@@ -1,0 +1,16 @@
+# N3 20260605 Action-Confirmation Metric Contract
+
+Status: CONTRACT_PASS
+
+```text
+projection_run_id=action_confirmation_projection_metric_20260605__trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+trigger_execute_run_id=trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+source_realtime_projection_run_id=realtime_projection_metric_20260605_live2_compat__realtime_snapshot_20260605_live2_market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1
+expected_metric_rows stock/index/board/total=595/0/0/595
+ready_backed stock/index/board/total=595/0/0/595
+not_ready_policy=pending_market_data
+not_ready_backed stock/index/board/total=584/1/60/645
+writes_outbox=false
+allowed_write_tables=['common_market_data_run', 'common_market_data_quality_item', 'stock_action_confirmation_projection_metric', 'index_action_confirmation_projection_metric', 'board_action_confirmation_projection_metric']
+rollback_sql=sql/N3_action_confirmation_metric_20260605_materialization_rollback.sql
+```

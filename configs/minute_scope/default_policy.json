@@ -1,0 +1,28 @@
+{
+  "policy_name": "default_scope_policy",
+  "index": {
+    "enabled": true,
+    "source": "fixed_index_scope",
+    "include_codes": ["000905", "399303", "000001", "000852", "399001", "399006", "000300", "000016", "000688"],
+    "directions": ["buy", "sell"]
+  },
+  "board": {
+    "enabled": true,
+    "source": "industry_board_scope",
+    "board_code_prefix": "881",
+    "directions": ["buy", "sell"]
+  },
+  "stock": {
+    "enabled": true,
+    "source": "condition_pool",
+    "directions": ["buy", "sell"],
+    "include_condition_families": ["ordinary", "full", "hint"],
+    "include_condition_keys": [],
+    "min_total_mv_wan": 1000000,
+    "market_value_compare": ">=",
+    "require_buy_target_price": false,
+    "require_sell_target_price": false,
+    "require_clear_sell_ref_period": false,
+    "limit": null
+  }
+}

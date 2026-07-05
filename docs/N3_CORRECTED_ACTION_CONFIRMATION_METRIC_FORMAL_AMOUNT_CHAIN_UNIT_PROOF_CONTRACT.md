@@ -1,0 +1,18 @@
+# N3 Corrected Action Confirmation Metric Formal Amount Chain Unit Proof Contract
+
+- target_run_id: `action_confirmation_projection_metric_20260616_until_1401_formal_amount_chain_unit_proof_corrected__market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4`
+- result: `BLOCKED`
+- source_condition_run_id: `condition_layer_20260615_source_20260615_for_20260616_v4`
+- source_subscription_run_id: `market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4`
+- source_preload_run_id: `previous_day_minute_preload_20260615_for_20260616__market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4`
+- required B1/C1 v4: `realtime_daily_snapshot_20260616_until_1401__market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4` / `today_minute_bar_1m_20260616_until_1401__market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4`
+- planned rows after v4 source refresh stock/index/board/total: `564/17/53/634`
+- blockers: `source_b1_v4_realtime_snapshot_missing, source_c1_v4_today_minute_missing, source_payload_not_materialized_for_current_v4_lineage`
+
+## Allowed Write Tables
+
+- `common_market_data_run`
+- `common_market_data_quality_item`
+- `stock_action_confirmation_projection_metric`
+- `index_action_confirmation_projection_metric`
+- `board_action_confirmation_projection_metric`

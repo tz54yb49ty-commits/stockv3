@@ -1,0 +1,1314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N2 条件层控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --teal: #0f766e;
+      --teal-dark: #115e59;
+      --amber: #b45309;
+      --red: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+    .topbar {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    h1, h2, h3 {
+      margin: 0;
+      font-weight: 720;
+    }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    h3 { font-size: 14px; }
+    .subtle {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .layer {
+      color: var(--teal-dark);
+      font-weight: 700;
+    }
+    .quicknav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 0 0 12px;
+    }
+    .quicknav a {
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0 11px;
+      display: inline-flex;
+      align-items: center;
+      background: #f8fafb;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+    }
+    main { padding: 18px 0 32px; }
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1.5fr repeat(8, minmax(110px, 1fr));
+      gap: 1px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+    .metric {
+      min-height: 72px;
+      padding: 11px 12px;
+      background: var(--panel);
+    }
+    .metric .label {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .metric .value {
+      font-size: 14px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(560px, 1.1fr) minmax(460px, 0.9fr);
+      gap: 16px;
+      margin-top: 16px;
+      align-items: start;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .panel-head {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    button, a.button, summary {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font-size: 13px;
+      font-weight: 680;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    button.primary {
+      border-color: var(--teal);
+      background: var(--teal);
+      color: #fff;
+    }
+    button[disabled], a.disabled {
+      color: #8b9a9f;
+      background: #eef2f3;
+      cursor: not-allowed;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px 12px 0;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+    .tab {
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      border-radius: 7px 7px 0 0;
+      background: #eef4f4;
+      min-width: 92px;
+    }
+    .tab.active {
+      background: var(--panel);
+      color: var(--teal-dark);
+    }
+    .tab-panel {
+      display: none;
+      padding: 14px;
+    }
+    .tab-panel.active { display: block; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 14px;
+    }
+    .form-grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    label, .field-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+    }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 9px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+    textarea.codes {
+      min-height: 74px;
+      resize: vertical;
+      line-height: 1.35;
+    }
+    textarea.json {
+      min-height: 360px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre;
+      overflow: auto;
+    }
+    .checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: center;
+      min-height: 34px;
+    }
+    .checks label {
+      color: var(--ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 560;
+    }
+    .period-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(94px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .period-details {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfcfc;
+      overflow: hidden;
+    }
+    .period-details summary {
+      width: 100%;
+      min-height: 40px;
+      justify-content: flex-start;
+      border: 0;
+      border-radius: 0;
+      background: #f4f8f8;
+      list-style: none;
+    }
+    .period-details summary::-webkit-details-marker { display: none; }
+    .period-details .period-grid {
+      margin: 0;
+      padding: 12px;
+    }
+    .period-cell {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .chip-block {
+      display: grid;
+      gap: 6px;
+    }
+    .chip-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 28px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+    }
+    .chip-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    button.mini {
+      min-height: 24px;
+      padding: 0 7px;
+      font-size: 12px;
+      font-weight: 660;
+    }
+    .chip-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-height: 76px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 26px;
+      padding: 0 8px;
+      border: 1px solid #d8e2e4;
+      border-radius: 999px;
+      color: var(--ink);
+      background: #f7fafb;
+      font-size: 12px;
+      font-weight: 620;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chip input {
+      margin: 0;
+      accent-color: var(--teal);
+    }
+    .chip:has(input:checked) {
+      border-color: #9bd6cf;
+      background: #e7f5f3;
+      color: var(--teal-dark);
+    }
+    .detail-chip-group {
+      min-height: 34px;
+      align-items: center;
+      padding: 5px;
+    }
+    .advanced {
+      border-top: 1px solid var(--line);
+      padding: 12px 14px 14px;
+      background: #fbfcfc;
+    }
+    .advanced summary {
+      width: max-content;
+      list-style: none;
+      margin-bottom: 12px;
+    }
+    .advanced summary::-webkit-details-marker { display: none; }
+    .notice {
+      border-top: 1px solid var(--line);
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 13px;
+      background: #fbfcfc;
+    }
+    #policy-action-result {
+      white-space: pre-wrap;
+    }
+    .section-note {
+      padding: 0 14px 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      background: #fbfcfc;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      padding: 9px 8px;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 680;
+      background: var(--soft);
+    }
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 720;
+      background: #e7f5f3;
+      color: var(--teal-dark);
+      overflow-wrap: anywhere;
+    }
+    .badge.warn { background: #fff7ed; color: var(--amber); }
+    .badge.bad { background: #fef2f2; color: var(--red); }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .result { margin-top: 16px; }
+    .detail-filter {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfc;
+    }
+    .detail-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .detail-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .detail-tab.active {
+      border-color: var(--teal);
+      color: var(--teal-dark);
+      background: #e7f5f3;
+    }
+    .detail-meta, .detail-counts, .pagination {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfc;
+      font-size: 13px;
+    }
+    .detail-counts {
+      justify-content: space-between;
+    }
+    .detail-count-group {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+    }
+    .detail-table-wrap {
+      overflow: auto;
+      max-height: 620px;
+      border-top: 1px solid var(--line);
+    }
+    .detail-table {
+      min-width: 980px;
+      white-space: nowrap;
+    }
+    .detail-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    .detail-table td {
+      max-width: 260px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .detail-table tbody tr:nth-child(even) td {
+      background: #fbfcfc;
+    }
+    .detail-table tbody tr:hover td {
+      background: #eef8f6;
+    }
+    .pagination {
+      justify-content: flex-end;
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+    }
+    @media (max-width: 1100px) {
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .layout { grid-template-columns: 1fr; }
+      .form-grid, .form-grid.three { grid-template-columns: 1fr; }
+      .period-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .detail-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>N2 条件层控制台</h1>
+        <div class="subtle">layer_role=<span class="layer">{{ layer_role }}</span> · dry-run only · overwrite disabled</div>
+      </div>
+      <div class="badge">{{ active_run.source }}</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    {% set r4_gate = baseline_gate if baseline_gate is defined else {} %}
+    {% set r4_domains = r4_gate.domains if r4_gate.domains is defined else {} %}
+    <nav class="quicknav" aria-label="page shortcuts">
+      <a href="#policy-panel">策略筛选</a>
+      <a href="#dry-run-result">Dry-run 结果</a>
+      <a href="#condition-details">全量明细</a>
+    </nav>
+    <div class="status-grid" aria-label="active run status">
+      <div class="metric">
+        <div class="label">active run_id</div>
+        <div class="value">{{ active_run.run_id or "未发现" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">source_trade_date</div>
+        <div class="value">{{ active_run.source_trade_date or "-" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">for_trade_date</div>
+        <div class="value">{{ active_run.for_trade_date or "-" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">prev_trade_date</div>
+        <div class="value">{{ active_run.prev_trade_date or "-" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">policy</div>
+        <div class="value">{{ active_run.policy_name or "default/web" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">P0 / P1 / P2</div>
+        <div class="value">{{ active_run.p0_count if active_run.p0_count is not none else "-" }} / {{ active_run.p1_count if active_run.p1_count is not none else "-" }} / {{ active_run.p2_count if active_run.p2_count is not none else "-" }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">pool rows</div>
+        <div class="value">{{ summaries.domains.index.pool.row_count + summaries.domains.board.pool.row_count + summaries.domains.stock.pool.row_count }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">scope rows</div>
+        <div class="value">{{ summaries.domains.index.scope.row_count + summaries.domains.board.scope.row_count + summaries.domains.stock.scope.row_count }}</div>
+      </div>
+      <div class="metric">
+        <div class="label">N2-R4 baseline</div>
+        <div class="value">{{ r4_gate.status|default("unavailable") }} · miss {{ r4_gate.baseline_missing_rows|default(0) }} · req {{ r4_gate.required_period_not_ready_rows|default(0) }}</div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <section class="panel" id="policy-panel">
+        <div class="panel-head">
+          <h2>策略筛选</h2>
+          <div class="toolbar">
+            <button type="button" id="load-default">加载默认</button>
+            <button class="primary" type="submit" form="policy-form">Dry-run</button>
+            <button type="button" id="save-default-policy-draft">保存为默认策略草案</button>
+            <button type="button" id="generate-execute-gate">生成 N2 execute gate</button>
+            <a class="button" href="/execute-overwrite?source_trade_date={{ active_run.source_trade_date or '' }}">Overwrite 二次确认</a>
+          </div>
+        </div>
+        <form id="policy-form">
+          <input type="hidden" name="source_trade_date" value="{{ active_run.source_trade_date or '' }}">
+          <div class="tabs" role="tablist">
+            <button class="tab active" type="button" data-tab="policy-index">指数筛选</button>
+            <button class="tab" type="button" data-tab="policy-board">板块筛选</button>
+            <button class="tab" type="button" data-tab="policy-stock">个股筛选</button>
+          </div>
+
+          {% for domain, label in [("index", "指数筛选"), ("board", "板块筛选"), ("stock", "个股筛选")] %}
+          {% set policy = form_model.domains[domain].policy %}
+          <div class="tab-panel {% if domain == 'index' %}active{% endif %}" id="tab-policy-{{ domain }}">
+            <div class="form-grid">
+              <div class="field">
+                <div class="field-label">direction</div>
+                <div class="checks">
+                  {% for option in form_model.direction_options %}
+                  <label><input type="checkbox" name="{{ domain }}.directions" value="{{ option }}" {% if option in policy.directions %}checked{% endif %}>{{ option }}</label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">condition_family</div>
+                <div class="checks">
+                  {% for option in form_model.condition_family_options %}
+                  <label><input type="checkbox" name="{{ domain }}.condition_family" value="{{ option }}" {% if option in policy.condition_family %}checked{% endif %}>{{ option }}</label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">condition_key</div>
+                <div class="checks">
+                  {% for option in form_model.condition_key_options %}
+                  <label><input type="checkbox" name="{{ domain }}.condition_keys" value="{{ option }}" {% if option in policy.condition_keys %}checked{% endif %}>{{ option }}</label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label">require</div>
+                <div class="checks">
+                  <label><input type="checkbox" name="{{ domain }}.require_buy_target_price" {% if policy.require_buy_target_price %}checked{% endif %}>buy target</label>
+                  <label><input type="checkbox" name="{{ domain }}.require_sell_target_price" {% if policy.require_sell_target_price %}checked{% endif %}>sell target</label>
+                  <label><input type="checkbox" name="{{ domain }}.require_up_sell_reference_period" {% if policy.require_up_sell_reference_period %}checked{% endif %}>up sell ref</label>
+                  <label><input type="checkbox" name="{{ domain }}.require_down_buy_reference_period" {% if policy.require_down_buy_reference_period %}checked{% endif %}>down buy ref</label>
+                  <label><input type="checkbox" name="{{ domain }}.require_clear_sell_ref_period" {% if policy.require_clear_sell_ref_period %}checked{% endif %}>legacy clear alias</label>
+                </div>
+              </div>
+            </div>
+
+            <details class="period-details">
+              <summary>周期分级 / 过渡筛选（Y/Q/M/W/D）</summary>
+              <div class="period-grid">
+                {% for period in form_model.periods %}
+                <div class="period-cell">
+                  <div class="chip-block">
+                    <div class="chip-title">
+                      <span>{{ period|upper }} grade</span>
+                      <span class="chip-actions">
+                        <button type="button" class="mini chip-action" data-chip-action="all" data-chip-target="{{ domain }}.period_grade.{{ period }}">全选</button>
+                        <button type="button" class="mini chip-action" data-chip-action="clear" data-chip-target="{{ domain }}.period_grade.{{ period }}">清空</button>
+                      </span>
+                    </div>
+                    <div class="chip-group" data-chip-group="{{ domain }}.period_grade.{{ period }}">
+                    {% set selected_grade = policy.period_grade.get(period, []) %}
+                    {% for option in form_model.grade_options %}
+                      <label class="chip"><input type="checkbox" name="{{ domain }}.period_grade.{{ period }}" value="{{ option }}" {% if option in selected_grade %}checked{% endif %}>{{ option }}</label>
+                    {% endfor %}
+                    </div>
+                  </div>
+                  <div class="chip-block">
+                    <div class="chip-title">
+                      <span>{{ period|upper }} transition</span>
+                      <span class="chip-actions">
+                        <button type="button" class="mini chip-action" data-chip-action="all" data-chip-target="{{ domain }}.period_transition.{{ period }}">全选</button>
+                        <button type="button" class="mini chip-action" data-chip-action="clear" data-chip-target="{{ domain }}.period_transition.{{ period }}">清空</button>
+                      </span>
+                    </div>
+                    <div class="chip-group" data-chip-group="{{ domain }}.period_transition.{{ period }}">
+                    {% set selected_transition = policy.period_transition.get(period, []) %}
+                    {% for option in form_model.grade_options %}
+                      <label class="chip"><input type="checkbox" name="{{ domain }}.period_transition.{{ period }}" value="{{ option }}" {% if option in selected_transition %}checked{% endif %}>{{ option }}</label>
+                    {% endfor %}
+                    </div>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </details>
+
+            <div class="form-grid three" style="margin-top: 12px;">
+              <div class="field">
+                <label>prev_up_str</label>
+                <input type="text" name="{{ domain }}.prev_up_str" value="{{ policy.prev_up_str or '' }}">
+              </div>
+              <div class="field">
+                <label>prev_dn_str</label>
+                <input type="text" name="{{ domain }}.prev_dn_str" value="{{ policy.prev_dn_str or '' }}">
+              </div>
+              {% if domain == 'board' %}
+              <div class="field">
+                <div class="field-label">板块类别</div>
+                <div class="subtle">行业=tdx_industry，概念=tdx_concept，地区=tdx_region</div>
+                <div class="checks">
+                  {% for option in form_model.board_segment_options %}
+                  <label><input type="checkbox" name="board.board_segments" value="{{ option.key }}" {% if option.key in policy.board_segments %}checked{% endif %}>{{ option.label }} {{ option.board_type }}</label>
+                  {% endfor %}
+                </div>
+              </div>
+              {% elif domain == 'stock' %}
+              <div class="field">
+                <label>limit</label>
+                <input type="number" min="0" name="stock.limit" value="{{ policy.limit or '' }}">
+              </div>
+              {% else %}
+              <div class="field">
+                <label>policy_name</label>
+                <input type="text" name="policy_name" value="{{ form_model.policy.policy_name }}">
+              </div>
+              {% endif %}
+            </div>
+
+            {% if domain == 'index' %}
+            <div class="field" style="margin-top: 12px;">
+              <label>全部指数对象单选</label>
+              <select name="index.selected_identity_key">
+                <option value="">不启用单选，使用下方固定 9 指数组合</option>
+                <option value="__all__" {% if policy.selected_identity_key == "__all__" %}selected{% endif %}>全部指数对象</option>
+                {% for item in form_model.index_object_options %}
+                <option value="{{ item.identity_key }}" {% if item.identity_key == policy.selected_identity_key %}selected{% endif %}>{{ item.label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field" style="margin-top: 12px;">
+              <div class="field-label">固定指数</div>
+              <div class="checks">
+                {% for identity in form_model.fixed_index_identities %}
+                <label><input type="checkbox" name="index.enabled_identities" value="{{ identity }}" {% if identity in policy.enabled_identities %}checked{% endif %}>{{ identity }}</label>
+                {% endfor %}
+              </div>
+            </div>
+            {% endif %}
+
+            {% if domain == 'stock' %}
+            <div class="form-grid three" style="margin-top: 12px;">
+              <div class="field">
+                <label>min_total_mv_yi</label>
+                <input type="number" step="1" min="100" name="stock.min_total_mv_yi" value="{{ policy.min_total_mv_yi }}">
+              </div>
+              <div class="field">
+                <label>max_total_mv_yi</label>
+                <input type="number" step="1" min="100" name="stock.max_total_mv_yi" value="{{ policy.max_total_mv_yi or '' }}">
+              </div>
+              <div class="field">
+                <label>min_score</label>
+                <input type="number" step="1" name="stock.min_score" value="{{ policy.min_score or '' }}">
+              </div>
+              <div class="field">
+                <div class="field-label">stock quality</div>
+                <div class="checks">
+                  <label><input type="checkbox" name="stock.exclude_st" {% if policy.exclude_st %}checked{% endif %}>exclude_st</label>
+                  <label><input type="checkbox" name="stock.exclude_bj" {% if policy.exclude_bj %}checked{% endif %}>排除 BJ</label>
+                  <label><input type="checkbox" name="stock.require_official_daily_proof" {% if policy.require_official_daily_proof %}checked{% endif %}>official daily</label>
+                  <label><input type="checkbox" name="stock.require_financial_quality_passed" {% if policy.require_financial_quality_passed %}checked{% endif %}>financial passed</label>
+                </div>
+              </div>
+              <div class="field">
+                <label>recommendation_levels</label>
+                <input type="text" name="stock.recommendation_levels" value="{{ policy.recommendation_levels | join(',') }}">
+              </div>
+              <div class="field">
+                <label>main_index_code</label>
+                <input type="text" name="stock.main_index_code" value="{{ policy.main_index_code or '' }}">
+              </div>
+              <div class="field">
+                <label>preferred_board_code</label>
+                <input type="text" name="stock.preferred_board_code" value="{{ policy.preferred_board_code or '' }}">
+              </div>
+            </div>
+            {% endif %}
+
+            <div class="form-grid" style="margin-top: 12px;">
+              <div class="field">
+                <label>include codes</label>
+                <textarea class="codes" name="{{ domain }}.include_codes">{{ policy.include_codes | join('\n') }}</textarea>
+              </div>
+              <div class="field">
+                <label>exclude codes</label>
+                <textarea class="codes" name="{{ domain }}.exclude_codes">{{ policy.exclude_codes | join('\n') }}</textarea>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+
+          <details class="advanced" id="advanced-json">
+            <summary>高级模式 / 查看 policy JSON</summary>
+            <textarea class="json" id="policy_json" name="policy_json" spellcheck="false">{{ default_policy_json }}</textarea>
+            <div class="toolbar" style="margin-top: 10px;">
+              <button type="button" id="apply-json">应用 JSON 到控件</button>
+              <button type="button" id="sync-json">从控件刷新 JSON</button>
+            </div>
+          </details>
+        </form>
+        <div class="notice">页面只提交 N2 policy dry-run；不写 condition 表、不拉行情、不进入 N3。</div>
+        <div class="notice" id="policy-action-result">保存草案 / 生成 gate 只写本地 artifact，不直接 execute 或 overwrite；保存后 N2 runner 会优先读取默认策略草案。</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>当前摘要</h2>
+          <span class="badge">{{ summaries.source }}</span>
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" type="button" data-tab="summary-index">指数</button>
+          <button class="tab" type="button" data-tab="summary-board">板块</button>
+          <button class="tab" type="button" data-tab="summary-stock">个股</button>
+        </div>
+        {% for domain, label in [("index", "指数"), ("board", "板块"), ("stock", "个股")] %}
+        {% set item = summaries.domains.get(domain, {}) %}
+        <div class="tab-panel {% if domain == 'index' %}active{% endif %}" id="tab-summary-{{ domain }}">
+          <table>
+            <thead>
+              <tr>
+                <th>{{ label }}</th>
+                <th>pool</th>
+                <th>scope / trigger_target_scope</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>rows</td>
+                <td>{{ item.pool.row_count or 0 }}</td>
+                <td>{{ item.scope.row_count or 0 }}</td>
+              </tr>
+              <tr>
+                <td>objects</td>
+                <td>{{ item.pool.object_count or 0 }}</td>
+                <td>{{ item.scope.object_count or 0 }}</td>
+              </tr>
+              <tr>
+                <td>buy / sell</td>
+                <td>{{ item.pool.buy_count or 0 }} / {{ item.pool.sell_count or 0 }}</td>
+                <td>{{ item.scope.buy_count or 0 }} / {{ item.scope.sell_count or 0 }}</td>
+              </tr>
+              {% set gate = r4_domains.get(domain, {}) %}
+              <tr>
+                <td>baseline missing</td>
+                <td>{{ gate.pool.baseline_missing_rows|default(0) }}</td>
+                <td>{{ gate.scope.baseline_missing_rows|default(0) }}</td>
+              </tr>
+              <tr>
+                <td>required period not ready</td>
+                <td>{{ gate.pool.required_period_not_ready_rows|default(0) }}</td>
+                <td>{{ gate.scope.required_period_not_ready_rows|default(0) }}</td>
+              </tr>
+              {% if domain == "index" %}
+              <tr>
+                <td>fixed 9 scope ready</td>
+                <td>-</td>
+                <td>{{ gate.fixed_9_scope_ready_object_count|default(0) }} / {{ r4_gate.fixed_9_index_expected|default(9) }}</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+        {% endfor %}
+      </section>
+    </div>
+
+    <section class="panel result" id="dry-run-result">
+      <div class="panel-head">
+        <h2>Dry-run 结果</h2>
+        <span class="badge warn">等待预览</span>
+      </div>
+      <div class="notice">点击 Dry-run 后显示 selected / excluded / reason_counts 和 N2-R4 baseline 闸口。</div>
+    </section>
+
+    <section class="panel result" id="condition-details">
+      <div class="panel-head">
+        <h2>全量明细</h2>
+        <span class="badge">{{ active_run.run_id or "no active run" }}</span>
+      </div>
+      <div class="section-note">默认读取当前 active condition run。minute_target_scope 在页面中按 trigger_target_scope 语义标注；condition_display_basis / display_basis 是对象级展示输入；筛选只影响明细浏览，不改 policy、不写 condition 表。</div>
+      <form id="detail-filter-form" class="detail-filter">
+        <input type="hidden" id="detail-domain" name="domain" value="index">
+        <input type="hidden" id="detail-table-kind" name="table_kind" value="basis">
+        <input type="hidden" id="detail-page" name="page" value="1">
+        <div class="detail-tabs" aria-label="detail domains">
+          {% for item in detail_model.domains %}
+          <button type="button" class="detail-tab {% if item.key == 'index' %}active{% endif %}" data-detail-domain="{{ item.key }}">{{ item.label }}</button>
+          {% endfor %}
+        </div>
+        <div class="detail-tabs" aria-label="detail tables">
+          {% for item in detail_model.table_kinds %}
+          <button type="button" class="detail-tab {% if item.key == 'basis' %}active{% endif %}" data-detail-table="{{ item.key }}">{{ item.label }}</button>
+          {% endfor %}
+        </div>
+        <div class="detail-filter-grid">
+          <div class="field">
+            <label>code / board_code</label>
+            <input class="detail-filter-control" type="text" name="code_query" placeholder="000001 / 881001">
+          </div>
+          <div class="field">
+            <label>name / board_name</label>
+            <input class="detail-filter-control" type="text" name="name_query" placeholder="名称包含">
+          </div>
+          <div class="field">
+            <label>condition_key</label>
+            <input class="detail-filter-control" type="text" name="condition_key" placeholder="BUY:* / SELL_HINT">
+          </div>
+          <div class="field">
+            <label>direction</label>
+            <select class="detail-filter-control" name="direction">
+              {% for option in detail_model.direction_options %}
+              <option value="{{ option }}">{{ option or "全部" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>period_transition</label>
+            <div class="chip-actions">
+              <button type="button" class="mini detail-chip-action" data-detail-chip-action="all" data-detail-chip-target="period_transition">全选</button>
+              <button type="button" class="mini detail-chip-action" data-detail-chip-action="clear" data-detail-chip-target="period_transition">清空</button>
+            </div>
+            <div class="chip-group detail-chip-group">
+              {% for option in detail_model.period_transition_options %}
+              <label class="chip"><input class="detail-filter-control" type="checkbox" name="period_transition" value="{{ option }}">{{ option }}</label>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="field">
+            <label>目标价</label>
+            <select class="detail-filter-control" name="target_status">
+              {% for option in detail_model.target_status_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>baseline_status</label>
+            <select class="detail-filter-control" name="baseline_status">
+              {% for option in detail_model.baseline_status_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>required_period_not_ready</label>
+            <select class="detail-filter-control" name="required_period_not_ready">
+              {% for option in detail_model.required_period_not_ready_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>up_sell_reference_period</label>
+            <select class="detail-filter-control" name="up_sell_reference_period">
+              {% for option in detail_model.reference_period_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+              {% for period in form_model.periods %}
+              <option value="{{ period|upper }}">{{ period|upper }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>down_buy_reference_period</label>
+            <select class="detail-filter-control" name="down_buy_reference_period">
+              {% for option in detail_model.reference_period_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+              {% for period in form_model.periods %}
+              <option value="{{ period|upper }}">{{ period|upper }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>clear_sell_ref_period legacy</label>
+            <select class="detail-filter-control" name="clear_ref_period">
+              {% for option in detail_model.clear_ref_options %}
+              <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+              {% for period in form_model.periods %}
+              <option value="{{ period|upper }}">{{ period|upper }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field stock-only" hidden>
+            <label>min_total_mv_yi</label>
+            <input class="detail-filter-control" type="number" step="1" min="0" name="min_total_mv_yi">
+          </div>
+          <div class="field stock-only" hidden>
+            <label>max_total_mv_yi</label>
+            <input class="detail-filter-control" type="number" step="1" min="0" name="max_total_mv_yi">
+          </div>
+          <div class="field stock-only" hidden>
+            <label>min_score</label>
+            <input class="detail-filter-control" type="number" step="1" name="min_score">
+          </div>
+          <div class="field stock-only" hidden>
+            <label>max_score</label>
+            <input class="detail-filter-control" type="number" step="1" name="max_score">
+          </div>
+          <div class="field stock-only" hidden>
+            <label>page_size</label>
+            <input class="detail-filter-control" type="number" step="1" min="1" max="{{ detail_model.stock_max_page_size }}" name="page_size" value="{{ detail_model.stock_page_size }}">
+          </div>
+        </div>
+        <div class="toolbar">
+          <button class="primary" type="submit">应用筛选</button>
+          <button type="button" id="clear-detail-filters">重置筛选</button>
+          <button type="button" id="export-detail-excel">导出 Excel</button>
+        </div>
+      </form>
+      <div id="detail-result">
+        {% set detail = initial_detail %}
+        {% include "n2_policy_details.html" %}
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const DEFAULT_POLICY = {{ default_policy | tojson }};
+    const PERIODS = {{ form_model.periods | tojson }};
+    const DOMAIN_KEYS = ["index", "board", "stock"];
+
+    function bindTabs(root) {
+      root.querySelectorAll(".tab").forEach((button) => {
+        if (button.dataset.bound === "true") return;
+        button.dataset.bound = "true";
+        button.addEventListener("click", () => {
+          const scope = button.closest(".panel") || document;
+          scope.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+          scope.querySelectorAll(".tab-panel").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          scope.querySelector(`#tab-${button.dataset.tab}`).classList.add("active");
+        });
+      });
+    }
+
+    function checkedValues(name) {
+      return Array.from(document.querySelectorAll(`[name="${name}"]:checked`)).map((item) => item.value);
+    }
+
+    function setCheckedValues(name, values) {
+      const selected = new Set(values || []);
+      document.querySelectorAll(`[name="${name}"]`).forEach((item) => {
+        item.checked = selected.has(item.value);
+      });
+    }
+
+    function fieldValue(name) {
+      const field = document.querySelector(`[name="${name}"]`);
+      return field ? field.value.trim() : "";
+    }
+
+    function setFieldValue(name, value) {
+      const field = document.querySelector(`[name="${name}"]`);
+      if (field) field.value = value ?? "";
+    }
+
+    function splitCodes(text) {
+      return (text || "").split(/[\n,，]+/).map((item) => item.trim()).filter(Boolean);
+    }
+
+    function numericValue(name) {
+      const value = fieldValue(name);
+      return value === "" ? null : Number(value);
+    }
+
+    function periodFilter(domain, prefix) {
+      const value = {};
+      PERIODS.forEach((period) => {
+        const selected = checkedValues(`${domain}.${prefix}.${period}`);
+        if (selected.length) value[period] = selected;
+      });
+      return value;
+    }
+
+    function applyPeriodFilter(domain, prefix, value) {
+      PERIODS.forEach((period) => {
+        setCheckedValues(`${domain}.${prefix}.${period}`, (value || {})[period] || []);
+      });
+    }
+
+    function setChipGroup(targetName, checked) {
+      document.querySelectorAll(`[name="${targetName}"]`).forEach((item) => {
+        item.checked = checked;
+      });
+      syncJsonFromControls();
+    }
+
+    function sectionFromControls(domain) {
+      const section = {
+        directions: checkedValues(`${domain}.directions`),
+        condition_family: checkedValues(`${domain}.condition_family`),
+        condition_keys: checkedValues(`${domain}.condition_keys`),
+        period_grade: periodFilter(domain, "period_grade"),
+        period_transition: periodFilter(domain, "period_transition"),
+        prev_up_str: fieldValue(`${domain}.prev_up_str`),
+        prev_dn_str: fieldValue(`${domain}.prev_dn_str`),
+        include_codes: splitCodes(fieldValue(`${domain}.include_codes`)),
+        exclude_codes: splitCodes(fieldValue(`${domain}.exclude_codes`)),
+        require_buy_target_price: document.querySelector(`[name="${domain}.require_buy_target_price"]`)?.checked || false,
+        require_sell_target_price: document.querySelector(`[name="${domain}.require_sell_target_price"]`)?.checked || false,
+        require_up_sell_reference_period: document.querySelector(`[name="${domain}.require_up_sell_reference_period"]`)?.checked || false,
+        require_down_buy_reference_period: document.querySelector(`[name="${domain}.require_down_buy_reference_period"]`)?.checked || false,
+        require_clear_sell_ref_period: document.querySelector(`[name="${domain}.require_clear_sell_ref_period"]`)?.checked || false
+      };
+      if (!section.condition_keys.length) section.condition_keys = ["*"];
+      return section;
+    }
+
+    function controlsToPolicy() {
+      const policy = {
+        policy_name: fieldValue("policy_name") || "default_adjusted_by_user",
+        index: sectionFromControls("index"),
+        board: sectionFromControls("board"),
+        stock: sectionFromControls("stock")
+      };
+      policy.index.selected_identity_key = fieldValue("index.selected_identity_key");
+      policy.index.enabled_identities = policy.index.selected_identity_key === "__all__"
+        ? []
+        : policy.index.selected_identity_key
+        ? [policy.index.selected_identity_key]
+        : checkedValues("index.enabled_identities");
+      policy.board.board_segments = checkedValues("board.board_segments");
+      policy.board.board_types = policy.board.board_segments.map((segment) => ({
+        industry: "tdx_industry",
+        concept: "tdx_concept",
+        region: "tdx_region"
+      })[segment]).filter(Boolean);
+      policy.board.board_code_prefixes = [];
+      policy.board.board_code_prefix = "";
+      policy.stock.min_total_mv_yi = numericValue("stock.min_total_mv_yi") ?? 100;
+      policy.stock.max_total_mv_yi = numericValue("stock.max_total_mv_yi");
+      policy.stock.exclude_st = document.querySelector('[name="stock.exclude_st"]')?.checked || false;
+      policy.stock.exclude_bj = document.querySelector('[name="stock.exclude_bj"]')?.checked || false;
+      policy.stock.require_official_daily_proof = document.querySelector('[name="stock.require_official_daily_proof"]')?.checked || false;
+      policy.stock.require_financial_quality_passed = document.querySelector('[name="stock.require_financial_quality_passed"]')?.checked || false;
+      policy.stock.min_score = numericValue("stock.min_score");
+      policy.stock.recommendation_levels = splitCodes(fieldValue("stock.recommendation_levels"));
+      policy.stock.main_index_code = fieldValue("stock.main_index_code");
+      policy.stock.preferred_board_code = fieldValue("stock.preferred_board_code");
+      policy.stock.limit = numericValue("stock.limit");
+      return policy;
+    }
+
+    function controlsFromPolicy(policy) {
+      setFieldValue("policy_name", policy.policy_name || "default_adjusted_by_user");
+      DOMAIN_KEYS.forEach((domain) => {
+        const section = policy[domain] || {};
+        setCheckedValues(`${domain}.directions`, section.directions || []);
+        setCheckedValues(`${domain}.condition_family`, section.condition_family || section.include_condition_families || []);
+        setCheckedValues(`${domain}.condition_keys`, section.condition_keys || section.include_condition_keys || ["*"]);
+        applyPeriodFilter(domain, "period_grade", section.period_grade || {});
+        applyPeriodFilter(domain, "period_transition", section.period_transition || {});
+        setFieldValue(`${domain}.prev_up_str`, section.prev_up_str || "");
+        setFieldValue(`${domain}.prev_dn_str`, section.prev_dn_str || "");
+        setFieldValue(`${domain}.include_codes`, (section.include_codes || []).join("\\n"));
+        setFieldValue(`${domain}.exclude_codes`, (section.exclude_codes || []).join("\\n"));
+        const requireBuy = document.querySelector(`[name="${domain}.require_buy_target_price"]`);
+        const requireSell = document.querySelector(`[name="${domain}.require_sell_target_price"]`);
+        const requireUpSellRef = document.querySelector(`[name="${domain}.require_up_sell_reference_period"]`);
+        const requireDownBuyRef = document.querySelector(`[name="${domain}.require_down_buy_reference_period"]`);
+        const requireClear = document.querySelector(`[name="${domain}.require_clear_sell_ref_period"]`);
+        if (requireBuy) requireBuy.checked = Boolean(section.require_buy_target_price);
+        if (requireSell) requireSell.checked = Boolean(section.require_sell_target_price);
+        if (requireUpSellRef) requireUpSellRef.checked = Boolean(section.require_up_sell_reference_period);
+        if (requireDownBuyRef) requireDownBuyRef.checked = Boolean(section.require_down_buy_reference_period);
+        if (requireClear) requireClear.checked = Boolean(section.require_clear_sell_ref_period);
+      });
+      setFieldValue("index.selected_identity_key", policy.index?.selected_identity_key || "");
+      setCheckedValues("index.enabled_identities", policy.index?.enabled_identities || []);
+      setCheckedValues("board.board_segments", policy.board?.board_segments || ["industry"]);
+      setFieldValue("stock.min_total_mv_yi", policy.stock?.min_total_mv_yi ?? 100);
+      setFieldValue("stock.max_total_mv_yi", policy.stock?.max_total_mv_yi ?? "");
+      setFieldValue("stock.min_score", policy.stock?.min_score ?? "");
+      setFieldValue("stock.recommendation_levels", (policy.stock?.recommendation_levels || []).join(","));
+      setFieldValue("stock.main_index_code", policy.stock?.main_index_code || "");
+      setFieldValue("stock.preferred_board_code", policy.stock?.preferred_board_code || "");
+      setFieldValue("stock.limit", policy.stock?.limit ?? "");
+      const excludeSt = document.querySelector('[name="stock.exclude_st"]');
+      const excludeBj = document.querySelector('[name="stock.exclude_bj"]');
+      const official = document.querySelector('[name="stock.require_official_daily_proof"]');
+      const financial = document.querySelector('[name="stock.require_financial_quality_passed"]');
+      if (excludeSt) excludeSt.checked = Boolean(policy.stock?.exclude_st);
+      if (excludeBj) excludeBj.checked = Boolean(policy.stock?.exclude_bj);
+      if (official) official.checked = Boolean(policy.stock?.require_official_daily_proof);
+      if (financial) financial.checked = Boolean(policy.stock?.require_financial_quality_passed);
+    }
+
+    function syncJsonFromControls() {
+      document.querySelector("#policy_json").value = JSON.stringify(controlsToPolicy(), null, 2);
+    }
+
+    function applyJsonToControls() {
+      const policy = JSON.parse(document.querySelector("#policy_json").value);
+      controlsFromPolicy(policy);
+      syncJsonFromControls();
+    }
+
+    bindTabs(document);
+    syncJsonFromControls();
+
+    document.querySelector("#policy-form").addEventListener("input", syncJsonFromControls);
+    document.querySelector("#policy-form").addEventListener("change", syncJsonFromControls);
+    document.querySelectorAll(".chip-action").forEach((button) => {
+      button.addEventListener("click", () => {
+        setChipGroup(button.dataset.chipTarget, button.dataset.chipAction === "all");
+      });
+    });
+    document.querySelectorAll(".detail-chip-action").forEach((button) => {
+      button.addEventListener("click", () => {
+        detailForm.querySelectorAll(`[name="${button.dataset.detailChipTarget}"]`).forEach((item) => {
+          item.checked = button.dataset.detailChipAction === "all";
+        });
+        loadDetails(1);
+      });
+    });
+    document.querySelector("#sync-json").addEventListener("click", syncJsonFromControls);
+    document.querySelector("#apply-json").addEventListener("click", applyJsonToControls);
+    document.querySelector("#load-default").addEventListener("click", () => {
+      controlsFromPolicy(DEFAULT_POLICY);
+      syncJsonFromControls();
+    });
+
+    const policyForm = document.querySelector("#policy-form");
+    const resultTarget = document.querySelector("#dry-run-result");
+    const policyActionTarget = document.querySelector("#policy-action-result");
+
+    async function postPolicyAction(url, runningText) {
+      syncJsonFromControls();
+      policyActionTarget.textContent = runningText;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json;charset=UTF-8"},
+        body: JSON.stringify({
+          policy_json: document.querySelector("#policy_json").value,
+          source_trade_date: fieldValue("source_trade_date")
+        })
+      });
+      const result = await response.json();
+      const status = result.ok ? "PASS" : "BLOCKED";
+      const lines = [
+        `${status} · ${result.message || result.next_gate_required || result.error || ""}`,
+        result.policy_relative_path ? `policy=${result.policy_relative_path}` : "",
+        result.gate_json_path ? `gate_json=${result.gate_json_path}` : "",
+        result.gate_markdown_path ? `gate_md=${result.gate_markdown_path}` : "",
+        result.execute_command ? `execute command candidate:\n${result.execute_command}` : ""
+      ].filter(Boolean);
+      policyActionTarget.textContent = lines.join("\n");
+    }
+
+    policyForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      syncJsonFromControls();
+      resultTarget.innerHTML = '<div class="panel-head"><h2>Dry-run 结果</h2><span class="badge warn">running</span></div><div class="notice">dry-run 预览生成中...</div>';
+      const payload = new URLSearchParams(new FormData(policyForm));
+      const response = await fetch("/dry-run", {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        body: payload
+      });
+      resultTarget.innerHTML = await response.text();
+      bindTabs(resultTarget);
+    });
+    document.querySelector("#save-default-policy-draft").addEventListener("click", () => {
+      postPolicyAction("/api/n2/policy/save-default-draft", "正在保存默认策略草案...");
+    });
+    document.querySelector("#generate-execute-gate").addEventListener("click", () => {
+      postPolicyAction("/api/n2/policy/generate-execute-gate", "正在生成 N2 execute gate 草案...");
+    });
+
+    const detailForm = document.querySelector("#detail-filter-form");
+    const detailResult = document.querySelector("#detail-result");
+    const detailDomain = document.querySelector("#detail-domain");
+    const detailTableKind = document.querySelector("#detail-table-kind");
+    const detailPage = document.querySelector("#detail-page");
+
+    function updateStockFilterVisibility() {
+      const isStock = detailDomain.value === "stock";
+      detailForm.querySelectorAll(".stock-only").forEach((item) => {
+        item.hidden = !isStock;
+      });
+    }
+
+    function setDetailTabActive(selector, value, attrName) {
+      document.querySelectorAll(selector).forEach((button) => {
+        button.classList.toggle("active", button.dataset[attrName] === value);
+      });
+    }
+
+    function bindDetailPagination() {
+      detailResult.querySelectorAll("[data-detail-page]").forEach((button) => {
+        if (button.dataset.bound === "true") return;
+        button.dataset.bound = "true";
+        button.addEventListener("click", () => {
+          if (!button.disabled) loadDetails(Number(button.dataset.detailPage || "1"));
+        });
+      });
+    }
+
+    async function loadDetails(page = 1) {
+      detailPage.value = String(page || 1);
+      const params = new URLSearchParams(new FormData(detailForm));
+      detailResult.innerHTML = '<div class="notice">明细加载中...</div>';
+      const response = await fetch(`/details-fragment?${params.toString()}`);
+      detailResult.innerHTML = await response.text();
+      bindDetailPagination();
+    }
+
+    function exportDetailExcel() {
+      const params = new URLSearchParams(new FormData(detailForm));
+      params.delete("page");
+      window.location.href = `/details-export.xlsx?${params.toString()}`;
+    }
+
+    document.querySelectorAll("[data-detail-domain]").forEach((button) => {
+      button.addEventListener("click", () => {
+        detailDomain.value = button.dataset.detailDomain;
+        detailPage.value = "1";
+        setDetailTabActive("[data-detail-domain]", detailDomain.value, "detailDomain");
+        updateStockFilterVisibility();
+        loadDetails(1);
+      });
+    });
+
+    document.querySelectorAll("[data-detail-table]").forEach((button) => {
+      button.addEventListener("click", () => {
+        detailTableKind.value = button.dataset.detailTable;
+        detailPage.value = "1";
+        setDetailTabActive("[data-detail-table]", detailTableKind.value, "detailTable");
+        loadDetails(1);
+      });
+    });
+
+    detailForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      loadDetails(1);
+    });
+
+    document.querySelector("#clear-detail-filters").addEventListener("click", () => {
+      detailForm.querySelectorAll(".detail-filter-control").forEach((field) => {
+        if (field.type === "checkbox") {
+          field.checked = false;
+        } else {
+          field.value = field.name === "page_size" ? String({{ detail_model.stock_page_size }}) : "";
+        }
+      });
+      loadDetails(1);
+    });
+
+    document.querySelector("#export-detail-excel").addEventListener("click", exportDetailExcel);
+
+    updateStockFilterVisibility();
+    bindDetailPagination();
+  </script>
+</body>
+</html>

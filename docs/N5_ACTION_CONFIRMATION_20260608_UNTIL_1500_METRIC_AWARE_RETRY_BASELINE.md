@@ -1,0 +1,10 @@
+# N5 Metric-Aware Retry Baseline 20260608 Until 15:00
+
+Status: READY
+
+```text
+source_trigger_run_id=trigger_projection_matcher_execute_20260608_v13_index_all_until_1500_v4_repair_retry
+metric_run_id=action_confirmation_metric_20260608_until_1500__trigger_projection_matcher_execute_20260608_v13_index_all_until_1500_v4_repair_retry
+read_event_count=3892
+metric_join_coverage=122/122
+```

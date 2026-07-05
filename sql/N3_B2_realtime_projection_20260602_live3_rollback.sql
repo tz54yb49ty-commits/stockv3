@@ -1,0 +1,23 @@
+-- N3-B2 realtime projection rollback draft.
+-- Boundary: rollback only projection facts/quality/run for the listed projection_run_id.
+-- Do not run if any downstream N4/N5/N6 consumer has used this projection_run_id;
+-- rollback downstream facts/inbox/checkpoint first in the owning layer.
+
+BEGIN;
+
+DELETE FROM common_market_data_quality_item
+WHERE run_id = 'realtime_projection_metric_20260602_live3__realtime_snapshot_20260602_live3_outbox_market_data_subscription_20260602_condition_layer_20260601_source_20260601_v1';
+
+DELETE FROM stock_realtime_projection_metric
+WHERE projection_run_id = 'realtime_projection_metric_20260602_live3__realtime_snapshot_20260602_live3_outbox_market_data_subscription_20260602_condition_layer_20260601_source_20260601_v1';
+
+DELETE FROM index_realtime_projection_metric
+WHERE projection_run_id = 'realtime_projection_metric_20260602_live3__realtime_snapshot_20260602_live3_outbox_market_data_subscription_20260602_condition_layer_20260601_source_20260601_v1';
+
+DELETE FROM board_realtime_projection_metric
+WHERE projection_run_id = 'realtime_projection_metric_20260602_live3__realtime_snapshot_20260602_live3_outbox_market_data_subscription_20260602_condition_layer_20260601_source_20260601_v1';
+
+DELETE FROM common_market_data_run
+WHERE run_id = 'realtime_projection_metric_20260602_live3__realtime_snapshot_20260602_live3_outbox_market_data_subscription_20260602_condition_layer_20260601_source_20260601_v1';
+
+COMMIT;

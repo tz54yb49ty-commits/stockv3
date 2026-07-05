@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N2 overwrite 二次确认</title>
+  <style>
+    body {
+      margin: 0;
+      background: #f5f7f8;
+      color: #182022;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(1040px, calc(100vw - 32px));
+      margin: 32px auto;
+      background: #ffffff;
+      border: 1px solid #d6dee1;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    header, section {
+      padding: 18px 22px;
+      border-bottom: 1px solid #d6dee1;
+    }
+    section:last-child { border-bottom: 0; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    p { line-height: 1.6; color: #607176; }
+    .badge {
+      display: inline-flex;
+      min-height: 28px;
+      align-items: center;
+      border: 1px solid #d6dee1;
+      border-radius: 999px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #f8fafb;
+    }
+    .pass { color: #115e59; border-color: #99d6cd; background: #eefaf8; }
+    .blocked { color: #9f1239; border-color: #fecdd3; background: #fff1f2; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: #d6dee1;
+      border: 1px solid #d6dee1;
+    }
+    .cell {
+      min-height: 58px;
+      padding: 10px 12px;
+      background: #fff;
+      overflow-wrap: anywhere;
+    }
+    .label {
+      margin-bottom: 5px;
+      color: #607176;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    pre {
+      margin: 0;
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid #d6dee1;
+      border-radius: 6px;
+      background: #f8fafb;
+      padding: 12px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #d6dee1;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+    button, a {
+      min-height: 36px;
+      border: 1px solid #0f766e;
+      border-radius: 6px;
+      background: #0f766e;
+      color: white;
+      padding: 0 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button[disabled] {
+      border-color: #d6dee1;
+      background: #eef2f3;
+      color: #8b9a9f;
+      cursor: not-allowed;
+    }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .notice { color: #607176; font-size: 13px; white-space: pre-wrap; }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>N2 overwrite 二次确认</h1>
+      <span class="badge {% if confirm.confirmation_enabled %}pass{% else %}blocked{% endif %}">
+        {{ "PASS" if confirm.confirmation_enabled else "BLOCKED" }}
+      </span>
+      <p>layer_role={{ layer_role }}。此页面只生成 WAIT_MANUAL_CONFIRM 状态和可复制命令，不写库、不执行 overwrite。</p>
+    </header>
+
+    <section>
+      <h2>Gate 状态</h2>
+      <div class="grid">
+        <div class="cell"><div class="label">gate_result</div>{{ confirm.gate_result }}</div>
+        <div class="cell"><div class="label">source_trade_date</div>{{ confirm.source_trade_date or "-" }}</div>
+        <div class="cell"><div class="label">current active run_id</div>{{ confirm.current_active_run_id or "-" }}</div>
+        <div class="cell"><div class="label">proposed_run_id</div>{{ confirm.proposed_run_id or "-" }}</div>
+        <div class="cell"><div class="label">policy_version</div>{{ confirm.policy_version or "-" }}</div>
+        <div class="cell"><div class="label">policy_hash</div>{{ confirm.policy_hash or "-" }}</div>
+        <div class="cell"><div class="label">rollback_sql_path</div>{{ confirm.rollback_sql_path or "-" }}</div>
+        <div class="cell"><div class="label">lineage</div>N3 不自动 rebuild；N4/N5/N6 不自动重放</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>policy_diff_summary</h2>
+      <pre>{{ confirm.policy_diff_summary | tojson(indent=2) }}</pre>
+    </section>
+
+    <section>
+      <h2>expected row counts</h2>
+      <pre>{{ confirm.expected_rows | tojson(indent=2) }}</pre>
+    </section>
+
+    <section>
+      <h2>execute command candidate</h2>
+      <pre id="execute-command">{{ confirm.execute_command_candidate or "" }}</pre>
+    </section>
+
+    <section>
+      <h2>二次确认</h2>
+      {% if not confirm.confirmation_enabled %}
+      <p class="notice">当前不可确认：{{ confirm.blocked_reasons | join(", ") }}</p>
+      {% endif %}
+      <form id="confirm-form">
+        <input type="hidden" name="source_trade_date" value="{{ confirm.source_trade_date or '' }}">
+        <input
+          name="confirmation_text"
+          placeholder="输入 proposed_run_id 或 policy_hash"
+          {% if not confirm.confirmation_enabled %}disabled{% endif %}
+        >
+        <div class="actions">
+          <button type="submit" {% if not confirm.confirmation_enabled %}disabled{% endif %}>生成 WAIT_MANUAL_CONFIRM</button>
+          <a href="/">返回控制台</a>
+        </div>
+      </form>
+      <p class="notice" id="confirm-result"></p>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector("#confirm-form");
+    const result = document.querySelector("#confirm-result");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(form).entries());
+      const response = await fetch("/api/n2/policy/confirm-overwrite", {
+        method: "POST",
+        headers: {"Content-Type": "application/json;charset=UTF-8"},
+        body: JSON.stringify(data)
+      });
+      const payload = await response.json();
+      result.textContent = [
+        payload.ok ? "WAIT_MANUAL_CONFIRM" : "BLOCKED",
+        payload.message || "",
+        payload.execute_command_candidate || ""
+      ].filter(Boolean).join("\n");
+    });
+  </script>
+</body>
+</html>

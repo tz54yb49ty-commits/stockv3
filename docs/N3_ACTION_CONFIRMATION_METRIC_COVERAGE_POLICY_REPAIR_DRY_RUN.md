@@ -1,0 +1,18 @@
+# N3 Action-Confirmation Metric Coverage Policy Repair Dry Run
+
+Status: DRY_RUN_PASS
+
+```text
+projection_run_id=action_confirmation_projection_metric_20260605_repair_v1__trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+original_metric_run_id=action_confirmation_projection_metric_20260605__trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+repair_additive_rows stock/index/board/total=256/0/5/261
+original_metric_rows=316
+n4_matched_universe=605
+repaired_total_coverage stock/index/board/total=572/0/5/577
+remaining_excluded stock/index/board/total=0/0/28/28
+remaining_excluded_reason=board_lineage_missing
+duplicate_vs_original_metric=0
+duplicate_inside_repair_payload=0
+P0/P1/P2=0/2/0
+writes_database=false
+```

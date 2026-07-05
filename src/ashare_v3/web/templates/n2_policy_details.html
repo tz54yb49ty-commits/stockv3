@@ -1,0 +1,71 @@
+{% set baseline_counts = detail.baseline_counts if detail.baseline_counts is defined else {} %}
+<div class="detail-meta">
+  <span class="badge">{{ detail.domain_label }} · {{ detail.table_label }}</span>
+  <span class="subtle">table={{ detail.table_name or "-" }}</span>
+  <span class="subtle">run_id={{ detail.run_id or "-" }}</span>
+  <span class="subtle">source={{ detail.source }}</span>
+  <span class="subtle">writes_performed={{ detail.writes_performed | string | lower }}</span>
+  <span class="subtle">focused_columns={{ detail.columns|length }}/{{ detail.all_column_count or detail.columns|length }}</span>
+  {% if detail.table_kind == "scope" %}
+  <span class="subtle">semantic=trigger_target_scope</span>
+  {% endif %}
+</div>
+
+{% if not detail.ok %}
+<div class="notice">明细不可用：{{ detail.source }}</div>
+{% elif detail.total_count == 0 %}
+<div class="notice">当前筛选没有匹配行。</div>
+{% else %}
+<div class="detail-counts">
+  <div class="detail-count-group">
+    <span class="badge">匹配 {{ detail.total_count }} 行</span>
+    <span>当前展示 {{ detail.shown_count }} 行</span>
+    {% if detail.pagination_enabled %}
+    <span>第 {{ detail.page }} / {{ detail.total_pages }} 页</span>
+    {% else %}
+    <span>当前表全量展示</span>
+    {% endif %}
+  </div>
+  {% if detail.hidden_column_count %}
+  <span class="subtle">已聚焦显示关键列，隐藏 {{ detail.hidden_column_count }} 个低频技术列。</span>
+  {% endif %}
+</div>
+{% if baseline_counts.loaded_row_count|default(0) %}
+<div class="detail-counts">
+  <div class="detail-count-group">
+    <span class="badge">baseline ready {{ baseline_counts.ready|default(0) }}</span>
+    <span>partial {{ baseline_counts.partial|default(0) }}</span>
+    <span>missing {{ baseline_counts.missing|default(0) }}</span>
+    <span>required_period_not_ready {{ baseline_counts.required_period_not_ready|default(0) }}</span>
+  </div>
+</div>
+{% endif %}
+<div class="detail-table-wrap">
+  <table class="detail-table">
+    <thead>
+      <tr>
+        {% for column in detail.columns %}
+        <th>{{ column }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.rows %}
+      <tr>
+        {% for column in detail.columns %}
+        {% set value = row.get(column) %}
+        <td title="{{ value if value is not none and value != '' else '-' }}">{{ value if value is not none and value != '' else "-" }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if detail.pagination_enabled %}
+<div class="pagination">
+  <button type="button" data-detail-page="{{ detail.page - 1 }}" {% if not detail.has_prev %}disabled{% endif %}>上一页</button>
+  <span class="subtle">page {{ detail.page }} / {{ detail.total_pages }}</span>
+  <button type="button" data-detail-page="{{ detail.page + 1 }}" {% if not detail.has_next %}disabled{% endif %}>下一页</button>
+</div>
+{% endif %}
+{% endif %}

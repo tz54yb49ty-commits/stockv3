@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>收盘后 Fast Lane 状态</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --danger: #b42318;
+      --warning: #a15c07;
+      --success: #067647;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 78px;
+      display: grid;
+      gap: 4px;
+      align-content: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; font-weight: 720; }
+    .metric strong { font-size: 22px; overflow-wrap: anywhere; }
+    .metric .success { color: var(--success); }
+    .metric .warning { color: var(--warning); }
+    .metric .danger { color: var(--danger); }
+    .metric .muted { color: var(--muted); }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .notice {
+      margin: 12px 14px;
+      padding: 10px 12px;
+      border: 1px solid #cfe4df;
+      border-radius: 8px;
+      background: #f2faf8;
+      color: #315f59;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(180px, 240px) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .status-pill {
+      display: inline-flex;
+      min-height: 24px;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid #cfe4df;
+      background: #eef7f5;
+      color: var(--accent);
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .artifact-list {
+      display: grid;
+      gap: 8px;
+      padding: 12px 14px 14px;
+    }
+    .artifact-row {
+      display: grid;
+      grid-template-columns: 180px 1fr 80px;
+      gap: 12px;
+      min-height: 36px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+    .artifact-row strong { color: var(--muted); font-size: 12px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #263238;
+    }
+    @media (max-width: 900px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 12px 0; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .filter-grid { grid-template-columns: 1fr; }
+      .artifact-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>收盘后 Fast Lane 状态</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner">
+      READ ONLY · 只读 docs/post_close_fastlane artifact · 不执行命令 · 不写数据库 · 不启动 worker · 不进入 N3P/N4 matcher/N5/N6
+    </section>
+
+    <section class="metric-grid">
+      <div class="metric">
+        <span>result</span>
+        <strong class="{{ status_page.result_tone }}">{{ status_page.result }}</strong>
+      </div>
+      <div class="metric">
+        <span>status_source</span>
+        <strong>{{ status_page.status.status_source }}</strong>
+      </div>
+      <div class="metric">
+        <span>current_effective_lineage</span>
+        <strong>{{ status_page.status.current_effective_lineage }}</strong>
+      </div>
+      <div class="metric">
+        <span>source_trade_date</span>
+        <strong>{{ status_page.status.source_trade_date }}</strong>
+      </div>
+      <div class="metric">
+        <span>for_trade_date</span>
+        <strong>{{ status_page.selected_for_trade_date }}</strong>
+      </div>
+      <div class="metric">
+        <span>failed_step_id</span>
+        <strong>{{ status_page.status.failed_step_id }}</strong>
+      </div>
+      <div class="metric">
+        <span>updated_at</span>
+        <strong>{{ status_page.status.updated_at }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>当前有效 Lineage</h2>
+          <div class="subtle">
+            优先展示 manual lineage overlay；原始 one-shot 状态仍保留为审计证据。
+          </div>
+        </div>
+      </div>
+      <section class="metric-grid" style="padding: 12px 14px;">
+        <div class="metric">
+          <span>n1_active_financial_source</span>
+          <strong>{{ status_page.status.n1_active_financial_source }}</strong>
+        </div>
+        <div class="metric">
+          <span>n2_active_condition_run</span>
+          <strong>{{ status_page.status.n2_active_condition_run }}</strong>
+        </div>
+        <div class="metric">
+          <span>n3_subscription_run</span>
+          <strong>{{ status_page.status.n3_subscription_run }}</strong>
+        </div>
+        <div class="metric">
+          <span>n3_a1_preload_run</span>
+          <strong>{{ status_page.status.n3_a1_preload_run }}</strong>
+        </div>
+        <div class="metric">
+          <span>original_oneshot_result</span>
+          <strong>{{ status_page.status.original_oneshot_result }}</strong>
+        </div>
+        <div class="metric">
+          <span>superseded_for_display_by_manual_overlay</span>
+          <strong>{{ status_page.status.superseded_for_display_by_manual_overlay }}</strong>
+        </div>
+        <div class="metric">
+          <span>latest_attempted_for_trade_date</span>
+          <strong>{{ status_page.latest_attempted_for_trade_date }}</strong>
+        </div>
+        <div class="metric">
+          <span>effective_manual_overlay_date</span>
+          <strong>{{ status_page.effective_manual_overlay.for_trade_date }}</strong>
+        </div>
+        <div class="metric">
+          <span>effective_manual_overlay_source</span>
+          <strong>{{ status_page.effective_manual_overlay.status_source }}</strong>
+        </div>
+      </section>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>每日 18:00 One-Shot</h2>
+          <div class="subtle">N1 source facts -> N2 condition -> N3 subscription -> N3-A1 preload -> N3-A1 cumulative amount -> N4 trigger context snapshot -> readiness guards，完成后停止。</div>
+        </div>
+        <div class="actions">
+          {% if status_page.latest_for_trade_date %}
+          <a class="{% if status_page.selected_for_trade_date == status_page.latest_for_trade_date %}active{% endif %}" href="/n6/post-close-fastlane-status">最新日期</a>
+          {% endif %}
+          <a href="/n6/input-messages">N6输入消息</a>
+        </div>
+      </div>
+      {% if status_page.result == "NO_STATUS" %}
+      <div class="notice">
+        还没有找到该交易日的 one-shot 状态文件。请确认目录
+        <code>{{ status_page.run_dir }}/00_status.json</code>
+        是否存在。
+      </div>
+      {% endif %}
+      <form class="filter-grid" method="get" action="/n6/post-close-fastlane-status">
+        <label>for_trade_date
+          <input type="text" name="for_trade_date" value="{{ status_page.selected_for_trade_date }}" placeholder="YYYYMMDD">
+        </label>
+        <button type="submit">查看日期</button>
+        <a href="/n6/post-close-fastlane-status">清空</a>
+      </form>
+      <table>
+        <thead>
+          <tr>
+            <th>step</th>
+            <th>layer_role</th>
+            <th>status</th>
+            <th>returncode</th>
+            <th>reports</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for step in status_page.sub_steps %}
+          <tr>
+            <td><strong>{{ step.step_id }}</strong><div class="subtle">{{ step.label }}</div></td>
+            <td>{{ step.layer_role }}</td>
+            <td><span class="status-pill">{{ step.status }}</span></td>
+            <td>{{ step.returncode }}</td>
+            <td>
+              {% for path in step.report_paths %}
+              <div><code>{{ path }}</code></div>
+              {% endfor %}
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="5" class="subtle">暂无子步骤报告。</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="metric-grid">
+      <div class="metric">
+        <span>N3-A1 objects_processed</span>
+        <strong>{{ status_page.n3_a1_summary.objects_processed }}</strong>
+      </div>
+      <div class="metric">
+        <span>minute_rows_written</span>
+        <strong>{{ status_page.n3_a1_summary.minute_rows_written }}</strong>
+      </div>
+      <div class="metric">
+        <span>preload_status_rows</span>
+        <strong>{{ status_page.n3_a1_summary.preload_status_rows_written }}</strong>
+      </div>
+      <div class="metric">
+        <span>event_outbox_rows</span>
+        <strong>{{ status_page.n3_a1_summary.event_outbox_rows_written }}</strong>
+      </div>
+      <div class="metric">
+        <span>P0 / P1 / P2</span>
+        <strong>{{ status_page.n3_a1_summary.P0 }} / {{ status_page.n3_a1_summary.P1 }} / {{ status_page.n3_a1_summary.P2 }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>Artifacts</h2>
+          <div class="subtle">只读展示本地报告路径。rollback、补跑和调度启停不在本页面执行。</div>
+        </div>
+      </div>
+      <div class="artifact-list">
+        {% for artifact in status_page.artifacts %}
+        <div class="artifact-row">
+          <strong>{{ artifact.label }}</strong>
+          <code>{{ artifact.path }}</code>
+          <span class="status-pill">{{ "exists" if artifact.exists else "missing" }}</span>
+        </div>
+        {% endfor %}
+        {% for path in status_page.log_paths %}
+        <div class="artifact-row">
+          <strong>log</strong>
+          <code>{{ path }}</code>
+          <span class="status-pill">local</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", { method: "POST" });
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

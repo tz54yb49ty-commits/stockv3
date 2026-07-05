@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6 持仓</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --buy: #166534;
+      --sell: #991b1b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    button[disabled] {
+      color: #8a989d;
+      background: #eef2f3;
+      cursor: not-allowed;
+    }
+    main { padding: 18px 0 32px; }
+    .summary {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .metric {
+      padding: 16px;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .metric strong { font-size: 24px; }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      min-width: 1060px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    .buy { color: var(--buy); font-weight: 720; }
+    .sell { color: var(--sell); font-weight: 720; }
+    .stack { display: grid; gap: 16px; }
+    @media (max-width: 920px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .summary { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>持仓</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap stack">
+    <section class="summary">
+      <div class="surface metric"><span>模拟资金</span><strong>{{ sim_account.initial_cash }}</strong><div class="subtle">{{ sim_account.account_name }} · {{ sim_account.settlement_mode }}</div></div>
+      <div class="surface metric"><span>当前持仓</span><strong>{% if positions %}{{ positions|length }} 个持仓{% else %}当前持仓为空{% endif %}</strong><div class="subtle">现金 {{ sim_account.cash_balance }} · 冻结 {{ sim_account.frozen_cash }}</div></div>
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>当前持仓</h2>
+        <span class="subtle">{{ positions|length }} rows</span>
+      </div>
+      {% if positions %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>股票代码</th>
+              <th>股票名</th>
+              <th>总数量</th>
+              <th>可用数量</th>
+              <th>T+1 锁定</th>
+              <th>成本</th>
+              <th>现价</th>
+              <th>市值</th>
+              <th>浮动盈亏</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in positions %}
+            <tr>
+              <td>{{ row.code }}</td>
+              <td>{{ row.name }}</td>
+              <td>{{ row.total_qty }}</td>
+              <td>{{ row.available_qty }}</td>
+              <td>{{ row.t_plus_one_locked_qty }}</td>
+              <td>{{ row.avg_cost }}</td>
+              <td>{{ row.last_price }}</td>
+              <td>{{ row.market_value }}</td>
+              <td>{{ row.unrealized_pnl }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">当前持仓为空</div>
+      {% endif %}
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>买入候选</h2>
+        <span class="subtle">{{ buy_candidates|length }} rows</span>
+      </div>
+      {% if buy_candidates %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>股票代码</th>
+              <th>股票名</th>
+              <th>股价</th>
+              <th>上涨目标价</th>
+              <th>上涨收益率</th>
+              <th>板块代码</th>
+              <th>板块名</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in buy_candidates %}
+            <tr>
+              <td>{{ row.code }}</td>
+              <td>{{ row.name }}</td>
+              <td>{{ row.current_price }}</td>
+              <td>{{ row.target_price }}</td>
+              <td class="buy">{{ row.expected_return_pct }}</td>
+              <td>{{ row.board_code }}</td>
+              <td>{{ row.board_name }}</td>
+              <td><button disabled>买入</button> <button disabled>丢弃</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">暂无买入候选</div>
+      {% endif %}
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>卖出候选</h2>
+        <span class="subtle">{{ sell_candidates|length }} rows</span>
+      </div>
+      {% if sell_candidates %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>股票代码</th>
+              <th>股票名</th>
+              <th>股价</th>
+              <th>下跌目标价</th>
+              <th>预亏率</th>
+              <th>板块代码</th>
+              <th>板块名</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in sell_candidates %}
+            <tr>
+              <td>{{ row.code }}</td>
+              <td>{{ row.name }}</td>
+              <td>{{ row.current_price }}</td>
+              <td>{{ row.target_price }}</td>
+              <td class="sell">{{ row.expected_return_pct }}</td>
+              <td>{{ row.board_code }}</td>
+              <td>{{ row.board_name }}</td>
+              <td><button disabled>卖出</button> <button disabled>丢弃</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">暂无卖出候选</div>
+      {% endif %}
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", {method: "POST"});
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

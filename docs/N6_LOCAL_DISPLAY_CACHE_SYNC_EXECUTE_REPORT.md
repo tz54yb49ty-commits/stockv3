@@ -1,0 +1,5 @@
+result=EXECUTED
+cache_run_id=n6_display_cache_sync_20260604_condition_layer_20260604_source_20260604_v1
+database_written=True
+outbox_consumed_or_updated=False
+worker_started=False

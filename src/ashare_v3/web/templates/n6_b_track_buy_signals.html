@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B轨买入信号</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1560px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+      line-height: 1.5;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 74px;
+      display: grid;
+      gap: 4px;
+      align-content: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; font-weight: 720; }
+    .metric strong { font-size: 22px; }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.4fr) minmax(140px, 180px) minmax(220px, .9fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1280px; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    th {
+      color: var(--muted);
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .trace-id {
+      max-width: 360px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: inline-block;
+      vertical-align: bottom;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      border: 1px solid #b7d9d3;
+      background: #eef7f5;
+      color: var(--accent);
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .empty { padding: 24px 14px; color: var(--muted); }
+    @media (max-width: 900px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .filter-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>B轨买入信号</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for link in nav.links %}
+        <a class="{% if nav.active == link.key %}active{% endif %}" href="{{ link.href }}">{{ link.label }}</a>
+        {% endfor %}
+        <a href="/n6/logout">退出</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="banner">
+      <strong>READ ONLY</strong> · 只读 common_event_outbox · 不消费 outbox · 不写 inbox/checkpoint · 不写 user projection/card/queue · 不建仓 · 不扣资金 · 不触发虚拟账户/交易 · 不触发 sim / voice / mobile
+    </section>
+
+    <section class="metric-grid" aria-label="B track buy signal summary">
+      <div class="metric">
+        <span>当前 action_run_id</span>
+        <strong class="trace-id">{{ buy_signals_page.action_run_id }}</strong>
+      </div>
+      <div class="metric">
+        <span>当前筛选命中</span>
+        <strong>{{ buy_signals_page.filtered_count }}</strong>
+      </div>
+      <div class="metric">
+        <span>buy</span>
+        <strong>{{ buy_signals_page.summary.buy }}</strong>
+      </div>
+      <div class="metric">
+        <span>sell</span>
+        <strong>{{ buy_signals_page.summary.sell }}</strong>
+      </div>
+      <div class="metric">
+        <span>ActionEligible</span>
+        <strong>{{ buy_signals_page.summary.ActionEligible }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>N5 provisional ActionEligible</h2>
+          <div class="subtle">默认只展示 action_type=buy；sell 可通过筛选查看，不进入卖出流程。</div>
+        </div>
+        <div class="actions">
+          <a class="active" href="/n6/b-track/buy-signals">默认买入信号</a>
+          <a href="/n6/n5-actions">N5动作</a>
+        </div>
+      </div>
+      <form class="filter-grid" method="get" action="/n6/b-track/buy-signals">
+        <label>action_run_id
+          <input type="search" name="action_run_id" value="{{ buy_signals_page.filter_inputs.action_run_id }}" placeholder="默认 latest provisional eligible action_run_id">
+        </label>
+        <label>action_type
+          <select name="action_type">
+            {% for action_type in buy_signals_page.action_types %}
+            <option value="{{ action_type }}"{% if buy_signals_page.filter_inputs.action_type == action_type %} selected{% endif %}>{{ action_type }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>代码 / identity / projection / condition
+          <input type="search" name="q" value="{{ buy_signals_page.filter_inputs.q }}" placeholder="identity_key / projection_id / condition_key">
+        </label>
+        <button type="submit">筛选</button>
+        <a href="/n6/b-track/buy-signals">清空</a>
+      </form>
+
+      {% if buy_signals_page["items"] %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>event_time</th>
+              <th>event_id</th>
+              <th>asset</th>
+              <th>action_type</th>
+              <th>action_state</th>
+              <th>signal_type</th>
+              <th>condition_key</th>
+              <th>projection_30m_type</th>
+              <th>trigger_mark_candidate</th>
+              <th>projection_id</th>
+              <th>source_trigger_event_id</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in buy_signals_page["items"] %}
+            <tr>
+              <td>{{ row.event_time }}</td>
+              <td><span class="trace-id">{{ row.event_id }}</span></td>
+              <td>{{ row.asset_kind }} · {{ row.identity_key }}</td>
+              <td><span class="pill">{{ row.action_type }}</span></td>
+              <td>{{ row.action_state }}</td>
+              <td>{{ row.signal_type }}</td>
+              <td>{{ row.condition_key }}</td>
+              <td>{{ row.projection_30m_type }}</td>
+              <td>{{ row.trigger_mark_candidate }}</td>
+              <td><span class="trace-id">{{ row.projection_id }}</span></td>
+              <td><span class="trace-id">{{ row.source_trigger_event_id }}</span></td>
+              <td>{{ row.status }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">暂无 B轨买入信号。</div>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

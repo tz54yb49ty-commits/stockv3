@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N5动作</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1680px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+      line-height: 1.5;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 74px;
+      display: grid;
+      gap: 4px;
+      align-content: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; font-weight: 720; }
+    .metric strong { font-size: 22px; }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(260px, 1.2fr) minmax(160px, 220px) minmax(140px, 180px) minmax(140px, 180px) minmax(220px, .8fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1380px; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    th {
+      color: var(--muted);
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .trace-id {
+      max-width: 360px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: inline-block;
+      vertical-align: bottom;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      border: 1px solid #b7d9d3;
+      background: #eef7f5;
+      color: var(--accent);
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .empty { padding: 24px 14px; color: var(--muted); }
+    @media (max-width: 900px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .filter-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>N5动作</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for link in nav.links %}
+        <a class="{% if nav.active == link.key %}active{% endif %}" href="{{ link.href }}">{{ link.label }}</a>
+        {% endfor %}
+        <a href="/n6/logout">退出</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="banner">
+      <strong>READ ONLY</strong> · 只读 common_event_outbox · 不消费 outbox · 不写 inbox/checkpoint · 不写 user projection/card · 不触发交易 / sim / voice / mobile
+    </section>
+
+    <section class="metric-grid" aria-label="N5 action summary">
+      <div class="metric">
+        <span>当前 action_run_id</span>
+        <strong class="trace-id">{{ n5_actions_page.action_run_id }}</strong>
+      </div>
+      <div class="metric">
+        <span>当前筛选命中</span>
+        <strong>{{ n5_actions_page.filtered_count }}</strong>
+      </div>
+      <div class="metric">
+        <span>ActionExecuted</span>
+        <strong>{{ n5_actions_page.summary.ActionExecuted }}</strong>
+      </div>
+      <div class="metric">
+        <span>ActionEligible</span>
+        <strong>{{ n5_actions_page.summary.ActionEligible }}</strong>
+      </div>
+      <div class="metric">
+        <span>pending</span>
+        <strong>{{ n5_actions_page.summary.pending }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>N5 canonical action outbox</h2>
+          <div class="subtle">默认读取 latest passed N5 action_run_id，仅展示 ActionExecuted / ActionEligible。</div>
+        </div>
+        <div class="actions">
+          <a class="active" href="/n6/n5-actions">默认 latest N5 action_run_id</a>
+          <a href="/n6/n5-messages">N5 raw messages</a>
+        </div>
+      </div>
+      <form class="filter-grid" method="get" action="/n6/n5-actions">
+        <label>action_run_id
+          <input type="search" name="action_run_id" value="{{ n5_actions_page.filter_inputs.action_run_id }}" placeholder="默认 latest passed action_run_id">
+        </label>
+        <label>event_type
+          <select name="event_type">
+            <option value="">ActionExecuted + ActionEligible</option>
+            {% for event_type in n5_actions_page.event_types %}
+            <option value="{{ event_type }}"{% if n5_actions_page.filter_inputs.event_type == event_type %} selected{% endif %}>{{ event_type }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>action_state
+          <select name="action_state">
+            <option value="">全部 state</option>
+            {% for action_state in n5_actions_page.action_states %}
+            <option value="{{ action_state }}"{% if n5_actions_page.filter_inputs.action_state == action_state %} selected{% endif %}>{{ action_state }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>asset_kind
+          <select name="asset_kind">
+            <option value="">全部资产</option>
+            {% for asset_kind in ["stock", "index", "board"] %}
+            <option value="{{ asset_kind }}"{% if n5_actions_page.filter_inputs.asset_kind == asset_kind %} selected{% endif %}>{{ asset_kind }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>代码 / identity / metric / key
+          <input type="search" name="q" value="{{ n5_actions_page.filter_inputs.q }}" placeholder="代码 / identity_key / selected_metric_id / action_key">
+        </label>
+        <button type="submit">筛选</button>
+        <a href="/n6/n5-actions">清空</a>
+      </form>
+
+      {% if n5_actions_page["items"] %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>event_time</th>
+              <th>asset</th>
+              <th>event_type</th>
+              <th>action_state</th>
+              <th>action_type</th>
+              <th>condition_key</th>
+              <th>selected_metric_id</th>
+              <th>selected_metric_time</th>
+              <th>trigger_metric_time</th>
+              <th>live_window_confirmation</th>
+              <th>multi_action_window</th>
+              <th>action_key</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in n5_actions_page["items"] %}
+            <tr>
+              <td>{{ row.event_time }}</td>
+              <td>{{ row.asset_kind }} · {{ row.identity_key }}</td>
+              <td><span class="pill">{{ row.event_type }}</span></td>
+              <td>{{ row.action_state }}</td>
+              <td>{{ row.action_type }}</td>
+              <td>{{ row.condition_key }}</td>
+              <td>{{ row.selected_metric_id }}</td>
+              <td>{{ row.selected_metric_time }}</td>
+              <td>{{ row.trigger_metric_time }}</td>
+              <td>{{ row.live_window_confirmation }}</td>
+              <td>{{ row.multi_action_window }}</td>
+              <td><span class="trace-id">{{ row.action_key }}</span></td>
+              <td>{{ row.status }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">暂无 N5 动作 outbox。</div>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

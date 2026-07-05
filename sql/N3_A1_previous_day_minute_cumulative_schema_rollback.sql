@@ -1,0 +1,20 @@
+-- Rollback artifact for N3-A1 previous-day minute cumulative amount schema draft.
+-- Artifact only: execute only under an explicit rollback gate.
+
+DROP INDEX IF EXISTS stock_previous_day_minute_cumulative_run_identity_idx;
+DROP INDEX IF EXISTS stock_previous_day_minute_cumulative_trade_date_idx;
+DROP INDEX IF EXISTS stock_previous_day_minute_cumulative_identity_minute_idx;
+DROP INDEX IF EXISTS stock_previous_day_minute_cumulative_source_identity_minute_uidx;
+DROP TABLE IF EXISTS stock_previous_day_minute_cumulative;
+
+DROP INDEX IF EXISTS index_previous_day_minute_cumulative_run_identity_idx;
+DROP INDEX IF EXISTS index_previous_day_minute_cumulative_trade_date_idx;
+DROP INDEX IF EXISTS index_previous_day_minute_cumulative_identity_minute_idx;
+DROP INDEX IF EXISTS index_previous_day_minute_cumulative_source_identity_minute_uidx;
+DROP TABLE IF EXISTS index_previous_day_minute_cumulative;
+
+DROP INDEX IF EXISTS board_previous_day_minute_cumulative_run_identity_idx;
+DROP INDEX IF EXISTS board_previous_day_minute_cumulative_trade_date_idx;
+DROP INDEX IF EXISTS board_previous_day_minute_cumulative_identity_minute_idx;
+DROP INDEX IF EXISTS board_previous_day_minute_cumulative_source_identity_minute_uidx;
+DROP TABLE IF EXISTS board_previous_day_minute_cumulative;

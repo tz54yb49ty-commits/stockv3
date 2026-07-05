@@ -1,0 +1,17 @@
+# N3 Board-Lineage Scoped Subscription Execute Contract
+
+Status: CONTRACT_PASS
+
+```text
+subscription_run_id=market_data_subscription_20260605_action_metric_board_lineage_repair_condition_layer_20260604_source_20260604_v1
+execute_target=subscription_control_only
+board_objects=28
+subscription_candidates=56
+subscriptions=56
+pull_plan_rows=2
+previous_day_planned_rows=6720
+today_planned_rows_until_1127=3276
+metric_v2_execute=False
+execute_command=PYTHONPATH=src:scripts python3 scripts/run_n3_board_lineage_scoped_subscription_execute.py --contract-path docs/N3_BOARD_LINEAGE_SCOPED_SUBSCRIPTION_EXECUTE_CONTRACT.json --preflight-path docs/N3_BOARD_LINEAGE_SCOPED_SUBSCRIPTION_EXECUTE_PREFLIGHT.json --payload-path docs/N3_action_confirmation_metric_board_lineage_repair_payload.json --json-report-path docs/N3_board_lineage_scoped_subscription_20260605_execute_report.json --markdown-report-path docs/N3_BOARD_LINEAGE_SCOPED_SUBSCRIPTION_20260605_EXECUTE_REPORT.md --execute --user-confirmed
+rollback_sql=sql/N3_board_lineage_scoped_subscription_20260605_rollback.sql
+```

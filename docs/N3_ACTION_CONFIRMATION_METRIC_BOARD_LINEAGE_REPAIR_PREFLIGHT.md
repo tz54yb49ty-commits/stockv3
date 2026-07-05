@@ -1,0 +1,11 @@
+# N3 Action-Confirmation Metric Board Lineage Repair Preflight
+
+Status: PREFLIGHT_PASS
+
+```text
+repair_run_id=action_confirmation_projection_metric_20260605_board_lineage_repair_v2__trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+subscription_run_id=market_data_subscription_20260605_action_metric_board_lineage_repair_condition_layer_20260604_source_20260604_v1
+P0/P1/P2=0/1/0
+blockers=[]
+writes_database=false
+```

@@ -1,0 +1,27 @@
+{
+  "policy_name": "manual_policy_example",
+  "index": {
+    "enabled": true,
+    "source": "fixed_index_scope",
+    "include_codes": ["000905", "000300", "399006"],
+    "directions": ["buy", "sell"]
+  },
+  "board": {
+    "enabled": true,
+    "source": "industry_board_scope",
+    "board_code_prefix": "881",
+    "directions": ["buy"]
+  },
+  "stock": {
+    "enabled": true,
+    "source": "condition_pool",
+    "directions": ["buy"],
+    "include_condition_families": ["full", "hint"],
+    "include_condition_keys": [],
+    "min_total_mv_wan": 3000000,
+    "market_value_compare": ">=",
+    "require_buy_target_price": false,
+    "require_clear_sell_ref_period": false,
+    "limit": 500
+  }
+}

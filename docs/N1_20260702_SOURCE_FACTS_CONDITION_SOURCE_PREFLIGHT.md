@@ -1,0 +1,455 @@
+{
+  "stage": "N1 condition source activation 20260605 execute preflight",
+  "layer_role": "N1_ingestion",
+  "result": "PREFLIGHT_PASS",
+  "blocked": false,
+  "blockers": [],
+  "trade_date": "20260702",
+  "source_batch_id": "condition_source_activation_20260702_v1",
+  "source_versions": {
+    "stock_daily_basic": "stock_daily_basic_20260702_v1",
+    "stock_financial": "stock_financial_20260702_v1",
+    "index_membership": "index_membership_20260702_v1",
+    "board_membership": "board_membership_20260702_v1"
+  },
+  "expected_rows": {
+    "stock_daily_basic": 5507,
+    "stock_financial": 5507,
+    "index_membership": 15360,
+    "board_membership": 57045,
+    "total": 83419
+  },
+  "baseline": {
+    "current_target_fact_rows": {
+      "stock_daily_basic": 0,
+      "stock_financial": 0,
+      "index_membership": 0,
+      "board_membership": 0
+    },
+    "active_target_source_versions": [],
+    "target_source_version_conflicts": {
+      "stock_daily_basic": 0,
+      "stock_financial": 0,
+      "index_membership": 0,
+      "board_membership": 0
+    },
+    "contract_batch_exists": false,
+    "event_counts": {
+      "common_event_outbox": 725982,
+      "common_event_inbox": 217415,
+      "common_event_consumer_checkpoint": 64055
+    }
+  },
+  "quality": {
+    "p0_count": 0,
+    "p1_count": 3,
+    "p2_count": 1
+  },
+  "quality_items": [
+    {
+      "gate_name": "upstream_stock_daily_active",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "active stock_daily rows > 0",
+      "actual_value": "5507",
+      "details": {}
+    },
+    {
+      "gate_name": "condition_stock_universe_expected_scope",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "5507",
+      "actual_value": "5507",
+      "details": {
+        "official_daily_bar_universe": 5507,
+        "condition_source_gap_manifest_rows": 19
+      }
+    },
+    {
+      "gate_name": "official_no_trade_excluded_from_condition_universe",
+      "severity": "P1",
+      "status": "warning",
+      "expected_value": "0 official no-trade rows required in condition source",
+      "actual_value": "19",
+      "details": {
+        "manifest": [
+          {
+            "identity_key": "stock:BJ:920305",
+            "ts_code": "920305.BJ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600193",
+            "ts_code": "600193.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600421",
+            "ts_code": "600421.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600599",
+            "ts_code": "600599.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600608",
+            "ts_code": "600608.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600636",
+            "ts_code": "600636.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:600696",
+            "ts_code": "600696.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:601369",
+            "ts_code": "601369.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:603722",
+            "ts_code": "603722.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:605081",
+            "ts_code": "605081.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:688072",
+            "ts_code": "688072.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:688121",
+            "ts_code": "688121.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SH:688287",
+            "ts_code": "688287.SH",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:000524",
+            "ts_code": "000524.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:000638",
+            "ts_code": "000638.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:002729",
+            "ts_code": "002729.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:002731",
+            "ts_code": "002731.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:300214",
+            "ts_code": "300214.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          },
+          {
+            "identity_key": "stock:SZ:300332",
+            "ts_code": "300332.SZ",
+            "reason": "official_no_trade_suspend_d_bak_daily_zero_volume",
+            "daily_bar_available": false,
+            "condition_source_available": false,
+            "tushare_suspend_d_present": true,
+            "bak_daily_zero_volume_present": true,
+            "action": "exclude_from_condition_universe",
+            "severity": "P1"
+          }
+        ],
+        "writes_target_fact": false
+      }
+    },
+    {
+      "gate_name": "index_membership_local_tdx_available",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "local TDX index membership rows > 0",
+      "actual_value": "15360",
+      "details": {}
+    },
+    {
+      "gate_name": "board_membership_local_tdx_available",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "local TDX board membership rows > 0",
+      "actual_value": "57045",
+      "details": {}
+    },
+    {
+      "gate_name": "index_membership_unique_key",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "0 duplicates",
+      "actual_value": "0",
+      "details": {}
+    },
+    {
+      "gate_name": "board_membership_unique_key",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "0 duplicates",
+      "actual_value": "0",
+      "details": {}
+    },
+    {
+      "gate_name": "target_fact_already_exists",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "0 existing 20260605 target fact rows",
+      "actual_value": "{'stock_daily_basic': 0, 'stock_financial': 0, 'index_membership': 0, 'board_membership': 0}",
+      "details": {}
+    },
+    {
+      "gate_name": "target_source_version_conflict",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "0 target source_version conflicts",
+      "actual_value": "{'stock_daily_basic': 0, 'stock_financial': 0, 'index_membership': 0, 'board_membership': 0}",
+      "details": {}
+    },
+    {
+      "gate_name": "active_source_version_conflict",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "0 target active source rows",
+      "actual_value": "0",
+      "details": {}
+    },
+    {
+      "gate_name": "condition_source_batch_conflict",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "batch absent",
+      "actual_value": "False",
+      "details": {}
+    },
+    {
+      "gate_name": "rollback_sql_scope_available",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "delete by batch/source_version/trade_date and restore/delete active",
+      "actual_value": "available",
+      "details": {}
+    },
+    {
+      "gate_name": "forbidden_scope_excluded",
+      "severity": "P0",
+      "status": "passed",
+      "expected_value": "no daily bar, no Parquet, no outbox, no N2-N6",
+      "actual_value": "excluded",
+      "details": {}
+    },
+    {
+      "gate_name": "board_unmapped_raw_count_filtered",
+      "severity": "P2",
+      "status": "warning",
+      "expected_value": "0",
+      "actual_value": "102",
+      "details": {
+        "raw_unmapped": 102,
+        "unique_identity_unmapped": 18,
+        "action": "filtered",
+        "blocking": false
+      }
+    },
+    {
+      "gate_name": "stale_identity_manifest_only",
+      "severity": "P1",
+      "status": "warning",
+      "expected_value": "0",
+      "actual_value": "1",
+      "details": {
+        "manifest": [
+          {
+            "identity_key": "stock:SZ:300114",
+            "ts_code": "300114.SZ",
+            "name": "中航成飞",
+            "disposition": "exclude_from_expected_universe",
+            "severity": "P1",
+            "superseded_by_identity_key": "stock:SZ:302132"
+          }
+        ],
+        "writes_identity": false
+      }
+    },
+    {
+      "gate_name": "board_membership_row_count_changed_from_recent_active",
+      "severity": "P1",
+      "status": "warning",
+      "expected_value": "56962",
+      "actual_value": "57045",
+      "details": {
+        "action": "reviewed_against_current_local_tdx_txt",
+        "blocking": false
+      }
+    }
+  ],
+  "runner_readiness": "ready_for_final_gate",
+  "execute_authorized": false,
+  "final_gate_required": true,
+  "final_execute_gate_allowed": true,
+  "execute_runner_implemented": true,
+  "postgres_commit_implemented": true,
+  "execute_flags_seen": {
+    "execute": true,
+    "user_confirmed": true,
+    "postgres_commit_enabled": true
+  },
+  "expected_future_writes": {
+    "allowed_tables": [
+      "common_ingest_batch",
+      "common_quality_gate_result",
+      "common_active_source_version",
+      "stock_daily_basic",
+      "stock_financial_metrics_fact",
+      "index_membership_fact",
+      "board_membership_fact"
+    ],
+    "writes_postgres": true,
+    "writes_parquet": false,
+    "updates_active_source_version": true,
+    "writes_outbox": false,
+    "enters_n2_n3_n4_n5_n6": false
+  },
+  "execute_command_template": "PYTHONPATH=src python3 scripts/run_condition_source_activation_20260605_once.py --execute --user-confirmed --postgres-commit-enabled --execute-report-json docs/post_close_fastlane/20260703/20_n1_source_facts_execute_report.json --execute-report-md docs/post_close_fastlane/20260703/20_n1_source_facts_execute_report.md",
+  "side_effects": {
+    "writes_postgres": false,
+    "writes_parquet": false,
+    "updates_active_source_version": false,
+    "writes_outbox": false,
+    "writes_inbox_or_checkpoint": false,
+    "enters_n2_n3_n4_n5_n6": false,
+    "worker_started": false,
+    "old_system_touched": false,
+    "real_trading": false
+  },
+  "rollback_sql_path": "sql/N1_20260702_source_facts_guarded_runner_rollback.sql",
+  "generated_at": "2026-07-02T18:01:02+08:00"
+}

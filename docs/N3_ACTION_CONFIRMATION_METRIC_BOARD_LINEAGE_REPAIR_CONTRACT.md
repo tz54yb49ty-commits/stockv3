@@ -1,0 +1,14 @@
+# N3 Action-Confirmation Metric Board Lineage Repair Contract
+
+Status: CONTRACT_PASS
+
+```text
+repair_run_id=action_confirmation_projection_metric_20260605_board_lineage_repair_v2__trigger_execute_20260605_condition_layer_20260604_source_20260604_v1
+subscription_run_id=market_data_subscription_20260605_action_metric_board_lineage_repair_condition_layer_20260604_source_20260604_v1
+board_objects=28
+previous_day_minute_rows=6720
+today_minute_rows_until_1127=3276
+additive_board_metric_v2_max_rows=28
+rollback_sql=sql/N3_action_confirmation_metric_board_lineage_repair_20260605_rollback.sql
+execute_authorized_now=false
+```

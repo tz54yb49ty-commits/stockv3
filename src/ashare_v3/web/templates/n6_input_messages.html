@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6输入消息中心</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --warn: #8a5a00;
+      --legacy: #6b7280;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .chips, .actions, .tabs {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 74px;
+      display: grid;
+      gap: 4px;
+      align-content: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; font-weight: 720; }
+    .metric strong { font-size: 22px; overflow-wrap: anywhere; }
+    .surface-head {
+      min-height: 58px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tabs {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+    .notice {
+      margin: 12px 14px 0;
+      padding: 10px 12px;
+      border: 1px solid #cfe4df;
+      border-radius: 8px;
+      background: #f2faf8;
+      color: #315f59;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(150px, 210px) minmax(150px, 210px) minmax(170px, 240px) minmax(130px, 180px) minmax(130px, 180px) minmax(180px, 1fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .chip.legacy { color: var(--legacy); }
+    .chip.display { color: var(--warn); }
+    .message-list {
+      display: grid;
+      gap: 10px;
+      padding: 12px 14px 16px;
+    }
+    .message-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      min-height: 112px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+    }
+    .message-main {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+    .message-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .status-pill {
+      min-height: 24px;
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #cfe4df;
+      border-radius: 999px;
+      padding: 2px 9px;
+      color: var(--accent);
+      background: #f2faf8;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .event-type { color: var(--accent); font-weight: 760; }
+    .category { color: var(--warn); font-weight: 760; }
+    .legacy-text { color: var(--legacy); font-weight: 720; }
+    .message-fields {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 8px;
+    }
+    .field {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .field span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+    }
+    .field strong {
+      font-size: 13px;
+      font-weight: 650;
+      overflow-wrap: anywhere;
+    }
+    .detail-button {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      background: rgba(15, 23, 42, 0.28);
+    }
+    .detail-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 31;
+      width: min(660px, calc(100vw - 28px));
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      background: #fff;
+      border-left: 1px solid var(--line);
+      box-shadow: -16px 0 32px rgba(15, 23, 42, 0.18);
+      transform: translateX(104%);
+      transition: transform 160ms ease;
+    }
+    .detail-drawer.open { transform: translateX(0); }
+    .drawer-head {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .drawer-body {
+      overflow: auto;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .detail-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .detail-section { display: grid; gap: 8px; }
+    .trace-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+    pre {
+      margin: 0;
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.45;
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+    }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    [hidden] { display: none !important; }
+    @media (max-width: 1100px) {
+      .metric-grid, .filter-grid, .message-fields, .detail-summary { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .message-card { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>N6输入消息中心</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner">
+      READ ONLY · 只读 N6 正式输入事件 · 不消费/update outbox · 不写 inbox/checkpoint · 不触发通知/交易
+    </section>
+
+    <section class="metric-grid">
+      <div class="metric">
+        <span>总输入</span>
+        <strong>{{ input_page.summary.total }}</strong>
+      </div>
+      <div class="metric">
+        <span>pending</span>
+        <strong>{{ input_page.summary.pending }}</strong>
+      </div>
+      <div class="metric">
+        <span>N5 canonical</span>
+        <strong>{{ input_page.summary.n5_canonical }}</strong>
+      </div>
+      <div class="metric">
+        <span>N5 legacy</span>
+        <strong>{{ input_page.summary.n5_legacy }}</strong>
+      </div>
+      <div class="metric">
+        <span>N3 display input</span>
+        <strong>{{ input_page.summary.n3_display_input }}</strong>
+      </div>
+      <div class="metric">
+        <span>latest event_time</span>
+        <strong>{{ input_page.summary.latest_event_time }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>N6 正式输入消息</h2>
+          <div class="subtle">N5 -> N6 主输入为 canonical action outbox；N3 -> N6 展示输入仅限 MarketDisplaySnapshotUpdated。N4消息保留为上游诊断。</div>
+        </div>
+        <div class="actions">
+          <a href="/n6/n5-messages">N5兼容页</a>
+          <a href="/n6/n4-messages">N4诊断页</a>
+        </div>
+      </div>
+      <div class="tabs">
+        <a class="{% if not input_page.filters.input_group %}active{% endif %}" href="/n6/input-messages">全部输入</a>
+        <a class="{% if input_page.filters.input_group == 'n5_action' %}active{% endif %}" href="/n6/input-messages?input_group=n5_action">N5动作输入</a>
+        <a class="{% if input_page.filters.input_group == 'n3_display' %}active{% endif %}" href="/n6/input-messages?input_group=n3_display">N3展示输入</a>
+        <a class="{% if input_page.filters.input_group == 'legacy' %}active{% endif %}" href="/n6/input-messages?show_all=1&input_group=legacy">legacy</a>
+      </div>
+      {% if input_page.date_filter_defaulted %}
+      <div class="notice">
+        当前未选择日期，已自动使用最新输入事件日期 {{ input_page.latest_event_date }}。默认展示前 {{ input_page.returned_count }} 条；跨日期历史请点击“显示全部日期”。
+      </div>
+      {% elif input_page.include_all and not input_page.filters.event_date %}
+      <div class="notice">
+        当前为手动全量模式，可能包含多日历史消息。建议优先选择 event_time 日期后再筛选。
+      </div>
+      {% endif %}
+      <form class="filter-grid" method="get" action="/n6/input-messages">
+        <label>event_time 日期
+          <input type="date" name="event_date" value="{{ input_page.filter_inputs.event_date }}">
+        </label>
+        <label>输入分组
+          <select name="input_group">
+            <option value="">全部输入</option>
+            <option value="n5_action"{% if input_page.filter_inputs.input_group == "n5_action" %} selected{% endif %}>N5动作输入</option>
+            <option value="n3_display"{% if input_page.filter_inputs.input_group == "n3_display" %} selected{% endif %}>N3展示输入</option>
+            <option value="legacy"{% if input_page.filter_inputs.input_group == "legacy" %} selected{% endif %}>legacy</option>
+          </select>
+        </label>
+        <label>source_layer
+          <select name="source_layer">
+            <option value="">全部 source_layer</option>
+            {% for source_layer in input_page.source_layers %}
+            <option value="{{ source_layer }}"{% if input_page.filter_inputs.source_layer == source_layer %} selected{% endif %}>{{ source_layer }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>event_type
+          <select name="event_type">
+            <option value="">全部 event_type</option>
+            {% for event_type in input_page.event_types %}
+            <option value="{{ event_type }}"{% if input_page.filters.event_type == event_type %} selected{% endif %}>{{ event_type }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>status
+          <select name="status">
+            <option value="">全部 status</option>
+            {% for status in ["pending", "delivering", "delivered", "failed"] %}
+            <option value="{{ status }}"{% if input_page.filter_inputs.status == status %} selected{% endif %}>{{ status }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>代码 / identity / event_id
+          <input type="search" name="q" value="{{ input_page.filter_inputs.q }}" placeholder="代码 / identity_key / event_id">
+        </label>
+        {% if input_page.include_all %}<input type="hidden" name="show_all" value="1">{% endif %}
+        <button type="submit">筛选</button>
+        <a href="/n6/input-messages">清空</a>
+      </form>
+      <div class="chips" aria-label="N6 input event types">
+        {% for event_type in input_page.n5_canonical_event_types %}
+        <span class="chip">{{ event_type }}</span>
+        {% endfor %}
+        {% for event_type in input_page.n3_display_event_types %}
+        <span class="chip display">{{ event_type }}</span>
+        {% endfor %}
+        {% for event_type in input_page.n5_legacy_event_types %}
+        <span class="chip legacy">{{ event_type }} · legacy</span>
+        {% endfor %}
+      </div>
+      {% if input_page["items"] %}
+      <div class="message-list">
+        {% for row in input_page["items"] %}
+        <article class="message-card">
+          <div class="message-main">
+            <div class="message-title">
+              <span class="status-pill">{{ row.status }}</span>
+              <span class="event-type">{{ row.event_type }}</span>
+              <span class="category">{{ row.source_category }}</span>
+              {% if row.legacy %}<span class="legacy-text">legacy</span>{% endif %}
+            </div>
+            <div class="message-fields">
+              <div class="field"><span>source_layer</span><strong>{{ row.source_layer }}</strong></div>
+              <div class="field"><span>event_time</span><strong>{{ row.event_time }}</strong></div>
+              <div class="field"><span>asset</span><strong>{{ row.asset_kind }} · {{ row.identity_key }}</strong></div>
+              <div class="field"><span>action_state</span><strong>{{ row.action_state }}</strong></div>
+              <div class="field"><span>blocked_reason</span><strong>{{ row.blocked_reason }}</strong></div>
+              <div class="field"><span>action_mark</span><strong>{{ row.action_mark }}</strong></div>
+              <div class="field"><span>signal_type</span><strong>{{ row.signal_type }}</strong></div>
+              <div class="field"><span>trade_date</span><strong>{{ row.trade_date }}</strong></div>
+              <div class="field"><span>schema</span><strong>{{ row.event_schema_version }}</strong></div>
+              <div class="field"><span>created_at</span><strong>{{ row.created_at }}</strong></div>
+            </div>
+          </div>
+          <div class="message-actions">
+            <button class="detail-button" type="button" data-detail-source="input-detail-{{ loop.index }}">查看明细</button>
+          </div>
+          <div class="message-detail-source" id="input-detail-{{ loop.index }}" hidden>
+            <div class="detail-section">
+              <h2>{{ row.event_type }} 明细</h2>
+              <div class="subtle">{{ row.source_category }} · {{ row.source_layer }}</div>
+            </div>
+            <div class="detail-summary">
+              <div class="field"><span>outbox_id</span><strong>{{ row.outbox_id }}</strong></div>
+              <div class="field"><span>status</span><strong>{{ row.status }}</strong></div>
+              <div class="field"><span>event_time</span><strong>{{ row.event_time }}</strong></div>
+              <div class="field"><span>event_schema_version</span><strong>{{ row.event_schema_version }}</strong></div>
+              <div class="field"><span>event_id</span><strong class="trace-id">{{ row.event_id }}</strong></div>
+              <div class="field"><span>source_run_id</span><strong class="trace-id">{{ row.source_run_id }}</strong></div>
+              <div class="field"><span>dedup_key · diagnostic</span><strong class="trace-id">{{ row.dedup_key }}</strong></div>
+              <div class="field"><span>partition_key · diagnostic</span><strong class="trace-id">{{ row.partition_key }}</strong></div>
+            </div>
+            <div class="detail-section">
+              <h2>payload_json 明细</h2>
+              <pre>{{ row.payload_json_display_text }}</pre>
+            </div>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">暂无符合条件的 N6 输入消息。若当前没有 MarketDisplaySnapshotUpdated，这是正常空态，不代表 N6 已消费 N3 内部行情事件。</div>
+      {% endif %}
+    </section>
+    <div class="drawer-backdrop" id="detail-backdrop" hidden></div>
+    <aside class="detail-drawer" id="detail-drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <h2>消息明细</h2>
+        <button type="button" id="detail-close">关闭</button>
+      </div>
+      <div class="drawer-body" id="detail-drawer-body">
+        <div class="subtle">选择一条输入消息查看 payload_json 和诊断字段。</div>
+      </div>
+    </aside>
+  </main>
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+    const detailDrawer = document.getElementById("detail-drawer");
+    const detailBackdrop = document.getElementById("detail-backdrop");
+    const detailBody = document.getElementById("detail-drawer-body");
+    const detailClose = document.getElementById("detail-close");
+
+    function closeDetailDrawer() {
+      detailDrawer.classList.remove("open");
+      detailDrawer.setAttribute("aria-hidden", "true");
+      detailBackdrop.hidden = true;
+    }
+
+    document.querySelectorAll("[data-detail-source]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const source = document.getElementById(button.dataset.detailSource);
+        if (!source) return;
+        detailBody.innerHTML = source.innerHTML;
+        detailDrawer.hidden = false;
+        detailDrawer.setAttribute("aria-hidden", "false");
+        detailBackdrop.hidden = false;
+        requestAnimationFrame(() => detailDrawer.classList.add("open"));
+      });
+    });
+
+    detailClose.addEventListener("click", closeDetailDrawer);
+    detailBackdrop.addEventListener("click", closeDetailDrawer);
+
+    logoutButton.addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", { method: "POST" });
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

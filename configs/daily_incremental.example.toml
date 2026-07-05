@@ -1,0 +1,108 @@
+[daily_incremental]
+# Example date is the next calendar day after the documented initial backfill
+# range. Replace it with the confirmed trade date when running a dry-run plan.
+trade_date = "20260522"
+version = "v1"
+mode = "single_trade_date"
+
+[paths]
+data_root = "/Volumes/MacRaid/database"
+tdx_root = "/Volumes/MacRaid/tdxdata/tdx"
+
+[security]
+# Secrets must be read from environment variables or a local secret manager.
+# Do not put a real Tushare token or PostgreSQL DSN in this file.
+tushare_token_env = "TUSHARE_TOKEN"
+postgres_dsn_env = "ASHARE_V3_POSTGRES_DSN"
+store_secret_in_config = false
+
+[side_effects]
+# N2.15 is configuration-only dry-run. Keep every switch false.
+allow_network = false
+allow_tdx_file_read = false
+allow_database_write = false
+allow_data_file_write = false
+allow_worker_start = false
+
+[sources.common_trade_calendar]
+target_table = "common_trade_calendar"
+data_domain = "common"
+data_type = "trade_calendar"
+source = "tushare.trade_cal"
+refresh_policy = "daily"
+
+[sources.stock_identity]
+target_table = "stock_identity"
+data_domain = "stock"
+data_type = "stock_identity"
+source = "tushare.stock_basic"
+refresh_policy = "daily"
+
+[sources.index_identity]
+target_table = "index_identity"
+data_domain = "index"
+data_type = "index_identity"
+source = "tushare.index_basic"
+refresh_policy = "daily"
+
+[sources.board_identity]
+target_table = "board_identity"
+data_domain = "board"
+data_type = "board_identity"
+source = "tdx.local_txt"
+refresh_policy = "daily_read_local_txt"
+source_path_key = "tdx_root"
+
+[sources.index_membership]
+target_table = "index_membership_fact"
+data_domain = "index"
+data_type = "index_membership"
+source = "tdx.local_txt.index_board"
+refresh_policy = "daily_read_local_txt"
+source_file = "指数板块.txt"
+
+[sources.board_membership]
+target_table = "board_membership_fact"
+data_domain = "board"
+data_type = "board_membership"
+source = "tdx.local_txt.board"
+refresh_policy = "daily_read_local_txt"
+source_path_key = "tdx_root"
+
+[sources.stock_daily]
+target_table = "stock_daily_bar_fact"
+data_domain = "stock"
+data_type = "stock_daily"
+source = "tushare.pro_bar.qfq"
+refresh_policy = "daily"
+source_params = { asset = "E", freq = "D", adj = "qfq" }
+
+[sources.stock_daily_basic]
+target_table = "stock_daily_basic"
+data_domain = "stock"
+data_type = "stock_daily_basic"
+source = "tushare.daily_basic"
+refresh_policy = "daily"
+
+[sources.index_daily]
+target_table = "index_daily_bar_fact"
+data_domain = "index"
+data_type = "index_daily"
+source = "mootdx.index"
+fallback_source = "tushare.index_daily"
+refresh_policy = "daily"
+
+[sources.board_daily]
+target_table = "board_daily_bar_fact"
+data_domain = "board"
+data_type = "board_daily"
+source = "mootdx.index"
+refresh_policy = "daily"
+
+[sources.stock_financial]
+target_table = "stock_financial_metrics_fact"
+data_domain = "stock"
+data_type = "stock_financial"
+source = "mootdx.finance"
+fallback_source = "tushare.fina_indicator"
+refresh_policy = "daily_or_latest_report_period"

@@ -1,0 +1,230 @@
+-- N5 market action confirmation spec v1 20260603 execute rollback.
+-- Scope:
+--   action_run_id: action_consumer_market_action_confirmation_v1_20260603_trigger_rule_v4_execute_20260603_condition_layer_20260602_source_20260602_v1
+--   source_trigger_run_id: trigger_rule_v4_execute_20260603_condition_layer_20260602_source_20260602_v1
+--   consumer_name: n5_action_consumer_v1
+-- Boundary:
+--   Deletes only this N5 action-layer run, scoped action facts/events/outbox,
+--   and this N5 consumer's inbox/checkpoint rows for the scoped N4 source run.
+--   It does not mutate N4 outbox status, N4/N3/N2 facts, N6/user/voice/mobile/sim/position/real-trade facts,
+--   or the N3 action-confirmation metric facts.
+
+BEGIN;
+
+\set action_run_id 'action_consumer_market_action_confirmation_v1_20260603_trigger_rule_v4_execute_20260603_condition_layer_20260602_source_20260602_v1'
+\set source_trigger_run_id 'trigger_rule_v4_execute_20260603_condition_layer_20260602_source_20260602_v1'
+\set consumer_name 'n5_action_consumer_v1'
+
+SET LOCAL n5.rollback_action_run_id = :'action_run_id';
+SET LOCAL n5.rollback_source_trigger_run_id = :'source_trigger_run_id';
+SET LOCAL n5.rollback_consumer_name = :'consumer_name';
+
+-- Hard-fail guard: every check in this DO block runs before the first DELETE.
+DO $$
+DECLARE
+  v_action_run_id text := current_setting('n5.rollback_action_run_id');
+  v_source_trigger_run_id text := current_setting('n5.rollback_source_trigger_run_id');
+  v_consumer_name text := current_setting('n5.rollback_consumer_name');
+  v_count bigint := 0;
+  v_table_name text;
+  v_table_regclass regclass;
+BEGIN
+  SELECT count(*) INTO v_count
+  FROM common_event_outbox
+  WHERE source_layer = 'N5_action'
+    AND source_run_id = v_action_run_id
+    AND status IN ('delivering', 'delivered');
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: scoped N5 outbox delivered/delivering rows exist (%)', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count
+  FROM common_event_inbox
+  WHERE source_layer = 'N5_action'
+    AND source_run_id = v_action_run_id;
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: scoped N5 outbox has downstream inbox refs (%)', v_count;
+  END IF;
+
+  WITH scoped_n5_partitions AS (
+    SELECT DISTINCT partition_key
+    FROM common_event_outbox
+    WHERE source_layer = 'N5_action'
+      AND source_run_id = v_action_run_id
+  )
+  SELECT count(*) INTO v_count
+  FROM common_event_consumer_checkpoint
+  WHERE source_layer = 'N5_action'
+    AND partition_key IN (SELECT partition_key FROM scoped_n5_partitions);
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: scoped N5 outbox has downstream checkpoint refs (%)', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count
+  FROM common_event_inbox
+  WHERE source_layer = 'N4_trigger'
+    AND source_run_id = v_source_trigger_run_id
+    AND consumer_name <> v_consumer_name;
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: non-scoped consumer inbox refs exist for N4 source run (%)', v_count;
+  END IF;
+
+  WITH scoped_n4_partitions AS (
+    SELECT DISTINCT partition_key
+    FROM common_event_inbox
+    WHERE consumer_name = v_consumer_name
+      AND source_layer = 'N4_trigger'
+      AND source_run_id = v_source_trigger_run_id
+  )
+  SELECT count(*) INTO v_count
+  FROM common_event_consumer_checkpoint
+  WHERE source_layer = 'N4_trigger'
+    AND consumer_name <> v_consumer_name
+    AND partition_key IN (SELECT partition_key FROM scoped_n4_partitions);
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: non-scoped consumer checkpoint refs exist for N4 source partitions (%)', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count
+  FROM common_action_run
+  WHERE run_id = v_action_run_id
+    AND (
+      worker_started IS TRUE
+      OR user_layer_touched IS TRUE
+      OR voice_touched IS TRUE
+      OR sim_touched IS TRUE
+      OR real_trade_touched IS TRUE
+      OR COALESCE(raw_json::jsonb #>> '{boundary_proof,worker_started}', 'false') = 'true'
+      OR COALESCE(raw_json::jsonb #>> '{boundary_proof,enter_n6}', 'false') = 'true'
+      OR COALESCE(raw_json::jsonb #>> '{boundary_proof,user_voice_mobile_sim_position_real_trade_touched}', 'false') = 'true'
+    );
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: scoped action_run records worker/downstream/user-layer touch (%)', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count
+  FROM common_event_outbox
+  WHERE source_run_id = v_source_trigger_run_id
+    AND (
+      COALESCE(payload_json #>> '{n4_boundary,worker_started}', 'false') = 'true'
+      OR COALESCE(payload_json #>> '{n4_boundary,downstream_layers_touched}', 'false') = 'true'
+      OR COALESCE(payload_json #>> '{n4_boundary,n5_touched}', 'false') = 'true'
+    );
+  IF v_count > 0 THEN
+    RAISE EXCEPTION 'N5 v1 rollback blocked: N4 source payload reports worker/downstream touched rows (%)', v_count;
+  END IF;
+
+  FOREACH v_table_name IN ARRAY ARRAY[
+    'user_projection_run',
+    'user_card_projection',
+    'user_signal_projection',
+    'user_signal_decision',
+    'user_notification_queue',
+    'user_notification_projection',
+    'user_voice_delivery',
+    'user_device_ack',
+    'user_market_projection',
+    'voice_delivery_queue',
+    'mobile_projection',
+    'mobile_notification_queue',
+    'sim_projection',
+    'sim_order',
+    'sim_trade',
+    'user_sim_order',
+    'user_sim_trade',
+    'user_sim_position',
+    'common_position_state',
+    'common_position_event'
+  ]
+  LOOP
+    v_table_regclass := to_regclass('public.' || v_table_name);
+    IF v_table_regclass IS NOT NULL THEN
+      EXECUTE format(
+        'SELECT count(*) FROM %s t WHERE to_jsonb(t)::text LIKE $1 OR to_jsonb(t)::text LIKE $2',
+        v_table_regclass
+      )
+      INTO v_count
+      USING '%' || v_action_run_id || '%', '%' || v_source_trigger_run_id || '%';
+      IF v_count > 0 THEN
+        RAISE EXCEPTION 'N5 v1 rollback blocked: downstream table % has scoped refs (%)', v_table_name, v_count;
+      END IF;
+    END IF;
+  END LOOP;
+END $$;
+
+-- Preview scoped rows immediately before deletion.
+SELECT 'common_action_run' AS table_name, count(*) AS row_count
+FROM common_action_run
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'common_action_quality_item', count(*)
+FROM common_action_quality_item
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'stock_action_fact', count(*)
+FROM stock_action_fact
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'index_action_fact', count(*)
+FROM index_action_fact
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'board_action_fact', count(*)
+FROM board_action_fact
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'common_action_event', count(*)
+FROM common_action_event
+WHERE run_id = :'action_run_id'
+UNION ALL
+SELECT 'common_event_outbox_n5', count(*)
+FROM common_event_outbox
+WHERE source_layer = 'N5_action'
+  AND source_run_id = :'action_run_id'
+UNION ALL
+SELECT 'common_event_inbox_n5_consumer', count(*)
+FROM common_event_inbox
+WHERE consumer_name = :'consumer_name'
+  AND source_layer = 'N4_trigger'
+  AND source_run_id = :'source_trigger_run_id';
+
+WITH scoped_partitions AS (
+  SELECT DISTINCT partition_key
+  FROM common_event_inbox
+  WHERE consumer_name = :'consumer_name'
+    AND source_layer = 'N4_trigger'
+    AND source_run_id = :'source_trigger_run_id'
+)
+DELETE FROM common_event_consumer_checkpoint
+WHERE consumer_name = :'consumer_name'
+  AND source_layer = 'N4_trigger'
+  AND partition_key IN (SELECT partition_key FROM scoped_partitions);
+
+DELETE FROM common_event_inbox
+WHERE consumer_name = :'consumer_name'
+  AND source_layer = 'N4_trigger'
+  AND source_run_id = :'source_trigger_run_id';
+
+DELETE FROM common_event_outbox
+WHERE source_layer = 'N5_action'
+  AND source_run_id = :'action_run_id';
+
+DELETE FROM common_action_event
+WHERE run_id = :'action_run_id';
+
+DELETE FROM board_action_fact
+WHERE run_id = :'action_run_id';
+
+DELETE FROM index_action_fact
+WHERE run_id = :'action_run_id';
+
+DELETE FROM stock_action_fact
+WHERE run_id = :'action_run_id';
+
+DELETE FROM common_action_quality_item
+WHERE run_id = :'action_run_id';
+
+DELETE FROM common_action_run
+WHERE run_id = :'action_run_id';
+
+COMMIT;

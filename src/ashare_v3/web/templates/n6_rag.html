@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG问答</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --success: #067647;
+      --warning: #a15c07;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) 130px 150px 130px;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      align-items: end;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 0 10px;
+      font: inherit;
+      font-size: 14px;
+      color: var(--ink);
+    }
+    .answer {
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+    .answer strong { font-size: 20px; overflow-wrap: anywhere; }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 26px;
+      padding: 0 10px;
+      border: 1px solid #cfe4df;
+      border-radius: 999px;
+      background: #edf8f5;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .evidence-list {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+    .evidence-card {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+      overflow-wrap: anywhere;
+    }
+    .evidence-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #263238;
+    }
+    @media (max-width: 900px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 12px 0; }
+      .filter-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>RAG问答</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner">
+      READ ONLY · 只读本地 artifact · 不执行命令 · 不写数据库 · 不启动 worker · 不读取 secret · 不接外部 LLM
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>Artifact-first RAG</h2>
+          <div class="subtle">用于查询 Fast Lane、lineage、post-review、revalidation 和 rollback 证据。</div>
+        </div>
+      </div>
+      <form class="filter-grid" method="get" action="/n6/rag">
+        <label>问题
+          <input type="search" name="q" value="{{ rag_page.query }}" placeholder="例如：20260616到20260617 N1-N2-N3A1完成了吗">
+        </label>
+        <label>trade_date
+          <input type="text" name="trade_date" value="" placeholder="YYYYMMDD">
+        </label>
+        <label>artifact_type
+          <select name="artifact_type">
+            <option value="">全部</option>
+            <option value="status">status</option>
+            <option value="post_review">post_review</option>
+            <option value="execute_report">execute_report</option>
+            <option value="rollback">rollback</option>
+            <option value="spec">spec</option>
+          </select>
+        </label>
+        <button type="submit">查询</button>
+      </form>
+      <div class="answer">
+        <span class="status-pill">{{ rag_page.answer_status }}</span>
+        <strong>{{ rag_page.answer }}</strong>
+        {% if rag_page.suggested_next_question %}
+        <div class="subtle">建议下一问：{{ rag_page.suggested_next_question }}</div>
+        {% endif %}
+      </div>
+      <div class="evidence-list">
+        {% for item in rag_page.evidence %}
+        <article class="evidence-card">
+          <div class="evidence-meta">
+            <span class="status-pill">{{ item.artifact_type }}</span>
+            {% if item.result %}<span class="status-pill">{{ item.result }}</span>{% endif %}
+            {% if item.layer_role %}<span class="status-pill">{{ item.layer_role }}</span>{% endif %}
+          </div>
+          <strong>{{ item.title }}</strong>
+          <code>{{ item.path }}</code>
+          {% if item.run_id %}<div class="subtle">run_id: {{ item.run_id }}</div>{% endif %}
+          <div class="subtle">matched_fields: {{ item.matched_fields | join(", ") }}</div>
+          <div>{{ item.text_preview }}</div>
+        </article>
+        {% else %}
+        <article class="evidence-card">
+          <strong>暂无证据</strong>
+          <div class="subtle">没有本地 artifact 命中时，本页面不会猜测结论。</div>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", { method: "POST" });
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

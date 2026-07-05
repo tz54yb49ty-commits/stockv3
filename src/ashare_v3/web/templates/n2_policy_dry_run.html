@@ -1,0 +1,83 @@
+<div class="panel-head">
+  <h2>Dry-run 结果</h2>
+  {% if result.ok %}
+  <span class="badge">passed preview</span>
+  {% elif result.blocked_by_layer %}
+  <span class="badge bad">{{ result.blocked_by_layer }}</span>
+  {% else %}
+  <span class="badge bad">failed</span>
+  {% endif %}
+</div>
+
+{% if result.ok %}
+{% set baseline_gate = result.baseline_gate if result.baseline_gate is defined else {} %}
+<div class="notice">
+  source={{ result.source }} · mode={{ result.mode }} · policy_hash={{ result.policy_hash }} · P0/P1/P2={{ result.p0_count }}/{{ result.p1_count }}/{{ result.p2_count }} · writes_performed=false · minute_kline_pulled=false
+</div>
+<div class="notice">
+  N2-R4 baseline 闸口：{{ baseline_gate.status|default("unavailable") }} · required_period_not_ready={{ baseline_gate.required_period_not_ready_count|default(0) }} · failed_quality={{ baseline_gate.failed_quality_count|default(0) }}
+</div>
+<div class="tabs" role="tablist">
+  <button class="tab active" type="button" data-tab="dry-index">指数</button>
+  <button class="tab" type="button" data-tab="dry-board">板块</button>
+  <button class="tab" type="button" data-tab="dry-stock">个股</button>
+</div>
+{% for domain, label in [("index", "指数"), ("board", "板块"), ("stock", "个股")] %}
+{% set item = result.domains.get(domain, {}) %}
+{% set item_baseline_gate = item.baseline_gate if item.baseline_gate is defined else {} %}
+<div class="tab-panel {% if domain == 'index' %}active{% endif %}" id="tab-dry-{{ domain }}">
+  <table>
+    <thead>
+      <tr>
+        <th>{{ label }}</th>
+        <th>candidate</th>
+        <th>selected</th>
+        <th>excluded</th>
+        <th>pool rows / objects</th>
+        <th>scope rows / objects</th>
+        <th>baseline gate</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>dry-run</td>
+        <td>{{ item.candidate_count or 0 }}</td>
+        <td>{{ item.selected_count or 0 }}</td>
+        <td>{{ item.excluded_count or 0 }}</td>
+        <td>{{ item.pool.row_count or 0 }} / {{ item.pool.object_count or 0 }}</td>
+        <td>{{ item.scope.row_count or 0 }} / {{ item.scope.object_count or 0 }}</td>
+        <td>required_not_ready {{ item_baseline_gate.required_period_not_ready_count|default(0) }}</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="split">
+    <div>
+      <div class="subtle">reason_counts</div>
+      <pre>{{ item.reason_counts | tojson(indent=2) }}</pre>
+    </div>
+    <div>
+      <div class="subtle">selected_reason_counts</div>
+      <pre>{{ item.selected_reason_counts | tojson(indent=2) }}</pre>
+    </div>
+  </div>
+  <div class="split">
+    <div>
+      <div class="subtle">selected_samples</div>
+      <pre>{{ item.selected_samples | tojson(indent=2) }}</pre>
+    </div>
+    <div>
+      <div class="subtle">excluded_samples</div>
+      <pre>{{ item.excluded_samples | tojson(indent=2) }}</pre>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% elif result.blocked_by_layer %}
+<div class="notice">
+  <pre>{{ result.handoff_prompt }}</pre>
+</div>
+{% else %}
+<div class="notice">
+  <pre>{{ result.error or result.db_warning or "dry-run failed" }}</pre>
+</div>
+{% endif %}

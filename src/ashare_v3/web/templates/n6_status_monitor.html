@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6 Status Monitor</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --warn: #8a5b00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .chips, .stat-grid, .status-tabs, .filter-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .surface, .banner {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .chip.warn { color: var(--warn); }
+    .stat-grid {
+      padding: 12px;
+    }
+    .stat-card {
+      min-width: 210px;
+      min-height: 72px;
+      display: grid;
+      align-content: center;
+      justify-items: start;
+      gap: 4px;
+      border-radius: 8px;
+      background: var(--soft);
+    }
+    .stat-card strong { font-size: 20px; }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      padding: 12px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .filter-actions { padding: 0 12px 12px; }
+    .status-tabs { padding: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    .event-type {
+      color: var(--accent);
+      font-weight: 760;
+    }
+    details summary {
+      width: fit-content;
+      min-height: 32px;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 760;
+      list-style: none;
+    }
+    .drawer-grid {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      padding: 10px;
+      background: var(--soft);
+      border-radius: 8px;
+    }
+    .drawer-field span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+      margin-bottom: 3px;
+    }
+    .drawer-field strong {
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 980px) {
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px 0;
+      }
+      .filter-grid, .drawer-grid { grid-template-columns: 1fr; }
+      .stat-card { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>N6 Status Monitor</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner" aria-label="安全边界">
+      <span class="chip">READ ONLY</span>
+      <span class="chip">NO ORDER</span>
+      <span class="chip">NO TRADE</span>
+      <span class="chip">NO POSITION UPDATE</span>
+      <span class="chip">NO REAL TRADE</span>
+      <span class="chip">NOT INVESTMENT ADVICE</span>
+    </section>
+
+    <section class="surface" aria-label="Source Runs">
+      <div class="surface-head">
+        <h2>Source Runs</h2>
+        <span class="subtle">standard event surfaces only</span>
+      </div>
+      <div class="chips" style="padding:12px;">
+        <span class="chip">N4 {{ monitor.source_runs.N4 }}</span>
+        <span class="chip">N5 {{ monitor.source_runs.N5 }}</span>
+      </div>
+    </section>
+
+    <section class="surface" aria-label="N4 Events">
+      <div class="surface-head">
+        <h2>N4 Events</h2>
+        <span class="subtle">TriggerMatched is the only action entry</span>
+      </div>
+      <div class="stat-grid">
+        <a class="stat-card" href="/n6/status-monitor?source_layer=N4_trigger&event_type=TriggerMatched&status=active&outbox_status=pending">
+          <span>TriggerMatched</span>
+          <strong>{{ monitor.event_summary.N4.TriggerMatched.pending }}</strong>
+        </a>
+        <a class="stat-card" href="/n6/status-monitor?source_layer=N4_trigger&event_type=TriggerPendingMarketData&status=pending_market_data&outbox_status=pending">
+          <span>TriggerPendingMarketData</span>
+          <strong>{{ monitor.event_summary.N4.TriggerPendingMarketData.pending }}</strong>
+        </a>
+        <a class="stat-card" href="/n6/status-monitor?source_layer=N4_trigger&event_type=TriggerStateChanged&outbox_status=pending">
+          <span>TriggerStateChanged</span>
+          <strong>{{ monitor.event_summary.N4.TriggerStateChanged.pending }}</strong>
+        </a>
+      </div>
+    </section>
+
+    <section class="surface" aria-label="N5 Relationship">
+      <div class="surface-head">
+        <h2>N5 Relationship</h2>
+        <span class="subtle">
+          {% if monitor.relationship_summary.matched_to_action.pass %}Matched reconciliation PASS{% else %}Matched reconciliation BLOCKED{% endif %}
+        </span>
+      </div>
+      <div class="stat-grid">
+        <a class="stat-card" href="/n6/status-monitor?source_layer=N5_action&action_event_type=ActionExecuted&outbox_status=pending">
+          <span>ActionExecuted</span>
+          <strong>{{ monitor.event_summary.N5.ActionExecuted.pending }}</strong>
+        </a>
+        <a class="stat-card" href="/n6/status-monitor?source_layer=N5_action&action_event_type=ActionBlocked&outbox_status=pending">
+          <span>ActionBlocked</span>
+          <strong>{{ monitor.event_summary.N5.ActionBlocked.pending }}</strong>
+        </a>
+        <span class="stat-card">
+          <span>matched reconciliation</span>
+          <strong>{% if monitor.relationship_summary.matched_to_action.pass %}PASS{% else %}BLOCKED{% endif %}</strong>
+        </span>
+        <span class="chip">TriggerMatched {{ monitor.relationship_summary.matched_to_action.TriggerMatched }}</span>
+        <span class="chip">ActionExecuted {{ monitor.relationship_summary.matched_to_action.ActionExecuted }}</span>
+        <span class="chip">ActionBlocked {{ monitor.relationship_summary.matched_to_action.ActionBlocked }}</span>
+        <span class="chip">unmatched {{ monitor.relationship_summary.matched_to_action.unmatched }}</span>
+      </div>
+    </section>
+
+    <section class="surface" aria-label="Status Filters">
+      <div class="surface-head">
+        <h2>Status</h2>
+        <span class="subtle">active / pending_market_data / inactive</span>
+      </div>
+      <div class="status-tabs">
+        <a class="chip" href="/n6/status-monitor?status=active">active {{ monitor.status_summary.active.count }}</a>
+        <a class="chip" href="/n6/status-monitor?status=pending_market_data">pending_market_data {{ monitor.status_summary.pending_market_data.count }}</a>
+        <a class="chip" href="/n6/status-monitor?status=inactive">inactive {{ monitor.status_summary.inactive.count }}</a>
+      </div>
+      <form method="get" action="/n6/status-monitor">
+        <div class="filter-grid">
+          <label>status
+            <select name="status">
+              <option value="">全部</option>
+              {% for value in ['active', 'pending_market_data', 'inactive'] %}
+              <option value="{{ value }}" {% if monitor.filters.status == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>event_type
+            <select name="event_type">
+              <option value="">全部</option>
+              {% for value in ['TriggerMatched', 'TriggerPendingMarketData', 'TriggerStateChanged'] %}
+              <option value="{{ value }}" {% if monitor.filters.event_type == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>action_event_type
+            <select name="action_event_type">
+              <option value="">全部</option>
+              {% for value in ['ActionExecuted', 'ActionBlocked'] %}
+              <option value="{{ value }}" {% if monitor.filters.action_event_type == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>asset_kind
+            <select name="asset_kind">
+              <option value="">全部</option>
+              {% for value in ['stock', 'index', 'board'] %}
+              <option value="{{ value }}" {% if monitor.filters.asset_kind == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>direction
+            <select name="direction">
+              <option value="">全部</option>
+              {% for value in ['buy', 'sell'] %}
+              <option value="{{ value }}" {% if monitor.filters.direction == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>关键词
+            <input type="search" name="q" value="{{ monitor.filters.q or '' }}" placeholder="code / event_id / condition_key">
+          </label>
+        </div>
+        <div class="filter-actions">
+          <button type="submit">筛选</button>
+          <a href="/n6/status-monitor">清空筛选</a>
+          <span class="chip">total {{ monitor.pagination.total_count }}</span>
+          <span class="chip">filtered {{ monitor.pagination.filtered_count }}</span>
+        </div>
+      </form>
+    </section>
+
+    <section class="surface" aria-label="Status List">
+      <div class="surface-head">
+        <h2>Status List</h2>
+        <span class="subtle">Click detail for read-only drawer</span>
+      </div>
+      {% if monitor["items"] %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>status</th>
+              <th>event_type</th>
+              <th>object</th>
+              <th>direction</th>
+              <th>signal_type</th>
+              <th>condition_key</th>
+              <th>trigger_live</th>
+              <th>N5 relationship</th>
+              <th>event_time</th>
+              <th>detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in monitor["items"] %}
+            <tr>
+              <td>{{ item.status }}</td>
+              <td><span class="event-type">{{ item.event_type }}</span></td>
+              <td>{{ item.object }}</td>
+              <td>{{ item.direction }}</td>
+              <td>{{ item.signal_type }}</td>
+              <td>{{ item.condition_key }}</td>
+              <td>{{ item.trigger_live }}</td>
+              <td>{{ item.action_event_type }} / {{ item.action_state }} / {{ item.blocked_reason }}</td>
+              <td>{{ item.event_time }}</td>
+              <td>
+                <details>
+                  <summary>详情</summary>
+                  <div class="drawer-grid">
+                    <div class="drawer-field"><span>event_source</span><strong>{{ item.detail_drawer.event_source }}</strong></div>
+                    <div class="drawer-field"><span>event_id</span><strong>{{ item.detail_drawer.event_id }}</strong></div>
+                    <div class="drawer-field"><span>event_time</span><strong>{{ item.detail_drawer.event_time }}</strong></div>
+                    <div class="drawer-field"><span>object</span><strong>{{ item.detail_drawer.object }}</strong></div>
+                    <div class="drawer-field"><span>asset</span><strong>{{ item.detail_drawer.asset_kind }} / {{ item.detail_drawer.code }} / {{ item.detail_drawer.name }}</strong></div>
+                    <div class="drawer-field"><span>direction</span><strong>{{ item.detail_drawer.direction }}</strong></div>
+                    <div class="drawer-field"><span>signal_type</span><strong>{{ item.detail_drawer.signal_type }}</strong></div>
+                    <div class="drawer-field"><span>condition_key</span><strong>{{ item.detail_drawer.condition_key }}</strong></div>
+                    <div class="drawer-field"><span>source_run_id</span><strong>{{ item.detail_drawer.source_run_id }}</strong></div>
+                    <div class="drawer-field"><span>current_status</span><strong>{{ item.detail_drawer.current_status }}</strong></div>
+                    <div class="drawer-field"><span>trigger_live</span><strong>{{ item.detail_drawer.trigger_live }}</strong></div>
+                    <div class="drawer-field"><span>action_event_type</span><strong>{{ item.detail_drawer.action_event_type }}</strong></div>
+                    <div class="drawer-field"><span>action_state</span><strong>{{ item.detail_drawer.action_state }}</strong></div>
+                    <div class="drawer-field"><span>blocked_reason</span><strong>{{ item.detail_drawer.blocked_reason }}</strong></div>
+                    <div class="drawer-field"><span>related_n4_event_id</span><strong>{{ item.detail_drawer.related_n4_event_id }}</strong></div>
+                    <div class="drawer-field"><span>boundary</span><strong>{{ item.detail_drawer.status_boundary }}</strong></div>
+                  </div>
+                  <div class="chips" style="padding-top:10px;">
+                    {% for label in item.detail_drawer.safety_banner %}
+                    <span class="chip">{{ label }}</span>
+                    {% endfor %}
+                  </div>
+                </details>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">暂无匹配状态事件</div>
+      {% endif %}
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", { method: "POST" });
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

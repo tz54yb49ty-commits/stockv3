@@ -1,0 +1,19 @@
+-- N3-A1 after N2-Display preload lineage rebuild rollback
+-- Scope: N3 control/status metadata only. No minute_bar_1m facts were written by the rebuild.
+
+BEGIN;
+
+UPDATE common_market_data_run
+SET status = 'passed',
+    raw_json = CASE WHEN raw_json IS NULL THEN NULL ELSE raw_json - 'stale_after_n2_display_preload_lineage_rebuild' END,
+    updated_at = now()
+WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260524014029_execute'
+  AND status = 'superseded';
+
+DELETE FROM stock_previous_day_minute_preload_status WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute';
+DELETE FROM index_previous_day_minute_preload_status WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute';
+DELETE FROM board_previous_day_minute_preload_status WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute';
+DELETE FROM common_market_data_quality_item WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute';
+DELETE FROM common_market_data_run WHERE run_id = 'previous_day_minute_preload_20260522_for_20260525__market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute';
+
+COMMIT;

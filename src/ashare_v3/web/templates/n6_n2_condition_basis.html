@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N2条件基础表</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav, .tabs, .actions, .chips {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main {
+      padding: 18px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #eef7f5;
+      border-color: #b7d9d3;
+      padding: 10px 12px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 74px;
+      display: grid;
+      gap: 4px;
+      align-content: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; font-weight: 720; }
+    .metric strong { font-size: 22px; overflow-wrap: anywhere; }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tabs { padding: 12px 14px 0; }
+    .notice {
+      margin: 12px 14px 0;
+      padding: 10px 12px;
+      border: 1px solid #cfe4df;
+      border-radius: 8px;
+      background: #f2faf8;
+      color: #315f59;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: minmax(160px, 220px) minmax(220px, 320px) minmax(160px, 220px) minmax(220px, 1fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .condition-list {
+      display: grid;
+      gap: 10px;
+      padding: 12px 14px 16px;
+    }
+    .condition-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      min-height: 132px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+    }
+    .condition-main {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+    .condition-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .status-pill {
+      min-height: 24px;
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #cfe4df;
+      border-radius: 999px;
+      padding: 2px 9px;
+      color: var(--accent);
+      background: #f2faf8;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .condition-fields {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 8px;
+    }
+    .field {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .field span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+    }
+    .field strong {
+      font-size: 13px;
+      font-weight: 650;
+      overflow-wrap: anywhere;
+    }
+    .condition-actions {
+      display: flex;
+      align-items: start;
+      justify-content: end;
+    }
+    .detail-button {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      background: rgba(15, 23, 42, 0.28);
+    }
+    .detail-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 31;
+      width: min(680px, calc(100vw - 28px));
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      background: #fff;
+      border-left: 1px solid var(--line);
+      box-shadow: -16px 0 32px rgba(15, 23, 42, 0.18);
+      transform: translateX(104%);
+      transition: transform 160ms ease;
+    }
+    .detail-drawer.open { transform: translateX(0); }
+    .drawer-head {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .drawer-body {
+      overflow: auto;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .detail-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .detail-section {
+      display: grid;
+      gap: 8px;
+    }
+    [hidden] { display: none !important; }
+    pre {
+      margin: 0;
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.45;
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+    }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 1100px) {
+      .filter-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 900px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .condition-card { grid-template-columns: 1fr; }
+      .condition-fields, .detail-summary, .filter-grid { grid-template-columns: 1fr; }
+      .condition-actions { justify-content: start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>N2条件基础表</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner">
+      READ ONLY · 只读 N2 condition_basis · 不写数据库 · 不拉行情 · 不触发 N3/N4/N5/N6 执行
+    </section>
+
+    <section class="metric-grid">
+      <div class="metric">
+        <span>当前筛选命中</span>
+        <strong>{{ n2_page.filtered_count }}</strong>
+      </div>
+      <div class="metric">
+        <span>当前展示</span>
+        <strong>{{ n2_page.returned_count }}</strong>
+      </div>
+      <div class="metric">
+        <span>当前 source_trade_date</span>
+        <strong>{{ n2_page.filter_inputs.source_trade_date or '全部' }}</strong>
+      </div>
+      <div class="metric">
+        <span>{{ n2_page.asset_label }}历史总量</span>
+        <strong>{{ n2_page.total_count }}</strong>
+      </div>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>{{ n2_page.asset_label }}条件基础</h2>
+          <div class="subtle">来源表：{{ n2_page.source_table }}。主列表只展示便于扫读的字段，完整原始行在明细抽屉的 row_json 中查看。</div>
+        </div>
+        <div class="actions">
+          <a class="{% if not n2_page.include_all %}active{% endif %}" href="/n6/n2-condition-basis/{{ n2_page.asset_kind }}{% if n2_page.filters.condition_key %}?condition_key={{ n2_page.filters.condition_key }}{% endif %}">默认最新日期</a>
+          {% if n2_page.filter_inputs.source_trade_date %}
+          <a class="{% if n2_page.include_all and n2_page.filters.source_trade_date %}active{% endif %}" href="/n6/n2-condition-basis/{{ n2_page.asset_kind }}?show_all=1&source_trade_date={{ n2_page.filter_inputs.source_trade_date }}{% if n2_page.filters.condition_key %}&condition_key={{ n2_page.filters.condition_key }}{% endif %}">显示当前日期全部</a>
+          {% endif %}
+          <a href="/n6/n2-condition-basis/{{ n2_page.asset_kind }}?show_all=1{% if n2_page.filters.condition_key %}&condition_key={{ n2_page.filters.condition_key }}{% endif %}">显示全部日期</a>
+          <a href="/n6/n2-condition-basis/export-latest.xlsx">导出最近日期Excel</a>
+        </div>
+      </div>
+      <div class="tabs" aria-label="N2 condition basis assets">
+        {% for tab in n2_page.asset_tabs %}
+        <a class="{% if n2_page.asset_kind == tab.asset_kind %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+        {% endfor %}
+      </div>
+      {% if n2_page.date_filter_defaulted %}
+      <div class="notice">
+        当前未选择日期，已自动使用最新 source_trade_date {{ n2_page.latest_source_trade_date_display }}。默认仅展示前 {{ n2_page.returned_count }} 条；可点击“显示当前日期全部”，跨日期历史请点击“显示全部日期”。
+      </div>
+      {% elif n2_page.include_all and not n2_page.filters.source_trade_date %}
+      <div class="notice">
+        当前为手动全量模式，可能包含多日历史条件基础行。建议优先选择 source_trade_date 后再筛选。
+      </div>
+      {% endif %}
+      <form class="filter-grid" method="get" action="/n6/n2-condition-basis/{{ n2_page.asset_kind }}">
+        <label>source_trade_date
+          <input type="date" name="source_trade_date" value="{{ n2_page.filter_inputs.source_trade_date }}">
+        </label>
+        <label>condition_key
+          <input type="text" name="condition_key" value="{{ n2_page.filter_inputs.condition_key }}" placeholder="BUY:M,W,D / SELL_HINT">
+        </label>
+        <label>quality_status
+          <input type="text" name="quality_status" value="{{ n2_page.filter_inputs.quality_status }}" placeholder="passed">
+        </label>
+        <label>keyword
+          <input type="search" name="q" value="{{ n2_page.filter_inputs.q }}" placeholder="code / name / identity_key / run_id">
+        </label>
+        {% if n2_page.include_all %}<input type="hidden" name="show_all" value="1">{% endif %}
+        <button type="submit">筛选</button>
+        <a href="/n6/n2-condition-basis/{{ n2_page.asset_kind }}">清空</a>
+      </form>
+      <div class="chips" aria-label="N2 condition basis source">
+        <span class="chip">{{ n2_page.source_table }}</span>
+        <span class="chip">source_layer=N2_condition</span>
+        <span class="chip">row_json 明细保留原始字段</span>
+      </div>
+      {% if n2_page["items"] %}
+      <div class="condition-list">
+        {% for row in n2_page["items"] %}
+        <article class="condition-card">
+          <div class="condition-main">
+            <div class="condition-title">
+              <span class="status-pill">{{ row.quality_status }}</span>
+              <strong>{{ row.code }} {{ row.name }}</strong>
+              <span class="subtle">{{ row.identity_key }}</span>
+            </div>
+            <div class="condition-fields">
+              <div class="field">
+                <span>source_trade_date</span>
+                <strong>{{ row.source_trade_date_display }}</strong>
+              </div>
+              <div class="field">
+                <span>for_trade_date</span>
+                <strong>{{ row.for_trade_date }}</strong>
+              </div>
+              <div class="field">
+                <span>direction_scope</span>
+                <strong>{{ row.direction_scope_text }}</strong>
+              </div>
+              <div class="field">
+                <span>condition keys</span>
+                <strong>{{ row.condition_keys_text }}</strong>
+              </div>
+              <div class="field">
+                <span>period Y/Q/M/W/D</span>
+                <strong>{{ row.period_keys.Y }} / {{ row.period_keys.Q }} / {{ row.period_keys.M }} / {{ row.period_keys.W }} / {{ row.period_keys.D }}</strong>
+              </div>
+              <div class="field">
+                <span>buy target / return</span>
+                <strong>{{ row.buy_target_price if row.buy_target_price is not none else '—' }} / {{ row.buy_expected_return_pct if row.buy_expected_return_pct is not none else '—' }}</strong>
+              </div>
+              <div class="field">
+                <span>sell target / return</span>
+                <strong>{{ row.sell_target_price if row.sell_target_price is not none else '—' }} / {{ row.sell_expected_return_pct if row.sell_expected_return_pct is not none else '—' }}</strong>
+              </div>
+              <div class="field">
+                <span>amount quality</span>
+                <strong>{{ row.amount_quality_status }}</strong>
+              </div>
+              {% if row.asset_kind == 'board' %}
+              <div class="field">
+                <span>board_type</span>
+                <strong>{{ row.board_type }}</strong>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+          <div class="condition-actions">
+            <button class="detail-button" type="button" data-detail-source="n2-detail-{{ loop.index }}">查看明细</button>
+          </div>
+          <div class="condition-detail-source" id="n2-detail-{{ loop.index }}" hidden>
+            <div class="detail-section">
+              <h2>{{ row.code }} {{ row.name }} 明细</h2>
+              <div class="subtle">{{ row.source_table }} · condition_basis_id={{ row.condition_basis_id }}</div>
+            </div>
+            <div class="detail-summary">
+              <div class="field"><span>source_table</span><strong>{{ row.source_table }}</strong></div>
+              <div class="field"><span>condition_basis_id</span><strong>{{ row.condition_basis_id }}</strong></div>
+              <div class="field"><span>run_id</span><strong>{{ row.run_id }}</strong></div>
+              <div class="field"><span>source_trade_date</span><strong>{{ row.source_trade_date }}</strong></div>
+              <div class="field"><span>for_trade_date</span><strong>{{ row.for_trade_date }}</strong></div>
+              <div class="field"><span>identity_key</span><strong>{{ row.identity_key }}</strong></div>
+              <div class="field"><span>quality_status</span><strong>{{ row.quality_status }}</strong></div>
+              <div class="field"><span>source_version</span><strong>{{ row.source_version }}</strong></div>
+              <div class="field"><span>created_at</span><strong>{{ row.created_at }}</strong></div>
+              <div class="field"><span>updated_at</span><strong>{{ row.updated_at }}</strong></div>
+            </div>
+            <div class="detail-section">
+              <h2>row_json 明细</h2>
+              <pre>{{ row.row_json_text }}</pre>
+            </div>
+            <div class="detail-section">
+              <h2>raw_json</h2>
+              <pre>{{ row.raw_json_text }}</pre>
+            </div>
+            <div class="detail-section">
+              <h2>period_trigger_baseline_json</h2>
+              <pre>{{ row.period_trigger_baseline_json_text }}</pre>
+            </div>
+            <div class="detail-section">
+              <h2>target_price_trace_json</h2>
+              <pre>{{ row.target_price_trace_json_text }}</pre>
+            </div>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">暂无 N2 条件基础行。</div>
+      {% endif %}
+    </section>
+    <div class="drawer-backdrop" id="detail-backdrop" hidden></div>
+    <aside class="detail-drawer" id="detail-drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <h2>条件基础明细</h2>
+        <button type="button" id="detail-close">关闭</button>
+      </div>
+      <div class="drawer-body" id="detail-drawer-body">
+        <div class="subtle">选择一条条件基础行查看 row_json 明细。</div>
+      </div>
+    </aside>
+  </main>
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+    const detailDrawer = document.getElementById("detail-drawer");
+    const detailBackdrop = document.getElementById("detail-backdrop");
+    const detailBody = document.getElementById("detail-drawer-body");
+    const detailClose = document.getElementById("detail-close");
+
+    function closeDetailDrawer() {
+      detailDrawer.classList.remove("open");
+      detailDrawer.setAttribute("aria-hidden", "true");
+      detailBackdrop.hidden = true;
+    }
+
+    document.querySelectorAll("[data-detail-source]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const source = document.getElementById(button.dataset.detailSource);
+        if (!source) return;
+        detailBody.innerHTML = source.innerHTML;
+        detailDrawer.hidden = false;
+        detailDrawer.setAttribute("aria-hidden", "false");
+        detailBackdrop.hidden = false;
+        requestAnimationFrame(() => detailDrawer.classList.add("open"));
+      });
+    });
+
+    detailClose.addEventListener("click", closeDetailDrawer);
+    detailBackdrop.addEventListener("click", closeDetailDrawer);
+
+    logoutButton.addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", {method: "POST"});
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

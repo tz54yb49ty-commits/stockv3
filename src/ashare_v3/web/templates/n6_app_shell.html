@@ -1,0 +1,2150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page.app_title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7f8;
+      --ink: #172124;
+      --muted: #617177;
+      --line: #d7e0e3;
+      --panel: #fff;
+      --soft: #f9fbfb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --warn: #8a5b00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap {
+      width: min(1440px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+    .n6-data-workspace {
+      width: calc(100vw - 16px);
+      max-width: none;
+    }
+    .topbar {
+      min-height: 74px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2, h3 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    h3 { font-size: 14px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 0 11px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main { padding: 18px 0 34px; display: grid; gap: 16px; }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      padding: 10px 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      background: #eef7f5;
+      border-color: #b7d9d3;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .chip.warn { color: var(--warn); }
+    .metric-grid {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-width: 0;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .metric strong { font-size: 18px; overflow-wrap: anywhere; }
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
+      gap: 16px;
+    }
+    .text-block { padding: 14px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    .guide-hero {
+      margin: 0 12px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: linear-gradient(135deg, #eef7f5 0%, #ffffff 58%, #f7faf9 100%);
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .guide-hero h3 { color: var(--ink); font-size: 18px; }
+    .guide-quick-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .guide-step-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 10px;
+    }
+    .guide-step {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .86);
+      padding: 12px;
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+    }
+    .guide-step-number {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 820;
+      letter-spacing: .04em;
+    }
+    .guide-step strong { color: var(--ink); font-size: 14px; }
+    .guide-step p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .guide-flow {
+      margin: 0 12px 12px;
+      padding: 14px;
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 12px;
+    }
+    .guide-flow-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 8px;
+      align-items: stretch;
+    }
+    .guide-flow-node {
+      position: relative;
+      min-height: 104px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--soft);
+      padding: 12px;
+      display: grid;
+      align-content: start;
+      gap: 6px;
+    }
+    .guide-flow-node:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -14px;
+      top: 38px;
+      color: var(--accent);
+      font-weight: 820;
+      z-index: 1;
+    }
+    .guide-flow-node strong { color: var(--ink); font-size: 13px; }
+    .guide-flow-node span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .guide-boundary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .message-card-grid {
+      padding: 14px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 12px;
+    }
+    .message-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+    .message-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .message-card-title {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 760;
+    }
+    .message-card-summary {
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .message-card-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .message-card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .grade-filter-panel {
+      margin: 0 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      overflow: hidden;
+    }
+    .grade-filter-panel summary {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      background: #f4f7f8;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+      font-weight: 720;
+      list-style: none;
+    }
+    .grade-filter-panel summary::-webkit-details-marker { display: none; }
+    .grade-filter-body {
+      padding: 16px 16px 18px;
+      display: grid;
+      gap: 16px;
+      background: var(--panel);
+    }
+    .grade-filter-label {
+      margin-bottom: 8px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 720;
+    }
+    .grade-filter-control {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+      position: relative;
+      padding-right: 72px;
+      flex-wrap: wrap;
+    }
+    .filter-token {
+      min-height: 30px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 8px;
+      background: #edf3f5;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 720;
+      gap: 6px;
+    }
+    .filter-token.is-selected {
+      background: #f15b57;
+      color: #fff;
+    }
+    .token-remove {
+      font-weight: 820;
+      line-height: 1;
+    }
+    .filter-row-reset,
+    .filter-row-toggle {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      min-height: 24px;
+      width: 24px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 16px;
+    }
+    .filter-row-reset { right: 38px; }
+    .filter-row-toggle { right: 10px; }
+    .field-detail {
+      padding: 0;
+      background: #fbfcfc;
+    }
+    .field-detail details {
+      padding: 10px 12px;
+    }
+    .field-detail summary {
+      cursor: pointer;
+      font-weight: 720;
+      color: var(--ink);
+    }
+    .field-grid {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .field-item {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      padding: 8px;
+      min-width: 0;
+    }
+    .field-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+      margin-bottom: 4px;
+    }
+    .field-item code {
+      display: block;
+      color: var(--ink);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .linked-detail {
+      padding: 0;
+      background: #fbfcfc;
+    }
+    .linked-stocks-panel {
+      padding: 10px 12px;
+    }
+    .linked-stocks-panel summary {
+      width: max-content;
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 0 10px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 720;
+    }
+    .linked-stock-summary {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .linked-stock-items {
+      margin-top: 10px;
+      overflow-x: auto;
+    }
+    .linked-stock-items table {
+      min-width: 760px;
+    }
+    .monitor-actions {
+      margin-top: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .monitor-actions label {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 720;
+    }
+    .monitor-actions select {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+    }
+    .monitor-message {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .row-action {
+      margin-top: 6px;
+      min-height: 28px;
+      font-size: 12px;
+    }
+    .row-action-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      flex-wrap: wrap;
+    }
+    .row-action-line .row-action {
+      margin-top: 0;
+      flex: 0 0 auto;
+    }
+    .row-check {
+      width: 16px;
+      height: 16px;
+      margin: 0 6px 0 0;
+      vertical-align: middle;
+    }
+    .table-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
+    table {
+      width: 100%;
+      min-width: 1080px;
+      border-collapse: separate;
+      border-spacing: 0;
+      table-layout: auto;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+      white-space: nowrap;
+    }
+    th a {
+      min-height: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+      color: inherit;
+      font-size: 12px;
+      justify-content: flex-start;
+    }
+    th a.is-active { color: var(--accent); }
+    .monitor-delete-button {
+      min-width: 44px;
+      white-space: nowrap;
+      overflow-wrap: normal;
+      word-break: keep-all;
+    }
+    main.n6-data-workspace {
+      padding: 10px 0 18px;
+      gap: 10px;
+    }
+    .n6-data-workspace .banner {
+      padding: 8px 10px;
+      gap: 6px;
+    }
+    .n6-data-workspace .surface-head {
+      min-height: 42px;
+      padding: 8px 10px;
+    }
+    .n6-data-workspace .text-block {
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .n6-data-workspace .chip {
+      min-height: 24px;
+      padding: 3px 8px;
+    }
+    .n6-data-workspace .grade-filter-panel {
+      margin: 0 10px 10px;
+    }
+    .n6-data-workspace .grade-filter-panel summary {
+      min-height: 34px;
+      padding: 0 10px;
+    }
+    .n6-data-workspace .grade-filter-body {
+      padding: 10px;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    }
+    .n6-data-workspace .grade-filter-label {
+      margin-bottom: 5px;
+      font-size: 12px;
+    }
+    .n6-data-workspace .grade-filter-control {
+      min-height: 34px;
+      padding: 4px 60px 4px 4px;
+    }
+    .n6-data-workspace .filter-token {
+      min-height: 24px;
+      padding: 0 7px;
+      font-size: 12px;
+    }
+    .n6-data-workspace .monitor-actions {
+      margin-top: 6px;
+      gap: 6px;
+    }
+    .n6-data-workspace .table-wrap {
+      max-height: calc(100vh - 260px);
+      overflow: auto;
+    }
+    .filter-table {
+      width: max-content;
+      min-width: 100%;
+      table-layout: fixed;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+    .filter-table th,
+    .filter-table td {
+      min-width: 132px;
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .filter-table th:first-child,
+    .filter-table td:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      min-width: 220px;
+      max-width: 220px;
+      background: var(--panel);
+      box-shadow: 1px 0 0 var(--line);
+      white-space: normal;
+    }
+    .filter-table th:first-child {
+      z-index: 3;
+      background: var(--soft);
+    }
+    .n6-data-workspace .filter-table th,
+    .n6-data-workspace .filter-table td {
+      min-width: 118px;
+      max-width: 220px;
+      padding: 6px 8px;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .n6-data-workspace .filter-table th:first-child,
+    .n6-data-workspace .filter-table td:first-child {
+      min-width: 280px;
+      max-width: 280px;
+      overflow: visible;
+    }
+    .filter-table th[data-column-key] {
+      cursor: grab;
+    }
+    .filter-table th[data-column-key].is-dragging {
+      opacity: 0.55;
+      cursor: grabbing;
+    }
+    .filter-table th[data-column-key].is-drop-target {
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+    .n6-data-workspace .row-action {
+      min-height: 24px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
+    .n6-data-workspace .row-action-line {
+      gap: 4px;
+      flex-wrap: nowrap;
+    }
+    .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { padding: 24px; color: var(--muted); font-size: 14px; }
+    @media (max-width: 980px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .metric-grid, .split, .field-grid, .guide-flow-grid { grid-template-columns: 1fr; }
+      .guide-flow-node::after { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
+      <div>
+        <h1>{{ page.app_title }}</h1>
+        <div class="subtle">{{ user.login_name }} · {{ page.principal.principal_type }} · {{ page.principal.app_scope }}</div>
+      </div>
+      <nav aria-label="B轨导航">
+        {% for item in page.nav.links %}
+        <a class="{% if page.nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        <button id="logout-button" type="button">退出登录</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
+    <section class="banner" aria-label="安全提示">
+      {% for item in page.safety %}
+      <span class="chip">{{ item }}</span>
+      {% endfor %}
+      <span class="chip">展示GET · 监控偏好写入限定</span>
+      <span class="chip">按账号范围展示</span>
+    </section>
+
+    <section class="surface">
+      <div class="surface-head">
+        <h2>{{ page.page_title }}</h2>
+        <span class="subtle">principal_id={{ page.principal.principal_id }}</span>
+      </div>
+      {% if page.page_key in ["home", "dashboard"] %}
+      {% set user_guide = page.data.user_operation_guide|default({}) %}
+      <div class="guide-hero">
+        <div>
+          <h3>{{ user_guide.title|default("B轨新用户操作说明书") }}</h3>
+          <p class="subtle">{{ user_guide.subtitle|default("B轨用于多用户筛选、保存个人监控范围、查看与自己范围匹配的实时/历史消息。") }}</p>
+        </div>
+        <div class="guide-quick-links" aria-label="B轨快捷入口">
+          {% for link in user_guide.quick_links|default([]) %}
+          <a href="{{ link.href }}">{{ link.label }}</a>
+          {% endfor %}
+        </div>
+        <div class="guide-step-grid">
+          {% for step in user_guide.steps|default([]) %}
+          <article class="guide-step">
+            <span class="guide-step-number">{{ step.number }}</span>
+            <strong>{{ step.title }}</strong>
+            <p>{{ step.summary }}</p>
+            <p>{{ step.description }}</p>
+          </article>
+          {% endfor %}
+        </div>
+        <div class="guide-boundary" aria-label="B轨多用户边界">
+          {% for note in user_guide.boundary_notes|default([]) %}
+          <span class="chip">{{ note }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="guide-flow" aria-label="B轨多用户流程图">
+        <h3>多用户流程图</h3>
+        <div class="guide-flow-grid">
+          {% for node in user_guide.workflow_nodes|default([]) %}
+          <div class="guide-flow-node">
+            <strong>{{ node.label }}</strong>
+            <span>{{ node.description }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% elif page.page_key == "account" %}
+      <div class="metric-grid">
+        <div class="metric"><span>账户名称</span><strong>{{ page.data.virtual_account.account_name }}</strong></div>
+        <div class="metric"><span>币种</span><strong>{{ page.data.virtual_account.base_currency }}</strong></div>
+        <div class="metric"><span>初始展示资金</span><strong>{{ page.data.virtual_account.initial_cash }}</strong></div>
+        <div class="metric"><span>可展示现金</span><strong>{{ page.data.virtual_account.available_cash }}</strong></div>
+        <div class="metric"><span>冻结展示现金</span><strong>{{ page.data.virtual_account.frozen_cash }}</strong></div>
+        <div class="metric"><span>展示现金合计</span><strong>{{ page.data.virtual_account.total_cash }}</strong></div>
+        <div class="metric"><span>账户状态</span><strong>{{ page.data.virtual_account.status }}</strong></div>
+        <div class="metric"><span>质量状态</span><strong>{{ page.data.virtual_account.quality_status }}</strong></div>
+      </div>
+      {% elif page.page_key == "watchlist" %}
+      <div class="text-block">
+        <h3>关注池</h3>
+        <span class="chip">来源: 已审核 N6 投影</span>
+        <span class="chip">新增: {{ page.data.controls.add_enabled }}</span>
+        <span class="chip">删除: {{ page.data.controls.delete_enabled }}</span>
+        <span class="chip">排序持久化: {{ page.data.controls.sort_persist_enabled }}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>标的</th>
+              <th>identity_key</th>
+              <th>状态</th>
+              <th>动作确认</th>
+              <th>条件来源</th>
+              <th>最近信号</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in page.data['items'] %}
+            <tr>
+              <td>{{ item.asset_kind_label }}</td>
+              <td>{{ item.display_name }}<br><span class="subtle">{{ item.display_code }}</span></td>
+              <td>{{ item.identity_key }}</td>
+              <td>{{ item.status_label }}</td>
+              <td>
+                {{ item.recent_signal.event_label }}<br>
+                <span class="subtle">{{ item.action.action_state_label }} · {{ item.action.action_mark }} · {{ item.action.blocked_reason_label }}</span>
+              </td>
+              <td>
+                {{ item.condition_source.condition_key }}<br>
+                <span class="subtle">{{ item.condition_source.display_cache_source }}</span><br>
+                <span class="subtle">{{ item.condition_source.rendering_policy }}</span>
+              </td>
+              <td>
+                {{ item.recent_signal.event_time }}<br>
+                <span class="subtle">{{ item.recent_signal.source_run_id }}</span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if not page.data['items'] %}
+        <div class="empty">暂无关注池记录。</div>
+        {% endif %}
+      </div>
+      {% elif page.page_key == "signals" %}
+      {% set signals_auto_refresh_enabled = page.data.available_trade_dates and page.data.selected_trade_date == page.data.available_trade_dates[0] %}
+      <div class="text-block">
+        <h3>{{ page.data.component_label }}</h3>
+        <span class="chip">消息</span>
+        <span class="chip">消息详情</span>
+        <span class="chip">route: /n6/app/signals</span>
+        {% if page.data.date_policy_message %}
+        <div class="monitor-message">{{ page.data.date_policy_message }}</div>
+        {% endif %}
+        <div class="monitor-actions" aria-label="消息资产类型">
+          {% for tab in page.data.asset_kind_tabs %}
+          <a class="{% if tab.active %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+          {% endfor %}
+        </div>
+        <form method="get" action="/n6/app/signals" class="monitor-actions">
+          <label for="signals-trade-date">交易日</label>
+          <input type="hidden" name="asset_kind" value="{{ page.data.selected_asset_kind }}">
+          <select id="signals-trade-date" name="trade_date">
+            {% for trade_date in page.data.available_trade_dates %}
+            <option value="{{ trade_date }}"{% if trade_date == page.data.selected_trade_date %} selected{% endif %}>{{ trade_date }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">查看消息</button>
+        </form>
+        <div
+          class="monitor-message"
+          data-n6-auto-refresh="signals"
+          data-refresh-enabled="{% if signals_auto_refresh_enabled %}true{% else %}false{% endif %}"
+          data-refresh-interval-ms="5000"
+          data-refresh-backoff-ms="15000"
+          data-refresh-max-backoff-ms="60000"
+          data-refresh-url="{{ page.data.api_refresh_href }}"
+        >
+          <span data-n6-refresh-status>{% if signals_auto_refresh_enabled %}自动刷新中，每 5 秒{% else %}历史快照，自动刷新关闭{% endif %}</span>
+          <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>交易日</th>
+              <th>时间</th>
+              <th>类型</th>
+              <th>标的</th>
+              <th>identity_key</th>
+              <th>方向</th>
+              <th>条件 trace</th>
+              <th>触发周期</th>
+              <th>主触发周期</th>
+              <th>动作状态</th>
+              <th>action_mark</th>
+              <th>未确认原因</th>
+            </tr>
+          </thead>
+          <tbody data-n6-signals-body>
+            {% for item in page.data['items'] %}
+            <tr>
+              <td>{{ item.trade_date }}</td>
+              <td>{{ item.event_time }}</td>
+              <td>{{ item.asset_kind_label }}</td>
+              <td>{{ item.display_name }}<br><span class="subtle">{{ item.display_code }}</span></td>
+              <td>{{ item.identity_key }}</td>
+              <td>{{ item.direction_label }}</td>
+              <td>{{ item.condition_trace.condition_key }}<br><span class="subtle">{{ item.condition_trace.rendering_policy }}</span></td>
+              <td>{{ item.triggered_periods }}</td>
+              <td>{{ item.primary_trigger_period }}</td>
+              <td>{{ item.action_state_label }}</td>
+              <td>{{ item.action_mark }}</td>
+              <td>{{ item.blocked_reason_label }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if not page.data['items'] %}
+        <div class="empty">{% if page.data.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
+        {% endif %}
+      </div>
+      {% elif page.page_key == "messages" %}
+      {% set messages_auto_refresh_enabled = page.data.selected_trade_date == page.data.current_filter_batch.for_trade_date %}
+      <div class="text-block">
+        <h3>{{ page.data.component_label }}</h3>
+        {% for item in page.data.safety_banner %}
+        <span class="chip">{{ item }}</span>
+        {% endfor %}
+        {% if page.data.date_policy_message %}
+        <div class="monitor-message">{{ page.data.date_policy_message }}</div>
+        {% endif %}
+        <div class="monitor-actions" aria-label="卡片资产类型">
+          {% for tab in page.data.asset_kind_tabs %}
+          <a class="{% if tab.active %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+          {% endfor %}
+        </div>
+        <form method="get" action="/n6/app/messages" class="monitor-actions">
+          <label for="messages-trade-date">交易日</label>
+          <input type="hidden" name="asset_kind" value="{{ page.data.selected_asset_kind }}">
+          <select id="messages-trade-date" name="trade_date">
+            {% for trade_date in page.data.available_trade_dates %}
+            <option value="{{ trade_date }}"{% if trade_date == page.data.selected_trade_date %} selected{% endif %}>{{ trade_date }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">查看消息</button>
+        </form>
+        <div
+          class="monitor-message"
+          data-n6-auto-refresh="messages"
+          data-refresh-enabled="{% if messages_auto_refresh_enabled %}true{% else %}false{% endif %}"
+          data-refresh-interval-ms="5000"
+          data-refresh-backoff-ms="15000"
+          data-refresh-max-backoff-ms="60000"
+          data-refresh-url="{{ page.data.api_refresh_href }}"
+        >
+          <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}自动刷新中，每 5 秒{% else %}历史快照，自动刷新关闭{% endif %}</span>
+          <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>当前有效监控交易日</span><strong>{{ page.data.current_filter_batch.for_trade_date }}</strong></div>
+        <div class="metric"><span>条件来源日</span><strong>{{ page.data.current_filter_batch.source_trade_date }}</strong></div>
+        <div class="metric"><span>有效监控对象数量</span><strong data-summary-key="effective_monitor_count">{{ page.data.summary.effective_monitor_count }}</strong></div>
+        <div class="metric"><span>已失效对象数量</span><strong data-summary-key="expired_monitor_count">{{ page.data.summary.expired_monitor_count }}</strong></div>
+        <div class="metric"><span>今日消息数量</span><strong data-summary-key="today_message_count">{{ page.data.summary.today_message_count }}</strong></div>
+        <div class="metric"><span>已确认</span><strong data-summary-key="action_executed_count">{{ page.data.summary.action_executed_count }}</strong></div>
+        <div class="metric"><span>未确认</span><strong data-summary-key="action_blocked_count">{{ page.data.summary.action_blocked_count }}</strong></div>
+        <div class="metric"><span>待确认</span><strong data-summary-key="action_eligible_count">{{ page.data.summary.action_eligible_count }}</strong></div>
+        <div class="metric"><span>等待行情证据</span><strong data-summary-key="pending_market_data_count">{{ page.data.summary.pending_market_data_count }}</strong></div>
+        <div class="metric"><span>状态变化</span><strong data-summary-key="state_changed_count">{{ page.data.summary.state_changed_count }}</strong></div>
+        <div class="metric"><span>被排除消息</span><strong data-summary-key="excluded_message_count">{{ page.data.summary.excluded_message_count }}</strong></div>
+      </div>
+      <div class="split">
+        <div class="text-block">
+          <h3>projection 状态</h3>
+          <p>状态: {{ page.data.projection_status.latest_status }} · {{ page.data.projection_status.status_reason }}</p>
+          <p>projection_run_id: {{ page.data.projection_status.latest_projection_run_id }}</p>
+          <span class="chip">projection: {{ page.data.projection_status.projection_count }}</span>
+          <span class="chip">card: {{ page.data.projection_status.card_count }}</span>
+          <span class="chip">notification_queue: {{ page.data.projection_status.notification_queue_count }}</span>
+        </div>
+        <div class="text-block">
+          <h3>消息分组</h3>
+          {% for group in page.data.groups %}
+          <span class="chip">{{ group.asset_kind_label }} · {{ group.direction_label }} · {{ group.event_label }}: {{ group.message_count }}</span>
+          {% else %}
+          <span class="chip">暂无消息分组</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="text-block">
+        <h3>消息卡片</h3>
+        {% if page.data.empty_state.message %}
+        <div class="empty">{{ page.data.empty_state.message }}</div>
+        {% endif %}
+      </div>
+      <div class="message-card-grid" data-n6-message-cards>
+        {% for item in page.data.card_items %}
+        <article class="message-card">
+          <div class="message-card-head">
+            <div>
+              <div class="message-card-title">{{ item.title }}</div>
+              <div class="subtle">{{ item.event_label }} · {{ item.event_time }}</div>
+            </div>
+            <span class="chip">{{ item.action_state_label }}</span>
+          </div>
+          <div class="message-card-summary">{{ item.summary }}</div>
+          <div class="message-card-meta">
+            <span class="chip">{{ item.asset_kind_label }}</span>
+            <span class="chip">{{ item.display_name }} {{ item.display_code }}</span>
+            <span class="chip">{{ item.direction_label }}</span>
+            <span class="chip">触发周期 {{ item.triggered_periods }}</span>
+            <span class="chip">主周期 {{ item.primary_trigger_period }}</span>
+            <span class="chip">action_mark {{ item.action_mark }}</span>
+          </div>
+          <p class="subtle">condition={{ item.condition_key }} · blocked_reason={{ item.blocked_reason_label }}</p>
+          <p class="subtle">trade_date={{ item.trade_date }} · identity_key={{ item.identity_key }}</p>
+          <div class="message-card-foot">
+            <span class="subtle">user_signal_card_id={{ item.user_signal_card_id }} · authority={{ item.authority_source }}</span>
+            {% if item.detail_href %}
+            <a href="{{ item.detail_href }}">{{ page.data.detail_entry.label }}</a>
+            {% endif %}
+          </div>
+        </article>
+        {% else %}
+        {% if not page.data.empty_state.message %}
+        <div class="empty">{% if page.data.summary.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% elif page.page_key == "buy-messages" %}
+      <div class="text-block">
+        <h3>{{ page.data.component_label }}</h3>
+        {% for item in page.data.safety_banner %}
+        <span class="chip">{{ item }}</span>
+        {% endfor %}
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>指数买入信号</span><strong>{{ page.data.summary.index_count }}</strong></div>
+        <div class="metric"><span>板块买入信号</span><strong>{{ page.data.summary.board_count }}</strong></div>
+        <div class="metric"><span>个股买入信号</span><strong>{{ page.data.summary.stock_count }}</strong></div>
+        <div class="metric"><span>候选总数</span><strong>{{ page.data.summary.total_count }}</strong></div>
+      </div>
+      {% for section_key, section in page.data.sections.items() %}
+      <div class="text-block">
+        <h3>{{ section["title"] }}</h3>
+        <span class="chip">只读</span>
+        {% if section["readonly_observation_only"] %}
+        <span class="chip">观察信号</span>
+        {% endif %}
+        {% for item in section["items"] %}
+        <article class="text-block">
+          <h3>{{ item.name }}</h3>
+          <span class="chip">{{ item.asset_kind_label }}</span>
+          <span class="chip">{{ item.asset }}</span>
+          <span class="chip">{{ item.buy_message_status_label }}</span>
+          <p>{{ item.signal_type }} · {{ item.event_time }} · {{ item.condition_key }}</p>
+          <p>trigger_price={{ item.trigger_price }} · trigger_period={{ item.trigger_period }} · triggered_periods={{ item.triggered_periods }}</p>
+          <p>action_state={{ item.action_state }} · blocked_reason={{ item.blocked_reason }}</p>
+          {% if section_key == "stock" %}
+          <p>来源类型：{{ item.source_type_label }} · 来源对象：{{ item.source_object_name or "无来源指数/板块" }} {{ item.source_object_identity_key or "" }}</p>
+          <p>行业代码：{{ item.industry_code }} · 行业名称：{{ item.industry_name }} · 关系日期：{{ item.membership_relation_date or "—" }}</p>
+          <p>{{ item.readonly_entry.label }}</p>
+          {% endif %}
+        </article>
+        {% else %}
+        <div class="empty">暂无{{ section["title"] }}</div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+      {% elif page.page_key == "realtime-scope" %}
+      <div class="text-block">
+        <h3>{{ page.data.component_label }}</h3>
+        <span class="chip">对象数: {{ page.data.summary.count }}</span>
+        <span class="chip">默认指数: {{ page.data.summary.default_seed_count }}</span>
+        <span class="chip">{{ page.data.controls.scope_notice }}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>identity_key</th>
+              <th>display_name</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in page.data["items"] %}
+            <tr>
+              <td>{{ item.identity_key }}</td>
+              <td>{{ item.display_name }}</td>
+              <td>
+                <button
+                  class="row-action"
+                  type="button"
+                  data-realtime-scope-delete
+                  data-realtime-scope-id="{{ item.realtime_scope_id }}"
+                  {% if not item.controls.delete_enabled %}disabled{% endif %}
+                >删除</button>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" class="empty">暂无实时监控范围。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% elif page.page_key == "filter-center" %}
+      <div class="text-block">
+        <h3>筛选中心</h3>
+        <span class="chip">只读筛选</span>
+        <span class="chip">买向观察</span>
+        <span class="chip">卖向观察</span>
+        <span class="chip">asset_kind</span>
+        <span class="chip">board_type</span>
+      </div>
+      {% set date_selector = page.data.get("date_selector") %}
+      {% if date_selector and date_selector.enabled %}
+      <div class="text-block">
+        <form method="get" action="{{ date_selector.base_href }}" class="monitor-actions">
+          <label for="filter-for-trade-date">{{ date_selector.label }}</label>
+          {% for hidden in date_selector.hidden_fields %}
+          <input type="hidden" name="{{ hidden.name }}" value="{{ hidden.value }}">
+          {% endfor %}
+          <select id="filter-for-trade-date" name="for_trade_date" onchange="this.form.submit()">
+            {% for option in date_selector.options %}
+            <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">切换日期</button>
+        </form>
+      </div>
+      {% endif %}
+      <div class="text-block" aria-label="筛选子界面">
+        {% for sub in page.data.subinterfaces %}
+        <a class="chip{% if sub.active %} active{% endif %}" href="{{ sub.href }}">{{ sub.label }}</a>
+        {% endfor %}
+      </div>
+      {% for section_key, section in page.data.sections.items() %}
+      {% set expected_return = section.expected_return_filter %}
+      {% if expected_return and expected_return.enabled %}
+      <div class="text-block" aria-label="预期收益率筛选">
+        <form method="get" action="{{ expected_return.base_href }}" class="monitor-actions" data-expected-return-filter>
+          {% for hidden in expected_return.hidden_fields %}
+          <input type="hidden" name="{{ hidden.name }}" value="{{ hidden.value }}">
+          {% endfor %}
+          <input
+            type="hidden"
+            name="{{ expected_return.param }}"
+            value="{{ expected_return.value }}"
+            data-expected-return-hidden
+          >
+          <label for="filter-expected-return-{{ section.asset_kind }}">{{ expected_return.label }}</label>
+          <input
+            id="filter-expected-return-{{ section.asset_kind }}"
+            type="range"
+            min="{{ expected_return.min }}"
+            max="{{ expected_return.max }}"
+            step="{{ expected_return.step }}"
+            value="{{ expected_return.slider_value }}"
+            data-expected-return-range
+          >
+          <output data-expected-return-output>
+            {% if expected_return.active %}{{ expected_return.value }}%{% else %}不限{% endif %}
+          </output>
+          <button type="submit">显示筛选结果</button>
+          {% if expected_return.active %}
+          <span class="chip">{{ expected_return.active_label }}</span>
+          <a href="{{ expected_return.clear_href }}">清除预期收益率</a>
+          {% endif %}
+        </form>
+      </div>
+      {% endif %}
+      {% endfor %}
+      {% for section_key, section in page.data.sections.items() %}
+      {% set recommendation = section.level_up_recommendation_filter %}
+      {% if recommendation and recommendation.enabled %}
+      <div class="text-block" aria-label="推荐筛选">
+        <div class="monitor-actions">
+          <a href="{{ recommendation.href }}">{{ recommendation.label }}</a>
+          {% if recommendation.active %}
+          <span class="chip{% if not recommendation.available %} warn{% endif %}">{{ recommendation.active_label }}</span>
+          <a href="{{ recommendation.clear_href }}">清除推荐筛选</a>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+      {% for section_key, section in page.data.sections.items() %}
+      <details class="grade-filter-panel" data-filter-panel="period-grade" open>
+        <summary><span aria-hidden="true">⌄</span><span>分级筛选</span></summary>
+        <div class="grade-filter-body">
+          {% for row in section.grade_filter_rows %}
+          <div class="grade-filter-row" data-filter-row data-filter-field="{{ row.field }}">
+            <div class="grade-filter-label">{{ row.label }}</div>
+            <div class="grade-filter-control">
+              {% for option in row.options %}
+              <a
+                class="filter-token{% if option.selected %} is-selected{% endif %}"
+                href="{{ option.href }}"
+                data-filter-token
+                data-filter-field="{{ row.field }}"
+                data-filter-value="{{ option.value }}"
+                aria-pressed="{% if option.selected %}true{% else %}false{% endif %}"
+              >
+                <span>{{ option.label }}</span>
+                <span class="token-remove" aria-hidden="true">×</span>
+              </a>
+              {% endfor %}
+              <a
+                class="filter-row-reset"
+                href="{{ row.reset_href }}"
+                aria-label="重置{{ row.label }}"
+              >×</a>
+              <button
+                type="button"
+                class="filter-row-toggle"
+                aria-label="{{ row.label }}选项"
+                disabled
+              >⌄</button>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% endfor %}
+      {% for section_key, section in page.data.sections.items() %}
+      <div class="text-block" id="{{ section.anchor_id }}">
+        <h3>{{ section.component_label }}</h3>
+        <span class="chip">状态: {{ section.status_label }}</span>
+        <span class="chip">总记录数: {{ section.total_count }}</span>
+        <span class="chip">筛选后数量: {{ section.filtered_count }}</span>
+        <span class="chip">当前显示: {{ section.returned_count }}</span>
+        <span class="chip">读取表: {{ section.read_source_table }}</span>
+        <span class="chip">展示标签: {{ section.source_table }}</span>
+        {% if section.date_policy_message %}
+        <span class="chip">{{ section.date_policy_message }}</span>
+        {% endif %}
+        {% if section.membership_read_source_table %}
+        <span class="chip">成分表: {{ section.membership_read_source_table }}</span>
+        {% endif %}
+        <span class="chip">默认方向: {{ section.default_monitor_direction_label }}</span>
+        <div class="monitor-actions">
+          <button
+            type="button"
+            data-monitor-selected-add
+            data-monitor-asset-kind="{{ section.asset_kind }}"
+            data-monitor-direction="{{ section.default_monitor_direction }}"
+            data-monitor-for-trade-date="{{ section.selected_for_trade_date }}"
+          >{{ section.controls.add_selected_label }}</button>
+          <button
+            type="button"
+            data-monitor-bulk-add
+            data-monitor-asset-kind="{{ section.asset_kind }}"
+            data-monitor-direction="{{ section.default_monitor_direction }}"
+            data-monitor-for-trade-date="{{ section.selected_for_trade_date }}"
+            data-monitor-filters="{{ section.filters_json }}"
+          >{{ section.controls.bulk_add_label }}</button>
+          <button
+            type="button"
+            data-realtime-scope-selected-add
+            data-realtime-scope-asset-kind="{{ section.asset_kind }}"
+            data-realtime-scope-for-trade-date="{{ section.selected_for_trade_date }}"
+          >{{ section.controls.add_realtime_selected_label }}</button>
+          <button
+            type="button"
+            data-realtime-scope-bulk-add
+            data-realtime-scope-asset-kind="{{ section.asset_kind }}"
+            data-realtime-scope-for-trade-date="{{ section.selected_for_trade_date }}"
+            data-realtime-scope-filters="{{ section.filters_json }}"
+          >{{ section.controls.bulk_realtime_scope_label }}</button>
+          <span class="chip">{{ section.controls.write_scope_notice }}</span>
+        </div>
+        {% if section.linked_stock_filter %}
+        <div class="monitor-actions" data-linked-stock-filter>
+          <a href="{{ section.linked_stock_filter.href }}">{{ section.linked_stock_filter.label }}</a>
+          <span class="chip">{{ section.linked_stock_filter.source_label }}</span>
+        </div>
+        {% endif %}
+        {% if section.source_context %}
+        <div class="monitor-actions" data-source-context>
+          <span class="chip">{{ section.source_context.label }}</span>
+          {% if section.source_context.membership_source_table %}
+          <span class="chip">成分表: {{ section.source_context.membership_source_table }}</span>
+          {% endif %}
+          {% if section.source_context.membership_trade_date %}
+          <span class="chip">成分日期: {{ section.source_context.membership_trade_date }}</span>
+          {% endif %}
+          {% if section.source_context.active %}
+          <span class="chip">成分股: {{ section.source_context.membership_count }}</span>
+          <span class="chip">筛选交集: {{ section.source_context.matched_stock_count }}</span>
+          <a href="{{ section.source_context.clear_href }}">清除来源，查看全部个股</a>
+          {% endif %}
+        </div>
+        {% endif %}
+        <div class="monitor-message" data-monitor-result="{{ section.asset_kind }}"></div>
+        {% if section.has_more_rows %}
+        <a href="{{ section.show_all_href }}">查看全部</a>
+        {% elif section.show_all %}
+        <a href="{{ section.default_rows_href }}">收起到默认{{ section.default_limit }}条</a>
+        {% endif %}
+        <div class="monitor-actions" data-column-order-controls>
+          <span class="chip">拖动表头可调整列顺序</span>
+          <button
+            type="button"
+            class="row-action"
+            data-column-order-reset
+            data-target-asset-kind="{{ section.asset_kind }}"
+          >重置列顺序</button>
+        </div>
+        {% if section.status == "data_not_ready" %}
+        <p>{{ section.empty_state }}</p>
+        {% endif %}
+      </div>
+      <div class="table-wrap">
+        <table
+          class="filter-table"
+          data-filter-table
+          data-asset-kind="{{ section.asset_kind }}"
+          data-column-order-storage-key="n6.filterCenter.{{ section.asset_kind }}.columnOrder"
+          data-schema-count="{{ section.schema|length }}"
+          data-column-count="{{ section.columns|length }}"
+          data-row-count="{{ section.grid_rows|length }}"
+        >
+          <thead>
+            <tr>
+              <th scope="col" data-column-fixed="true">操作</th>
+              {% for column in section.columns %}
+              <th
+                scope="col"
+                class="{% if column.align == 'numeric' %}numeric{% endif %}"
+                data-column-key="{{ column.key }}"
+                draggable="true"
+                title="{{ column.label }}"
+                aria-sort="{% if column.sort_active and column.sort_direction == 'asc' %}ascending{% elif column.sort_active and column.sort_direction == 'desc' %}descending{% else %}none{% endif %}"
+              >
+                <a
+                  href="{{ column.sort_href }}"
+                  class="{% if column.sort_active %}is-active{% endif %}"
+                  data-sort-key="{{ column.key }}"
+                  data-sort-type="{{ column.sort_type }}"
+                  data-sort-dir="{{ column.sort_direction }}"
+                  aria-label="按 {{ column.label }} 排序"
+                >{{ column.label }}{% if column.sort_active %} {{ "↓" if column.sort_direction == "desc" else "↑" }}{% endif %}</a>
+              </th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in section.grid_rows %}
+            <tr data-cell-count="{{ item.cells|length }}">
+              <td class="filter-action-cell">
+                <div class="row-action-line">
+                  <input
+                    class="row-check"
+                    type="checkbox"
+                    data-monitor-checkbox
+                    data-monitor-asset-kind="{{ item.asset_kind }}"
+                    data-monitor-identity-key="{{ item.identity_key }}"
+                    data-monitor-direction="{{ section.default_monitor_direction }}"
+                    data-monitor-for-trade-date="{{ item.for_trade_date }}"
+                    aria-label="选择{{ item.display_name }}"
+                  >
+                  <span>{{ item.asset_kind_label }}</span>
+                  <span class="subtle">{{ item.display_code }}</span>
+                  <button
+                    class="row-action"
+                    type="button"
+                    data-monitor-add
+                    data-monitor-asset-kind="{{ item.asset_kind }}"
+                    data-monitor-identity-key="{{ item.identity_key }}"
+                    data-monitor-direction="{{ section.default_monitor_direction }}"
+                    data-monitor-for-trade-date="{{ item.for_trade_date }}"
+                    title="{{ item.add_monitor_label }}"
+                    aria-label="{{ item.add_monitor_label }}"
+                  >{{ item.add_monitor_short_label|default(item.add_monitor_label) }}</button>
+                  <button
+                    class="row-action"
+                    type="button"
+                    data-realtime-scope-add
+                    data-realtime-scope-asset-kind="{{ item.asset_kind }}"
+                    data-realtime-scope-identity-key="{{ item.identity_key }}"
+                    data-realtime-scope-for-trade-date="{{ item.for_trade_date }}"
+                    title="{{ item.add_realtime_scope_label }}"
+                    aria-label="{{ item.add_realtime_scope_label }}"
+                  >{{ item.add_realtime_scope_short_label|default(item.add_realtime_scope_label) }}</button>
+                </div>
+              </td>
+              {% for cell in item.cells %}
+              <td
+                class="{% if cell.align == 'numeric' %}numeric{% endif %}"
+                data-field-key="{{ cell.key }}"
+                data-sort-type="{{ cell.sort_type }}"
+                data-empty="{% if cell.value == '—' %}true{% else %}false{% endif %}"
+                title="{{ cell.value }}"
+              >{{ cell.value }}</td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if not section['items'] %}
+        <div class="empty">{{ section.empty_state }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% elif page.page_key == "my-monitor" %}
+      <div class="text-block">
+        <h3>我的监控对象</h3>
+	        {% for item in page.data.subinterfaces %}
+	        <a class="chip{% if item.active %} active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+	        {% endfor %}
+	        <span class="chip">{{ page.data.notice }}</span>
+	        <span class="chip">{{ page.data.current_batch_label }}</span>
+	        <span class="chip">{{ page.data.signal_scope_notice }}</span>
+	        {% if page.data.locked_reason %}
+	        <p>{{ page.data.locked_reason }}</p>
+	        {% endif %}
+	        <button type="button" disabled>暂停监控（暂未开放）</button>
+	        <button type="button" disabled>归档已失效对象（后续开放）</button>
+	        {% set date_selector = page.data.date_selector %}
+	        <form method="get" action="{{ date_selector.base_href }}" class="monitor-actions">
+	          <label for="my-monitor-for-trade-date">当前生效日期</label>
+	          <select id="my-monitor-for-trade-date" name="for_trade_date">
+	            {% for option in date_selector.options %}
+	            <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+	            {% endfor %}
+	          </select>
+	          <input type="hidden" name="monitor_status" value="{{ date_selector.monitor_status_filter }}">
+	          <button type="submit">切换日期</button>
+	        </form>
+	      </div>
+	      <div class="metric-grid">
+	        <div class="metric"><span>我的个股监控</span><strong>{{ page.data.sections.stocks.count }}</strong></div>
+	        <div class="metric"><span>我的板块监控</span><strong>{{ page.data.sections.boards.count }}</strong></div>
+        <div class="metric"><span>我的指数监控</span><strong>{{ page.data.sections.indexes.count }}</strong></div>
+        <div class="metric"><span>写入接口</span><strong>{{ page.data.controls.write_route_registered }}</strong></div>
+      </div>
+      {% set selected_section = page.data.sections[page.data.selected_section_key] %}
+	      <div class="text-block">
+	        <h3>{{ selected_section.title }}</h3>
+	        <span class="chip">状态: {{ selected_section.status_label }}</span>
+	        <span class="chip">数量: {{ selected_section.count }}</span>
+	        <span class="chip">有效: {{ selected_section.status_counts.active }}</span>
+	        <span class="chip">已失效: {{ selected_section.status_counts.expired }}</span>
+	        {% for item in page.data.status_filter_links %}
+	        <a class="chip{% if item.active %} active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+	        {% endfor %}
+	      </div>
+	      <div class="table-wrap">
+	        <table>
+	          <thead>
+	            <tr>
+	              <th>操作</th>
+	              {% for column in selected_section.columns %}
+	              <th class="{{ column.align }}">{{ column.label }}</th>
+	              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in selected_section['items'] %}
+            <tr>
+	              <td>
+	                <button
+	                  class="monitor-delete-button"
+	                  type="button"
+	                  data-monitor-delete
+	                  data-monitor-id="{{ item.monitor_id }}"
+	                >{{ page.data.controls.remove_monitor_label }}</button>
+	              </td>
+	              {% for cell in item.cells %}
+	              <td class="{{ cell.align }}">{{ cell.value }}</td>
+	              {% endfor %}
+            </tr>
+	            {% if selected_section.asset_kind == "stock" %}
+	            <tr>
+	              <td class="field-detail" colspan="{{ selected_section.columns|length + 1 }}">
+	                <details class="monitor-relationship-detail">
+	                  <summary>所有字段 · 当前所属关系</summary>
+	                  <div class="field-grid">
+                    <div class="field-item">
+                      <span>current_index_memberships</span>
+                      <code>当前所属指数: {{ item.current_memberships.index_count }}{% for membership in item.current_memberships.indexes %}
+{{ membership.display_name }} {{ membership.display_code }}
+{{ membership.identity_key }} · 关系日期: {{ membership.trade_date }}{% else %}
+暂无指数关系{% endfor %}</code>
+                    </div>
+                    <div class="field-item">
+                      <span>current_board_memberships</span>
+                      <code>当前所属板块: {{ item.current_memberships.board_count }}{% for membership in item.current_memberships.boards %}
+{{ membership.display_name }} {{ membership.display_code }}
+{{ membership.identity_key }} · {{ membership.board_type }} · 关系日期: {{ membership.trade_date }}{% else %}
+暂无板块关系{% endfor %}</code>
+                    </div>
+                  </div>
+                </details>
+              </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if not selected_section['items'] %}
+        <div class="empty">{{ selected_section.empty_state }}</div>
+        {% endif %}
+      </div>
+      {% elif page.page_key == "status-monitor" %}
+      <div class="metric-grid">
+        <div class="metric"><span>有效</span><strong>{{ page.data.status_summary.active }}</strong></div>
+        <div class="metric"><span>等待行情证据</span><strong>{{ page.data.status_summary.pending_market_data }}</strong></div>
+        <div class="metric"><span>已失效</span><strong>{{ page.data.status_summary.inactive }}</strong></div>
+        <div class="metric"><span>投影写入</span><strong>{{ page.data.write_controls.projection_write_enabled }}</strong></div>
+      </div>
+      <div class="text-block">
+        <h3>状态监控</h3>
+        <span class="chip">卡片写入: {{ page.data.write_controls.card_write_enabled }}</span>
+        <span class="chip">outbox 消费: {{ page.data.write_controls.outbox_consume_enabled }}</span>
+        <span class="chip">worker: {{ page.data.write_controls.worker_enabled }}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>identity_key</th>
+              <th>当前状态</th>
+              <th>N4 事件</th>
+              <th>N5 关系</th>
+              <th>质量</th>
+              <th>运行批次</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in page.data['items'] %}
+            <tr>
+              <td>{{ item.asset_kind_label }}</td>
+              <td>{{ item.identity_key }}<br><span class="subtle">{{ item.display_name }} {{ item.display_code }}</span></td>
+              <td>{{ item.current_status_label }}<br><span class="subtle">trigger_live={{ item.trigger_live }}</span></td>
+              <td>
+                N4 {{ item.n4_event.event_id }}<br>
+                <span class="subtle">{{ item.n4_event.source_run_id }}</span>
+              </td>
+              <td>
+                N5 {{ item.n5_relationship.event_label }}<br>
+                <span class="subtle">{{ item.n5_relationship.action_state_label }} · {{ item.n5_relationship.action_mark }} · {{ item.n5_relationship.blocked_reason_label }}</span>
+              </td>
+              <td>{{ item.quality_status }}<br><span class="subtle">{{ item.event_time }}</span></td>
+              <td>
+                N5: {{ item.source_run_id }}<br>
+                N6: {{ item.projection_run_id }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if not page.data['items'] %}
+        <div class="empty">暂无状态记录。</div>
+        {% endif %}
+      </div>
+      {% elif page.page_key == "ai-users" %}
+      <div class="text-block">
+        <h3>AI助手</h3>
+        <span class="chip">状态: {{ page.data.status_label }}</span>
+        <span class="chip">模式: {{ page.data.mode_label }}</span>
+        <span class="chip">来源: 已审核 N6 投影</span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>生成信号</span><strong>生成信号: {{ page.data.observer_policy.generated_signal_enabled }}</strong></div>
+        <div class="metric"><span>自动交易</span><strong>自动交易: {{ page.data.observer_policy.auto_trade_enabled }}</strong></div>
+        <div class="metric"><span>订单生成</span><strong>订单生成: {{ page.data.observer_policy.order_enabled }}</strong></div>
+        <div class="metric"><span>实盘提交</span><strong>实盘提交: {{ page.data.observer_policy.real_trade_enabled }}</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ai_user_id</th>
+              <th>角色</th>
+              <th>状态</th>
+              <th>来源</th>
+              <th>生成信号</th>
+              <th>交易能力</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in page.data['items'] %}
+            <tr>
+              <td>{{ item.ai_user_id }}</td>
+              <td>{{ item.role_label }}</td>
+              <td>{{ item.status_label }}</td>
+              <td>{{ item['source'] }}</td>
+              <td>{{ item.can_generate_signal }}</td>
+              <td>{{ item.can_trade }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="text-block">
+        <p>状态: {{ page.data.status_label }}</p>
+        {% if page.data.locked %}
+        <p>锁定: {{ page.data.locked }}</p>
+        <p>原因: {{ page.data.reason }}</p>
+        <p>入口开放: {{ page.data.controls.entry_enabled }}</p>
+        <p>方案生成: {{ page.data.controls.proposal_enabled }}</p>
+        <p>订单生成: {{ page.data.controls.order_enabled }}</p>
+        <p>交易生成: {{ page.data.controls.trade_enabled }}</p>
+        <p>持仓更新: {{ page.data.controls.position_update_enabled }}</p>
+        <p>收益生成: {{ page.data.controls.pnl_generation_enabled }}</p>
+        <p>实盘提交: {{ page.data.controls.real_trade_enabled }}</p>
+        {% endif %}
+        <p>记录数: {{ page.data['items']|length }}</p>
+        {% if page.disclaimer %}
+        <p>
+          {% for item in page.disclaimer %}
+          <span class="chip warn">{{ item }}</span>
+          {% endfor %}
+        </p>
+        {% endif %}
+        <p>该入口为未来功能预留，当前不会生成方案、订单、交易或持仓变化。</p>
+      </div>
+      {% endif %}
+    </section>
+
+    {% if page.page_key not in ["home", "dashboard"] %}
+    <section class="surface">
+      <div class="surface-head">
+        <h2>数据边界</h2>
+        <span class="subtle">allowlist adapter</span>
+      </div>
+      <div class="split">
+        <div class="text-block">
+          <h3>允许来源</h3>
+          {% for item in page.source_policy.allowed_sources %}
+          <span class="chip">{{ item }}</span>
+          {% endfor %}
+        </div>
+        <div class="text-block">
+          <h3>禁止来源</h3>
+          {% for item in page.source_policy.forbidden_sources %}
+          <span class="chip warn">{{ item }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+  <script>
+    const escapeHtml = (value) => String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+    const monitorMessage = (assetKind, text) => {
+      const target = document.querySelector(`[data-monitor-result="${assetKind}"]`);
+      if (target) target.textContent = text;
+    };
+
+    const postMonitorJson = async (url, payload) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (_error) {
+        data = {
+          ok: false,
+          status: response.ok ? "invalid_json" : "http_error",
+          error: text ? text.slice(0, 120) : "empty_response",
+        };
+      }
+      if (!response.ok && !data.error) {
+        data.error = `http_${response.status}`;
+      }
+      return data;
+    };
+
+    const linkedMessage = (panel, text) => {
+      const target = panel.querySelector("[data-linked-status]");
+      if (target) target.textContent = text;
+    };
+
+    const renderLinkedStocks = (panel, payload) => {
+      const members = Array.isArray(payload.members) ? payload.members : [];
+      const memberCount = payload.member_count ?? members.length;
+      panel.querySelector("[data-linked-membership-count]").textContent = memberCount;
+      panel.querySelector("[data-linked-current-count]").textContent = members.length;
+      const container = panel.querySelector("[data-linked-items]");
+      if (!payload.ok && payload.error) {
+        linkedMessage(panel, payload.error);
+        container.innerHTML = "";
+        return;
+      }
+      if (!members.length) {
+        linkedMessage(panel, "暂无成分股记录");
+        container.innerHTML = "";
+        return;
+      }
+      linkedMessage(panel, `成分股: ${members.length}`);
+      const rows = members.map((item) => `
+        <tr>
+          <td>${escapeHtml(item.display_name)}</td>
+          <td>${escapeHtml(item.stock_identity_key)}</td>
+          <td>${escapeHtml(item.membership_date || "—")}</td>
+          <td>${escapeHtml(item.weight ?? "—")}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th>stock_identity_key</th>
+              <th>membership_date</th>
+              <th>weight</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    };
+
+    const fetchLinkedStocks = async (panel) => {
+      linkedMessage(panel, "正在读取成分股");
+      const url = new URL(panel.dataset.linkedStocksUrl, window.location.origin);
+      const response = await fetch(url.toString(), { method: "GET" });
+      const payload = await response.json();
+      renderLinkedStocks(panel, payload);
+      panel.dataset.loaded = "true";
+    };
+
+    document.querySelectorAll("[data-linked-stocks-url]").forEach((panel) => {
+      panel.addEventListener("toggle", async () => {
+        if (!panel.open || panel.dataset.loaded === "true") return;
+        try {
+          await fetchLinkedStocks(panel);
+        } catch (_error) {
+          linkedMessage(panel, "关联数据读取失败");
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        monitorMessage(assetKind, "正在加入监控");
+        const payload = await postMonitorJson("/api/n6/app/v2/monitor/items", {
+          asset_kind: assetKind,
+          identity_key: button.dataset.monitorIdentityKey,
+          direction: button.dataset.monitorDirection || "buy",
+          for_trade_date: button.dataset.monitorForTradeDate || "",
+        });
+        monitorMessage(assetKind, payload.status === "added" ? "已加入监控" : `结果: ${payload.status || payload.error}`);
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-selected-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        const direction = button.dataset.monitorDirection || "buy";
+        const selected = Array.from(document.querySelectorAll(
+          `[data-monitor-checkbox][data-monitor-asset-kind="${assetKind}"]:checked`
+        ));
+        if (!selected.length) {
+          monitorMessage(assetKind, "请先选择要加入监控的对象");
+          return;
+        }
+        const identityKeys = selected.map((item) => item.dataset.monitorIdentityKey).filter(Boolean);
+        const forTradeDate = button.dataset.monitorForTradeDate
+          || selected.map((item) => item.dataset.monitorForTradeDate).find(Boolean)
+          || "";
+        monitorMessage(assetKind, `正在加入已选对象：${identityKeys.length} 个`);
+        try {
+          const payload = await postMonitorJson("/api/n6/app/v2/monitor/selected-add", {
+            asset_kind: assetKind,
+            identity_keys: identityKeys,
+            direction,
+            for_trade_date: forTradeDate,
+          });
+          if (!payload.ok) {
+            monitorMessage(assetKind, `已选对象处理失败：${payload.error || payload.status || "unknown_error"}`);
+            return;
+          }
+          monitorMessage(
+            assetKind,
+            `已选对象处理完成：选中 ${payload.requested_count || identityKeys.length}，新增 ${payload.added_count || 0}，跳过 ${payload.skipped_count || 0}，失败 ${payload.failed_count || 0}`
+          );
+        } catch (_error) {
+          monitorMessage(assetKind, "已选对象处理失败，请稍后重试");
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-bulk-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        monitorMessage(assetKind, "正在将当前筛选结果加入监控");
+        let filters = {};
+        try {
+          filters = JSON.parse(button.dataset.monitorFilters || "{}");
+        } catch (_error) {
+          filters = {};
+        }
+        const payload = await postMonitorJson("/api/n6/app/v2/monitor/bulk-add", {
+          asset_kind: assetKind,
+          direction: button.dataset.monitorDirection || "buy",
+          for_trade_date: button.dataset.monitorForTradeDate || "",
+          filters,
+        });
+        if (!payload.ok) {
+          monitorMessage(assetKind, `筛选结果处理失败：${payload.error || payload.status || "unknown_error"}`);
+          return;
+        }
+        monitorMessage(
+          assetKind,
+          `筛选结果处理完成：命中 ${payload.filtered_count || 0}，新增 ${payload.added_count || 0}，跳过 ${payload.skipped_count || 0}`
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        monitorMessage(assetKind, "正在加入实时监控范围");
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/items", {
+          asset_kind: assetKind,
+          identity_key: button.dataset.realtimeScopeIdentityKey,
+          for_trade_date: button.dataset.realtimeScopeForTradeDate || "",
+        });
+        monitorMessage(assetKind, payload.ok ? "已加入实时监控范围" : `结果: ${payload.status || payload.error}`);
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-selected-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        const selected = Array.from(document.querySelectorAll(
+          `[data-monitor-checkbox][data-monitor-asset-kind="${assetKind}"]:checked`
+        ));
+        if (!selected.length) {
+          monitorMessage(assetKind, "请先选择要加入实时监控范围的对象");
+          return;
+        }
+        const identityKeys = selected.map((item) => item.dataset.monitorIdentityKey).filter(Boolean);
+        const forTradeDate = button.dataset.realtimeScopeForTradeDate
+          || selected.map((item) => item.dataset.monitorForTradeDate).find(Boolean)
+          || "";
+        monitorMessage(assetKind, `正在加入实时监控范围：${identityKeys.length} 个`);
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/selected-add", {
+          asset_kind: assetKind,
+          identity_keys: identityKeys,
+          for_trade_date: forTradeDate,
+        });
+        monitorMessage(
+          assetKind,
+          payload.ok
+            ? `实时监控范围处理完成：新增 ${payload.added_count || 0}，失败 ${payload.failed_count || 0}`
+            : `实时监控范围处理失败：${payload.error || payload.status || "unknown_error"}`
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-bulk-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        let filters = {};
+        try {
+          filters = JSON.parse(button.dataset.realtimeScopeFilters || "{}");
+        } catch (_error) {
+          filters = {};
+        }
+        monitorMessage(assetKind, "正在将当前筛选结果加入实时监控范围");
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/bulk-add", {
+          asset_kind: assetKind,
+          for_trade_date: button.dataset.realtimeScopeForTradeDate || "",
+          filters,
+        });
+        monitorMessage(
+          assetKind,
+          payload.ok
+            ? `实时监控范围处理完成：命中 ${payload.filtered_count || 0}，新增 ${payload.added_count || 0}`
+            : `实时监控范围处理失败：${payload.error || payload.status || "unknown_error"}`
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-expected-return-filter]").forEach((form) => {
+      const range = form.querySelector("[data-expected-return-range]");
+      const hidden = form.querySelector("[data-expected-return-hidden]");
+      const output = form.querySelector("[data-expected-return-output]");
+      if (!range || !hidden || !output) return;
+      range.addEventListener("input", () => {
+        hidden.value = range.value;
+        output.textContent = `${range.value}%`;
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-delete]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const monitorId = button.dataset.monitorId;
+        const response = await fetch(`/api/n6/app/v2/monitor/items/${monitorId}`, { method: "DELETE" });
+        const payload = await response.json();
+        if (payload.status === "removed") {
+          window.location.reload();
+          return;
+        }
+        button.textContent = "删除失败";
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-delete]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const scopeId = button.dataset.realtimeScopeId;
+        if (!scopeId) return;
+        const response = await fetch(`/api/n6/app/v2/realtime-scope/items/${scopeId}`, { method: "DELETE" });
+        const payload = await response.json();
+        if (payload.status === "deleted") {
+          window.location.reload();
+          return;
+        }
+        button.textContent = "删除失败";
+      });
+    });
+
+    const n6FilterColumnOrder = (() => {
+      const cssEscape = (value) => {
+        if (window.CSS && typeof window.CSS.escape === "function") {
+          return window.CSS.escape(value);
+        }
+        return String(value).replace(/"/g, '\\"');
+      };
+
+      const tableColumnKeys = (table) => Array.from(table.querySelectorAll("th[data-column-key]"))
+        .map((header) => header.dataset.columnKey)
+        .filter(Boolean);
+
+      const readStoredOrder = (table) => {
+        const storageKey = table.dataset.columnOrderStorageKey;
+        if (!storageKey) return [];
+        try {
+          const parsed = JSON.parse(localStorage.getItem(storageKey) || "[]");
+          return Array.isArray(parsed) ? parsed : [];
+        } catch (_error) {
+          return [];
+        }
+      };
+
+      const normalizeOrder = (table, order) => {
+        const currentOrder = tableColumnKeys(table);
+        const available = new Set(currentOrder);
+        const selected = Array.isArray(order) ? order.filter((key) => available.has(key)) : [];
+        return selected.concat(currentOrder.filter((key) => !selected.includes(key)));
+      };
+
+      const applyOrder = (table, order) => {
+        const normalized = normalizeOrder(table, order);
+        const headerRow = table.tHead && table.tHead.rows ? table.tHead.rows[0] : null;
+        if (!headerRow) return normalized;
+        normalized.forEach((key) => {
+          const header = table.querySelector(`th[data-column-key="${cssEscape(key)}"]`);
+          if (header) headerRow.appendChild(header);
+        });
+        table.querySelectorAll("tbody tr").forEach((row) => {
+          normalized.forEach((key) => {
+            const cell = row.querySelector(`td[data-field-key="${cssEscape(key)}"]`);
+            if (cell) row.appendChild(cell);
+          });
+        });
+        return normalized;
+      };
+
+      const saveOrder = (table) => {
+        const storageKey = table.dataset.columnOrderStorageKey;
+        if (!storageKey) return;
+        const order = tableColumnKeys(table);
+        localStorage.setItem(storageKey, JSON.stringify(order));
+      };
+
+      const clearDragState = (table) => {
+        table.querySelectorAll(".is-dragging, .is-drop-target").forEach((node) => {
+          node.classList.remove("is-dragging", "is-drop-target");
+        });
+      };
+
+      const attachTable = (table) => {
+        table.dataset.defaultColumnOrder = JSON.stringify(tableColumnKeys(table));
+        const storedOrder = readStoredOrder(table);
+        if (storedOrder.length) applyOrder(table, storedOrder);
+
+        table.addEventListener("dragstart", (event) => {
+          const header = event.target.closest("th[data-column-key]");
+          if (!header) return;
+          table.dataset.dragColumnKey = header.dataset.columnKey;
+          header.classList.add("is-dragging");
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", header.dataset.columnKey || "");
+          }
+        });
+
+        table.addEventListener("dragover", (event) => {
+          const header = event.target.closest("th[data-column-key]");
+          if (!header || !table.dataset.dragColumnKey || header.dataset.columnKey === table.dataset.dragColumnKey) return;
+          event.preventDefault();
+          table.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
+          header.classList.add("is-drop-target");
+        });
+
+        table.addEventListener("dragleave", (event) => {
+          const header = event.target.closest("th[data-column-key]");
+          if (header) header.classList.remove("is-drop-target");
+        });
+
+        table.addEventListener("drop", (event) => {
+          const targetHeader = event.target.closest("th[data-column-key]");
+          const draggedKey = table.dataset.dragColumnKey;
+          const targetKey = targetHeader ? targetHeader.dataset.columnKey : "";
+          clearDragState(table);
+          delete table.dataset.dragColumnKey;
+          if (!draggedKey || !targetKey || draggedKey === targetKey) return;
+          event.preventDefault();
+          const order = tableColumnKeys(table).filter((key) => key !== draggedKey);
+          const targetIndex = order.indexOf(targetKey);
+          order.splice(targetIndex < 0 ? order.length : targetIndex, 0, draggedKey);
+          applyOrder(table, order);
+          saveOrder(table);
+        });
+
+        table.addEventListener("dragend", () => {
+          clearDragState(table);
+          delete table.dataset.dragColumnKey;
+        });
+      };
+
+      const attachReset = (button) => {
+        button.addEventListener("click", () => {
+          const assetKind = button.dataset.targetAssetKind;
+          const table = document.querySelector(`[data-filter-table][data-asset-kind="${cssEscape(assetKind)}"]`);
+          if (!table) return;
+          const storageKey = table.dataset.columnOrderStorageKey;
+          if (storageKey) localStorage.removeItem(storageKey);
+          try {
+            applyOrder(table, JSON.parse(table.dataset.defaultColumnOrder || "[]"));
+          } catch (_error) {
+            applyOrder(table, tableColumnKeys(table));
+          }
+        });
+      };
+
+      const init = () => {
+        document.querySelectorAll("[data-filter-table]").forEach(attachTable);
+        document.querySelectorAll("[data-column-order-reset]").forEach(attachReset);
+      };
+
+      return { init };
+    })();
+
+    const n6AutoRefresh = (() => {
+      const statusText = (root, text) => {
+        const target = root.querySelector("[data-n6-refresh-status]");
+        if (target) target.textContent = text;
+      };
+
+      const formatList = (value) => {
+        if (Array.isArray(value)) return value.join(",");
+        return value || "—";
+      };
+
+      const renderSignals = (payload) => {
+        const target = document.querySelector("[data-n6-signals-body]");
+        if (!target) return 0;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        if (!items.length) {
+          const message = payload.empty_state?.message || "暂无已审核消息。";
+          target.innerHTML = `<tr><td colspan="12"><div class="empty">${escapeHtml(message)}</div></td></tr>`;
+          return 0;
+        }
+        target.innerHTML = items.map((item) => `
+          <tr>
+            <td>${escapeHtml(item.trade_date)}</td>
+            <td>${escapeHtml(item.event_time)}</td>
+            <td>${escapeHtml(item.asset_kind_label)}</td>
+            <td>${escapeHtml(item.display_name)}<br><span class="subtle">${escapeHtml(item.display_code)}</span></td>
+            <td>${escapeHtml(item.identity_key)}</td>
+            <td>${escapeHtml(item.direction_label)}</td>
+            <td>${escapeHtml(item.condition_trace?.condition_key)}<br><span class="subtle">${escapeHtml(item.condition_trace?.rendering_policy)}</span></td>
+            <td>${escapeHtml(formatList(item.triggered_periods))}</td>
+            <td>${escapeHtml(item.primary_trigger_period || "—")}</td>
+            <td>${escapeHtml(item.action_state_label)}</td>
+            <td>${escapeHtml(item.action_mark || "—")}</td>
+            <td>${escapeHtml(item.blocked_reason_label || "—")}</td>
+          </tr>
+        `).join("");
+        return items.length;
+      };
+
+      const renderMessageCards = (payload) => {
+        const cardsTarget = document.querySelector("[data-n6-message-cards]");
+        if (!cardsTarget) return 0;
+        const summary = payload.summary || {};
+        document.querySelectorAll("[data-summary-key]").forEach((target) => {
+          const value = summary[target.dataset.summaryKey];
+          if (value !== undefined) target.textContent = value;
+        });
+        const items = Array.isArray(payload.card_items) ? payload.card_items : [];
+        if (!items.length) {
+          const message = payload.empty_state?.message || "当前有效监控对象暂无 N6 用户消息";
+          cardsTarget.innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+          return 0;
+        }
+        cardsTarget.innerHTML = items.map((item) => `
+          <article class="message-card">
+            <div class="message-card-head">
+              <div>
+                <div class="message-card-title">${escapeHtml(item.title)}</div>
+                <div class="subtle">${escapeHtml(item.event_label)} · ${escapeHtml(item.event_time)}</div>
+              </div>
+              <span class="chip">${escapeHtml(item.action_state_label)}</span>
+            </div>
+            <div class="message-card-summary">${escapeHtml(item.summary)}</div>
+            <div class="message-card-meta">
+              <span class="chip">${escapeHtml(item.asset_kind_label)}</span>
+              <span class="chip">${escapeHtml(item.display_name)} ${escapeHtml(item.display_code)}</span>
+              <span class="chip">${escapeHtml(item.direction_label)}</span>
+              <span class="chip">触发周期 ${escapeHtml(formatList(item.triggered_periods))}</span>
+              <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period || "—")}</span>
+              <span class="chip">action_mark ${escapeHtml(item.action_mark || "—")}</span>
+            </div>
+            <p class="subtle">condition=${escapeHtml(item.condition_key)} · blocked_reason=${escapeHtml(item.blocked_reason_label)}</p>
+            <p class="subtle">trade_date=${escapeHtml(item.trade_date)} · identity_key=${escapeHtml(item.identity_key)}</p>
+            <div class="message-card-foot">
+              <span class="subtle">user_signal_card_id=${escapeHtml(item.user_signal_card_id)} · authority=${escapeHtml(item.authority_source)}</span>
+              ${item.detail_href ? `<a href="${escapeHtml(item.detail_href)}">查看详情</a>` : ""}
+            </div>
+          </article>
+        `).join("");
+        return items.length;
+      };
+
+      const backoffRemainingSeconds = (root) => {
+        const backoffUntil = Number(root.dataset.refreshBackoffUntil || 0);
+        return Math.max(0, Math.ceil((backoffUntil - Date.now()) / 1000));
+      };
+
+      const refreshOnce = async (root, options = {}) => {
+        const url = root.dataset.refreshUrl;
+        if (!url) return;
+        if (root.dataset.refreshInFlight === "true") {
+          statusText(root, "刷新中，跳过重叠请求");
+          return;
+        }
+        if (!options.force) {
+          const remaining = backoffRemainingSeconds(root);
+          if (remaining > 0) {
+            statusText(root, `刷新失败退避中，${remaining}s 后重试`);
+            return;
+          }
+        }
+        const button = root.querySelector("[data-n6-refresh-now]");
+        const startedAt = performance.now();
+        root.dataset.refreshInFlight = "true";
+        if (button) button.disabled = true;
+        try {
+          const response = await fetch(url, { method: "GET", headers: { "Accept": "application/json" } });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) {
+            const errorCount = Number(root.dataset.refreshErrorCount || 0) + 1;
+            root.dataset.refreshErrorCount = String(errorCount);
+            const baseBackoffMs = Number(root.dataset.refreshBackoffMs || 15000);
+            const maxBackoffMs = Number(root.dataset.refreshMaxBackoffMs || 60000);
+            const backoffMs = Math.min(maxBackoffMs, baseBackoffMs * errorCount);
+            root.dataset.refreshBackoffUntil = String(Date.now() + backoffMs);
+            statusText(root, `刷新失败：${payload.error || response.status} · 退避 ${Math.ceil(backoffMs / 1000)}s`);
+            return;
+          }
+          const kind = root.dataset.n6AutoRefresh;
+          const count = kind === "signals" ? renderSignals(payload) : renderMessageCards(payload);
+          const durationMs = Math.round(performance.now() - startedAt);
+          root.dataset.refreshErrorCount = "0";
+          root.dataset.refreshBackoffUntil = "0";
+          statusText(root, `已刷新 ${new Date().toLocaleTimeString()} · ${count} 条 · 上次耗时 ${durationMs}ms`);
+        } catch (_error) {
+          const errorCount = Number(root.dataset.refreshErrorCount || 0) + 1;
+          root.dataset.refreshErrorCount = String(errorCount);
+          const baseBackoffMs = Number(root.dataset.refreshBackoffMs || 15000);
+          const maxBackoffMs = Number(root.dataset.refreshMaxBackoffMs || 60000);
+          const backoffMs = Math.min(maxBackoffMs, baseBackoffMs * errorCount);
+          root.dataset.refreshBackoffUntil = String(Date.now() + backoffMs);
+          statusText(root, `刷新失败：网络或服务暂不可用 · 退避 ${Math.ceil(backoffMs / 1000)}s`);
+        } finally {
+          root.dataset.refreshInFlight = "false";
+          if (button) button.disabled = false;
+        }
+      };
+
+      const init = () => {
+        document.querySelectorAll("[data-n6-auto-refresh]").forEach((root) => {
+          const button = root.querySelector("[data-n6-refresh-now]");
+          root.dataset.refreshInFlight = "false";
+          root.dataset.refreshErrorCount = "0";
+          root.dataset.refreshBackoffUntil = "0";
+          if (button) button.addEventListener("click", () => refreshOnce(root, { force: true }));
+          if (root.dataset.refreshEnabled !== "true") return;
+          const intervalMs = Number(root.dataset.refreshIntervalMs || 5000);
+          window.setInterval(() => {
+            if (!document.hidden) refreshOnce(root);
+          }, intervalMs);
+        });
+      };
+
+      return { init };
+    })();
+
+    n6FilterColumnOrder.init();
+    n6AutoRefresh.init();
+
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", { method: "POST" });
+      window.location.href = "/n6/login";
+    });
+  </script>
+</body>
+</html>

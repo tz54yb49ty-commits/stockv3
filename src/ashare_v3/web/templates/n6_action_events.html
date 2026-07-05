@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6 动作消息</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main { padding: 18px 0 32px; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .banner {
+      background: #eef7f5;
+      border: 1px solid #b7d9d3;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .metric, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .metric { padding: 12px; }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+    .metric strong { font-size: 20px; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .metric-wide {
+      min-height: 76px;
+      display: grid;
+      align-content: center;
+    }
+    .chips {
+      padding: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .table-wrap { overflow-x: auto; }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      padding: 12px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .filter-actions {
+      padding: 0 12px 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .preset-row, .stat-grid {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 12px;
+    }
+    .stat-card {
+      min-width: 170px;
+      min-height: 70px;
+      display: grid;
+      align-content: center;
+      justify-items: start;
+      gap: 4px;
+      border-radius: 8px;
+      background: var(--soft);
+    }
+    .stat-card strong { font-size: 20px; }
+    .message-list {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }
+    .message-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .message-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .status-label {
+      color: var(--accent);
+      font-weight: 780;
+      font-size: 15px;
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .card-field span, .drawer-field span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+      margin-bottom: 3px;
+    }
+    .card-field strong, .drawer-field strong {
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .detail-drawer {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .detail-drawer summary {
+      width: fit-content;
+      min-height: 32px;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 760;
+      list-style: none;
+    }
+    .drawer-grid {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding: 10px;
+      background: var(--soft);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    .event-type {
+      color: var(--accent);
+      font-weight: 760;
+    }
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 920px) {
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px 0;
+      }
+      .summary, .metric-grid, .filter-grid, .card-grid, .drawer-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>动作消息</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner" aria-label="安全边界">
+      {% for item in dashboard.safety %}
+      <span class="chip">{{ item }}</span>
+      {% endfor %}
+    </section>
+    <section class="surface" style="margin-bottom:16px;" aria-label="Virtual Account Summary">
+      <div class="surface-head">
+        <h2>Virtual Account Summary</h2>
+        <span class="subtle">{{ virtual_account_summary.quality_status }}</span>
+      </div>
+      <div class="metric-grid" style="padding:12px; margin-bottom:0;">
+        <div class="metric metric-wide"><span>account_name</span><strong>{{ virtual_account_summary.account_name }}</strong></div>
+        <div class="metric metric-wide"><span>base_currency</span><strong>{{ virtual_account_summary.base_currency }}</strong></div>
+        <div class="metric metric-wide"><span>initial_cash</span><strong>{{ virtual_account_summary.initial_cash }}</strong></div>
+        <div class="metric metric-wide"><span>available_cash</span><strong>{{ virtual_account_summary.available_cash }}</strong></div>
+        <div class="metric metric-wide"><span>frozen_cash</span><strong>{{ virtual_account_summary.frozen_cash }}</strong></div>
+        <div class="metric metric-wide"><span>total_cash</span><strong>{{ virtual_account_summary.total_cash }}</strong></div>
+      </div>
+      <div class="chips">
+        <span class="chip">seed_run_id {{ virtual_account_summary.seed_run_id }}</span>
+        {% for item in virtual_account_summary.safety %}
+        <span class="chip">{{ item }}</span>
+        {% endfor %}
+      </div>
+    </section>
+    <section class="metric-grid" aria-label="管理员消息看板">
+      {% for item in dashboard.metrics %}
+      <div class="metric metric-wide">
+        <span>{{ item.label }}</span>
+        <strong>{{ item.value }}</strong>
+      </div>
+      {% endfor %}
+    </section>
+    <section class="summary">
+      <div class="surface">
+        <div class="surface-head">
+          <h2>N4/N5 消息分布</h2>
+          <span class="subtle">{{ summary.total }} rows loaded</span>
+        </div>
+        <div class="chips">
+          {% for item in dashboard.event_distribution %}
+          <span class="chip">{{ item.label }} {{ item.count }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="surface">
+        <div class="surface-head">
+          <h2>blocked_reason 分布</h2>
+        </div>
+        <div class="chips">
+          {% for item in dashboard.blocked_reasons %}
+          <span class="chip">{{ item.label }} {{ item.count }}</span>
+          {% else %}
+          <span class="chip">暂无 blocked_reason</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="surface">
+        <div class="surface-head">
+          <h2>N6 shadow 状态</h2>
+        </div>
+        <div class="chips">
+          {% for item in dashboard.n6_shadow %}
+          <span class="chip">{{ item.label }} {{ item.value }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+    <section class="surface" style="margin-bottom:16px;">
+      <div class="surface-head">
+        <h2>最近 run 状态</h2>
+        <span class="subtle">只读 artifact/DB 摘要</span>
+      </div>
+      <div class="table-wrap">
+        <table style="min-width:760px;">
+          <thead>
+            <tr>
+              <th>层级</th>
+              <th>run_id</th>
+              <th>状态</th>
+              <th>创建时间</th>
+              <th>完成时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in dashboard.recent_runs %}
+            <tr>
+              <td>{{ item.layer }}</td>
+              <td>{{ item.run_id }}</td>
+              <td>{{ item.status }}</td>
+              <td>{{ item.created_at }}</td>
+              <td>{{ item.finished_at }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section class="surface" style="margin-bottom:16px;" aria-label="消息筛选">
+      <div class="surface-head">
+        <h2>消息筛选</h2>
+        <span class="subtle">GET-only · 不消费 outbox</span>
+      </div>
+      <div class="preset-row">
+        <a href="/n6/action-events?time_field=event_time">今天</a>
+        <a href="/n6/action-events?time_field=event_time">昨天</a>
+        <a href="/n6/action-events?time_field=event_time">最近7天</a>
+        <a href="/n6/action-events?time_field=event_time">最近30天</a>
+        <span class="chip">自定义日期</span>
+      </div>
+      <form method="get" action="/n6/action-events">
+        <div class="filter-grid">
+          <label>开始日期
+            <input type="date" name="date_from" value="{{ signal_page.filters.date_from or '' }}">
+          </label>
+          <label>结束日期
+            <input type="date" name="date_to" value="{{ signal_page.filters.date_to or '' }}">
+          </label>
+          <label>时间字段
+            <select name="time_field">
+              <option value="event_time" {% if signal_page.filters.time_field == 'event_time' %}selected{% endif %}>event_time</option>
+              <option value="created_at" {% if signal_page.filters.time_field == 'created_at' %}selected{% endif %}>created_at</option>
+            </select>
+          </label>
+          <label>事件类型
+            <select name="event_type">
+              <option value="">全部</option>
+              {% for value in ['TriggerMatched', 'TriggerPendingMarketData', 'TriggerStateChanged', 'ActionExecuted', 'ActionBlocked'] %}
+              <option value="{{ value }}" {% if signal_page.filters.event_type == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>资产类型
+            <select name="asset_kind">
+              <option value="">全部</option>
+              {% for value in ['stock', 'index', 'board'] %}
+              <option value="{{ value }}" {% if signal_page.filters.asset_kind == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>方向
+            <select name="direction">
+              <option value="">全部</option>
+              {% for value in ['buy', 'sell'] %}
+              <option value="{{ value }}" {% if signal_page.filters.direction == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>信号
+            <select name="signal_type">
+              <option value="">全部</option>
+              {% for value in ['B_BUY', 'S_SELL'] %}
+              <option value="{{ value }}" {% if signal_page.filters.signal_type == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>blocked_reason
+            <select name="blocked_reason">
+              <option value="">全部</option>
+              {% for value in ['price_confirmation_failed', 'metric_missing', 'amount_confirmation_failed'] %}
+              <option value="{{ value }}" {% if signal_page.filters.blocked_reason == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>关键词
+            <input type="search" name="q" value="{{ signal_page.filters.q or '' }}" placeholder="code / event_id / condition_key">
+          </label>
+          <label>分页
+            <input type="number" name="limit" min="1" max="500" value="{{ signal_page.pagination.limit }}">
+          </label>
+        </div>
+        <div class="filter-actions">
+          <button type="submit">筛选</button>
+          <a href="/n6/action-events">清空筛选</a>
+          <span class="chip">total {{ signal_page.pagination.total_count }}</span>
+          <span class="chip">filtered {{ signal_page.pagination.filtered_count }}</span>
+        </div>
+      </form>
+    </section>
+    <section class="surface" style="margin-bottom:16px;" aria-label="全链路消息统计">
+      <div class="surface-head">
+        <h2>{{ lineage_stats.title }}</h2>
+        <span class="subtle">点击后只设置筛选条件</span>
+      </div>
+      <div class="stat-grid">
+        <span class="chip">N4 Events</span>
+        <a class="stat-card" href="/n6/action-events?source_layer=N4_trigger&event_type=TriggerMatched&outbox_status=pending"><span>N4 TriggerMatched</span><strong>{{ lineage_stats.lineage_stats.N4.TriggerMatched.pending }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N4_trigger&event_type=TriggerPendingMarketData&outbox_status=pending"><span>N4 TriggerPendingMarketData</span><strong>{{ lineage_stats.lineage_stats.N4.TriggerPendingMarketData.pending }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N4_trigger&event_type=TriggerStateChanged&outbox_status=pending"><span>N4 TriggerStateChanged</span><strong>{{ lineage_stats.lineage_stats.N4.TriggerStateChanged.pending }}</strong></a>
+        <span class="chip">N5 Actions</span>
+        <a class="stat-card" href="/n6/action-events?source_layer=N5_action&event_type=ActionExecuted&outbox_status=pending"><span>N5 ActionExecuted</span><strong>{{ lineage_stats.lineage_stats.N5.ActionExecuted.pending }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N5_action&event_type=ActionBlocked&outbox_status=pending"><span>N5 ActionBlocked</span><strong>{{ lineage_stats.lineage_stats.N5.ActionBlocked.pending }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N5_action&event_type=ActionBlocked&blocked_reason=price_confirmation_failed"><span>price_confirmation_failed</span><strong>{{ lineage_stats.blocked_reason.price_confirmation_failed }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N5_action&event_type=ActionBlocked&blocked_reason=amount_confirmation_failed"><span>amount_confirmation_failed</span><strong>{{ lineage_stats.blocked_reason.amount_confirmation_failed }}</strong></a>
+        <a class="stat-card" href="/n6/action-events?source_layer=N5_action&event_type=ActionBlocked&blocked_reason=metric_missing"><span>metric_missing</span><strong>{{ lineage_stats.blocked_reason.metric_missing }}</strong></a>
+      </div>
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>消息卡片</h2>
+        <span class="subtle">页面只读，卡片不直接展示长 event_id</span>
+      </div>
+      {% if signal_page["items"] %}
+      <div class="message-list">
+        {% for item in signal_page["items"] %}
+        <article class="message-card">
+          <div class="message-card-head">
+            <div>
+              <div class="status-label">{{ item.status_label }}</div>
+              <div class="subtle">{{ item.event_type }} · {{ item.event_time }}</div>
+            </div>
+            <span class="chip">{{ item.action_state }}</span>
+          </div>
+          <div class="card-grid">
+            <div class="card-field"><span>资产</span><strong>{{ item.asset_kind }} / {{ item.identity_key }}</strong></div>
+            <div class="card-field"><span>方向</span><strong>{{ item.direction }}</strong></div>
+            <div class="card-field"><span>信号</span><strong>{{ item.signal_type }}</strong></div>
+            <div class="card-field"><span>条件</span><strong>{{ item.condition_key }}</strong></div>
+            <div class="card-field"><span>blocked_reason</span><strong>{{ item.blocked_reason }}</strong></div>
+            <div class="card-field"><span>动作标记</span><strong>{{ item.action_mark }}</strong></div>
+          </div>
+          <details class="detail-drawer">
+            <summary>详情</summary>
+            <div class="drawer-grid">
+              <div class="drawer-field"><span>event_id</span><strong>{{ item.detail_drawer.event_id }}</strong></div>
+              <div class="drawer-field"><span>N4 trigger event id</span><strong>{{ item.detail_drawer.n4_trigger_event_id }}</strong></div>
+              <div class="drawer-field"><span>N5 action event id</span><strong>{{ item.detail_drawer.n5_action_event_id }}</strong></div>
+              <div class="drawer-field"><span>action_run_id</span><strong>{{ item.detail_drawer.action_run_id }}</strong></div>
+              <div class="drawer-field"><span>source_action_status</span><strong>{{ item.detail_drawer.source_action_status }}</strong></div>
+              <div class="drawer-field"><span>blocked_reason</span><strong>{{ item.detail_drawer.blocked_reason }}</strong></div>
+              <div class="drawer-field"><span>trigger_price</span><strong>{{ item.detail_drawer.trigger_price or '—' }}</strong></div>
+              <div class="drawer-field"><span>triggered_periods</span><strong>{{ item.detail_drawer.triggered_periods }}</strong></div>
+              <div class="drawer-field"><span>baseline_source</span><strong>{{ item.detail_drawer.baseline_source }}</strong></div>
+              <div class="drawer-field"><span>proposal_eligibility.behavior</span><strong>{{ item.detail_drawer.proposal_eligibility.behavior }}</strong></div>
+              <div class="drawer-field"><span>proposal/order/trade</span><strong>{{ item.detail_drawer.proposal_eligibility.proposal_generated }} / {{ item.detail_drawer.proposal_eligibility.order_generated }} / {{ item.detail_drawer.proposal_eligibility.trade_generated }}</strong></div>
+              <div class="drawer-field"><span>position/pnl/real</span><strong>{{ item.detail_drawer.proposal_eligibility.position_updated }} / {{ item.detail_drawer.proposal_eligibility.pnl_generated }} / {{ item.detail_drawer.proposal_eligibility.real_trade_submitted }}</strong></div>
+            </div>
+            <div class="chips">
+              {% for label in item.detail_drawer.safety_banner %}
+              <span class="chip">{{ label }}</span>
+              {% endfor %}
+            </div>
+          </details>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">暂无匹配消息</div>
+      {% endif %}
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", {method: "POST"});
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

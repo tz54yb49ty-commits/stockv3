@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ archive_page.title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --line: #d7dce5;
+      --text: #172033;
+      --muted: #637083;
+      --good: #1b7f4d;
+      --warn: #9a6200;
+      --bad: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header, main { max-width: 1180px; margin: 0 auto; padding: 18px 20px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+    nav a.active { color: var(--text); font-weight: 700; }
+    .hero { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+    h1 { margin: 0 0 6px; font-size: 28px; }
+    .muted { color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .label { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    .value { font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+    .tone-success { color: var(--good); }
+    .tone-warning { color: var(--warn); }
+    .tone-danger { color: var(--bad); }
+    .tone-muted { color: var(--muted); }
+    .section { margin-top: 18px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; font-size: 14px; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; background: #fff; font-size: 13px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      background: #172033;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button.secondary { background: #e9edf5; color: var(--text); }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    .notice {
+      border: 1px solid var(--line);
+      background: #fbfcff;
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hero { align-items: start; flex-direction: column; }
+    }
+    @media (max-width: 560px) {
+      .grid { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <strong>N6 Admin</strong>
+      <div class="muted">只读控制台</div>
+    </div>
+    <nav aria-label="N6 admin navigation">
+      {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+      {% endfor %}
+      <a href="/api/n6/auth/logout">退出登录</a>
+    </nav>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <h1>{{ archive_page.title }}</h1>
+        <div class="muted">Hot runtime keep-5 清理状态 · 本页只读</div>
+      </div>
+      <div class="chips">
+        {% for label in archive_page.safety_labels %}
+          <span class="chip">{{ label }}</span>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="label">Cleanup Result</div>
+        <div class="value tone-{{ archive_page.hot_cleanup_summary.result_tone }}">{{ archive_page.hot_cleanup_summary.result }}</div>
+      </div>
+      <div class="panel">
+        <div class="label">Cleanup Success</div>
+        <div class="value">{% if archive_page.hot_cleanup_summary.cleanup_success %}true{% else %}false{% endif %}</div>
+      </div>
+      <div class="panel">
+        <div class="label">Deleted Rows</div>
+        <div class="value">{{ archive_page.hot_cleanup_summary.deleted_total_rows }}</div>
+      </div>
+      <div class="panel">
+        <div class="label">Retention</div>
+        <div class="value">keep {{ archive_page.hot_cleanup_summary.retained_trade_date_count }} / cleanup {{ archive_page.hot_cleanup_summary.cleanup_trade_date_count }}</div>
+      </div>
+    </section>
+
+    <section class="panel section">
+      <h2>Hot Cleanup Summary</h2>
+      <p class="muted">只读展示 keep-5 direct-delete cleanup closeout。本页面不提供执行入口，不写数据库。</p>
+      <table>
+        <tbody>
+          <tr><th>result</th><td>{{ archive_page.hot_cleanup_summary.result }}</td></tr>
+          <tr><th>cleanup_success</th><td>{{ archive_page.hot_cleanup_summary.cleanup_success }}</td></tr>
+          <tr><th>direct_delete_no_archive</th><td>{{ archive_page.hot_cleanup_summary.direct_delete_no_archive }}</td></tr>
+          <tr><th>row_count_plan_skipped</th><td>{{ archive_page.hot_cleanup_summary.row_count_plan_skipped }}</td></tr>
+          <tr><th>retained_trade_dates</th><td>{{ archive_page.hot_cleanup_summary.retained_trade_dates | join(", ") }}</td></tr>
+          <tr><th>cleanup_trade_dates</th><td>{{ archive_page.hot_cleanup_summary.cleanup_trade_dates | join(", ") }}</td></tr>
+          <tr><th>deleted_total_rows</th><td>{{ archive_page.hot_cleanup_summary.deleted_total_rows }}</td></tr>
+          <tr><th>started_at</th><td>{{ archive_page.hot_cleanup_summary.started_at or "—" }}</td></tr>
+          <tr><th>finished_at</th><td>{{ archive_page.hot_cleanup_summary.finished_at or "—" }}</td></tr>
+          <tr><th>duration_ms</th><td>{{ archive_page.hot_cleanup_summary.duration_ms or "—" }}</td></tr>
+          <tr><th>blockers</th><td>{{ archive_page.hot_cleanup_summary.blockers | join(", ") }}</td></tr>
+          <tr><th>status_artifact</th><td><code>{{ archive_page.hot_cleanup_source_path or "—" }}</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel section">
+      <h2>Deleted Table Summary</h2>
+      <table>
+        <thead>
+          <tr><th>layer</th><th>table</th><th>deleted_rows</th><th>trade_date_count</th></tr>
+        </thead>
+        <tbody>
+          {% for row in archive_page.hot_cleanup_summary.deleted_table_summary %}
+            <tr>
+              <td>{{ row.layer }}</td>
+              <td>{{ row.table }}</td>
+              <td>{{ row.deleted_rows }}</td>
+              <td>{{ row.trade_date_count }}</td>
+            </tr>
+          {% endfor %}
+          {% if not archive_page.hot_cleanup_summary.deleted_table_summary %}
+            <tr><td colspan="4" class="muted">No deleted table summary available.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="label">row_count_match</div>
+        <div class="value">{% if archive_page.row_count_match %}true{% else %}false{% endif %}</div>
+      </div>
+      <div class="panel">
+        <div class="label">Cleanup</div>
+        <div class="value">
+          {% if archive_page.cleanup_executed %}
+            {{ archive_page.local_cleanup_state or archive_page.plan.cleanup_state or "LOCAL_CLEANED" }}
+          {% elif archive_page.plan.cleanup_eligible %}
+            eligible
+          {% else %}
+            waiting
+          {% endif %}
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section">
+      <h2>Storage</h2>
+      <table>
+        <tbody>
+          <tr><th>archive_root</th><td><code>{{ archive_page.archive_root }}</code></td></tr>
+          <tr><th>trade_date</th><td>{{ archive_page.selected_trade_date }}</td></tr>
+          <tr><th>macraid</th><td>{% if archive_page.storage.mounted %}mounted{% else %}not mounted{% endif %}</td></tr>
+          <tr><th>writable</th><td>{{ archive_page.storage.writable }}</td></tr>
+          <tr><th>free_bytes</th><td>{{ archive_page.storage.free_bytes }}</td></tr>
+          <tr><th>hot_retention_days</th><td>{{ archive_page.hot_retention_days }}</td></tr>
+          <tr><th>checksum_algorithm</th><td>{{ archive_page.checksum_algorithm or archive_page.plan.checksum_algorithm or "—" }}</td></tr>
+          <tr><th>cleanup_executed</th><td>{{ archive_page.cleanup_executed }}</td></tr>
+          <tr><th>local_cleanup_state</th><td>{{ archive_page.local_cleanup_state or archive_page.plan.cleanup_state or "—" }}</td></tr>
+          <tr><th>post_cleanup_rows_remaining</th><td>{{ archive_page.post_cleanup.live_total_archived_scope_rows or "—" }}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel section">
+      <h2>Archive Plan</h2>
+      <div class="chips">
+        <span class="chip">{{ archive_page.plan.status }}</span>
+        <span class="chip">files {{ archive_page.plan.file_count }}</span>
+        <span class="chip">rows {{ archive_page.plan.total_rows }}</span>
+      </div>
+      <table>
+        <thead>
+          <tr><th>layer</th><th>table</th><th>rows</th><th>path</th></tr>
+        </thead>
+        <tbody>
+          {% for file in archive_page.plan.files %}
+            <tr>
+              <td>{{ file.layer }}</td>
+              <td>{{ file.table }}</td>
+              <td>{{ file.row_count }}</td>
+              <td><code>{{ file.path }}</code></td>
+            </tr>
+          {% endfor %}
+          {% if not archive_page.plan.files %}
+            <tr><td colspan="4" class="muted">No archive files planned.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+      <p><strong>manifest:</strong> <code>{{ archive_page.plan.manifest_path }}</code></p>
+      <p><strong>report:</strong> <code>{{ archive_page.plan.report_path }}</code></p>
+      <p><strong>archive_execute_result:</strong> {{ archive_page.archive_execute_result or "—" }}</p>
+      <p><strong>row_count_match:</strong> {{ archive_page.plan.row_count_match }}</p>
+      <p><strong>blockers:</strong> {{ archive_page.plan.blockers | join(", ") }}</p>
+      <p><strong>cleanup blockers:</strong> {{ archive_page.plan.cleanup_blockers | join(", ") }}</p>
+      {% if archive_page.cleanup_executed and archive_page.post_cleanup.nonzero_tables %}
+        <h3>Retained Metadata</h3>
+        <table>
+          <thead><tr><th>layer</th><th>table</th><th>rows</th></tr></thead>
+          <tbody>
+            {% for row in archive_page.post_cleanup.nonzero_tables %}
+              <tr>
+                <td>{{ row.layer }}</td>
+                <td>{{ row.table }}</td>
+                <td>{{ row.rows }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <p><strong>retention reason:</strong> {{ archive_page.retained_metadata.reason or "—" }}</p>
+      {% endif %}
+    </section>
+
+    <section class="panel section">
+      <h2>Artifacts</h2>
+      <table>
+        <thead><tr><th>label</th><th>file</th><th>exists</th><th>path</th></tr></thead>
+        <tbody>
+          {% for artifact in archive_page.artifacts %}
+            <tr>
+              <td>{{ artifact.label }}</td>
+              <td>{{ artifact.file_name }}</td>
+              <td>{{ artifact.exists }}</td>
+              <td><code>{{ artifact.path }}</code></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

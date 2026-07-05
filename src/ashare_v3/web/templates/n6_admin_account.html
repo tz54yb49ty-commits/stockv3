@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6 系统账户状态</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main { padding: 18px 0 32px; display: grid; gap: 16px; }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      padding: 10px 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      background: #eef7f5;
+      border-color: #b7d9d3;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .chip {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .metric-grid {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-width: 0;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+    .metric strong { font-size: 18px; overflow-wrap: anywhere; }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      min-width: 960px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    @media (max-width: 920px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .metric-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>系统账户状态</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% if nav.is_admin %}
+        <a class="{% if nav.active == 'admin_users' %}active{% endif %}" href="/n6/admin/users">用户管理</a>
+        {% endif %}
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner" aria-label="Safety Banner">
+      {% for item in safety %}
+      <span class="chip">{{ item }}</span>
+      {% endfor %}
+    </section>
+    <p class="subtle">本页仅用于管理员审计 admin virtual account 初始化状态，不是多用户前台账户页面。</p>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>Virtual Account Summary</h2>
+        <span class="subtle">{{ account.quality_status }}</span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>account_name</span><strong>{{ account.account_name }}</strong></div>
+        <div class="metric"><span>virtual_account_id</span><strong>{{ account.virtual_account_id }}</strong></div>
+        <div class="metric"><span>base_currency</span><strong>{{ account.base_currency }}</strong></div>
+        <div class="metric"><span>initial_cash</span><strong>{{ account.initial_cash }}</strong></div>
+        <div class="metric"><span>status</span><strong>{{ account.virtual_account_status }}</strong></div>
+        <div class="metric"><span>seed_run_id</span><strong>{{ account.seed_run_id }}</strong></div>
+      </div>
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>Cash Snapshot</h2>
+        <span class="subtle">{{ cash_snapshot.snapshot_status }}</span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>available_cash</span><strong>{{ cash_snapshot.available_cash }}</strong></div>
+        <div class="metric"><span>frozen_cash</span><strong>{{ cash_snapshot.frozen_cash }}</strong></div>
+        <div class="metric"><span>total_cash</span><strong>{{ cash_snapshot.total_cash }}</strong></div>
+        <div class="metric"><span>snapshot_time</span><strong>{{ cash_snapshot.snapshot_time }}</strong></div>
+        <div class="metric"><span>source_ledger_max_id</span><strong>{{ cash_snapshot.source_ledger_max_id }}</strong></div>
+        <div class="metric"><span>currency</span><strong>{{ cash_snapshot.currency }}</strong></div>
+      </div>
+    </section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>Cash Ledger</h2>
+        <span class="subtle">{{ cash_ledger|length }} rows</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>event_time</th>
+              <th>ledger_type</th>
+              <th>amount</th>
+              <th>currency</th>
+              <th>source_event_type</th>
+              <th>source_event_id</th>
+              <th>source_virtual_order_id</th>
+              <th>source_virtual_trade_id</th>
+              <th>quality_status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in cash_ledger %}
+            <tr>
+              <td>{{ item.event_time }}</td>
+              <td>{{ item.ledger_type }}</td>
+              <td>{{ item.amount }}</td>
+              <td>{{ item.currency }}</td>
+              <td>{{ item.source_event_type }}</td>
+              <td>{{ item.source_event_id }}</td>
+              <td>{{ item.source_virtual_order_id }}</td>
+              <td>{{ item.source_virtual_trade_id }}</td>
+              <td>{{ item.quality_status }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", {method: "POST"});
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

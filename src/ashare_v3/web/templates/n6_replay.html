@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>全日回放</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+      --danger: #8a2d1d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 760; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    nav, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    main { padding: 18px 0 32px; display: grid; gap: 16px; }
+    .banner, .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .banner {
+      background: #fff6ed;
+      border-color: #e7c9a9;
+      color: var(--danger);
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      align-items: end;
+      padding: 12px 14px;
+    }
+    .lineage-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0 14px 14px;
+    }
+    .bundle-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0 14px 14px;
+    }
+    .lineage {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+    }
+    .lineage span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 6px; }
+    .lineage strong { display: block; font-size: 13px; line-height: 1.4; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 720; }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      padding: 12px 14px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--soft);
+    }
+    .metric span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 6px; }
+    .metric strong { font-size: 20px; }
+    .tables {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+    .timeline-layout {
+      display: grid;
+      grid-template-columns: 330px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .message-stack {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+    .table-wrap {
+      overflow: auto;
+      max-height: 640px;
+    }
+    .message-table table {
+      min-width: 1180px;
+    }
+    .message-table th {
+      white-space: nowrap;
+    }
+    .message-table td {
+      max-width: 220px;
+    }
+    .message-table td:nth-child(3),
+    .message-table td:nth-child(5),
+    .message-table td:nth-child(6) {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+    .timeline-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .timeline-row {
+      cursor: pointer;
+    }
+    .timeline-row.is-active td {
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 760;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th { color: var(--muted); background: var(--soft); font-weight: 760; }
+    .text { padding: 12px 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .status { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>{{ replay.title }}</h1>
+        <div class="status">A轨 · 本地 artifact 回放 · {{ replay.mode }}</div>
+      </div>
+      <nav>
+        {% for link in nav.links %}
+          <a href="{{ link.href }}" class="{{ 'active' if nav.active == link.key else '' }}">{{ link.label }}</a>
+        {% endfor %}
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="banner">{{ replay.notice }}</section>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>Replay Control</h2>
+        <div class="actions">
+          <button id="refresh">刷新状态</button>
+          <a id="download" href="#" aria-disabled="true">下载 Excel</a>
+        </div>
+      </div>
+      <form id="replay-form" class="filter-grid">
+        <label>交易日
+          <select id="trade-date" name="trade_date" required>
+            {% for trade_date in replay.supported_trade_dates %}
+              <option value="{{ trade_date }}" {{ 'selected' if trade_date == replay.default_trade_date else '' }}>{{ trade_date }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>开始 <input id="start-hhmm" name="start_hhmm" value="{{ replay.default_start_hhmm }}" required></label>
+        <label>结束 <input id="end-hhmm" name="end_hhmm" value="{{ replay.default_end_hhmm }}" required></label>
+        <label>Engine
+          <select id="replay-engine-version" name="replay_engine_version">
+            {% for engine_version in replay.supported_replay_engine_versions %}
+              <option value="{{ engine_version }}" {{ 'selected' if engine_version == replay.default_replay_engine_version else '' }}>{{ engine_version }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Asset Scope
+          <select id="asset-scope" name="asset_scope">
+            {% for asset_scope in replay.supported_asset_scopes %}
+              <option value="{{ asset_scope }}" {{ 'selected' if asset_scope == replay.default_asset_scope else '' }}>{{ asset_scope }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Source Bundle
+          <select id="source-bundle-key" name="source_bundle_key">
+            {% for source_bundle_key in replay.supported_source_bundle_keys %}
+              <option value="{{ source_bundle_key }}" {{ 'selected' if source_bundle_key == replay.default_source_bundle_key else '' }}>{{ source_bundle_key }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Validation
+          <select id="validation-mode" name="validation_mode">
+            {% for validation_mode in replay.supported_validation_modes %}
+              <option value="{{ validation_mode }}" {{ 'selected' if validation_mode == replay.default_validation_mode else '' }}>{{ validation_mode }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>N3P Strategy
+          <select id="n3p-strategy" name="n3p_strategy">
+            {% for n3p_strategy in replay.supported_n3p_strategies %}
+              <option value="{{ n3p_strategy }}" {{ 'selected' if n3p_strategy == replay.default_n3p_strategy else '' }}>{{ n3p_strategy }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>N3P Reduction
+          <select id="n3p-reduction-mode" name="n3p_reduction_mode">
+            {% for n3p_reduction_mode in replay.supported_n3p_reduction_modes %}
+              <option value="{{ n3p_reduction_mode }}" {{ 'selected' if n3p_reduction_mode == replay.default_n3p_reduction_mode else '' }}>{{ n3p_reduction_mode }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>模式 <select id="mode" name="mode"><option value="local_only">local_only</option></select></label>
+        <button type="submit">创建本地回放</button>
+        <span id="job-status" class="status">未创建 job</span>
+      </form>
+      <div class="surface-head"><h2>C1 Readiness</h2><span id="c1-readiness-status" class="status">not checked</span></div>
+      <div class="lineage-grid">
+        <div class="lineage"><span>status</span><strong id="c1-status">pending</strong></div>
+        <div class="lineage"><span>expected minutes</span><strong id="c1-expected">240</strong></div>
+        <div class="lineage"><span>objects index/board</span><strong id="c1-objects">0/0</strong></div>
+        <div class="lineage"><span>missing assets</span><strong id="c1-missing">0</strong></div>
+        <div class="lineage"><span>distribution</span><strong id="c1-distribution">pending</strong></div>
+        <div class="lineage"><span>N3 handoff</span><strong id="c1-handoff">N3_C1_INDEX_BOARD_HISTORICAL_1M_FILL_GATE</strong></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="check-c1-readiness">检查 C1 完整性</button>
+        <button type="button" id="export-c1-source-bundle">从 C1 生成 full-day source bundle</button>
+      </div>
+    </section>
+    <section class="surface">
+      <div class="surface-head"><h2>Summary</h2><span id="job-id" class="status"></span></div>
+      <div class="metric-grid">
+        <div class="metric"><span>N4 ordinary matched</span><strong id="m-n4-o">0</strong></div>
+        <div class="metric"><span>N4 hint matched</span><strong id="m-n4-h">0</strong></div>
+        <div class="metric"><span>N5 eligible</span><strong id="m-n5-e">0</strong></div>
+        <div class="metric"><span>N5 executed</span><strong id="m-n5-x">0</strong></div>
+        <div class="metric"><span>BUY_HINT eligible</span><strong id="m-buy-hint">0</strong></div>
+        <div class="metric"><span>SELL_HINT eligible</span><strong id="m-sell-hint">0</strong></div>
+      </div>
+      <div class="lineage-grid">
+        <div class="lineage"><span>replay_engine_version</span><strong id="summary-engine">{{ replay.default_replay_engine_version }}</strong></div>
+        <div class="lineage"><span>validation_mode</span><strong id="summary-validation-mode">{{ replay.default_validation_mode }}</strong></div>
+        <div class="lineage"><span>n3p_strategy</span><strong id="summary-n3p-strategy">{{ replay.default_n3p_strategy }}</strong></div>
+        <div class="lineage"><span>n3p_reduction_mode</span><strong id="summary-n3p-reduction-mode">{{ replay.default_n3p_reduction_mode }}</strong></div>
+        <div class="lineage"><span>asset_scope</span><strong id="summary-asset-scope">{{ replay.default_asset_scope }}</strong></div>
+        <div class="lineage"><span>source_mode</span><strong id="summary-source-mode">replay</strong></div>
+        <div class="lineage"><span>source_policy</span><strong id="summary-source-policy">canonical planner dry-run, not production lineage</strong></div>
+        <div class="lineage"><span>historical_source_status</span><strong id="summary-source-status">pending</strong></div>
+        <div class="lineage"><span>safety lineage</span><strong id="summary-safety">database_write=false / consume_outbox=false / update_checkpoint=false</strong></div>
+        <div class="lineage"><span>allowed_asset_kinds</span><strong id="summary-allowed-assets">stock/index/board</strong></div>
+        <div class="lineage"><span>asset_unit_fix delta</span><strong id="summary-delta-counts">disabled</strong></div>
+        <div class="lineage"><span>N5 delta-only</span><strong id="summary-n5-delta">disabled</strong></div>
+        <div class="lineage"><span>shadow_mode</span><strong id="summary-shadow-mode">false</strong></div>
+        <div class="lineage"><span>shadow N4</span><strong id="summary-shadow-n4">disabled</strong></div>
+        <div class="lineage"><span>shadow N5</span><strong id="summary-shadow-n5">disabled</strong></div>
+        <div class="lineage"><span>shadow safety</span><strong id="summary-shadow-safety">pending</strong></div>
+        <div class="lineage"><span>N3P prefilter</span><strong id="summary-n3p-prefilter">disabled</strong></div>
+      </div>
+      <div class="surface-head"><h2>Source Bundle</h2><span id="summary-bundle-note" class="status">pending</span></div>
+      <div class="bundle-grid">
+        <div class="lineage"><span>source_bundle_key</span><strong id="summary-source-bundle-key">{{ replay.default_source_bundle_key }}</strong></div>
+        <div class="lineage"><span>source_bundle_selector_mode</span><strong id="summary-source-bundle-mode">auto</strong></div>
+        <div class="lineage"><span>resolved_source_bundle_path</span><strong id="summary-source-bundle-path">pending</strong></div>
+        <div class="lineage"><span>asset_scope_filter_applied</span><strong id="summary-scope-applied">false</strong></div>
+        <div class="lineage"><span>historical_source_type</span><strong id="summary-source-type"></strong></div>
+        <div class="lineage"><span>source_row_count</span><strong id="summary-source-rows">0</strong></div>
+        <div class="lineage"><span>candidate_count</span><strong id="summary-candidate-count">0</strong></div>
+        <div class="lineage"><span>context_count</span><strong id="summary-context-count">0</strong></div>
+        <div class="lineage"><span>b2 row counts</span><strong id="summary-b2-counts">snapshot=0 / live=0 / prev=0</strong></div>
+        <div class="lineage"><span>source hash / upstream</span><strong id="summary-source-hash">pending</strong></div>
+        <div class="lineage"><span>before counts</span><strong id="summary-scope-before">pending</strong></div>
+        <div class="lineage"><span>after counts</span><strong id="summary-scope-after">pending</strong></div>
+      </div>
+      <div class="text" id="engine-disclaimer">canonical planner dry-run, not production lineage</div>
+    </section>
+    <section class="timeline-layout">
+      <div class="surface">
+        <div class="surface-head">
+          <h2>Timeline</h2>
+          <div class="timeline-controls">
+            <button type="button" id="timeline-clear">全部分钟</button>
+            <span id="timeline-filter" class="status">未选择分钟</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>minute</th><th>N3 rows</th><th>N4 ordinary</th><th>N4 hint</th><th>N4 state_changed</th><th>N4 no-op</th><th>N5 eligible</th><th>N5 executed</th><th>N5 skipped</th></tr></thead>
+            <tbody id="timeline-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="message-stack">
+      <div class="surface">
+        <div class="surface-head"><h2>N4 Messages</h2></div>
+        <div class="table-wrap message-table">
+          <table>
+            <thead>
+              <tr>
+                <th>minute</th><th>event</th><th>identity</th><th>signal</th><th>condition_key</th><th>original_condition_key</th>
+                <th>trigger_mark_candidate</th><th>source_mode</th><th>source_policy</th><th>replay_engine_version</th>
+                <th>source</th><th>trace_summary</th><th>lineage_summary</th>
+              </tr>
+            </thead>
+            <tbody id="n4-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="surface">
+        <div class="surface-head"><h2>N5 Messages</h2></div>
+        <div class="table-wrap message-table">
+          <table>
+            <thead>
+              <tr>
+                <th>minute</th><th>event</th><th>identity</th><th>signal</th><th>condition_key</th><th>original_condition_key</th>
+                <th>state</th><th>source_trigger_run_id</th><th>source_trigger_event_type</th><th>final_proof_source</th>
+                <th>confirmation_metric_id</th><th>action_mark</th><th>replay_engine_version</th>
+              </tr>
+            </thead>
+            <tbody id="n5-body"></tbody>
+          </table>
+        </div>
+      </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    let currentJobId = "";
+    let currentTimeline = [];
+    let currentN4Rows = [];
+    let currentN5Rows = [];
+    let selectedMinute = "";
+    const scopeCountsText = (counts) => {
+      const data = counts || {};
+      const source = data.source_records || {};
+      const candidates = data.candidates || {};
+      const context = data.context || {};
+      return `src s/i/b=${source.stock || 0}/${source.index || 0}/${source.board || 0} | cand=${candidates.stock || 0}/${candidates.index || 0}/${candidates.board || 0} | ctx=${context.stock || 0}/${context.index || 0}/${context.board || 0}`;
+    };
+    const shortHash = (value) => {
+      const textValue = String(value || "");
+      return textValue ? textValue.slice(0, 12) : "";
+    };
+    const text = (id, value) => { document.getElementById(id).textContent = value ?? ""; };
+    const rowHtml = (values) => `<tr>${values.map(v => `<td>${String(v ?? "")}</td>`).join("")}</tr>`;
+    const timelineRowHtml = (row) => {
+      const activeClass = selectedMinute === row.minute ? "timeline-row is-active" : "timeline-row";
+      return `<tr class="${activeClass}" data-minute="${row.minute}"><td>${row.minute}</td><td>${row.n3_rows ?? 0}</td><td>${row.n4_ordinary ?? 0}</td><td>${row.n4_hint ?? 0}</td><td>${row.n4_state_changed ?? 0}</td><td>${row.n4_noop_suppressed ?? 0}</td><td>${row.n5_eligible ?? 0}</td><td>${row.n5_executed ?? 0}</td><td>${row.n5_skipped ?? 0}</td></tr>`;
+    };
+    function renderTables() {
+      const minuteFilter = selectedMinute;
+      const n4Rows = minuteFilter ? currentN4Rows.filter(row => row.minute === minuteFilter) : currentN4Rows;
+      const n5Rows = minuteFilter ? currentN5Rows.filter(row => row.minute === minuteFilter) : currentN5Rows;
+      document.getElementById("n4-body").innerHTML = n4Rows.map(row => rowHtml([
+        row.minute,
+        row.event_type,
+        row.identity_key,
+        row.signal_type,
+        row.condition_key,
+        row.original_condition_key,
+        row.trigger_mark_candidate,
+        row.source_mode,
+        row.source_policy,
+        row.replay_engine_version,
+        row.source,
+        row.trace_summary,
+        row.lineage_summary
+      ])).join("");
+      document.getElementById("n5-body").innerHTML = n5Rows.map(row => rowHtml([
+        row.minute,
+        row.event_type,
+        row.identity_key,
+        row.signal_type,
+        row.condition_key,
+        row.original_condition_key,
+        row.action_state,
+        row.source_trigger_run_id,
+        row.source_trigger_event_type,
+        row.final_proof_source,
+        row.confirmation_metric_id,
+        row.action_mark,
+        row.replay_engine_version
+      ])).join("");
+      text("timeline-filter", minuteFilter ? `当前过滤分钟 ${minuteFilter}` : "未选择分钟");
+    }
+    function renderTimeline() {
+      document.getElementById("timeline-body").innerHTML = currentTimeline.map(timelineRowHtml).join("");
+      document.querySelectorAll("#timeline-body tr[data-minute]").forEach((row) => {
+        row.addEventListener("click", () => {
+          selectedMinute = row.dataset.minute === selectedMinute ? "" : row.dataset.minute;
+          renderTimeline();
+          renderTables();
+        });
+      });
+    }
+    async function loadJob(jobId) {
+      const job = await fetch(`/api/n6/ui/v1/replay/jobs/${jobId}`).then(r => r.json());
+      const n4 = await fetch(`/api/n6/ui/v1/replay/jobs/${jobId}/n4-messages`).then(r => r.json());
+      const n5 = await fetch(`/api/n6/ui/v1/replay/jobs/${jobId}/n5-messages`).then(r => r.json());
+      const timeline = await fetch(`/api/n6/ui/v1/replay/jobs/${jobId}/timeline`).then(r => r.json());
+      text("job-id", jobId);
+      text("m-n4-o", job.summary?.n4?.ordinary_TriggerMatched || 0);
+      text("m-n4-h", job.summary?.n4?.hint_TriggerMatched || 0);
+      text("m-n5-e", job.summary?.n5?.ActionEligible || 0);
+      text("m-n5-x", job.summary?.n5?.ActionExecuted || 0);
+      text("m-buy-hint", job.summary?.n5?.BUY_HINT_ActionEligible || 0);
+      text("m-sell-hint", job.summary?.n5?.SELL_HINT_ActionEligible || 0);
+      text("summary-engine", job.summary?.replay_engine_version || "");
+      text("summary-validation-mode", job.summary?.validation_mode || "none");
+      text("summary-n3p-strategy", job.summary?.n3p_strategy || "full_n3p");
+      text("summary-n3p-reduction-mode", job.summary?.n3p_reduction_mode || "none");
+      text("summary-asset-scope", job.summary?.asset_scope || "all");
+      text("summary-source-mode", job.summary?.n3?.source_mode || "replay");
+      text("summary-source-policy", job.summary?.source_policy || "");
+      text("summary-source-status", job.summary?.historical_source_status || "pending");
+      text("summary-source-bundle-key", job.summary?.source_bundle_key || "auto");
+      text("summary-source-bundle-mode", job.summary?.source_bundle_selector_mode || "auto");
+      text("summary-source-bundle-path", job.summary?.resolved_source_bundle_path || "");
+      text("summary-scope-applied", String(job.summary?.asset_scope_filter_applied || false));
+      text("summary-allowed-assets", (job.summary?.asset_scope_allowed_asset_kinds || []).join("/") || "");
+      text("summary-source-type", job.summary?.source_meta?.historical_source_type || "");
+      text("summary-source-rows", job.summary?.source_meta?.source_row_count || 0);
+      text("summary-candidate-count", job.summary?.source_meta?.candidate_count || 0);
+      text("summary-context-count", job.summary?.source_meta?.context_count || 0);
+      text(
+        "summary-b2-counts",
+        `snapshot=${job.summary?.source_meta?.b2_snapshot_row_count || 0} / live=${job.summary?.source_meta?.b2_live_current_row_count || 0} / prev=${job.summary?.source_meta?.b2_previous_day_row_count || 0}`
+      );
+      text(
+        "summary-source-hash",
+        `${shortHash(job.summary?.source_meta?.historical_source_hash)} / ${job.summary?.source_meta?.upstream_source_mode || ""}`.trim()
+      );
+      text("summary-scope-before", scopeCountsText(job.summary?.asset_scope_source_counts_before));
+      text("summary-scope-after", scopeCountsText(job.summary?.asset_scope_source_counts_after));
+      text(
+        "summary-delta-counts",
+        job.summary?.asset_unit_fix_delta_validation
+          ? `common=${job.summary?.asset_unit_fix_delta?.common_old_and_corrected || 0} / corrected_only=${job.summary?.asset_unit_fix_delta?.corrected_only || 0} / index_board=${job.summary?.asset_unit_fix_delta?.index_board_delta || 0} / stock_excluded=${job.summary?.asset_unit_fix_delta?.excluded_stock_replay || 0}`
+          : "disabled"
+      );
+      text(
+        "summary-n5-delta",
+        job.summary?.asset_unit_fix_delta_validation
+          ? `eligible=${job.summary?.n5_delta_only?.ActionEligible || 0} / stock_executed=${job.summary?.n5_delta_only?.stock_ActionExecuted || 0}`
+          : "disabled"
+      );
+      text("summary-shadow-mode", String(job.summary?.shadow_mode || false));
+      text(
+        "summary-shadow-n4",
+        job.summary?.shadow_mode
+          ? `matched=${job.summary?.shadow?.TriggerMatched || 0} / state_changed=${job.summary?.shadow?.TriggerStateChanged || 0} / noop=${job.summary?.shadow?.noop_suppressed || 0}`
+          : "disabled"
+      );
+      text(
+        "summary-shadow-n5",
+        job.summary?.shadow_mode
+          ? `eligible=${job.summary?.shadow?.ActionEligible || 0} / executed=${job.summary?.shadow?.ActionExecuted || 0} / skipped=${job.summary?.shadow?.ActionSkipped || 0}`
+          : "disabled"
+      );
+      text(
+        "summary-shadow-safety",
+        job.summary?.shadow_mode
+          ? `stock_n4=${job.summary?.shadow?.stock_n4_messages || 0} / stock_n5=${job.summary?.shadow?.stock_n5_messages || 0} / state_changed_to_n5=${job.summary?.shadow?.trigger_state_changed_action_entries || 0}`
+          : "pending"
+      );
+      text(
+        "summary-n3p-prefilter",
+        job.summary?.n3p_prefilter
+          ? `keep=${job.summary.n3p_prefilter.prefilter_keep || 0} / drop=${job.summary.n3p_prefilter.prefilter_drop || 0} / false_negative=${job.summary.n3p_prefilter.false_negative_count || 0} / saved=${job.summary.n3p_prefilter.n3p_calls_saved || 0}`
+          : "disabled"
+      );
+      text(
+        "summary-bundle-note",
+        job.summary?.historical_source_kind === "fixture"
+          ? "fixture fallback / not full historical source"
+          : "explicit source bundle"
+      );
+      text(
+        "summary-safety",
+        `database_write=${job.safety_flags?.database_write ?? false} / consume_outbox=${job.safety_flags?.consume_outbox ?? false} / update_checkpoint=${job.safety_flags?.update_checkpoint ?? false}`
+      );
+      text(
+        "engine-disclaimer",
+        job.summary?.engine_disclaimer || (job.summary?.replay_engine_version === "fixture_v1"
+          ? "fixture harness, not canonical planner proof"
+          : "canonical planner dry-run, not production lineage")
+      );
+      currentTimeline = timeline.items || [];
+      currentN4Rows = n4.items || [];
+      currentN5Rows = n5.items || [];
+      renderTimeline();
+      renderTables();
+      document.getElementById("download").href = `/api/n6/ui/v1/replay/jobs/${jobId}/export.xlsx`;
+      text("job-status", "job completed");
+    }
+    async function checkC1Readiness() {
+      const tradeDate = document.getElementById("trade-date").value;
+      const assetScope = document.getElementById("asset-scope").value;
+      text("c1-readiness-status", "checking...");
+      const response = await fetch(`/api/n6/ui/v1/replay/c1-readiness?trade_date=${encodeURIComponent(tradeDate)}&asset_scope=${encodeURIComponent(assetScope)}`);
+      const data = await response.json();
+      const readiness = data.readiness || {};
+      text("c1-status", readiness.status || data.error || "blocked");
+      text("c1-expected", readiness.expected_minutes_per_object || 240);
+      text("c1-objects", `${readiness.index_object_count || 0}/${readiness.board_object_count || 0}`);
+      text("c1-missing", readiness.missing_asset_count || 0);
+      text("c1-distribution", JSON.stringify(readiness.actual_minutes_distribution || {}));
+      text("c1-readiness-status", data.ok ? "passed" : (readiness.blocked_reason || data.error || "blocked"));
+      return data;
+    }
+    async function exportC1SourceBundle() {
+      text("c1-readiness-status", "exporting...");
+      const tradeDate = document.getElementById("trade-date").value;
+      const payload = {
+        trade_date: tradeDate,
+        asset_scope: document.getElementById("asset-scope").value,
+        template_source_bundle_key: `${tradeDate.replaceAll("-", "")}_index_board_only`
+      };
+      const response = await fetch("/api/n6/ui/v1/replay/source-bundles/from-c1", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        text("c1-readiness-status", data.detail || data.error || "blocked");
+        return;
+      }
+      const selector = document.getElementById("source-bundle-key");
+      if (![...selector.options].some(option => option.value === data.source_bundle_key)) {
+        selector.add(new Option(data.source_bundle_key, data.source_bundle_key));
+      }
+      selector.value = data.source_bundle_key;
+      document.getElementById("asset-scope").value = "index_board_only";
+      document.getElementById("validation-mode").value = "full_day_shadow_v1";
+      document.getElementById("n3p-strategy").value = "prefilter_audit";
+      text("c1-readiness-status", "exported");
+      text("c1-status", data.readiness?.status || "passed");
+      text("c1-distribution", JSON.stringify(data.readiness?.actual_minutes_distribution || {}));
+    }
+    document.getElementById("check-c1-readiness").addEventListener("click", checkC1Readiness);
+    document.getElementById("export-c1-source-bundle").addEventListener("click", exportC1SourceBundle);
+    document.getElementById("replay-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      text("job-status", "creating...");
+      const payload = {
+        trade_date: document.getElementById("trade-date").value,
+        start_hhmm: document.getElementById("start-hhmm").value,
+        end_hhmm: document.getElementById("end-hhmm").value,
+        replay_engine_version: document.getElementById("replay-engine-version").value,
+        asset_scope: document.getElementById("asset-scope").value,
+        source_bundle_key: document.getElementById("source-bundle-key").value,
+        validation_mode: document.getElementById("validation-mode").value,
+        n3p_strategy: document.getElementById("n3p-strategy").value,
+        n3p_reduction_mode: document.getElementById("n3p-reduction-mode").value,
+        mode: "local_only"
+      };
+      const response = await fetch("/api/n6/ui/v1/replay/jobs", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        text("job-status", data.detail || data.error || "blocked");
+        return;
+      }
+      currentJobId = data.job_id;
+      await loadJob(currentJobId);
+    });
+    document.getElementById("refresh").addEventListener("click", async () => {
+      if (currentJobId) await loadJob(currentJobId);
+    });
+    document.getElementById("timeline-clear").addEventListener("click", () => {
+      selectedMinute = "";
+      renderTimeline();
+      renderTables();
+    });
+  </script>
+</body>
+</html>

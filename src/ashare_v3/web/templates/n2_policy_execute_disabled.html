@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N2 overwrite disabled</title>
+  <style>
+    body {
+      margin: 0;
+      background: #f5f7f8;
+      color: #182022;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(760px, calc(100vw - 32px));
+      margin: 48px auto;
+      background: #ffffff;
+      border: 1px solid #d6dee1;
+      border-radius: 8px;
+      padding: 24px;
+    }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    p { line-height: 1.6; color: #607176; }
+    a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 6px;
+      background: #0f766e;
+      color: white;
+      text-decoration: none;
+      font-weight: 680;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Execute overwrite 暂未启用</h1>
+    <p>当前 layer_role={{ layer_role }}，MVP 只支持 policy dry-run 预览。此入口保留为二次确认页面占位，不写 condition 表、不 supersede active run。</p>
+    <a href="/">返回控制台</a>
+  </main>
+</body>
+</html>

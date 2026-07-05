@@ -1,0 +1,14641 @@
+import json
+import copy
+from io import BytesIO
+from pathlib import Path
+import re
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+import inspect
+from typing import Any
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+from fastapi.templating import Jinja2Templates
+
+from ashare_v3.web import n6_app_v1 as n6_app_v1_module
+from ashare_v3.web import n6_user_app as n6_user_app_module
+from ashare_v3.web.n6_replay import _canonical_fixture_source_bundle
+from ashare_v3.web.n6_user_app import (
+    COOKIE_NAME,
+    AuthSession,
+    N6UserWebConfig,
+    PostgresN6UserRepository,
+    TEMPLATE_DIR,
+    UserAccount,
+    app_signal_available_trade_dates,
+    current_app_signal_trade_date,
+    create_app,
+    hash_session_token,
+    strategy_type_from_transitions,
+)
+from ashare_v3.user.admin_bootstrap import HashResult
+from ashare_v3.user.stale_active_lineage import (
+    HINT_30M_STALE_SOURCE_ACTION_RUN_IDS,
+    HINT_30M_STALE_SOURCE_TRIGGER_RUN_IDS,
+    N2_D_ANCHOR_STALE_SOURCE_ACTION_RUN_IDS,
+    N2_D_ANCHOR_STALE_SOURCE_TRIGGER_RUN_IDS,
+    is_stale_user_signal_row,
+    stale_source_action_run_ids,
+)
+from ashare_v3.web.n6_ui_v1 import n4_message_item, n5_message_item
+
+
+def _test_c1_rows(*, asset_kind: str, identity_key: str, code: str, trade_date: str = "2026-06-26") -> list[dict[str, object]]:
+    minutes = [
+        *[f"{hour:02d}:{minute:02d}" for hour in range(9, 12) for minute in range(60) if "09:31" <= f"{hour:02d}:{minute:02d}" <= "11:30"],
+        *[f"{hour:02d}:{minute:02d}" for hour in range(13, 16) for minute in range(60) if "13:01" <= f"{hour:02d}:{minute:02d}" <= "15:00"],
+    ]
+    return [
+        {
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+            "code": code,
+            "display_code": code,
+            "datetime": f"{trade_date} {minute}",
+            "bar_time": f"{trade_date}T{minute}:00+08:00",
+            "open": "10",
+            "high": "11",
+            "low": "9",
+            "close": "10",
+            "volume": "100",
+            "amount": "1000",
+            "quality_status": "passed",
+        }
+        for minute in minutes
+    ]
+
+
+def _write_test_explicit_replay_source_bundle(target: Path) -> None:
+    bundle = _canonical_fixture_source_bundle(job_id="local_replay_20260626_explicit_seed")
+    bundle["source_meta"] = {
+        "historical_source_type": "explicit_source_bundle",
+        "historical_source_path": str(target),
+        "historical_source_hash": "test-explicit-source-bundle-hash",
+        "source_row_count": 960,
+        "candidate_count": 4,
+        "context_count": 4,
+        "b2_snapshot_row_count": 2,
+        "b2_live_current_row_count": 2,
+        "b2_previous_day_row_count": 2,
+        "upstream_source_mode": "live_current_1m",
+        "bundle_contract_version": "historical_replay_source_bundle_v1",
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _write_test_asset_unit_fix_delta_source_bundle(target: Path) -> None:
+    bundle = _canonical_fixture_source_bundle(job_id="local_replay_20260626_asset_unit_fix_delta_seed")
+
+    def trigger_row(asset_kind: str, identity_key: str, condition_key: str = "BUY:D") -> dict[str, object]:
+        return {
+            "for_trade_date": "20260626",
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": condition_key,
+            "trigger_period": "D",
+            "trigger_mark_candidate": "normal",
+            "trigger_time": "2026-06-26T14:47:00+08:00",
+            "trigger_price": "10.00",
+            "source_condition_run_id": "condition_layer_20260625_source_20260625_for_20260626_v1",
+            "source_metric_run_id": "realtime_action_confirmation_metric_20260626_until_1447__asset_unit_fix_v1_trace_only",
+            "source_n3p_live_target_run_id": "realtime_action_confirmation_metric_20260626_until_1447__asset_unit_fix_v1_trace_only",
+            "source_mode": "live_current_1m",
+            "c1_dependency": False,
+            "n5_entry_allowed": True,
+            "source_run_id": "production_lineage_trace_only",
+            "event_id": f"prod_evt_{identity_key.replace(':', '_')}_{condition_key.replace(':', '_')}",
+            "dedup_key": f"production_dedup_{identity_key}",
+        }
+
+    old_rows = [trigger_row("stock", f"stock:SH:{600000 + index:06d}") for index in range(295)]
+    corrected_rows = [
+        *old_rows,
+        *[trigger_row("stock", f"stock:SZ:{300000 + index:06d}", "BUY:Q,M,W,D") for index in range(90)],
+        *[trigger_row("index", f"index:SH:{index:06d}") for index in range(1, 6)],
+        *[trigger_row("board", f"board:TDX:{881000 + index}", "BUY:Q,M,W,D") for index in range(1, 17)],
+    ]
+    bundle["asset_unit_fix_delta_validation"] = {
+        "old_unified_n4_run_id": "trigger_provisional_ordinary_20260626_until_1447__old_unified_trace_only",
+        "corrected_n4_run_id": "trigger_provisional_ordinary_20260626_until_1447__asset_unit_fix_v1_trace_only",
+        "old_unified_trigger_matched": old_rows,
+        "corrected_trigger_matched": corrected_rows,
+    }
+    bundle["source_meta"] = {
+        "historical_source_type": "explicit_source_bundle_asset_unit_fix_delta",
+        "historical_source_path": str(target),
+        "historical_source_hash": "test-asset-unit-fix-delta-source-bundle-hash",
+        "source_row_count": 960,
+        "candidate_count": 4,
+        "context_count": 4,
+        "b2_snapshot_row_count": 2,
+        "b2_live_current_row_count": 2,
+        "b2_previous_day_row_count": 2,
+        "upstream_source_mode": "live_current_1m",
+        "bundle_contract_version": "historical_replay_source_bundle_v1",
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _write_test_mixed_asset_scope_bundle(target: Path) -> None:
+    bundle = {
+        "source_records": {
+            "600000": [
+                {"asset_kind": "stock", "code": "600000", "datetime": "2026-06-25 09:31", "open": 10, "high": 11, "low": 9, "close": 10, "amount": 100},
+                {"asset_kind": "stock", "code": "600000", "datetime": "2026-06-26 10:00", "open": 10, "high": 11, "low": 9, "close": 10, "amount": 100},
+            ],
+            "000300": [
+                {"asset_kind": "index", "code": "000300", "datetime": "2026-06-25 09:31", "open": 20, "high": 21, "low": 19, "close": 20, "amount": 200},
+                {"asset_kind": "index", "code": "000300", "datetime": "2026-06-26 10:00", "open": 20, "high": 21, "low": 19, "close": 20, "amount": 200},
+            ],
+            "881001": [
+                {"asset_kind": "board", "code": "881001", "datetime": "2026-06-25 09:31", "open": 30, "high": 31, "low": 29, "close": 30, "amount": 300},
+                {"asset_kind": "board", "code": "881001", "datetime": "2026-06-26 10:00", "open": 30, "high": 31, "low": 29, "close": 30, "amount": 300},
+            ],
+        },
+        "candidates": [
+            {"asset_kind": "stock", "identity_key": "stock:SH:600000", "exchange": "SH", "code": "600000", "display_code": "600000", "name": "浦发银行", "signal_type": "B_BUY", "condition_key": "BUY:D", "minute_label": "2026-06-26 10:00", "observed_at": "2026-06-26 10:00:30"},
+            {"asset_kind": "index", "identity_key": "index:SH:000300", "exchange": "SH", "code": "000300", "display_code": "000300", "name": "沪深300", "signal_type": "B_BUY", "condition_key": "BUY:D", "minute_label": "2026-06-26 10:00", "observed_at": "2026-06-26 10:00:30"},
+            {"asset_kind": "board", "identity_key": "board:TDX:881001", "code": "881001", "display_code": "881001", "name": "银行", "signal_type": "B_BUY", "condition_key": "BUY_HINT", "minute_label": "2026-06-26 10:15", "observed_at": "2026-06-26 10:15:30"},
+        ],
+        "n4_context_snapshot_rows": [
+            {"run_id": "trigger_context_snapshot_20260626_test", "for_trade_date": "20260626", "source_trade_date": "20260625", "prev_trade_date": "20260625", "asset_kind": "stock", "identity_key": "stock:SH:600000", "direction": "buy", "condition_key": "BUY:D", "condition_periods": ["D"], "allowed_signal_types": ["BUY"], "is_hint_scope": False, "quality_status": "passed", "period_trigger_baseline_json": {"periods": {"D": {"previous_transition": "flat"}}}, "raw_json": {"condition_key": "BUY:D", "original_condition_key": "BUY:D"}},
+            {"run_id": "trigger_context_snapshot_20260626_test", "for_trade_date": "20260626", "source_trade_date": "20260625", "prev_trade_date": "20260625", "asset_kind": "index", "identity_key": "index:SH:000300", "direction": "buy", "condition_key": "BUY:D", "condition_periods": ["D"], "allowed_signal_types": ["BUY"], "is_hint_scope": False, "quality_status": "passed", "period_trigger_baseline_json": {"periods": {"D": {"previous_transition": "flat"}}}, "raw_json": {"condition_key": "BUY:D", "original_condition_key": "BUY:D"}},
+            {"run_id": "trigger_context_snapshot_20260626_test", "for_trade_date": "20260626", "source_trade_date": "20260625", "prev_trade_date": "20260625", "asset_kind": "board", "identity_key": "board:TDX:881001", "direction": "buy", "condition_key": "BUY_HINT", "condition_periods": [], "allowed_signal_types": ["BUY_HINT"], "is_hint_scope": True, "quality_status": "passed", "period_trigger_baseline_json": {"periods": {"D": {"previous_transition": "flat"}}}, "raw_json": {"condition_key": "BUY_HINT", "original_condition_key": "BUY_HINT"}},
+        ],
+        "replay_config": {
+            "replay_run_id": "local_replay_20260626_explicit_seed",
+            "job_id": "local_replay_20260626_explicit_seed",
+            "trade_date": "20260626",
+            "source_trade_date": "20260625",
+            "prev_trade_date": "20260625",
+            "for_trade_date": "20260626",
+            "until_hhmm": "1500",
+            "source_mode": "replay",
+            "source_condition_run_id": "condition_layer_20260625_test",
+            "source_subscription_run_id": "market_data_subscription_20260626_test",
+            "source_snapshot_run_id": "realtime_daily_snapshot_20260626_test",
+            "source_previous_day_minute_run_id": "previous_day_minute_preload_20260625_test",
+            "source_live_minute_run_id": "live_current_1m_source_20260626_test",
+            "latest_closed_minute": "2026-06-26T10:01:00+08:00",
+            "calculation_config": {
+                "completion_ratio_min_ready": "0.1",
+                "amount_projection_expand_threshold": "1.2",
+                "amount_projection_shrink_threshold": "0.8",
+                "price_flat_abs_pct_threshold": "0.001",
+                "window_total_seconds": 1800,
+                "calculation_method": "active_30m_bucket_projection_v1_strict_current_lineage",
+                "calculation_config_hash": "local-replay-asset-scope-test",
+            },
+        },
+        "b2_input": {
+            "snapshot_rows": [
+                {"asset_kind": "stock", "snapshot_id": 1, "subscription_id": 11, "identity_key": "stock:SH:600000", "exchange": "SH", "code": "600000", "display_code": "600000", "name": "浦发银行", "snapshot_time": "2026-06-26T10:00:00+08:00", "current_price": "10.0", "close": "10.0", "source_adapter": "LocalReplaySnapshotAdapter"},
+                {"asset_kind": "index", "snapshot_id": 2, "subscription_id": 12, "identity_key": "index:SH:000300", "exchange": "SH", "code": "000300", "display_code": "000300", "name": "沪深300", "snapshot_time": "2026-06-26T10:00:00+08:00", "current_price": "20.0", "close": "20.0", "source_adapter": "LocalReplaySnapshotAdapter"},
+                {"asset_kind": "board", "snapshot_id": 3, "subscription_id": 13, "identity_key": "board:TDX:881001", "exchange": "TDX", "code": "881001", "display_code": "881001", "name": "银行", "snapshot_time": "2026-06-26T10:15:00+08:00", "current_price": "30.0", "close": "30.0", "source_adapter": "LocalReplaySnapshotAdapter"},
+            ],
+            "live_current_rows_by_asset": {
+                "stock": [{"bar_id": 1, "bar_time": "2026-06-26T10:00:00+08:00", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "100", "amount": "1000", "quality_status": "passed"}],
+                "index": [{"bar_id": 2, "bar_time": "2026-06-26T10:00:00+08:00", "open": "20", "high": "21", "low": "19", "close": "20", "volume": "200", "amount": "2000", "quality_status": "passed"}],
+                "board": [{"bar_id": 3, "bar_time": "2026-06-26T10:15:00+08:00", "open": "30", "high": "31", "low": "29", "close": "30", "volume": "300", "amount": "3000", "quality_status": "passed"}],
+            },
+            "previous_day_rows_by_asset": {
+                "stock": [{"bar_id": 11, "bar_time": "2026-06-25T10:00:00+08:00", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "100", "amount": "1000", "quality_status": "passed"}],
+                "index": [{"bar_id": 12, "bar_time": "2026-06-25T10:00:00+08:00", "open": "20", "high": "21", "low": "19", "close": "20", "volume": "200", "amount": "2000", "quality_status": "passed"}],
+                "board": [{"bar_id": 13, "bar_time": "2026-06-25T10:15:00+08:00", "open": "30", "high": "31", "low": "29", "close": "30", "volume": "300", "amount": "3000", "quality_status": "passed"}],
+            },
+        },
+        "source_meta": {
+            "historical_source_type": "explicit_source_bundle",
+            "historical_source_path": str(target),
+            "historical_source_hash": "test-mixed-asset-scope-hash",
+            "source_row_count": 6,
+            "candidate_count": 3,
+            "context_count": 3,
+            "b2_snapshot_row_count": 3,
+            "b2_live_current_row_count": 3,
+            "b2_previous_day_row_count": 3,
+            "upstream_source_mode": "live_current_1m",
+            "bundle_contract_version": "historical_replay_source_bundle_v1",
+        },
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _write_test_index_board_source_bundle(target: Path, *, full_scope_target: Path | None = None) -> None:
+    if full_scope_target is None:
+        full_scope_target = target.parent.parent / "20260626" / "source_bundle.json"
+    _write_test_mixed_asset_scope_bundle(full_scope_target)
+    bundle = json.loads(full_scope_target.read_text(encoding="utf-8"))
+    bundle["source_records"] = {
+        key: rows
+        for key, rows in bundle["source_records"].items()
+        if rows and rows[0].get("asset_kind") in {"index", "board"}
+    }
+    bundle["candidates"] = [row for row in bundle["candidates"] if row.get("asset_kind") in {"index", "board"}]
+    bundle["n4_context_snapshot_rows"] = [
+        row for row in bundle["n4_context_snapshot_rows"] if row.get("asset_kind") in {"index", "board"}
+    ]
+    bundle["b2_input"]["snapshot_rows"] = [
+        row for row in bundle["b2_input"]["snapshot_rows"] if row.get("asset_kind") in {"index", "board"}
+    ]
+    bundle["b2_input"]["live_current_rows_by_asset"] = {
+        key: rows
+        for key, rows in bundle["b2_input"]["live_current_rows_by_asset"].items()
+        if key in {"index", "board"}
+    }
+    bundle["b2_input"]["previous_day_rows_by_asset"] = {
+        key: rows
+        for key, rows in bundle["b2_input"]["previous_day_rows_by_asset"].items()
+        if key in {"index", "board"}
+    }
+    bundle["source_meta"].update({
+        "historical_source_type": "explicit_source_bundle_index_board_only",
+        "historical_source_path": str(target),
+        "historical_source_hash": "test-index-board-source-bundle-hash",
+        "source_row_count": 4,
+        "candidate_count": 2,
+        "context_count": 2,
+        "b2_snapshot_row_count": 2,
+        "b2_live_current_row_count": 2,
+        "b2_previous_day_row_count": 2,
+    })
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+class FakeN6UserRepository:
+    def __init__(self) -> None:
+        self.users_by_login = {
+            "admin": UserAccount(
+                user_id=1,
+                login_name="admin",
+                display_name="Initial Admin",
+                role="admin",
+                status="active",
+                password_hash="stored-password-hash",
+                password_hash_algo="argon2id",
+            )
+        }
+        self.sessions_by_hash: dict[str, AuthSession] = {}
+        self.created_sessions: list[dict[str, Any]] = []
+        self.revoked_session_hashes: list[str] = []
+        self.created_users: list[dict[str, Any]] = []
+        self.created_filter_profiles: list[dict[str, Any]] = []
+        self.created_sim_accounts: list[dict[str, Any]] = []
+        self.deleted_users: list[dict[str, Any]] = []
+        self.revoked_user_session_ids: list[int] = []
+        self.card_read_user_ids: list[int] = []
+        self.notification_read_user_ids: list[int] = []
+        self.action_event_reads = 0
+        self.ui_v1_n2_condition_basis_export_reads = 0
+        self.cards = [
+            {
+                "user_signal_card_id": 11,
+                "title": "买入候选 000001",
+                "summary": "N6 card",
+                "asset_kind": "stock",
+                "code": "000001",
+                "name": "平安银行",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "target_price": 12.345,
+                "current_price": 10.123,
+                "expected_return_pct": 21.951,
+                "board_code": "881001",
+                "board_name": "银行",
+                "queue_status": "n/a",
+                "period_transition_y": "volume_up",
+                "period_transition_q": "volume_up",
+                "period_transition_m": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_d": "flat",
+            },
+            {
+                "user_signal_card_id": 12,
+                "title": "卖出候选 000002",
+                "summary": "N6 sell card",
+                "asset_kind": "stock",
+                "code": "000002",
+                "name": "万科A",
+                "direction": "sell",
+                "signal_type": "S_SELL",
+                "target_price": None,
+                "current_price": None,
+                "expected_return_pct": None,
+                "board_code": "881002",
+                "board_name": "地产",
+                "queue_status": "n/a",
+                "period_transition_y": "volume_up",
+                "period_transition_q": "volume_up",
+                "period_transition_m": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_d": "volume_up",
+            }
+        ]
+        self.notifications = [
+            {
+                "user_notification_queue_id": 21,
+                "title": "播报候选 000001",
+                "message": "queued only",
+                "queue_status": "queued_only",
+                "channel": "broadcast_queue",
+                "notification_source": "n5_action_event",
+                "code": "000001",
+                "name": "平安银行",
+            },
+            {
+                "user_notification_queue_id": 22,
+                "title": "指数信号",
+                "message": "index queued",
+                "queue_status": "queued_only",
+                "channel": "broadcast_queue",
+                "notification_source": "index_signal",
+                "code": "000300",
+                "name": "沪深300",
+            }
+        ]
+        self.cards_by_user_id = {1: self.cards}
+        self.notifications_by_user_id = {1: self.notifications}
+        self.action_events = [
+            {
+                "outbox_id": 301,
+                "event_id": "n5-action-blocked-000001",
+                "event_type": "ActionBlocked",
+                "source_layer": "N5_action",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260529",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "event_time": datetime(2026, 5, 29, 2, 3, tzinfo=timezone.utc),
+                "source_run_id": "action_consumer_canonical_20260529",
+                "dedup_key": "n5:blocked:600000",
+                "partition_key": "stock:SH:600000",
+                "payload_json": {
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "action_state": "blocked",
+                    "action_mark": "normal",
+                    "condition_key": "BUY_HINT",
+                },
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "action_state": "blocked",
+                "action_mark": "normal",
+                "condition_key": "BUY_HINT",
+                "original_condition_key": "BUY_HINT",
+                "status": "pending",
+                "created_at": datetime(2026, 5, 29, 2, 4, tzinfo=timezone.utc),
+            }
+        ]
+        self.top_index_strategy = {
+            "code": "000300",
+            "name": "沪深300",
+            "display_title": "指数强确认",
+            "display_summary": "最高级别策略",
+            "selected_signal_types": ["B_BUY_30M_VOL"],
+            "period_transition_y": "volume_up",
+            "period_transition_q": "volume_up",
+            "period_transition_m": "volume_up",
+            "period_transition_w": "volume_up",
+            "period_transition_d": "flat",
+        }
+        self.strong_boards = [
+            {
+                "board_code": "881001",
+                "board_name": "银行",
+                "period_transition_y": "volume_up",
+                "period_transition_q": "volume_up",
+                "period_transition_m": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_d": "volume_up",
+            },
+            {
+                "board_code": "880205",
+                "board_name": "辽宁板块",
+                "period_transition_y": "volume_up",
+                "period_transition_q": "volume_up",
+                "period_transition_m": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_d": "volume_up",
+            },
+            {
+                "board_code": "881002",
+                "board_name": "非强势行业",
+                "period_transition_y": "volume_up",
+                "period_transition_q": "flat",
+                "period_transition_m": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_d": "volume_up",
+            }
+        ]
+        self.filter_profile = {
+            "enable_chase": True,
+            "enable_ultra_short": True,
+            "enable_short": True,
+            "enable_mid": True,
+            "enable_long": True,
+        }
+        self.users = [
+            {
+                "user_id": 1,
+                "login_name": "admin",
+                "display_name": "Initial Admin",
+                "role": "admin",
+                "status": "active",
+                "filter_profile_count": 1,
+                "sim_account_count": 1,
+                "active_position_count": 0,
+            }
+        ]
+        self.sim_accounts = {
+            1: {
+                "user_sim_account_id": 1,
+                "account_name": "MVP T+1 shadow account",
+                "initial_cash": 1000000000,
+                "cash_balance": 1000000000,
+                "frozen_cash": 0,
+                "settlement_mode": "T_PLUS_1",
+                "account_status": "active",
+            }
+        }
+        self.sim_positions: dict[int, list[dict[str, Any]]] = {1: []}
+        self.card_reads = 0
+        self.notification_reads = 0
+        self.strategy_reads = 0
+        self.board_reads = 0
+        self.profile_reads = 0
+        self.user_reads = 0
+        self.sim_account_reads = 0
+        self.sim_position_reads = 0
+        self.ui_v1_signal_reads = 0
+        self.ui_v1_signal_count_reads = 0
+        self.ui_v1_signal_statistics_reads = 0
+        self.ui_v1_lineage_stats_reads = 0
+        self.ui_v1_n4_message_reads = 0
+        self.ui_v1_n5_message_reads = 0
+        self.ui_v1_n5_action_reads = 0
+        self.latest_passed_n5_action_run_id = "action_consumer_current_only_20260623_scopefix_multiwindow_v1_until_1500"
+        self.b_track_buy_signal_reads = 0
+        self.latest_b_track_action_run_id = (
+            "action_provisional_eligible_20260624__trigger_provisional_b2_20260624_until_1352__"
+            "realtime_projection_metric_20260624_until_1352"
+        )
+        self.ui_v1_n3_message_reads = 0
+        self.ui_v1_input_message_reads = 0
+        self.ui_v1_n2_condition_basis_reads = 0
+        self.ui_v1_status_monitor_reads = 0
+        self.ui_v1_signal_detail_reads = 0
+        self.ui_v1_dashboard_reads = 0
+        self.ui_v1_message_dashboard_reads = 0
+        self.ui_v1_virtual_account_reads = 0
+        self.ui_v1_cash_snapshot_reads = 0
+        self.ui_v1_cash_ledger_reads = 0
+        self.ui_v1_artifact_reads = 0
+        self.ui_v1_rollback_reads = 0
+        self.app_principals = [
+            {
+                "principal_id": 1,
+                "principal_type": "admin",
+                "owner_user_id": 1,
+                "display_name": "Initial Admin",
+                "principal_status": "active",
+            }
+        ]
+        self.app_principal_reads = 0
+        self.app_virtual_account_reads: list[tuple[int, str]] = []
+        self.app_cash_snapshot_reads: list[int] = []
+        self.app_signal_reads: list[tuple[int, str, int]] = []
+        self.app_signal_filter_reads: list[dict[str, Any]] = []
+        self.app_position_reads: list[tuple[int, str]] = []
+        self.app_pnl_reads: list[tuple[int, str]] = []
+        self.app_filter_reads: list[tuple[int, str, int, str, dict[str, Any]]] = []
+        self.app_filter_member_reads: list[tuple[int, str, int, str, str]] = []
+        self.app_filter_linked_stock_reads: list[tuple[int, str, int, str, str]] = []
+        self.app_membership_reads: list[tuple[int, str, int, str, str]] = []
+        self.app_monitor_reads: list[tuple[int, str, int, str | None, str]] = []
+        self.app_monitor_writes: list[dict[str, Any]] = []
+        self.app_monitor_rows: list[dict[str, Any]] = []
+        self.next_app_monitor_id = 1
+        self.app_realtime_scope_reads: list[tuple[int, str, int]] = []
+        self.app_realtime_scope_writes: list[dict[str, Any]] = []
+        self.app_realtime_scope_rows: list[dict[str, Any]] = []
+        self.next_app_realtime_scope_id = 1
+        self.app_filter_cache_ready = {"stock": False, "index": False, "board": False}
+        self.app_membership_cache_ready = {"index": False, "board": False}
+        self.app_filter_rows = {
+            "stock": [
+                {
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:600000",
+                    "stock_identity_key": "stock:SH:600000",
+                    "code": "600000",
+                    "name": "浦发银行",
+                    "direction": "buy",
+                    "condition_key": "BUY:M,W,D",
+                    "selected_directions": ["buy"],
+                    "selected_condition_keys": ["BUY:M,W,D"],
+                    "selected_signal_types": ["BUY"],
+                    "selected_lanes": ["default"],
+                    "selected_monitor_types": ["watch"],
+                    "year_overheat_level": "低位",
+                    "quarter_overheat_level": "回升",
+                    "month_overheat_level": "低位",
+                    "week_overheat_level": "回升",
+                    "day_overheat_level": "启动",
+                    "last_signal_state": "blocked",
+                    "quality_status": "reviewed",
+                    "source_display_basis_id": 3001,
+                    "run_id": "condition_layer_20260604_source_20260604_v1",
+                    "source_trade_date": "20260604",
+                    "for_trade_date": "20260605",
+                    "source_run_id": "condition_layer_20260604_source_20260604_v1",
+                    "projection_run_id": "user_projection_shadow_20260605_v1",
+                    "cache_run_id": "n6_display_cache_20260605_v1",
+                }
+            ],
+            "index": [
+                {
+                    "asset_kind": "index",
+                    "identity_key": "index:SH:000300",
+                    "index_identity_key": "index:SH:000300",
+                    "code": "000300",
+                    "name": "沪深300",
+                    "direction": "buy",
+                    "condition_key": "BUY_HINT",
+                    "selected_directions": ["buy"],
+                    "selected_condition_keys": ["BUY_HINT"],
+                    "selected_signal_types": ["BUY_HINT"],
+                    "selected_lanes": ["default"],
+                    "selected_monitor_types": ["watch"],
+                    "year_overheat_level": "低位",
+                    "quarter_overheat_level": "低位",
+                    "month_overheat_level": "回升",
+                    "week_overheat_level": "启动",
+                    "day_overheat_level": "启动",
+                    "last_signal_state": "executed",
+                    "quality_status": "reviewed",
+                    "source_display_basis_id": 1001,
+                    "run_id": "condition_layer_20260604_source_20260604_v1",
+                    "source_trade_date": "20260604",
+                    "for_trade_date": "20260605",
+                    "source_run_id": "condition_layer_20260604_source_20260604_v1",
+                    "projection_run_id": "user_projection_shadow_20260605_v1",
+                    "cache_run_id": "n6_display_cache_20260605_v1",
+                }
+            ],
+            "board": [
+                {
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881001",
+                    "board_identity_key": "board:TDX:881001",
+                    "code": "881001",
+                    "name": "银行",
+                    "board_type": "tdx_industry",
+                    "direction": "buy",
+                    "condition_key": "BUY:M,W,D",
+                    "selected_directions": ["buy"],
+                    "selected_condition_keys": ["BUY:M,W,D"],
+                    "selected_signal_types": ["BUY"],
+                    "selected_lanes": ["default"],
+                    "selected_monitor_types": ["watch"],
+                    "year_overheat_level": "低位",
+                    "quarter_overheat_level": "回升",
+                    "month_overheat_level": "启动",
+                    "week_overheat_level": "启动",
+                    "day_overheat_level": "启动",
+                    "last_signal_state": "blocked",
+                    "quality_status": "reviewed",
+                    "source_display_basis_id": 2001,
+                    "run_id": "condition_layer_20260604_source_20260604_v1",
+                    "source_trade_date": "20260604",
+                    "for_trade_date": "20260605",
+                    "source_run_id": "condition_layer_20260604_source_20260604_v1",
+                    "projection_run_id": "user_projection_shadow_20260605_v1",
+                    "cache_run_id": "n6_display_cache_20260605_v1",
+                }
+            ],
+        }
+        self.app_member_rows = {
+            "board": [
+                {
+                    "membership_kind": "board",
+                    "parent_identity_key": "board:TDX:881001",
+                    "parent_code": "881001",
+                    "parent_name": "银行",
+                    "stock_identity_key": "stock:SH:600000",
+                    "stock_code": "600000",
+                    "stock_name": "浦发银行",
+                    "board_type": "tdx_industry",
+                    "source_version": "board_membership_20260604_v1",
+                    "source_batch_id": "condition_source_activation_20260604_v1",
+                }
+            ],
+            "index": [
+                {
+                    "membership_kind": "index",
+                    "parent_identity_key": "index:SH:000300",
+                    "parent_code": "000300",
+                    "parent_name": "沪深300",
+                    "stock_identity_key": "stock:SH:600000",
+                    "stock_code": "600000",
+                    "stock_name": "浦发银行",
+                    "source_version": "index_membership_20260604_v1",
+                    "source_batch_id": "condition_source_activation_20260604_v1",
+                }
+            ],
+        }
+        self.raw_k_reads = 0
+        self.funds_reads = 0
+        self.position_reads = 0
+        self.n5_outbox_reads_for_ui_v1 = 0
+        self.delivery_side_effects = 0
+        self.forbidden_writes = {
+            "user_signal_decision": 0,
+            "user_sim": 0,
+            "user_watchlist": 0,
+            "user_monitor": 0,
+            "user_realtime_monitor_scope": 0,
+            "user_signal_card": 0,
+            "user_signal_projection": 0,
+            "user_notification_queue": 0,
+            "common_event_inbox": 0,
+            "checkpoint": 0,
+            "n5_outbox": 0,
+            "n6_virtual_order": 0,
+            "n6_virtual_trade": 0,
+            "n6_virtual_position": 0,
+            "n6_virtual_pnl_snapshot": 0,
+        }
+        self.c1_minute_rows = {"index": [], "board": []}
+        self.virtual_account = {
+            "virtual_account_id": 1,
+            "principal_id": 1,
+            "principal_type": "admin",
+            "account_name": "Admin Virtual Account",
+            "virtual_account_status": "active",
+            "base_currency": "CNY",
+            "initial_cash": 1000000,
+            "current_cash_snapshot_id": 1,
+            "run_id": "n6_phase3_virtual_account_seed_20260605_v1",
+            "policy_version": "n6_phase3_virtual_account_seed_policy_v1",
+            "policy_hash": "seed-policy-hash",
+            "rollback_scope": "n6_phase3_virtual_account_seed_20260605_v1",
+            "quality_status": "passed",
+            "created_at": datetime(2026, 6, 5, 1, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 6, 5, 1, 1, tzinfo=timezone.utc),
+        }
+        self.cash_snapshot = {
+            "cash_snapshot_id": 1,
+            "virtual_account_id": 1,
+            "snapshot_time": datetime(2026, 6, 5, 1, 2, tzinfo=timezone.utc),
+            "trade_date": 20260605,
+            "available_cash": 1000000,
+            "frozen_cash": 0,
+            "total_cash": 1000000,
+            "currency": "CNY",
+            "source_ledger_max_id": 1,
+            "snapshot_status": "active",
+            "run_id": "n6_phase3_virtual_account_seed_20260605_v1",
+            "policy_version": "n6_phase3_virtual_account_seed_policy_v1",
+            "policy_hash": "seed-policy-hash",
+            "rollback_scope": "n6_phase3_virtual_account_seed_20260605_v1",
+            "quality_status": "passed",
+            "created_at": datetime(2026, 6, 5, 1, 2, tzinfo=timezone.utc),
+        }
+        self.cash_ledger = [
+            {
+                "cash_ledger_id": 1,
+                "virtual_account_id": 1,
+                "ledger_type": "initial_deposit",
+                "amount": 1000000,
+                "currency": "CNY",
+                "trade_date": 20260605,
+                "event_time": datetime(2026, 6, 5, 1, 2, tzinfo=timezone.utc),
+                "source_event_type": "phase3_seed",
+                "source_event_id": "n6_phase3_virtual_account_seed_20260605_v1",
+                "source_virtual_order_id": None,
+                "source_virtual_trade_id": None,
+                "run_id": "n6_phase3_virtual_account_seed_20260605_v1",
+                "policy_version": "n6_phase3_virtual_account_seed_policy_v1",
+                "policy_hash": "seed-policy-hash",
+                "rollback_scope": "n6_phase3_virtual_account_seed_20260605_v1",
+                "quality_status": "passed",
+                "created_at": datetime(2026, 6, 5, 1, 2, tzinfo=timezone.utc),
+            }
+        ]
+        self.n2_condition_basis_rows = {
+            "index": [
+                {
+                    "asset_kind": "index",
+                    "asset_label": "指数",
+                    "source_table": "index_condition_basis",
+                    "condition_basis_id": 1001,
+                    "run_id": "condition_layer_20260608_v1",
+                    "source_trade_date": "20260608",
+                    "for_trade_date": "20260609",
+                    "prev_trade_date": "20260605",
+                    "identity_key": "index:SH:000300",
+                    "code": "000300",
+                    "exchange": "SH",
+                    "name": "沪深300",
+                    "board_type": None,
+                    "lane": "default",
+                    "monitor_type": "watch",
+                    "monitor_status": "active",
+                    "direction_scope": ["buy", "sell"],
+                    "period_key_y": "Y:volume_up",
+                    "period_key_q": "Q:volume_up",
+                    "period_key_m": "M:volume_up",
+                    "period_key_w": "W:volume_up",
+                    "period_key_d": "D:volume_up",
+                    "amount_quality_status": "passed",
+                    "buy_target_price": 4200.12,
+                    "buy_expected_return_pct": 8.23,
+                    "sell_target_price": 3900.00,
+                    "sell_expected_return_pct": -3.12,
+                    "up_sell_reference_period": "D",
+                    "down_buy_reference_period": "D",
+                    "buy_necessary_key": "BUY:M,W,D",
+                    "sell_necessary_key": "SELL:M,W,D",
+                    "buy_full_necessary_key": "BUY:FULL",
+                    "sell_full_necessary_key": "SELL:FULL",
+                    "oversold_hint_key": "BUY_HINT",
+                    "overbought_hint_key": "SELL_HINT",
+                    "quality_status": "passed",
+                    "quality_reason": None,
+                    "source_version": "n2_basis_20260608_v1",
+                    "source_batch_id": "batch_20260608",
+                    "raw_json": {"identity_key": "index:SH:000300", "raw": True},
+                    "missing_fields_json": {},
+                    "period_trigger_baseline_json": {"D": {"amount_metric": "passed"}},
+                    "target_price_trace_json": {"reference_target_price": 4200.12},
+                    "row_json": {
+                        "index_condition_basis_id": 1001,
+                        "index_identity_key": "index:SH:000300",
+                        "source_trade_date": "20260608",
+                        "buy_necessary_key": "BUY:M,W,D",
+                    },
+                    "created_at": datetime(2026, 6, 8, 1, 0, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 8, 1, 1, tzinfo=timezone.utc),
+                },
+                {
+                    "asset_kind": "index",
+                    "asset_label": "指数",
+                    "source_table": "index_condition_basis",
+                    "condition_basis_id": 1000,
+                    "run_id": "condition_layer_20260605_v1",
+                    "source_trade_date": "20260605",
+                    "for_trade_date": "20260608",
+                    "prev_trade_date": "20260604",
+                    "identity_key": "index:SH:000905",
+                    "code": "000905",
+                    "exchange": "SH",
+                    "name": "中证500",
+                    "board_type": None,
+                    "lane": "default",
+                    "monitor_type": "watch",
+                    "monitor_status": "active",
+                    "direction_scope": ["buy"],
+                    "period_key_y": "Y:volume_up",
+                    "period_key_q": "Q:flat",
+                    "period_key_m": "M:flat",
+                    "period_key_w": "W:flat",
+                    "period_key_d": "D:flat",
+                    "amount_quality_status": "passed",
+                    "buy_target_price": 6200.55,
+                    "buy_expected_return_pct": 6.5,
+                    "sell_target_price": None,
+                    "sell_expected_return_pct": None,
+                    "up_sell_reference_period": "W",
+                    "down_buy_reference_period": "D",
+                    "buy_necessary_key": "BUY:D",
+                    "sell_necessary_key": None,
+                    "buy_full_necessary_key": None,
+                    "sell_full_necessary_key": None,
+                    "oversold_hint_key": None,
+                    "overbought_hint_key": None,
+                    "quality_status": "passed",
+                    "quality_reason": None,
+                    "source_version": "n2_basis_20260605_v1",
+                    "source_batch_id": "batch_20260605",
+                    "raw_json": {"identity_key": "index:SH:000905", "raw": True},
+                    "missing_fields_json": {},
+                    "period_trigger_baseline_json": {"D": {"amount_metric": "passed"}},
+                    "target_price_trace_json": {"reference_target_price": 6200.55},
+                    "row_json": {
+                        "index_condition_basis_id": 1000,
+                        "index_identity_key": "index:SH:000905",
+                        "source_trade_date": "20260605",
+                    },
+                    "created_at": datetime(2026, 6, 5, 1, 0, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 5, 1, 1, tzinfo=timezone.utc),
+                },
+            ],
+            "board": [
+                {
+                    "asset_kind": "board",
+                    "asset_label": "板块",
+                    "source_table": "board_condition_basis",
+                    "condition_basis_id": 2001,
+                    "run_id": "condition_layer_20260608_v1",
+                    "source_trade_date": "20260608",
+                    "for_trade_date": "20260609",
+                    "prev_trade_date": "20260605",
+                    "identity_key": "board:TDX:881001",
+                    "code": "881001",
+                    "exchange": None,
+                    "name": "银行",
+                    "board_type": "tdx_industry",
+                    "lane": "default",
+                    "monitor_type": "watch",
+                    "monitor_status": "active",
+                    "direction_scope": ["sell"],
+                    "period_key_y": "Y:volume_up",
+                    "period_key_q": "Q:volume_up",
+                    "period_key_m": "M:volume_up",
+                    "period_key_w": "W:volume_up",
+                    "period_key_d": "D:volume_down",
+                    "amount_quality_status": "passed",
+                    "buy_target_price": None,
+                    "buy_expected_return_pct": None,
+                    "sell_target_price": 1888.88,
+                    "sell_expected_return_pct": -4.5,
+                    "up_sell_reference_period": "D",
+                    "down_buy_reference_period": "W",
+                    "buy_necessary_key": None,
+                    "sell_necessary_key": "SELL:M,W,D",
+                    "buy_full_necessary_key": None,
+                    "sell_full_necessary_key": "SELL:FULL",
+                    "oversold_hint_key": None,
+                    "overbought_hint_key": "SELL_HINT",
+                    "quality_status": "passed",
+                    "quality_reason": None,
+                    "source_version": "n2_basis_20260608_v1",
+                    "source_batch_id": "batch_20260608",
+                    "raw_json": {"board_code": "881001", "raw": True},
+                    "missing_fields_json": {},
+                    "period_trigger_baseline_json": {"D": {"amount_metric": "passed"}},
+                    "target_price_trace_json": {"reference_target_price": 1888.88},
+                    "row_json": {
+                        "board_condition_basis_id": 2001,
+                        "board_identity_key": "board:TDX:881001",
+                        "board_type": "tdx_industry",
+                        "source_trade_date": "20260608",
+                    },
+                    "created_at": datetime(2026, 6, 8, 1, 2, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 8, 1, 3, tzinfo=timezone.utc),
+                },
+            ],
+            "stock": [
+                {
+                    "asset_kind": "stock",
+                    "asset_label": "个股",
+                    "source_table": "stock_condition_basis",
+                    "condition_basis_id": 3001,
+                    "run_id": "condition_layer_20260608_v1",
+                    "source_trade_date": "20260608",
+                    "for_trade_date": "20260609",
+                    "prev_trade_date": "20260605",
+                    "identity_key": "stock:SH:600000",
+                    "code": "600000",
+                    "exchange": "SH",
+                    "name": "浦发银行",
+                    "board_type": None,
+                    "lane": "default",
+                    "monitor_type": "watch",
+                    "monitor_status": "active",
+                    "direction_scope": ["buy"],
+                    "period_key_y": "Y:volume_up",
+                    "period_key_q": "Q:volume_up",
+                    "period_key_m": "M:volume_up",
+                    "period_key_w": "W:volume_up",
+                    "period_key_d": "D:volume_up",
+                    "amount_quality_status": "passed",
+                    "buy_target_price": 12.34,
+                    "buy_expected_return_pct": 9.87,
+                    "sell_target_price": None,
+                    "sell_expected_return_pct": None,
+                    "up_sell_reference_period": "D",
+                    "down_buy_reference_period": "D",
+                    "buy_necessary_key": "BUY:M,W,D",
+                    "sell_necessary_key": None,
+                    "buy_full_necessary_key": "BUY:FULL",
+                    "sell_full_necessary_key": None,
+                    "oversold_hint_key": "BUY_HINT",
+                    "overbought_hint_key": None,
+                    "quality_status": "passed",
+                    "quality_reason": None,
+                    "source_version": "n2_basis_20260608_v1",
+                    "source_batch_id": "batch_20260608",
+                    "raw_json": {"stock_identity_key": "stock:SH:600000", "raw": True},
+                    "missing_fields_json": {},
+                    "period_trigger_baseline_json": {"D": {"amount_metric": "passed"}},
+                    "target_price_trace_json": {"reference_target_price": 12.34},
+                    "row_json": {
+                        "stock_condition_basis_id": 3001,
+                        "stock_identity_key": "stock:SH:600000",
+                        "source_trade_date": "20260608",
+                    },
+                    "created_at": datetime(2026, 6, 8, 1, 4, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 8, 1, 5, tzinfo=timezone.utc),
+                },
+            ],
+        }
+        self.n4_messages = [
+            {
+                "outbox_id": 401,
+                "event_id": "n4-trigger-matched-1",
+                "event_type": "TriggerMatched",
+                "event_schema_version": "n4.trigger.v4",
+                "trade_date": "20260605",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688690",
+                "event_time": datetime(2026, 6, 5, 3, 6, 59, tzinfo=timezone.utc),
+                "source_layer": "N4_trigger",
+                "source_run_id": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "dedup_key": "n4:matched:688690",
+                "partition_key": "stock:SH:688690",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "condition_key": "BUY:W,D",
+                    "trigger_time": "2026-06-05 11:06:59+08:00",
+                    "trigger_price": "43.73",
+                    "triggered_periods": ["D"],
+                    "baseline_source": "trigger_baseline",
+                    "trigger_live": True,
+                },
+                "created_at": datetime(2026, 6, 5, 3, 7, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 7, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 402,
+                "event_id": "n4-pending-market-data-1",
+                "event_type": "TriggerPendingMarketData",
+                "event_schema_version": "n4.trigger.v4",
+                "trade_date": "20260605",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "event_time": datetime(2026, 6, 5, 3, 5, tzinfo=timezone.utc),
+                "source_layer": "N4_trigger",
+                "source_run_id": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "dedup_key": "n4:pending:000300",
+                "partition_key": "index:SH:000300",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"trigger_live": False, "quality_status": "market_data_missing"},
+                "created_at": datetime(2026, 6, 5, 3, 5, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 5, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 403,
+                "event_id": "n4-state-changed-1",
+                "event_type": "TriggerStateChanged",
+                "event_schema_version": "n4.trigger.v4",
+                "trade_date": "20260605",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "event_time": datetime(2026, 6, 5, 3, 4, tzinfo=timezone.utc),
+                "source_layer": "N4_trigger",
+                "source_run_id": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "dedup_key": "n4:state:881001",
+                "partition_key": "board:TDX:881001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"trigger_live": False, "current_status": "inactive"},
+                "created_at": datetime(2026, 6, 5, 3, 4, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 4, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 404,
+                "event_id": "n4-trigger-cleared-legacy",
+                "event_type": "TriggerCleared",
+                "event_schema_version": "n4.trigger.legacy",
+                "trade_date": "20260525",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "event_time": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+                "source_layer": "N4_trigger",
+                "source_run_id": "trigger_legacy_20260525",
+                "dedup_key": "n4:legacy:cleared:600000",
+                "partition_key": "stock:SH:600000",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True},
+                "created_at": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 405,
+                "event_id": "n4-trigger-live-changed-legacy",
+                "event_type": "TriggerLiveChanged",
+                "event_schema_version": "n4.trigger.legacy",
+                "trade_date": "20260525",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:000001",
+                "event_time": datetime(2026, 5, 25, 2, 0, tzinfo=timezone.utc),
+                "source_layer": "N4_trigger",
+                "source_run_id": "trigger_legacy_20260525",
+                "dedup_key": "n4:legacy:live:000001",
+                "partition_key": "stock:SZ:000001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True, "trigger_live": False},
+                "created_at": datetime(2026, 5, 25, 2, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 0, tzinfo=timezone.utc),
+            },
+        ]
+        self.n5_messages = [
+            {
+                "outbox_id": 501,
+                "event_id": "n5-action-eligible-1",
+                "event_type": "ActionEligible",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260605",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600001",
+                "event_time": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_action_pipeline_20260605",
+                "dedup_key": "n5:eligible:600001",
+                "partition_key": "stock:SH:600001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "action_state": "eligible",
+                    "action_mark": "normal",
+                    "source_trigger_event_id": "n4-trigger-matched-eligible",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 502,
+                "event_id": "n5-action-blocked-1",
+                "event_type": "ActionBlocked",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260605",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688690",
+                "event_time": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_action_pipeline_20260605",
+                "dedup_key": "n5:blocked:688690",
+                "partition_key": "stock:SH:688690",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "action_state": "blocked",
+                    "blocked_reason": "price_confirmation_failed",
+                    "source_trigger_event_id": "n4-trigger-matched-1",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 503,
+                "event_id": "n5-action-executed-1",
+                "event_type": "ActionExecuted",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260605",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "event_time": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_action_pipeline_20260605",
+                "dedup_key": "n5:executed:000300",
+                "partition_key": "index:SH:000300",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "action_state": "executed",
+                    "action_mark": "30m_volume",
+                    "source_trigger_event_id": "n4-trigger-matched-executed",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 504,
+                "event_id": "n5-action-skipped-1",
+                "event_type": "ActionSkipped",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260605",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "event_time": datetime(2026, 6, 5, 3, 7, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_action_pipeline_20260605",
+                "dedup_key": "n5:skipped:881001",
+                "partition_key": "board:TDX:881001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "direction": "sell",
+                    "signal_type": "S_SELL",
+                    "action_state": "expired",
+                    "reason": "window_expired",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 7, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 7, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 505,
+                "event_id": "n5-action-event-legacy",
+                "event_type": "ActionEvent",
+                "event_schema_version": "n5.legacy.v1",
+                "trade_date": "20260525",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "event_time": datetime(2026, 5, 25, 2, 4, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_real_execute_20260525",
+                "dedup_key": "n5:legacy:action:600000",
+                "partition_key": "stock:SH:600000",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True, "action_state": "passed"},
+                "created_at": datetime(2026, 5, 25, 2, 4, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 4, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 506,
+                "event_id": "n5-hint-event-legacy",
+                "event_type": "HintEvent",
+                "event_schema_version": "n5.legacy.v1",
+                "trade_date": "20260525",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:000001",
+                "event_time": datetime(2026, 5, 25, 2, 3, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_real_execute_20260525",
+                "dedup_key": "n5:legacy:hint:000001",
+                "partition_key": "stock:SZ:000001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True, "hint": "BUY_HINT"},
+                "created_at": datetime(2026, 5, 25, 2, 3, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 3, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 507,
+                "event_id": "n5-risk-event-legacy",
+                "event_type": "RiskEvent",
+                "event_schema_version": "n5.legacy.v1",
+                "trade_date": "20260525",
+                "asset_kind": "common",
+                "identity_key": "common:risk",
+                "event_time": datetime(2026, 5, 25, 2, 2, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_real_execute_20260525",
+                "dedup_key": "n5:legacy:risk",
+                "partition_key": "common:risk",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True},
+                "created_at": datetime(2026, 5, 25, 2, 2, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 2, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 508,
+                "event_id": "n5-position-event-legacy",
+                "event_type": "PositionEvent",
+                "event_schema_version": "n5.legacy.v1",
+                "trade_date": "20260525",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600010",
+                "event_time": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_real_execute_20260525",
+                "dedup_key": "n5:legacy:position:600010",
+                "partition_key": "stock:SH:600010",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {"legacy_event": True},
+                "created_at": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 25, 2, 1, tzinfo=timezone.utc),
+            },
+        ]
+        self.n5_action_display_rows = [
+            {
+                "outbox_id": 901,
+                "event_id": "n5-action-executed-live-window-000300-1401",
+                "event_type": "ActionExecuted",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260623",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "event_time": datetime(2026, 6, 23, 6, 1, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_only_20260623_scopefix_multiwindow_v1_until_1500",
+                "dedup_key": "n5:executed:000300:338343",
+                "partition_key": "index:SH:000300",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "action_state": "executed",
+                    "action_type": "buy_candidate",
+                    "condition_key": "BUY:M",
+                    "action_key": "action-key-selected-metric-338343",
+                    "dedup_key": "dedup-key-selected-metric-338343",
+                    "trace_json": {
+                        "live_window_confirmation": {
+                            "selected_metric_id": "338343",
+                            "executed_metric_time": "2026-06-23T14:01:00+08:00",
+                            "trigger_metric_time": "2026-06-23T13:56:00+08:00",
+                            "live_window_confirmation": True,
+                            "multi_action_window": True,
+                        }
+                    },
+                },
+                "created_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 902,
+                "event_id": "n5-action-eligible-pending-002824",
+                "event_type": "ActionEligible",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260623",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:002824",
+                "event_time": datetime(2026, 6, 23, 5, 42, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_only_20260623_scopefix_multiwindow_v1_until_1500",
+                "dedup_key": "n5:eligible:002824",
+                "partition_key": "stock:SZ:002824",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "action_state": "eligible",
+                    "action_type": "buy_candidate",
+                    "condition_key": "BUY:D",
+                    "action_key": "action-key-eligible-002824",
+                    "dedup_key": "dedup-key-eligible-002824",
+                    "trace_json": {
+                        "live_window_confirmation": {
+                            "trigger_metric_id": "900001",
+                            "trigger_metric_time": "2026-06-23T13:42:00+08:00",
+                            "live_window_confirmation": True,
+                            "status": "tracking",
+                        }
+                    },
+                },
+                "created_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 903,
+                "event_id": "n5-action-blocked-hidden",
+                "event_type": "ActionBlocked",
+                "event_schema_version": "n5.canonical.v1",
+                "trade_date": "20260623",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "event_time": datetime(2026, 6, 23, 5, 40, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": "action_consumer_current_only_20260623_scopefix_multiwindow_v1_until_1500",
+                "dedup_key": "n5:blocked:881001",
+                "partition_key": "board:TDX:881001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "action_state": "blocked",
+                    "action_type": "sell_candidate",
+                    "condition_key": "SELL:D",
+                    "action_key": "action-key-blocked-881001",
+                    "dedup_key": "dedup-key-blocked-881001",
+                },
+                "created_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 23, 13, 38, tzinfo=timezone.utc),
+            },
+        ]
+        self.b_track_buy_signal_rows = [
+            {
+                "outbox_id": 10000 + index,
+                "event_id": f"n5-provisional-buy-{index:02d}",
+                "event_type": "ActionEligible",
+                "event_schema_version": "n5.provisional.v1",
+                "trade_date": "20260624",
+                "asset_kind": "stock",
+                "identity_key": f"stock:SH:60{index:04d}",
+                "event_time": datetime(2026, 6, 24, 5, 52, index % 60, tzinfo=timezone.utc),
+                "source_layer": "N5_action",
+                "source_run_id": self.latest_b_track_action_run_id,
+                "dedup_key": f"n5:provisional:buy:{index}",
+                "partition_key": f"stock:SH:60{index:04d}",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "provisional": True,
+                    "action_confirmation_mode": "eligibility_only",
+                    "source_trigger_run_id": (
+                        "trigger_provisional_b2_20260624_until_1352__"
+                        "realtime_projection_metric_20260624_until_1352"
+                    ),
+                    "source_trigger_event_id": f"n4-provisional-trigger-{index:02d}",
+                    "projection_run_id": (
+                        "realtime_projection_metric_20260624_until_1352__"
+                        "realtime_daily_snapshot_20260624_until_1352__market_data_subscription_20260624"
+                    ),
+                    "projection_id": str(7000 + index),
+                    "projection_30m_type": "volume_up",
+                    "trigger_mark_candidate": "30m_volume",
+                    "action_state": "eligible",
+                    "action_type": "buy",
+                    "condition_key": "BUY_HINT",
+                    "signal_type": "B_BUY",
+                },
+                "created_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+            }
+            for index in range(1, 18)
+        ]
+        self.b_track_buy_signal_rows.extend(
+            [
+                {
+                    "outbox_id": 10018,
+                    "event_id": "n5-provisional-sell-01",
+                    "event_type": "ActionEligible",
+                    "event_schema_version": "n5.provisional.v1",
+                    "trade_date": "20260624",
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881001",
+                    "event_time": datetime(2026, 6, 24, 5, 52, 58, tzinfo=timezone.utc),
+                    "source_layer": "N5_action",
+                    "source_run_id": self.latest_b_track_action_run_id,
+                    "dedup_key": "n5:provisional:sell:1",
+                    "partition_key": "board:TDX:881001",
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "payload_json": {
+                        "provisional": True,
+                        "action_confirmation_mode": "eligibility_only",
+                        "source_trigger_run_id": (
+                            "trigger_provisional_b2_20260624_until_1352__"
+                            "realtime_projection_metric_20260624_until_1352"
+                        ),
+                        "source_trigger_event_id": "n4-provisional-trigger-sell-01",
+                        "projection_run_id": (
+                            "realtime_projection_metric_20260624_until_1352__"
+                            "realtime_daily_snapshot_20260624_until_1352__market_data_subscription_20260624"
+                        ),
+                        "projection_id": "8018",
+                        "projection_30m_type": "shrink_down",
+                        "trigger_mark_candidate": "30m_shrink",
+                        "action_state": "eligible",
+                        "action_type": "sell",
+                        "condition_key": "SELL_HINT",
+                        "signal_type": "S_SELL",
+                    },
+                    "created_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                },
+                {
+                    "outbox_id": 10019,
+                    "event_id": "n5-provisional-executed-excluded",
+                    "event_type": "ActionExecuted",
+                    "event_schema_version": "n5.provisional.v1",
+                    "trade_date": "20260624",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:688001",
+                    "event_time": datetime(2026, 6, 24, 5, 51, tzinfo=timezone.utc),
+                    "source_layer": "N5_action",
+                    "source_run_id": self.latest_b_track_action_run_id,
+                    "dedup_key": "n5:excluded:executed",
+                    "partition_key": "stock:SH:688001",
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "payload_json": {
+                        "provisional": True,
+                        "action_confirmation_mode": "eligibility_only",
+                        "action_state": "executed",
+                        "action_type": "buy",
+                    },
+                    "created_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                },
+                {
+                    "outbox_id": 10020,
+                    "event_id": "n5-non-provisional-eligible-excluded",
+                    "event_type": "ActionEligible",
+                    "event_schema_version": "n5.canonical.v1",
+                    "trade_date": "20260624",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:688002",
+                    "event_time": datetime(2026, 6, 24, 5, 50, tzinfo=timezone.utc),
+                    "source_layer": "N5_action",
+                    "source_run_id": self.latest_b_track_action_run_id,
+                    "dedup_key": "n5:excluded:non-provisional",
+                    "partition_key": "stock:SH:688002",
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "payload_json": {
+                        "provisional": False,
+                        "action_confirmation_mode": "eligibility_only",
+                        "action_state": "eligible",
+                        "action_type": "buy",
+                    },
+                    "created_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                },
+                {
+                    "outbox_id": 10021,
+                    "event_id": "n5-wrong-mode-eligible-excluded",
+                    "event_type": "ActionEligible",
+                    "event_schema_version": "n5.canonical.v1",
+                    "trade_date": "20260624",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:688003",
+                    "event_time": datetime(2026, 6, 24, 5, 49, tzinfo=timezone.utc),
+                    "source_layer": "N5_action",
+                    "source_run_id": self.latest_b_track_action_run_id,
+                    "dedup_key": "n5:excluded:wrong-mode",
+                    "partition_key": "stock:SH:688003",
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "payload_json": {
+                        "provisional": True,
+                        "action_confirmation_mode": "confirmed",
+                        "action_state": "eligible",
+                        "action_type": "buy",
+                    },
+                    "created_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 6, 24, 5, 53, tzinfo=timezone.utc),
+                },
+            ]
+        )
+        self.n3_messages = [
+            {
+                "outbox_id": 602,
+                "event_id": "n3-market-snapshot-1",
+                "event_type": "MarketSnapshotUpdated",
+                "event_schema_version": "n3.market_snapshot.v1",
+                "trade_date": "20260605",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "event_time": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+                "source_layer": "N3_market_data",
+                "source_run_id": "market_snapshot_20260605_v1",
+                "dedup_key": "n3:snapshot:600000",
+                "partition_key": "stock:SH:600000",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "data_quality_status": "passed",
+                    "source_adapter": "mootdx",
+                    "subscription_id": "sub-stock-600000",
+                    "pull_plan_id": "pull-plan-snapshot-1",
+                    "snapshot_id": "stock-snapshot-1",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 10, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 603,
+                "event_id": "n3-minute-closed-1",
+                "event_type": "MinuteBarClosed",
+                "event_schema_version": "n3.minute_bar.v1",
+                "trade_date": "20260605",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "event_time": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+                "source_layer": "N3_market_data",
+                "source_run_id": "minute_bar_closed_20260605_v1",
+                "dedup_key": "n3:minute:000300:1500",
+                "partition_key": "index:SH:000300",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "data_quality_status": "passed",
+                    "source_adapter": "mootdx",
+                    "subscription_id": "sub-index-000300",
+                    "pull_plan_id": "pull-plan-minute-1",
+                    "minute_bar_id": "index-minute-closed-1",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 9, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 604,
+                "event_id": "n3-market-data-missing-1",
+                "event_type": "MarketDataMissing",
+                "event_schema_version": "n3.quality.v1",
+                "trade_date": "20260605",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "event_time": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+                "source_layer": "N3_market_data",
+                "source_run_id": "market_quality_20260605_v1",
+                "dedup_key": "n3:missing:881001",
+                "partition_key": "board:TDX:881001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "data_quality_status": "missing",
+                    "source_adapter": "mootdx",
+                    "subscription_id": "sub-board-881001",
+                    "pull_plan_id": "pull-plan-quality-1",
+                    "quality_item_id": "board-quality-missing-1",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 8, tzinfo=timezone.utc),
+            },
+            {
+                "outbox_id": 601,
+                "event_id": "n3-market-display-1",
+                "event_type": "MarketDisplaySnapshotUpdated",
+                "event_schema_version": "n3.display.v1",
+                "trade_date": "20260605",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "event_time": datetime(2026, 6, 5, 3, 11, tzinfo=timezone.utc),
+                "source_layer": "N3_market_data",
+                "source_run_id": "market_display_snapshot_20260605_v1",
+                "dedup_key": "n3:display:000001",
+                "partition_key": "index:SH:000001",
+                "status": "pending",
+                "attempt_count": 0,
+                "payload_json": {
+                    "display_price": "3120.12",
+                    "display_change_pct": "0.82",
+                    "source": "MarketDisplaySnapshotUpdated",
+                    "data_quality_status": "passed",
+                    "source_adapter": "mootdx",
+                    "subscription_id": "sub-index-000001",
+                    "pull_plan_id": "pull-plan-display-1",
+                    "snapshot_id": "index-display-snapshot-1",
+                },
+                "created_at": datetime(2026, 6, 5, 3, 11, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 5, 3, 11, tzinfo=timezone.utc),
+            }
+        ]
+        self.n3_display_messages = [
+            row for row in self.n3_messages
+            if row.get("event_type") == "MarketDisplaySnapshotUpdated"
+        ]
+        self.ui_v1_signals = [
+            {
+                "user_signal_projection_id": 101,
+                "user_signal_card_id": 201,
+                "user_notification_queue_id": 301,
+                "user_projection_run_id": "user_projection_shadow_20260603_v1",
+                "trade_date": "20260603",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:302132",
+                "code": "302132",
+                "name": "测试股份",
+                "direction": "sell",
+                "signal_type": "S_SELL",
+                "action_state": "blocked",
+                "action_mark": "normal",
+                "card_status": "blocked",
+                "blocked_reason": "price_confirmation_failed",
+                "trigger_kind": "market_action_confirmation",
+                "condition_key": "SELL:M,W,D",
+                "original_condition_key": "SELL:M,W,D",
+                "primary_trigger_period": "30m",
+                "triggered_periods": '["M", "W", "D"]',
+                "trigger_time": datetime(2026, 6, 3, 2, 6, tzinfo=timezone.utc),
+                "event_time": datetime(2026, 6, 3, 2, 6, tzinfo=timezone.utc),
+                "queue_status": "queued_only",
+                "delivery_status": "not_delivered",
+                "notification_source": "n5_action_blocked",
+                "channel": "broadcast_queue",
+                "source_action_run_id": "action_consumer_market_action_confirmation_v1_20260603",
+                "source_event_id": "evt_blocked_1",
+                "source_action_event_id": "evt_blocked_1",
+                "source_action_event_type": "ActionBlocked",
+                "source_n4_run_id": "trigger_rule_v4_execute_20260603",
+                "target_price": None,
+                "current_price": None,
+                "expected_return_pct": None,
+                "board_code": "881001",
+                "board_name": "行业一",
+                "card_payload_json": {
+                    "blocked_reason": "price_confirmation_failed",
+                    "trigger_kind": "market_action_confirmation",
+                    "source_n4_run_id": "trigger_rule_v4_execute_20260603",
+                },
+                "display_payload_json": {
+                    "trade_date": "20260603",
+                    "primary_trigger_period": "30m",
+                },
+                "notification_payload_json": {
+                    "title": "市场动作未确认",
+                    "message": "302132 市场动作未确认",
+                    "trace_json": {"hidden": True},
+                    "source_payload_json": {"hidden": True},
+                    "raw_payload": {"hidden": True},
+                },
+                "rollback_safe": True,
+                "created_at": datetime(2026, 6, 3, 2, 7, tzinfo=timezone.utc),
+            },
+            {
+                "user_signal_projection_id": 102,
+                "user_signal_card_id": 202,
+                "user_notification_queue_id": 302,
+                "user_projection_run_id": "user_projection_shadow_20260602_1105",
+                "trade_date": "20260602",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "action_state": "executed",
+                "action_mark": "30m_shrink",
+                "card_status": "action_confirmed",
+                "blocked_reason": None,
+                "trigger_kind": "market_action_confirmation",
+                "condition_key": "BUY:M,W,D",
+                "original_condition_key": "BUY:M,W,D",
+                "primary_trigger_period": "30m",
+                "triggered_periods": '["M", "W", "D"]',
+                "trigger_time": datetime(2026, 6, 2, 3, 5, tzinfo=timezone.utc),
+                "event_time": datetime(2026, 6, 2, 3, 5, tzinfo=timezone.utc),
+                "queue_status": "queued_only",
+                "delivery_status": "not_delivered",
+                "notification_source": "n5_action_executed",
+                "channel": "broadcast_queue",
+                "source_action_run_id": "action_consumer_action_confirmation_metric_execute_20260602_1105",
+                "source_event_id": "evt_executed_1",
+                "source_action_event_id": "evt_executed_1",
+                "source_action_event_type": "ActionExecuted",
+                "source_n4_run_id": "trigger_action_confirmation_metric_execute_20260602_1105",
+                "target_price": 12.34,
+                "current_price": 10.11,
+                "expected_return_pct": 22.06,
+                "board_code": "881002",
+                "board_name": "行业二",
+                "card_payload_json": {
+                    "trigger_kind": "market_action_confirmation",
+                    "source_n4_run_id": "trigger_action_confirmation_metric_execute_20260602_1105",
+                },
+                "display_payload_json": {
+                    "trade_date": "20260602",
+                    "primary_trigger_period": "30m",
+                },
+                "notification_payload_json": {
+                    "title": "市场动作确认成立",
+                    "message": "600000 市场动作确认成立",
+                },
+                "rollback_safe": True,
+                "created_at": datetime(2026, 6, 2, 3, 6, tzinfo=timezone.utc),
+            },
+        ]
+        self.status_monitor_rows = [
+            {
+                "source_layer": "N4_trigger",
+                "event_type": "TriggerMatched",
+                "event_id": "n4-trigger-matched-1",
+                "outbox_status": "pending",
+                "status_key": "active",
+                "current_status": "matched",
+                "trigger_live": True,
+                "source_run_id": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "event_time": datetime(2026, 6, 5, 2, 5, tzinfo=timezone.utc),
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W,D",
+                "n5_relationship": {
+                    "action_event_type": "ActionBlocked",
+                    "action_state": "blocked",
+                    "blocked_reason": "price_confirmation_failed",
+                    "action_event_id": "n5-action-blocked-1",
+                },
+            },
+            {
+                "source_layer": "N5_action",
+                "event_type": "ActionBlocked",
+                "action_event_type": "ActionBlocked",
+                "event_id": "n5-action-blocked-1",
+                "outbox_status": "pending",
+                "status_key": "active",
+                "action_state": "blocked",
+                "blocked_reason": "price_confirmation_failed",
+                "source_run_id": "action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "event_time": datetime(2026, 6, 5, 2, 6, tzinfo=timezone.utc),
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W,D",
+                "related_n4_event_id": "n4-trigger-matched-1",
+            },
+            {
+                "source_layer": "N5_action",
+                "event_type": "ActionExecuted",
+                "action_event_type": "ActionExecuted",
+                "event_id": "n5-action-executed-1",
+                "outbox_status": "pending",
+                "status_key": "active",
+                "action_state": "executed",
+                "blocked_reason": None,
+                "source_run_id": "action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "event_time": datetime(2026, 6, 5, 2, 7, tzinfo=timezone.utc),
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:000001",
+                "code": "000001",
+                "name": "平安银行",
+                "direction": "sell",
+                "signal_type": "S_SELL",
+                "condition_key": "SELL:M,W,D",
+                "related_n4_event_id": "n4-trigger-matched-2",
+            },
+        ]
+
+    def fetch_user_for_login(self, login_name: str) -> UserAccount | None:
+        return self.users_by_login.get(login_name)
+
+    def create_session(
+        self,
+        *,
+        user_id: int,
+        session_token_hash: str,
+        session_token_hash_algo: str,
+        expires_at: datetime,
+        client_info: dict[str, Any],
+    ) -> AuthSession:
+        self.created_sessions.append(
+            {
+                "user_id": user_id,
+                "session_token_hash": session_token_hash,
+                "session_token_hash_algo": session_token_hash_algo,
+                "expires_at": expires_at,
+                "client_info": client_info,
+            }
+        )
+        user = self.user_by_id(user_id)
+        if user is None:
+            raise AssertionError(f"unexpected user_id {user_id}")
+        session = AuthSession(
+            user_session_id=len(self.created_sessions),
+            user_id=user_id,
+            login_name=user.login_name,
+            display_name=user.display_name,
+            role=user.role,
+            status=user.status,
+            session_token_hash=session_token_hash,
+            expires_at=expires_at,
+            revoked_at=None,
+        )
+        self.sessions_by_hash[session_token_hash] = session
+        return session
+
+    def fetch_session(self, session_token_hash: str) -> AuthSession | None:
+        return self.sessions_by_hash.get(session_token_hash)
+
+    def revoke_session(self, session_token_hash: str, revoked_at: datetime) -> bool:
+        self.revoked_session_hashes.append(session_token_hash)
+        session = self.sessions_by_hash.get(session_token_hash)
+        if session is None:
+            return False
+        self.sessions_by_hash[session_token_hash] = AuthSession(
+            user_session_id=session.user_session_id,
+            user_id=session.user_id,
+            login_name=session.login_name,
+            display_name=session.display_name,
+            role=session.role,
+            status=session.status,
+            session_token_hash=session.session_token_hash,
+            expires_at=session.expires_at,
+            revoked_at=revoked_at,
+        )
+        return True
+
+    def fetch_cards(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+        self.card_reads += 1
+        self.card_read_user_ids.append(user_id)
+        self.assert_user(user_id)
+        return self.cards_by_user_id.get(user_id, [])[:limit]
+
+    def fetch_notifications(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+        self.notification_reads += 1
+        self.notification_read_user_ids.append(user_id)
+        self.assert_user(user_id)
+        return self.notifications_by_user_id.get(user_id, [])[:limit]
+
+    def fetch_n5_action_events(self, limit: int) -> list[dict[str, Any]]:
+        self.action_event_reads += 1
+        return self.action_events[:limit]
+
+    def fetch_message_dashboard(self, limit: int) -> dict[str, Any]:
+        self.ui_v1_message_dashboard_reads += 1
+        return {
+            "admin_dashboard": {
+                "today_n4_trigger_matched_pending": 3,
+                "today_n5_action_blocked": 1,
+                "today_n5_action_executed": 0,
+                "n5_outbox_pending": 1,
+                "n6_shadow_projection_count": 2,
+                "n6_shadow_card_count": 2,
+                "n6_shadow_queue_count": 2,
+                "n6_queued_only": 2,
+                "n6_ready_for_future_push": 0,
+                "latest_projection_run_id": "user_projection_shadow_20260603_v1",
+            },
+            "message_dashboard": {
+                "event_distribution": [
+                    {"event_type": "TriggerMatched", "status": "pending", "count": 3},
+                    {"event_type": "ActionBlocked", "status": "pending", "count": 1},
+                ],
+                "total_messages": 4,
+            },
+            "blocked_reason_distribution": [
+                {"blocked_reason": "price_confirmation_failed", "count": 1},
+            ],
+            "recent_runs": [
+                {
+                    "layer": "N5",
+                    "run_id": "action_consumer_market_action_confirmation_v1_20260603",
+                    "status": "passed",
+                    "created_at": datetime(2026, 6, 3, 2, 0, tzinfo=timezone.utc),
+                    "finished_at": datetime(2026, 6, 3, 2, 1, tzinfo=timezone.utc),
+                }
+            ],
+            "messages": self.action_events[:limit],
+        }
+
+    def fetch_top_index_strategy(self) -> dict[str, Any] | None:
+        self.strategy_reads += 1
+        return self.top_index_strategy
+
+    def fetch_strong_boards(self, limit: int) -> list[dict[str, Any]]:
+        self.board_reads += 1
+        return self.strong_boards[:limit]
+
+    def fetch_filter_profile(self, user_id: int) -> dict[str, Any] | None:
+        self.profile_reads += 1
+        self.assert_user(user_id)
+        return self.filter_profile
+
+    def fetch_users_for_admin(self) -> list[dict[str, Any]]:
+        self.user_reads += 1
+        return self.users
+
+    def create_user_with_defaults(
+        self,
+        *,
+        login_name: str,
+        display_name: str | None,
+        role: str,
+        password_hash: str,
+        password_hash_algo: str,
+        created_by_user_id: int,
+    ) -> dict[str, Any]:
+        if login_name in self.users_by_login:
+            raise ValueError("login_name_exists")
+        user_id = max(row["user_id"] for row in self.users) + 1
+        self.users_by_login[login_name] = UserAccount(
+            user_id=user_id,
+            login_name=login_name,
+            display_name=display_name,
+            role=role,
+            status="active",
+            password_hash=password_hash,
+            password_hash_algo=password_hash_algo,
+        )
+        user_row = {
+            "user_id": user_id,
+            "login_name": login_name,
+            "display_name": display_name,
+            "role": role,
+            "status": "active",
+            "filter_profile_count": 1,
+            "sim_account_count": 1,
+            "active_position_count": 0,
+        }
+        self.users.append(user_row)
+        self.created_users.append(
+            {
+                "user_id": user_id,
+                "login_name": login_name,
+                "display_name": display_name,
+                "role": role,
+                "password_hash": password_hash,
+                "password_hash_algo": password_hash_algo,
+                "created_by_user_id": created_by_user_id,
+            }
+        )
+        self.created_filter_profiles.append({"user_id": user_id, "profile_name": "MVP default", "is_default": True})
+        self.created_sim_accounts.append(
+            {
+                "user_id": user_id,
+                "account_name": "MVP T+1 shadow account",
+                "initial_cash": 1000000000,
+                "cash_balance": 1000000000,
+            }
+        )
+        self.sim_accounts[user_id] = {
+            "user_sim_account_id": user_id,
+            "account_name": "MVP T+1 shadow account",
+            "initial_cash": 1000000000,
+            "cash_balance": 1000000000,
+            "frozen_cash": 0,
+            "settlement_mode": "T_PLUS_1",
+            "account_status": "active",
+        }
+        self.sim_positions[user_id] = []
+        return user_row
+
+    def delete_user(self, *, target_user_id: int, deleted_by_user_id: int) -> dict[str, Any]:
+        for row in self.users:
+            if row["user_id"] == target_user_id:
+                row["status"] = "deleted"
+                self.deleted_users.append({"target_user_id": target_user_id, "deleted_by_user_id": deleted_by_user_id})
+                self.revoked_user_session_ids.append(target_user_id)
+                return row
+        raise ValueError("user_not_found")
+
+    def fetch_sim_account(self, user_id: int) -> dict[str, Any] | None:
+        self.sim_account_reads += 1
+        return self.sim_accounts.get(user_id)
+
+    def fetch_sim_positions(self, user_id: int) -> list[dict[str, Any]]:
+        self.sim_position_reads += 1
+        return self.sim_positions.get(user_id, [])
+
+    def _filtered_ui_v1_signals(self, user_id: int, filters: dict[str, Any]) -> list[dict[str, Any]]:
+        self.assert_user(user_id)
+        rows = [row for row in self.ui_v1_signals if not is_stale_user_signal_row(row)]
+        for key in (
+            "trade_date",
+            "event_type",
+            "asset_kind",
+            "direction",
+            "signal_type",
+            "action_state",
+            "blocked_reason",
+        ):
+            value = filters.get(key)
+            if value:
+                if key == "event_type":
+                    rows = [row for row in rows if row.get("source_action_event_type") == value]
+                else:
+                    rows = [row for row in rows if row.get(key) == value]
+        date_from = filters.get("date_from")
+        date_to = filters.get("date_to")
+        time_field = filters.get("time_field") or "event_time"
+        if date_from:
+            rows = [row for row in rows if str(row.get(time_field, ""))[:10] >= str(date_from)]
+        if date_to:
+            rows = [row for row in rows if str(row.get(time_field, ""))[:10] <= str(date_to)]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            rows = [
+                row for row in rows
+                if keyword in str(row.get("code") or "").lower()
+                or keyword in str(row.get("source_event_id") or "").lower()
+                or keyword in str(row.get("source_action_event_id") or "").lower()
+                or keyword in str(row.get("condition_key") or "").lower()
+                or keyword in str(row.get("identity_key") or "").lower()
+            ]
+        return rows
+
+    def fetch_ui_v1_signals(
+        self,
+        user_id: int,
+        filters: dict[str, Any],
+        limit: int,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        self.ui_v1_signal_reads += 1
+        rows = self._filtered_ui_v1_signals(user_id, filters)
+        return rows[offset:offset + limit]
+
+    def count_ui_v1_signals(self, user_id: int, filters: dict[str, Any]) -> int:
+        self.ui_v1_signal_count_reads += 1
+        return len(self._filtered_ui_v1_signals(user_id, filters))
+
+    def fetch_ui_v1_signal_statistics(self, user_id: int) -> dict[str, Any]:
+        self.ui_v1_signal_statistics_reads += 1
+        self.assert_user(user_id)
+        blocked_reasons: dict[str, int] = {}
+        rows = [row for row in self.ui_v1_signals if not is_stale_user_signal_row(row)]
+        for row in rows:
+            reason = row.get("blocked_reason")
+            if reason:
+                blocked_reasons[str(reason)] = blocked_reasons.get(str(reason), 0) + 1
+        return {
+            "total_count": len(rows),
+            "ActionExecuted": sum(1 for row in rows if row.get("source_action_event_type") == "ActionExecuted"),
+            "ActionBlocked": sum(1 for row in rows if row.get("source_action_event_type") == "ActionBlocked"),
+            "TriggerMatched": 0,
+            "blocked_reason_distribution": blocked_reasons,
+        }
+
+    def fetch_ui_v1_lineage_stats(self, user_id: int) -> dict[str, Any]:
+        self.ui_v1_lineage_stats_reads += 1
+        self.assert_user(user_id)
+        return {
+            "source_runs": {
+                "N4": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "N5": "action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "N6": "user_projection_shadow_20260605__action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+            },
+            "lineage_stats": {
+                "N4": {
+                    "TriggerMatched": {"pending": 605},
+                    "TriggerPendingMarketData": {"pending": 0},
+                    "TriggerStateChanged": {"pending": 0},
+                },
+                "N5": {
+                    "ActionExecuted": {"pending": 1},
+                    "ActionBlocked": {"pending": 604},
+                },
+            },
+            "legacy": {
+                "N4": {
+                    "TriggerCleared": {"pending": 0, "display": "hidden_by_default"},
+                    "TriggerLiveChanged": {"pending": 0, "display": "hidden_by_default"},
+                }
+            },
+            "blocked_reason": {
+                "price_confirmation_failed": 587,
+                "amount_confirmation_failed": 17,
+                "metric_missing": 0,
+            },
+        }
+
+    def _filtered_raw_messages(self, rows: list[dict[str, Any]], filters: dict[str, Any]) -> list[dict[str, Any]]:
+        filtered = list(rows)
+        source_layer = filters.get("source_layer")
+        if source_layer:
+            filtered = [row for row in filtered if row.get("source_layer") == source_layer]
+        input_group = filters.get("input_group")
+        if input_group == "n5_action":
+            filtered = [row for row in filtered if row.get("source_layer") == "N5_action"]
+        elif input_group == "n3_display":
+            filtered = [
+                row for row in filtered
+                if row.get("source_layer") == "N3_market_data"
+                and row.get("event_type") == "MarketDisplaySnapshotUpdated"
+            ]
+        elif input_group == "legacy":
+            filtered = [
+                row for row in filtered
+                if row.get("event_type") in {"ActionEvent", "HintEvent", "RiskEvent", "PositionEvent"}
+            ]
+        event_type = filters.get("event_type")
+        if event_type:
+            filtered = [row for row in filtered if row.get("event_type") == event_type]
+        status = filters.get("status")
+        if status:
+            filtered = [row for row in filtered if row.get("status") == status]
+        asset_kind = filters.get("asset_kind")
+        if asset_kind:
+            filtered = [row for row in filtered if row.get("asset_kind") == asset_kind]
+        source_run_id = filters.get("source_run_id")
+        if source_run_id:
+            filtered = [row for row in filtered if row.get("source_run_id") == source_run_id]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            filtered = [
+                row for row in filtered
+                if keyword in str(row.get("identity_key") or "").lower()
+                or keyword in str(row.get("event_id") or "").lower()
+                or keyword in str(row.get("source_run_id") or "").lower()
+                or keyword in json.dumps(row.get("payload_json") or {}, ensure_ascii=False).lower()
+            ]
+        event_date = filters.get("event_date")
+        if event_date:
+            filtered = [
+                row for row in filtered
+                if row.get("event_time")
+                and row["event_time"].astimezone(timezone(timedelta(hours=8))).date().isoformat() == event_date
+            ]
+        return filtered
+
+    def _latest_raw_message_event_date(
+        self,
+        rows: list[dict[str, Any]],
+        filters: dict[str, Any],
+    ) -> str | None:
+        filtered = list(rows)
+        source_layer = filters.get("source_layer")
+        if source_layer:
+            filtered = [row for row in filtered if row.get("source_layer") == source_layer]
+        input_group = filters.get("input_group")
+        if input_group == "n5_action":
+            filtered = [row for row in filtered if row.get("source_layer") == "N5_action"]
+        elif input_group == "n3_display":
+            filtered = [
+                row for row in filtered
+                if row.get("source_layer") == "N3_market_data"
+                and row.get("event_type") == "MarketDisplaySnapshotUpdated"
+            ]
+        elif input_group == "legacy":
+            filtered = [
+                row for row in filtered
+                if row.get("event_type") in {"ActionEvent", "HintEvent", "RiskEvent", "PositionEvent"}
+            ]
+        event_type = filters.get("event_type")
+        if event_type:
+            filtered = [row for row in filtered if row.get("event_type") == event_type]
+        status = filters.get("status")
+        if status:
+            filtered = [row for row in filtered if row.get("status") == status]
+        asset_kind = filters.get("asset_kind")
+        if asset_kind:
+            filtered = [row for row in filtered if row.get("asset_kind") == asset_kind]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            filtered = [
+                row for row in filtered
+                if keyword in str(row.get("identity_key") or "").lower()
+                or keyword in str(row.get("event_id") or "").lower()
+                or keyword in str(row.get("source_run_id") or "").lower()
+                or keyword in json.dumps(row.get("payload_json") or {}, ensure_ascii=False).lower()
+            ]
+        dates = [
+            row["event_time"].astimezone(timezone(timedelta(hours=8))).date().isoformat()
+            for row in filtered
+            if row.get("event_time")
+        ]
+        return max(dates) if dates else None
+
+    def _effective_raw_message_filters(
+        self,
+        rows: list[dict[str, Any]],
+        filters: dict[str, Any],
+        *,
+        include_all: bool,
+    ) -> tuple[dict[str, Any], str | None, bool]:
+        effective_filters = dict(filters)
+        latest_event_date = self._latest_raw_message_event_date(rows, filters)
+        if not include_all and not effective_filters.get("event_date") and latest_event_date:
+            effective_filters["event_date"] = latest_event_date
+            return effective_filters, latest_event_date, True
+        return effective_filters, latest_event_date, False
+
+    def _active_lineage_raw_message_filters(
+        self,
+        source_layer: str,
+        filters: dict[str, Any],
+        *,
+        include_all: bool,
+    ) -> dict[str, Any]:
+        effective_filters = dict(filters)
+        if include_all or effective_filters.get("source_run_id"):
+            return effective_filters
+        event_date = effective_filters.get("event_date")
+        active_source_run_id = n6_user_app_module.ACTIVE_RAW_MESSAGE_SOURCE_RUN_BY_LAYER_DATE.get(
+            (source_layer, str(event_date))
+        )
+        if active_source_run_id:
+            effective_filters["source_run_id"] = active_source_run_id
+        return effective_filters
+
+    def fetch_ui_v1_n3_messages(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        self.ui_v1_n3_message_reads += 1
+        rows = list(self.n3_messages)
+        filters = filters or {}
+        effective_filters, latest_event_date, date_filter_defaulted = self._effective_raw_message_filters(
+            rows,
+            filters,
+            include_all=include_all,
+        )
+        filtered_rows = self._filtered_raw_messages(rows, effective_filters)
+        filtered_rows = sorted(
+            filtered_rows,
+            key=lambda row: (row.get("event_time") or datetime.min.replace(tzinfo=timezone.utc), row.get("outbox_id") or 0),
+            reverse=True,
+        )
+        effective_limit = len(rows) if include_all else limit
+        return {
+            "total_count": len(rows),
+            "filtered_count": len(filtered_rows),
+            "returned_count": min(len(filtered_rows), effective_limit),
+            "default_limit": limit,
+            "include_all": include_all,
+            "filters": {key: value for key, value in effective_filters.items() if value},
+            "latest_event_date": latest_event_date,
+            "date_filter_defaulted": date_filter_defaulted,
+            "event_types": [
+                "MarketSnapshotUpdated",
+                "MinuteBarClosed",
+                "MinuteBarCorrected",
+                "MarketDataDelayed",
+                "MarketDataMissing",
+                "MarketDisplaySnapshotUpdated",
+            ],
+            "items": filtered_rows[:effective_limit],
+        }
+
+    def fetch_ui_v1_n4_messages(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        self.ui_v1_n4_message_reads += 1
+        rows = list(self.n4_messages)
+        filters = filters or {}
+        effective_filters, latest_event_date, date_filter_defaulted = self._effective_raw_message_filters(
+            rows,
+            filters,
+            include_all=include_all,
+        )
+        effective_filters = self._active_lineage_raw_message_filters(
+            "N4_trigger",
+            effective_filters,
+            include_all=include_all,
+        )
+        filtered_rows = self._filtered_raw_messages(rows, effective_filters)
+        filtered_rows = sorted(
+            filtered_rows,
+            key=lambda row: (row.get("event_time") or datetime.min.replace(tzinfo=timezone.utc), row.get("outbox_id") or 0),
+            reverse=True,
+        )
+        effective_limit = len(rows) if include_all else limit
+        return {
+            "total_count": len(rows),
+            "filtered_count": len(filtered_rows),
+            "returned_count": min(len(filtered_rows), effective_limit),
+            "default_limit": limit,
+            "include_all": include_all,
+            "filters": {key: value for key, value in effective_filters.items() if value},
+            "latest_event_date": latest_event_date,
+            "date_filter_defaulted": date_filter_defaulted,
+            "event_types": [
+                "TriggerMatched",
+                "TriggerPendingMarketData",
+                "TriggerStateChanged",
+                "TriggerCleared",
+                "TriggerLiveChanged",
+            ],
+            "standard_event_types": [
+                "TriggerMatched",
+                "TriggerPendingMarketData",
+                "TriggerStateChanged",
+            ],
+            "legacy_event_types": ["TriggerCleared", "TriggerLiveChanged"],
+            "items": filtered_rows[:effective_limit],
+        }
+
+    def fetch_ui_v1_n5_messages(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        self.ui_v1_n5_message_reads += 1
+        rows = list(self.n5_messages)
+        filters = filters or {}
+        effective_filters, latest_event_date, date_filter_defaulted = self._effective_raw_message_filters(
+            rows,
+            filters,
+            include_all=include_all,
+        )
+        effective_filters = self._active_lineage_raw_message_filters(
+            "N5_action",
+            effective_filters,
+            include_all=include_all,
+        )
+        filtered_rows = self._filtered_raw_messages(rows, effective_filters)
+        effective_limit = len(rows) if include_all else limit
+        return {
+            "total_count": len(rows),
+            "filtered_count": len(filtered_rows),
+            "returned_count": min(len(filtered_rows), effective_limit),
+            "default_limit": limit,
+            "include_all": include_all,
+            "filters": {key: value for key, value in effective_filters.items() if value},
+            "latest_event_date": latest_event_date,
+            "date_filter_defaulted": date_filter_defaulted,
+            "event_types": [
+                "ActionEligible",
+                "ActionBlocked",
+                "ActionExecuted",
+                "ActionSkipped",
+                "ActionEvent",
+                "HintEvent",
+                "RiskEvent",
+                "PositionEvent",
+            ],
+            "standard_event_types": [
+                "ActionEligible",
+                "ActionBlocked",
+                "ActionExecuted",
+                "ActionSkipped",
+            ],
+            "legacy_event_types": ["ActionEvent", "HintEvent", "RiskEvent", "PositionEvent"],
+            "items": filtered_rows[:effective_limit],
+        }
+
+    def _n5_action_display_item(self, row: dict[str, Any]) -> dict[str, Any]:
+        payload = row.get("payload_json") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        trace_json = payload.get("trace_json") or {}
+        if not isinstance(trace_json, dict):
+            trace_json = {}
+        live_window = trace_json.get("live_window_confirmation") or {}
+        if not isinstance(live_window, dict):
+            live_window = {}
+        selected_metric_id = live_window.get("selected_metric_id") or payload.get("selected_metric_id") or ""
+        selected_metric_time = (
+            live_window.get("executed_metric_time")
+            or live_window.get("selected_metric_time")
+            or payload.get("selected_metric_time")
+            or ""
+        )
+        trigger_metric_time = live_window.get("trigger_metric_time") or payload.get("trigger_metric_time") or ""
+        event_time = row.get("event_time")
+        return {
+            "outbox_id": row.get("outbox_id"),
+            "event_id": row.get("event_id") or "",
+            "event_time": event_time.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+            if event_time
+            else "",
+            "trade_date": row.get("trade_date") or "",
+            "asset_kind": row.get("asset_kind") or "",
+            "identity_key": row.get("identity_key") or "",
+            "event_type": row.get("event_type") or "",
+            "source_layer": row.get("source_layer") or "",
+            "source_run_id": row.get("source_run_id") or "",
+            "status": row.get("status") or "",
+            "action_state": payload.get("action_state") or "",
+            "action_type": payload.get("action_type") or "",
+            "condition_key": payload.get("condition_key") or "",
+            "selected_metric_id": str(selected_metric_id) if selected_metric_id else "",
+            "selected_metric_time": str(selected_metric_time) if selected_metric_time else "",
+            "trigger_metric_time": str(trigger_metric_time) if trigger_metric_time else "",
+            "live_window_confirmation": bool(live_window.get("live_window_confirmation")),
+            "multi_action_window": bool(live_window.get("multi_action_window")),
+            "action_key": payload.get("action_key") or "",
+            "dedup_key": payload.get("dedup_key") or row.get("dedup_key") or "",
+            "payload_json": payload,
+            "payload_json_text": json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        }
+
+    def fetch_ui_v1_n5_actions(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.ui_v1_n5_action_reads += 1
+        filters = filters or {}
+        target_run_id = (
+            filters.get("action_run_id")
+            or filters.get("source_run_id")
+            or self.latest_passed_n5_action_run_id
+        )
+        action_event_types = ["ActionExecuted", "ActionEligible"]
+        rows = [
+            row
+            for row in self.n5_action_display_rows
+            if row.get("source_run_id") == target_run_id
+            and row.get("event_type") in action_event_types
+        ]
+        event_type = filters.get("event_type")
+        if event_type:
+            rows = [row for row in rows if row.get("event_type") == event_type]
+        status = filters.get("status")
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        asset_kind = filters.get("asset_kind")
+        if asset_kind:
+            rows = [row for row in rows if row.get("asset_kind") == asset_kind]
+        items = [self._n5_action_display_item(row) for row in rows]
+        action_state = filters.get("action_state")
+        if action_state:
+            items = [item for item in items if item.get("action_state") == action_state]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            items = [
+                item
+                for item in items
+                if keyword in str(item.get("identity_key") or "").lower()
+                or keyword in str(item.get("event_id") or "").lower()
+                or keyword in str(item.get("source_run_id") or "").lower()
+                or keyword in str(item.get("action_key") or "").lower()
+                or keyword in str(item.get("condition_key") or "").lower()
+                or keyword in str(item.get("selected_metric_id") or "").lower()
+            ]
+        items = sorted(
+            items,
+            key=lambda item: (item.get("event_time") or "", item.get("outbox_id") or 0),
+            reverse=True,
+        )
+        effective_limit = max(1, min(int(limit or 200), 5000))
+        returned = items[:effective_limit]
+        effective_filters = {
+            key: value
+            for key, value in dict(filters, action_run_id=target_run_id, source_run_id=target_run_id).items()
+            if value
+        }
+        return {
+            "ok": True,
+            "component": "N5 Actions",
+            "title": "N5动作",
+            "source_layer": "N5_action",
+            "action_run_id": target_run_id,
+            "source_run_id": target_run_id,
+            "total_count": sum(
+                1
+                for row in self.n5_action_display_rows
+                if row.get("source_run_id") == target_run_id and row.get("event_type") in action_event_types
+            ),
+            "filtered_count": len(items),
+            "returned_count": len(returned),
+            "default_limit": effective_limit,
+            "filters": effective_filters,
+            "filter_inputs": {
+                "action_run_id": str(filters.get("action_run_id") or ""),
+                "source_run_id": str(filters.get("source_run_id") or ""),
+                "event_type": str(filters.get("event_type") or ""),
+                "status": str(filters.get("status") or ""),
+                "asset_kind": str(filters.get("asset_kind") or ""),
+                "action_state": str(filters.get("action_state") or ""),
+                "q": str(filters.get("q") or ""),
+            },
+            "event_types": action_event_types,
+            "action_states": ["executed", "eligible"],
+            "summary": {
+                "total": len(items),
+                "pending": sum(1 for item in items if item.get("status") == "pending"),
+                "ActionExecuted": sum(1 for item in items if item.get("event_type") == "ActionExecuted"),
+                "ActionEligible": sum(1 for item in items if item.get("event_type") == "ActionEligible"),
+            },
+            "items": returned,
+            "side_effects": {
+                "writes_database": False,
+                "outbox_status_updates": 0,
+                "inbox_writes": 0,
+                "checkpoint_writes": 0,
+                "user_projection_writes": 0,
+                "sim_written": False,
+                "real_trade_submitted": False,
+                "voice_triggered": False,
+                "mobile_triggered": False,
+            },
+        }
+
+    def _b_track_buy_signal_item(self, row: dict[str, Any]) -> dict[str, Any]:
+        payload = row.get("payload_json") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "event_id": row.get("event_id") or "",
+            "event_time": row.get("event_time").astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+            if row.get("event_time")
+            else "",
+            "action_run_id": row.get("source_run_id") or "",
+            "source_run_id": row.get("source_run_id") or "",
+            "asset_kind": row.get("asset_kind") or "",
+            "identity_key": row.get("identity_key") or "",
+            "action_type": payload.get("action_type") or "",
+            "action_state": payload.get("action_state") or "",
+            "signal_type": payload.get("signal_type") or "",
+            "condition_key": payload.get("condition_key") or "",
+            "projection_30m_type": payload.get("projection_30m_type") or "",
+            "trigger_mark_candidate": payload.get("trigger_mark_candidate") or "",
+            "projection_run_id": payload.get("projection_run_id") or "",
+            "projection_id": str(payload.get("projection_id") or ""),
+            "source_trigger_run_id": payload.get("source_trigger_run_id") or "",
+            "source_trigger_event_id": payload.get("source_trigger_event_id") or "",
+            "provisional": bool(payload.get("provisional")),
+            "action_confirmation_mode": payload.get("action_confirmation_mode") or "",
+            "status": row.get("status") or "",
+        }
+
+    def fetch_b_track_buy_signals(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.b_track_buy_signal_reads += 1
+        filters = filters or {}
+        target_run_id = filters.get("action_run_id") or self.latest_b_track_action_run_id
+        action_type = str(filters.get("action_type") or "buy").strip().lower()
+        if action_type not in {"buy", "sell", "all"}:
+            action_type = "buy"
+        rows = [
+            row
+            for row in self.b_track_buy_signal_rows
+            if row.get("source_run_id") == target_run_id
+            and row.get("source_layer") == "N5_action"
+            and row.get("event_type") == "ActionEligible"
+            and (row.get("payload_json") or {}).get("provisional") is True
+            and (row.get("payload_json") or {}).get("action_confirmation_mode") == "eligibility_only"
+        ]
+        total_count = len(rows)
+        if action_type != "all":
+            rows = [row for row in rows if (row.get("payload_json") or {}).get("action_type") == action_type]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            rows = [
+                row
+                for row in rows
+                if keyword in str(row.get("identity_key") or "").lower()
+                or keyword in str(row.get("event_id") or "").lower()
+                or keyword in str((row.get("payload_json") or {}).get("projection_id") or "").lower()
+                or keyword in str((row.get("payload_json") or {}).get("condition_key") or "").lower()
+            ]
+        rows = sorted(
+            rows,
+            key=lambda row: (row.get("event_time") or datetime.min.replace(tzinfo=timezone.utc), row.get("outbox_id") or 0),
+            reverse=True,
+        )
+        effective_limit = max(1, min(int(limit or 200), 5000))
+        items = [self._b_track_buy_signal_item(row) for row in rows[:effective_limit]]
+        return {
+            "ok": True,
+            "component": "B Track Buy Signals",
+            "title": "B轨买入信号",
+            "action_run_id": target_run_id,
+            "source_layer": "N5_action",
+            "total_count": total_count,
+            "filtered_count": len(rows),
+            "returned_count": len(items),
+            "default_limit": effective_limit,
+            "filters": {
+                "action_run_id": target_run_id,
+                "action_type": action_type,
+                **({"q": str(filters.get("q") or "")} if filters.get("q") else {}),
+            },
+            "filter_inputs": {
+                "action_run_id": str(filters.get("action_run_id") or ""),
+                "action_type": action_type,
+                "q": str(filters.get("q") or ""),
+            },
+            "action_types": ["buy", "sell", "all"],
+            "summary": {
+                "total": len(rows),
+                "buy": sum(1 for item in items if item.get("action_type") == "buy"),
+                "sell": sum(1 for item in items if item.get("action_type") == "sell"),
+                "ActionEligible": len(rows),
+                "ActionExecuted": 0,
+                "ActionBlocked": 0,
+                "ActionSkipped": 0,
+            },
+            "items": items,
+            "side_effects": {
+                "writes_database": False,
+                "outbox_status_updates": 0,
+                "inbox_writes": 0,
+                "checkpoint_writes": 0,
+                "user_projection_writes": 0,
+                "user_card_writes": 0,
+                "virtual_account_writes": 0,
+                "order_writes": 0,
+                "position_writes": 0,
+                "sim_written": False,
+                "real_trade_submitted": False,
+                "voice_triggered": False,
+                "mobile_triggered": False,
+            },
+        }
+
+    def fetch_ui_v1_input_messages(
+        self,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        self.ui_v1_input_message_reads += 1
+        rows = list(self.n5_messages) + list(self.n3_display_messages)
+        filters = filters or {}
+        effective_filters, latest_event_date, date_filter_defaulted = self._effective_raw_message_filters(
+            rows,
+            filters,
+            include_all=include_all,
+        )
+        filtered_rows = self._filtered_raw_messages(rows, effective_filters)
+        filtered_rows = sorted(
+            filtered_rows,
+            key=lambda row: (row.get("event_time") or datetime.min.replace(tzinfo=timezone.utc), row.get("outbox_id") or 0),
+            reverse=True,
+        )
+        effective_limit = len(rows) if include_all else limit
+        n5_canonical_events = {"ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped"}
+        n5_legacy_events = {"ActionEvent", "HintEvent", "RiskEvent", "PositionEvent"}
+        return {
+            "total_count": len(rows),
+            "filtered_count": len(filtered_rows),
+            "returned_count": min(len(filtered_rows), effective_limit),
+            "default_limit": limit,
+            "include_all": include_all,
+            "filters": {key: value for key, value in effective_filters.items() if value},
+            "latest_event_date": latest_event_date,
+            "date_filter_defaulted": date_filter_defaulted,
+            "source_layers": ["N5_action", "N3_market_data"],
+            "event_types": [
+                "ActionEligible",
+                "ActionBlocked",
+                "ActionExecuted",
+                "ActionSkipped",
+                "ActionEvent",
+                "HintEvent",
+                "RiskEvent",
+                "PositionEvent",
+                "MarketDisplaySnapshotUpdated",
+            ],
+            "n5_canonical_event_types": list(n5_canonical_events),
+            "n5_legacy_event_types": list(n5_legacy_events),
+            "n3_display_event_types": ["MarketDisplaySnapshotUpdated"],
+            "summary": {
+                "total": len(filtered_rows),
+                "pending": sum(1 for row in filtered_rows if row.get("status") == "pending"),
+                "n5_canonical": sum(1 for row in filtered_rows if row.get("event_type") in n5_canonical_events),
+                "n5_legacy": sum(1 for row in filtered_rows if row.get("event_type") in n5_legacy_events),
+                "n3_display_input": sum(
+                    1
+                    for row in filtered_rows
+                    if row.get("source_layer") == "N3_market_data"
+                    and row.get("event_type") == "MarketDisplaySnapshotUpdated"
+                ),
+                "latest_event_time": max(
+                    [row.get("event_time") for row in filtered_rows if row.get("event_time")],
+                    default=None,
+                ),
+            },
+            "items": filtered_rows[:effective_limit],
+        }
+
+    def _latest_n2_condition_source_trade_date(
+        self,
+        rows: list[dict[str, Any]],
+        filters: dict[str, Any],
+    ) -> str | None:
+        filtered = list(rows)
+        condition_key = filters.get("condition_key")
+        if condition_key:
+            filtered = [row for row in filtered if condition_key in self._n2_condition_keys(row)]
+        quality_status = filters.get("quality_status")
+        if quality_status:
+            filtered = [row for row in filtered if row.get("quality_status") == quality_status]
+        dates = [str(row.get("source_trade_date")) for row in filtered if row.get("source_trade_date")]
+        return max(dates) if dates else None
+
+    def _n2_condition_keys(self, row: dict[str, Any]) -> set[str]:
+        keys = {
+            row.get("buy_necessary_key"),
+            row.get("sell_necessary_key"),
+            row.get("buy_full_necessary_key"),
+            row.get("sell_full_necessary_key"),
+            row.get("oversold_hint_key"),
+            row.get("overbought_hint_key"),
+        }
+        return {str(key) for key in keys if key}
+
+    def _filtered_n2_condition_basis(
+        self,
+        rows: list[dict[str, Any]],
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        filtered = list(rows)
+        source_trade_date = filters.get("source_trade_date")
+        if source_trade_date:
+            filtered = [row for row in filtered if row.get("source_trade_date") == source_trade_date]
+        condition_key = filters.get("condition_key")
+        if condition_key:
+            filtered = [row for row in filtered if condition_key in self._n2_condition_keys(row)]
+        quality_status = filters.get("quality_status")
+        if quality_status:
+            filtered = [row for row in filtered if row.get("quality_status") == quality_status]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            filtered = [
+                row for row in filtered
+                if keyword in str(row.get("identity_key") or "").lower()
+                or keyword in str(row.get("code") or "").lower()
+                or keyword in str(row.get("name") or "").lower()
+                or keyword in str(row.get("run_id") or "").lower()
+            ]
+        return filtered
+
+    def fetch_ui_v1_n2_condition_basis(
+        self,
+        *,
+        asset_kind: str,
+        filters: dict[str, Any] | None = None,
+        limit: int,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        self.ui_v1_n2_condition_basis_reads += 1
+        rows = list(self.n2_condition_basis_rows[asset_kind])
+        filters = filters or {}
+        effective_filters = dict(filters)
+        latest_source_trade_date = self._latest_n2_condition_source_trade_date(rows, filters)
+        date_filter_defaulted = False
+        if not include_all and not effective_filters.get("source_trade_date") and latest_source_trade_date:
+            effective_filters["source_trade_date"] = latest_source_trade_date
+            date_filter_defaulted = True
+        filtered_rows = self._filtered_n2_condition_basis(rows, effective_filters)
+        effective_limit = len(rows) if include_all else limit
+        return {
+            "asset_kind": asset_kind,
+            "asset_label": {"index": "指数", "board": "板块", "stock": "个股"}[asset_kind],
+            "source_table": f"{asset_kind}_condition_basis" if asset_kind != "board" else "board_condition_basis",
+            "total_count": len(rows),
+            "filtered_count": len(filtered_rows),
+            "returned_count": min(len(filtered_rows), effective_limit),
+            "default_limit": limit,
+            "include_all": include_all,
+            "filters": {key: value for key, value in effective_filters.items() if value},
+            "latest_source_trade_date": latest_source_trade_date,
+            "date_filter_defaulted": date_filter_defaulted,
+            "asset_tabs": [
+                {"asset_kind": "index", "label": "指数", "href": "/n6/n2-condition-basis/index"},
+                {"asset_kind": "board", "label": "板块", "href": "/n6/n2-condition-basis/board"},
+                {"asset_kind": "stock", "label": "个股", "href": "/n6/n2-condition-basis/stock"},
+            ],
+            "items": filtered_rows[:effective_limit],
+        }
+
+    def fetch_ui_v1_n2_condition_basis_latest_export(self) -> dict[str, Any]:
+        self.ui_v1_n2_condition_basis_export_reads += 1
+        latest_dates = [
+            str(row.get("source_trade_date"))
+            for rows in self.n2_condition_basis_rows.values()
+            for row in rows
+            if row.get("source_trade_date")
+        ]
+        latest_source_trade_date = max(latest_dates) if latest_dates else None
+        assets: dict[str, Any] = {}
+        for asset_kind in ("index", "board", "stock"):
+            rows = [
+                row
+                for row in self.n2_condition_basis_rows[asset_kind]
+                if not latest_source_trade_date or row.get("source_trade_date") == latest_source_trade_date
+            ]
+            assets[asset_kind] = {
+                "asset_kind": asset_kind,
+                "asset_label": {"index": "指数", "board": "板块", "stock": "个股"}[asset_kind],
+                "source_table": f"{asset_kind}_condition_basis" if asset_kind != "board" else "board_condition_basis",
+                "items": rows,
+                "row_count": len(rows),
+            }
+        return {
+            "latest_source_trade_date": latest_source_trade_date,
+            "assets": assets,
+            "side_effects": {"writes_database": False},
+        }
+
+    def fetch_ui_v1_status_monitor(
+        self,
+        user_id: int,
+        filters: dict[str, Any],
+        limit: int,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        self.ui_v1_status_monitor_reads += 1
+        self.assert_user(user_id)
+        rows = list(self.status_monitor_rows)
+        for key in ("source_layer", "event_type", "action_event_type", "status", "asset_kind", "direction", "signal_type"):
+            value = filters.get(key)
+            if not value:
+                continue
+            if key == "status":
+                rows = [row for row in rows if row.get("status_key") == value]
+            else:
+                rows = [row for row in rows if row.get(key) == value]
+        keyword = str(filters.get("q") or "").strip().lower()
+        if keyword:
+            rows = [
+                row for row in rows
+                if keyword in str(row.get("code") or "").lower()
+                or keyword in str(row.get("identity_key") or "").lower()
+                or keyword in str(row.get("event_id") or "").lower()
+                or keyword in str(row.get("condition_key") or "").lower()
+            ]
+        return {
+            "source_runs": {
+                "N4": "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+                "N5": "action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1",
+            },
+            "event_summary": {
+                "N4": {
+                    "TriggerMatched": {"pending": 605, "action_entry": True},
+                    "TriggerPendingMarketData": {"pending": 0, "action_entry": False},
+                    "TriggerStateChanged": {"pending": 0, "action_entry": False},
+                },
+                "N5": {
+                    "ActionExecuted": {"pending": 1},
+                    "ActionBlocked": {"pending": 604},
+                },
+            },
+            "relationship_summary": {
+                "matched_to_action": {
+                    "TriggerMatched": 605,
+                    "ActionExecuted": 1,
+                    "ActionBlocked": 604,
+                    "unmatched": 0,
+                    "pass": True,
+                },
+                "status_only": {
+                    "TriggerPendingMarketData_action_entries": 0,
+                    "TriggerStateChanged_action_entries": 0,
+                },
+            },
+            "status_summary": {
+                "active": {"count": 605, "trigger_live": True},
+                "pending_market_data": {"count": 0, "trigger_live": False},
+                "inactive": {"count": 0, "trigger_live": False},
+            },
+            "items": rows[offset:offset + limit],
+            "pagination": {
+                "total_count": len(self.status_monitor_rows),
+                "filtered_count": len(rows),
+                "limit": limit,
+                "offset": offset,
+            },
+        }
+
+    def fetch_ui_v1_signal_detail(self, user_id: int, user_signal_projection_id: int) -> dict[str, Any] | None:
+        self.ui_v1_signal_detail_reads += 1
+        self.assert_user(user_id)
+        for row in self.ui_v1_signals:
+            if is_stale_user_signal_row(row):
+                continue
+            if int(row["user_signal_projection_id"]) == user_signal_projection_id:
+                return row
+        return None
+
+    def fetch_ui_v1_dashboard_metrics(self, user_id: int) -> dict[str, Any]:
+        self.ui_v1_dashboard_reads += 1
+        self.assert_user(user_id)
+        latest_run_id = self.ui_v1_signals[0]["user_projection_run_id"]
+        return {
+            "today_signal_count": len(self.ui_v1_signals),
+            "action_blocked": sum(1 for row in self.ui_v1_signals if row.get("action_state") == "blocked"),
+            "action_executed": sum(1 for row in self.ui_v1_signals if row.get("action_state") == "executed"),
+            "queued_only": sum(1 for row in self.ui_v1_signals if row.get("queue_status") == "queued_only"),
+            "pending_delivery": 0,
+            "rollback_safe": True,
+            "latest_run_id": latest_run_id,
+        }
+
+    def fetch_ui_v1_virtual_account(self, user_id: int) -> dict[str, Any] | None:
+        self.ui_v1_virtual_account_reads += 1
+        self.assert_user(user_id)
+        return self.virtual_account
+
+    def fetch_ui_v1_cash_snapshot(self, user_id: int) -> dict[str, Any] | None:
+        self.ui_v1_cash_snapshot_reads += 1
+        self.assert_user(user_id)
+        return self.cash_snapshot
+
+    def fetch_ui_v1_cash_ledger(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+        self.ui_v1_cash_ledger_reads += 1
+        self.assert_user(user_id)
+        return self.cash_ledger[:limit]
+
+    def fetch_ui_v1_artifacts(self) -> dict[str, Any]:
+        self.ui_v1_artifact_reads += 1
+        return {
+            "artifacts": [
+                "docs/N6_USER_INTERFACE_SPEC_v1.md",
+                "docs/N6_USER_INTERFACE_SPEC_v1_POST_REVIEW.md",
+                "docs/N6_20260603_V1_MARKET_ACTION_CONFIRMATION_PROJECTION_POST_REVIEW.md",
+            ],
+            "stale_artifact": False,
+        }
+
+    def fetch_ui_v1_rollback_summary(self) -> dict[str, Any]:
+        self.ui_v1_rollback_reads += 1
+        return {
+            "rollback_sql_path": "sql/N6_projection_business_rollback.sql",
+            "rollback_safe": True,
+            "delete_order": [
+                "user_notification_queue",
+                "user_signal_card",
+                "user_signal_projection",
+                "user_projection_run",
+            ],
+            "hard_fail_guards": ["decision", "sim", "voice", "mobile", "position"],
+        }
+
+    def fetch_app_principals(self, user_id: int) -> list[dict[str, Any]]:
+        self.app_principal_reads += 1
+        self.assert_user(user_id)
+        return [row for row in self.app_principals if row.get("owner_user_id") == user_id]
+
+    def fetch_app_virtual_account(self, principal_id: int, principal_type: str) -> dict[str, Any] | None:
+        self.app_virtual_account_reads.append((principal_id, principal_type))
+        if (
+            self.virtual_account.get("principal_id") == principal_id
+            and self.virtual_account.get("principal_type") == principal_type
+        ):
+            return self.virtual_account
+        return None
+
+    def fetch_app_cash_snapshot(self, virtual_account_id: int) -> dict[str, Any] | None:
+        self.app_cash_snapshot_reads.append(virtual_account_id)
+        if self.cash_snapshot.get("virtual_account_id") == virtual_account_id:
+            return self.cash_snapshot
+        return None
+
+    def _fake_effective_monitor_scope(
+        self,
+        principal_id: int,
+        principal_type: str,
+        user_id: int = 0,
+    ) -> tuple[dict[str, dict[str, str]], list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, int]]]:
+        current_filter_batch = self._fake_current_filter_batch()
+        all_rows = [
+            self._monitor_row_with_validity(dict(row), current_filter_batch)
+            for row in self.app_monitor_rows
+            if row["principal_id"] == principal_id
+            and row["principal_type"] == principal_type
+            and int(row.get("user_id") or user_id or 0) == int(user_id or row.get("user_id") or 0)
+            and row["status"] != "removed"
+        ]
+        status_counts = self._fake_monitor_status_counts(all_rows)
+        effective_rows = [row for row in all_rows if row.get("effective_active")]
+        return current_filter_batch, effective_rows, all_rows, status_counts
+
+    def _default_realtime_scope_rows(
+        self,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "realtime_scope_id": None,
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "user_id": user_id,
+                "asset_kind": item["asset_kind"],
+                "identity_key": item["identity_key"],
+                "display_name": item["display_name"],
+                "source_type": "default_seed",
+                "source_snapshot_json": dict(item),
+                "is_default_seed": True,
+                "status": "active",
+            }
+            for item in n6_app_v1_module.DEFAULT_REALTIME_SCOPE_INDEXES
+        ]
+
+    def _effective_realtime_scope_rows(
+        self,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+    ) -> list[dict[str, Any]]:
+        explicit_rows = [
+            dict(row)
+            for row in self.app_realtime_scope_rows
+            if int(row.get("principal_id") or 0) == int(principal_id)
+            and str(row.get("principal_type") or "") == str(principal_type)
+            and int(row.get("user_id") or 0) == int(user_id)
+        ]
+        deleted_keys = {
+            (str(row.get("asset_kind") or ""), str(row.get("identity_key") or ""))
+            for row in explicit_rows
+            if str(row.get("status") or "") == "deleted"
+        }
+        active_rows = []
+        active_keys = set()
+        for row in explicit_rows:
+            if str(row.get("status") or "") != "active":
+                continue
+            key = (str(row.get("asset_kind") or ""), str(row.get("identity_key") or ""))
+            active_rows.append(row)
+            active_keys.add(key)
+        for row in self._default_realtime_scope_rows(principal_id, principal_type, user_id):
+            key = (str(row.get("asset_kind") or ""), str(row.get("identity_key") or ""))
+            if key in deleted_keys or key in active_keys:
+                continue
+            active_rows.append(row)
+        return active_rows
+
+    def _fake_signal_trade_date(self, row: dict[str, Any]) -> str:
+        for payload_key in ("display_payload_json", "source_payload_json", "card_payload_json", "trace_json"):
+            payload = row.get(payload_key)
+            if isinstance(payload, dict) and payload.get("trade_date"):
+                return str(payload.get("trade_date"))
+        return str(row.get("trade_date") or "")
+
+    def _fake_scoped_app_signal_rows(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        historical_projection_mode = bool(filters.get("historical_projection_mode"))
+        monitor_rows = [
+            row
+            for row in self.app_monitor_rows
+            if row["principal_id"] == principal_id
+            and row["principal_type"] == principal_type
+            and int(row.get("user_id") or user_id) == int(user_id)
+            and (
+                row["status"] == "active"
+                or (historical_projection_mode and row["status"] != "removed")
+            )
+        ]
+        effective_scope = {}
+        for row in monitor_rows:
+            snapshot = row.get("source_snapshot_json")
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            effective_scope[
+                (
+                    str(row.get("asset_kind") or ""),
+                    str(row.get("identity_key") or ""),
+                    str(row.get("valid_for_trade_date") or snapshot.get("for_trade_date") or ""),
+                )
+            ] = row
+        if not historical_projection_mode:
+            current_filter_batch = self._fake_current_filter_batch()
+            current_trade_date = current_app_signal_trade_date({"current_filter_batch": current_filter_batch})
+            for row in self._effective_realtime_scope_rows(principal_id, principal_type, user_id):
+                effective_scope[
+                    (
+                        str(row.get("asset_kind") or ""),
+                        str(row.get("identity_key") or ""),
+                        current_trade_date,
+                    )
+                ] = {
+                    **row,
+                    "valid_for_trade_date": current_trade_date,
+                    "source_type": "realtime_scope",
+                }
+        rows = []
+        for row in self.ui_v1_signals:
+            if is_stale_user_signal_row(row):
+                continue
+            message_trade_date = self._fake_signal_trade_date(row)
+            scope_key = (
+                str(row.get("asset_kind") or ""),
+                str(row.get("identity_key") or ""),
+                message_trade_date,
+            )
+            scope_row = effective_scope.get(scope_key)
+            if not message_trade_date or scope_row is None:
+                continue
+            scoped_row = dict(row)
+            source_context = n6_app_v1_module.app_v2_monitor_source_context(scope_row)
+            scoped_row.update(source_context)
+            scoped_row["valid_for_trade_date"] = scope_row.get("valid_for_trade_date")
+            scoped_row["valid_source_trade_date"] = scope_row.get("valid_source_trade_date")
+            scoped_row["valid_source_run_id"] = scope_row.get("valid_source_run_id")
+            rows.append(scoped_row)
+        for key in ("trade_date", "asset_kind", "signal_type", "action_state", "blocked_reason"):
+            value = filters.get(key)
+            if value:
+                rows = [row for row in rows if row.get(key) == value]
+        return rows
+
+    def fetch_app_signals(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        filters: dict[str, Any],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        self.app_signal_reads.append((principal_id, principal_type, user_id))
+        self.app_signal_filter_reads.append(dict(filters))
+        self.assert_user(user_id)
+        rows = self._fake_scoped_app_signal_rows(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            filters=filters,
+        )
+        return rows[:limit]
+
+    def fetch_app_signal_detail(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        user_signal_projection_id: int,
+    ) -> dict[str, Any] | None:
+        self.app_signal_reads.append((principal_id, principal_type, user_id))
+        self.assert_user(user_id)
+        for row in self._fake_scoped_app_signal_rows(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            filters={},
+        ):
+            if int(row["user_signal_projection_id"]) == user_signal_projection_id:
+                return row
+        return None
+
+    def fetch_app_signal_scope_metadata(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        current_filter_batch, effective_rows, _, status_counts = self._fake_effective_monitor_scope(
+            principal_id,
+            principal_type,
+            user_id,
+        )
+        effective_monitor_count = sum(asset_counts.get("active", 0) for asset_counts in status_counts.values())
+        expired_monitor_count = sum(asset_counts.get("expired", 0) for asset_counts in status_counts.values())
+        scope_by_key = {
+            (
+                str(row.get("asset_kind") or ""),
+                str(row.get("identity_key") or ""),
+            ): str(row.get("valid_for_trade_date") or "")
+            for row in effective_rows
+        }
+        missing = 0
+        mismatch = 0
+        for row in self.ui_v1_signals:
+            scope_key = (
+                str(row.get("asset_kind") or ""),
+                str(row.get("identity_key") or ""),
+            )
+            if scope_key not in scope_by_key:
+                continue
+            message_trade_date = self._fake_signal_trade_date(row)
+            if not message_trade_date:
+                missing += 1
+            elif message_trade_date != scope_by_key[scope_key]:
+                mismatch += 1
+        current_trade_date = current_app_signal_trade_date({"current_filter_batch": current_filter_batch})
+        available_trade_dates = app_signal_available_trade_dates(
+            current_trade_date=current_trade_date,
+            projection_trade_dates=[
+                self._fake_signal_trade_date(row)
+                for row in self.ui_v1_signals
+                if not is_stale_user_signal_row(row)
+            ],
+        )
+        return {
+            "scope_mode": "effective_monitor",
+            "current_filter_batch": current_filter_batch,
+            "available_trade_dates": available_trade_dates,
+            "effective_monitor_count": effective_monitor_count,
+            "expired_monitor_count": expired_monitor_count,
+            "matched_signal_count": 0,
+            "excluded_reason_counts": {
+                "message_trade_date_missing": missing,
+                "message_trade_date_mismatch": mismatch,
+                "monitor_expired": expired_monitor_count,
+            },
+        }
+
+    def fetch_app_realtime_scope(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_realtime_scope_reads.append((principal_id, principal_type, user_id))
+        return {
+            "tables_ready": True,
+            "items": self._effective_realtime_scope_rows(principal_id, principal_type, user_id),
+        }
+
+    def add_app_realtime_scope_item(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+        for_trade_date: str = "",
+        source: str = "single_row",
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        source_row = self._fake_realtime_scope_source_row(asset_kind, identity_key, for_trade_date)
+        item = self._upsert_fake_realtime_scope_row(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+            source=source,
+            source_row=source_row,
+        )
+        self.app_realtime_scope_writes.append(
+            {
+                "operation": "add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "user_id": user_id,
+                "asset_kind": asset_kind,
+                "identity_key": identity_key,
+                "for_trade_date": for_trade_date,
+            }
+        )
+        self.forbidden_writes["user_realtime_monitor_scope"] += 1
+        return {"ok": True, "status": "added", "added_count": 1, "skipped_count": 0, "item": dict(item)}
+
+    def selected_add_app_realtime_scope_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_keys: list[str],
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        added = 0
+        for identity_key in identity_keys:
+            source_row = self._fake_realtime_scope_source_row(asset_kind, str(identity_key), for_trade_date)
+            self._upsert_fake_realtime_scope_row(
+                principal_id=principal_id,
+                principal_type=principal_type,
+                user_id=user_id,
+                asset_kind=asset_kind,
+                identity_key=str(identity_key),
+                source="selected_rows",
+                source_row=source_row,
+            )
+            added += 1
+        self.app_realtime_scope_writes.append(
+            {
+                "operation": "selected_add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "user_id": user_id,
+                "asset_kind": asset_kind,
+                "identity_keys": list(identity_keys),
+                "for_trade_date": for_trade_date,
+            }
+        )
+        self.forbidden_writes["user_realtime_monitor_scope"] += added
+        return {
+            "ok": True,
+            "status": "completed",
+            "asset_kind": asset_kind,
+            "requested_count": len(identity_keys),
+            "added_count": added,
+            "skipped_count": 0,
+            "failed_count": 0,
+        }
+
+    def bulk_add_app_realtime_scope_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        filters: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        result = self.fetch_app_filter_items(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            asset_kind=asset_kind,
+            filters=filters,
+            limit=10000,
+            include_all_fields=False,
+        )
+        added = 0
+        for source_row in result.get("items", []):
+            identity_key = str(source_row.get("identity_key") or "")
+            if not identity_key:
+                continue
+            self._upsert_fake_realtime_scope_row(
+                principal_id=principal_id,
+                principal_type=principal_type,
+                user_id=user_id,
+                asset_kind=asset_kind,
+                identity_key=identity_key,
+                source="filter_result",
+                source_row=source_row,
+            )
+            added += 1
+        self.app_realtime_scope_writes.append(
+            {
+                "operation": "bulk_add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "user_id": user_id,
+                "asset_kind": asset_kind,
+                "filters": dict(filters),
+            }
+        )
+        self.forbidden_writes["user_realtime_monitor_scope"] += added
+        return {
+            "ok": True,
+            "status": "completed",
+            "asset_kind": asset_kind,
+            "filtered_count": int(result.get("filtered_count") or 0),
+            "added_count": added,
+            "skipped_count": 0,
+            "failed_count": 0,
+        }
+
+    def remove_app_realtime_scope_item(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        realtime_scope_id: int,
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        for row in self.app_realtime_scope_rows:
+            if int(row.get("realtime_scope_id") or 0) != int(realtime_scope_id):
+                continue
+            if (
+                int(row.get("principal_id") or 0) != int(principal_id)
+                or str(row.get("principal_type") or "") != str(principal_type)
+                or int(row.get("user_id") or 0) != int(user_id)
+            ):
+                return {"ok": False, "status": "not_found", "error": "realtime_scope_not_found"}
+            row["status"] = "deleted"
+            row["deleted_at"] = "2026-06-14T09:30:00+08:00"
+            self.forbidden_writes["user_realtime_monitor_scope"] += 1
+            return {"ok": True, "status": "deleted", "realtime_scope_id": realtime_scope_id}
+        return {"ok": False, "status": "not_found", "error": "realtime_scope_not_found"}
+
+    def _fake_realtime_scope_source_row(
+        self,
+        asset_kind: str,
+        identity_key: str,
+        for_trade_date: str,
+    ) -> dict[str, Any]:
+        return next(
+            (
+                dict(row)
+                for row in self.app_filter_rows.get(asset_kind, [])
+                if str(row.get("identity_key") or "") == str(identity_key)
+                and (not for_trade_date or str(row.get("for_trade_date") or "") == str(for_trade_date))
+            ),
+            {
+                "asset_kind": asset_kind,
+                "identity_key": identity_key,
+                "display_name": identity_key,
+                "for_trade_date": for_trade_date,
+            },
+        )
+
+    def _upsert_fake_realtime_scope_row(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+        source: str,
+        source_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        for row in self.app_realtime_scope_rows:
+            if (
+                int(row.get("principal_id") or 0) == int(principal_id)
+                and str(row.get("principal_type") or "") == str(principal_type)
+                and int(row.get("user_id") or 0) == int(user_id)
+                and str(row.get("asset_kind") or "") == str(asset_kind)
+                and str(row.get("identity_key") or "") == str(identity_key)
+            ):
+                row.update(
+                    {
+                        "display_name": source_row.get("display_name") or source_row.get("name") or identity_key,
+                        "source_type": source,
+                        "source_snapshot_json": dict(source_row),
+                        "is_default_seed": bool(row.get("is_default_seed")),
+                        "status": "active",
+                        "deleted_at": None,
+                    }
+                )
+                return row
+        row = {
+            "realtime_scope_id": self.next_app_realtime_scope_id,
+            "principal_id": principal_id,
+            "principal_type": principal_type,
+            "user_id": user_id,
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+            "display_name": source_row.get("display_name") or source_row.get("name") or identity_key,
+            "source_type": source,
+            "source_snapshot_json": dict(source_row),
+            "is_default_seed": False,
+            "status": "active",
+            "deleted_at": None,
+        }
+        self.next_app_realtime_scope_id += 1
+        self.app_realtime_scope_rows.append(row)
+        return row
+
+    def fetch_app_positions(self, principal_id: int, principal_type: str) -> list[dict[str, Any]]:
+        self.app_position_reads.append((principal_id, principal_type))
+        return []
+
+    def fetch_app_pnl_snapshots(self, principal_id: int, principal_type: str, limit: int) -> list[dict[str, Any]]:
+        self.app_pnl_reads.append((principal_id, principal_type))
+        return []
+
+    def fetch_app_filter_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        filters: dict[str, Any],
+        limit: int,
+        include_all_fields: bool = False,
+    ) -> dict[str, Any]:
+        self.app_filter_reads.append((principal_id, principal_type, user_id, asset_kind, dict(filters)))
+        self.assert_user(user_id)
+        if not self.app_filter_cache_ready.get(asset_kind, False):
+            return {"cache_ready": False, "items": [], "total_count": 0, "filtered_count": 0, "returned_count": 0}
+        all_rows = list(self.app_filter_rows.get(asset_kind, []))
+        available_for_trade_dates = sorted(
+            {str(row.get("for_trade_date") or "").strip() for row in all_rows if str(row.get("for_trade_date") or "").strip()},
+            reverse=True,
+        )
+        selected_for_trade_date = str(filters.get("for_trade_date") or "").strip()
+        if not selected_for_trade_date:
+            selected_for_trade_date = available_for_trade_dates[0] if available_for_trade_dates else ""
+        rows = [
+            row for row in all_rows
+            if not selected_for_trade_date or str(row.get("for_trade_date") or "").strip() == selected_for_trade_date
+        ]
+        source_context = self._fake_filter_source_context(
+            asset_kind=asset_kind,
+            filters=filters,
+            selected_for_trade_date=selected_for_trade_date,
+        )
+        if source_context and source_context.get("source_filter_active"):
+            stock_keys = set(source_context.get("_stock_identity_keys") or [])
+            rows = [
+                row for row in rows
+                if (str(row.get("identity_key") or "").strip() in stock_keys)
+                or (str(row.get("stock_identity_key") or "").strip() in stock_keys)
+            ]
+        total_count = len(rows)
+        for key in (
+            "direction",
+            "board_type",
+            "year_overheat_level",
+            "quarter_overheat_level",
+            "month_overheat_level",
+            "week_overheat_level",
+            "day_overheat_level",
+        ):
+            value = filters.get(key)
+            if value:
+                if isinstance(value, (list, tuple, set)):
+                    rows = [row for row in rows if row.get(key) in value]
+                else:
+                    rows = [row for row in rows if row.get(key) == value]
+        expected_return_min = n6_app_v1_module.app_v2_expected_return_threshold(
+            filters.get("buy_expected_return_pct_min")
+        )
+        if expected_return_min is not None:
+            rows = [
+                row for row in rows
+                if (
+                    n6_app_v1_module.app_v2_expected_return_threshold(row.get("buy_expected_return_pct"))
+                    is not None
+                    and n6_app_v1_module.app_v2_expected_return_threshold(row.get("buy_expected_return_pct"))
+                    >= expected_return_min
+                )
+            ]
+        level_up_recommendation = self._fake_filter_level_up_recommendation_context(
+            asset_kind=asset_kind,
+            filters=filters,
+            selected_for_trade_date=selected_for_trade_date,
+        )
+        if level_up_recommendation["active"]:
+            threshold = self._fake_decimal_or_none(level_up_recommendation.get("threshold"))
+            if threshold is None:
+                rows = []
+            else:
+                rows = [
+                    row for row in rows
+                    if self._fake_decimal_or_none(row.get("level_up_score")) is not None
+                    and self._fake_decimal_or_none(row.get("level_up_score")) >= threshold
+                ]
+        filtered_count = len(rows)
+        if source_context is not None:
+            source_context["matched_stock_count"] = filtered_count
+            if (
+                source_context.get("source_filter_active")
+                and source_context.get("membership_count")
+                and not filtered_count
+                and not source_context.get("empty_state")
+            ):
+                source_context["empty_state"] = "成分股中无符合当前筛选条件的个股"
+            source_context.pop("_stock_identity_keys", None)
+        linked_stock_filter_source_identity_keys = (
+            list(
+                dict.fromkeys(
+                    str(row.get("identity_key") or "").strip()
+                    for row in rows
+                    if str(row.get("identity_key") or "").strip()
+                )
+            )
+            if asset_kind in {"index", "board"}
+            else []
+        )
+        rows = [dict(row) for row in rows[:limit]]
+        if asset_kind == "stock":
+            self._fake_enrich_stock_membership_display_cache(rows)
+        if include_all_fields:
+            for row in rows:
+                row["_include_all_fields"] = True
+        result = {
+            "cache_ready": True,
+            "items": rows,
+            "total_count": total_count,
+            "filtered_count": filtered_count,
+            "returned_count": len(rows),
+            "available_for_trade_dates": available_for_trade_dates,
+            "selected_for_trade_date": selected_for_trade_date,
+            "level_up_recommendation": level_up_recommendation,
+            "linked_stock_filter_source_identity_keys": linked_stock_filter_source_identity_keys,
+        }
+        if source_context is not None:
+            result["source_context"] = source_context
+        return result
+
+    def _fake_decimal_or_none(self, value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _fake_filter_level_up_recommendation_context(
+        self,
+        *,
+        asset_kind: str,
+        filters: dict[str, Any],
+        selected_for_trade_date: str,
+    ) -> dict[str, Any]:
+        value = n6_app_v1_module.app_v2_level_up_recommendation_value(
+            filters.get("level_up_score_recommendation")
+        )
+        if asset_kind not in {"board", "stock"} or value != "index_max":
+            return {"active": False, "value": "", "available": True}
+        index_scores = [
+            self._fake_decimal_or_none(row.get("level_up_score"))
+            for row in self.app_filter_rows.get("index", [])
+            if str(row.get("for_trade_date") or "").strip() == selected_for_trade_date
+        ]
+        present_scores = [score for score in index_scores if score is not None]
+        if not present_scores:
+            return {
+                "active": True,
+                "value": "index_max",
+                "available": False,
+                "threshold": None,
+                "blocker": "index_level_up_score_max_unavailable",
+                "source_asset_kind": "index",
+                "source_field": "level_up_score",
+            }
+        return {
+            "active": True,
+            "value": "index_max",
+            "available": True,
+            "threshold": max(present_scores),
+            "blocker": "",
+            "source_asset_kind": "index",
+            "source_field": "level_up_score",
+        }
+
+    def _fake_enrich_stock_membership_display_cache(self, rows: list[dict[str, Any]]) -> None:
+        industry_by_stock: dict[str, dict[str, Any]] = {}
+        for membership in self.app_member_rows.get("board", []):
+            if str(membership.get("board_type") or "").strip() != "tdx_industry":
+                continue
+            stock_key = str(membership.get("stock_identity_key") or "").strip()
+            if stock_key and stock_key not in industry_by_stock:
+                industry_by_stock[stock_key] = membership
+        index_by_stock: dict[str, list[dict[str, Any]]] = {}
+        for membership in self.app_member_rows.get("index", []):
+            stock_key = str(membership.get("stock_identity_key") or "").strip()
+            if stock_key:
+                index_by_stock.setdefault(stock_key, []).append(membership)
+        for row in rows:
+            stock_key = str(row.get("identity_key") or row.get("stock_identity_key") or "").strip()
+            industry = industry_by_stock.get(stock_key)
+            if industry:
+                row["industry_code"] = industry.get("parent_code")
+                row["industry_name"] = industry.get("parent_name")
+            index_memberships = index_by_stock.get(stock_key) or []
+            if index_memberships:
+                row["index_codes"] = ",".join(
+                    str(item.get("parent_code") or "").strip()
+                    for item in index_memberships
+                    if str(item.get("parent_code") or "").strip()
+                )
+                row["index_names"] = ",".join(
+                    str(item.get("parent_name") or "").strip()
+                    for item in index_memberships
+                    if str(item.get("parent_name") or "").strip()
+                )
+
+    def _fake_filter_source_context(
+        self,
+        *,
+        asset_kind: str,
+        filters: dict[str, Any],
+        selected_for_trade_date: str,
+    ) -> dict[str, Any] | None:
+        if asset_kind != "stock":
+            return None
+        source_asset_type = str(filters.get("source_asset_type") or "").strip()
+        source_identity_keys = self._fake_source_identity_keys(filters)
+        if not source_asset_type and not source_identity_keys:
+            return {
+                "source_asset_type": None,
+                "source_identity_keys": [],
+                "source_display_names": [],
+                "membership_source_table": None,
+                "membership_trade_date": None,
+                "membership_count": 0,
+                "matched_stock_count": 0,
+                "for_trade_date": selected_for_trade_date,
+                "empty_state": "",
+                "fallback_used": False,
+                "source_filter_active": False,
+            }
+        if source_asset_type not in {"index", "board"}:
+            return {
+                "source_asset_type": source_asset_type,
+                "source_identity_keys": source_identity_keys,
+                "source_display_names": [],
+                "membership_source_table": None,
+                "membership_trade_date": None,
+                "membership_count": 0,
+                "matched_stock_count": 0,
+                "for_trade_date": selected_for_trade_date,
+                "empty_state": "非法来源类型",
+                "fallback_used": False,
+                "source_filter_active": True,
+                "_stock_identity_keys": [],
+            }
+        membership_rows = [
+            row for row in self.app_member_rows.get(source_asset_type, [])
+            if str(row.get("parent_identity_key") or "").strip() in set(source_identity_keys)
+        ]
+        parent_rows = [
+            row for row in self.app_filter_rows.get(source_asset_type, [])
+            if str(row.get("identity_key") or "").strip() in set(source_identity_keys)
+            and str(row.get("for_trade_date") or "").strip() == selected_for_trade_date
+        ]
+        parent_source_dates = sorted(
+            {
+                str(row.get("source_trade_date") or "").strip()
+                for row in parent_rows
+                if str(row.get("source_trade_date") or "").strip()
+            }
+        )
+        fallback_used = not bool(parent_source_dates)
+        parent_source_trade_date = parent_source_dates[-1] if parent_source_dates else ""
+        membership_dates = sorted(
+            {
+                str(row.get("trade_date") or "").strip()
+                for row in membership_rows
+                if str(row.get("trade_date") or "").strip()
+            }
+        )
+        eligible_dates = [
+            trade_date for trade_date in membership_dates
+            if not parent_source_trade_date or trade_date <= parent_source_trade_date
+        ]
+        membership_trade_date = eligible_dates[-1] if eligible_dates else (membership_dates[-1] if membership_dates else None)
+        if membership_trade_date:
+            membership_rows = [
+                row for row in membership_rows
+                if str(row.get("trade_date") or "").strip() in {"", membership_trade_date}
+            ]
+        display_names_by_key = {
+            str(row.get("identity_key") or "").strip(): (
+                str(row.get("display_name") or row.get("name") or row.get("code") or row.get("identity_key") or "").strip()
+            )
+            for row in parent_rows
+        }
+        for row in membership_rows:
+            key = str(row.get("parent_identity_key") or "").strip()
+            if key and key not in display_names_by_key:
+                display_names_by_key[key] = str(row.get("parent_name") or row.get("parent_code") or key).strip()
+        stock_identity_keys = list(
+            dict.fromkeys(
+                str(row.get("stock_identity_key") or "").strip()
+                for row in membership_rows
+                if str(row.get("stock_identity_key") or "").strip()
+            )
+        )
+        empty_state = ""
+        if not stock_identity_keys:
+            empty_state = "暂无成分股"
+        return {
+            "source_asset_type": source_asset_type,
+            "source_identity_keys": source_identity_keys,
+            "source_display_names": [
+                display_names_by_key.get(identity_key, identity_key)
+                for identity_key in source_identity_keys
+            ],
+            "membership_source_table": f"v_n6_{source_asset_type}_membership_fact",
+            "membership_trade_date": membership_trade_date,
+            "membership_count": len(stock_identity_keys),
+            "matched_stock_count": 0,
+            "for_trade_date": selected_for_trade_date,
+            "empty_state": empty_state,
+            "fallback_used": fallback_used,
+            "source_filter_active": True,
+            "_stock_identity_keys": stock_identity_keys,
+        }
+
+    def _fake_source_identity_keys(self, filters: dict[str, Any]) -> list[str]:
+        raw_values = filters.get("source_identity_keys")
+        if raw_values is None:
+            raw_values = filters.get("source_identity_key")
+        if raw_values is None:
+            return []
+        values = raw_values if isinstance(raw_values, (list, tuple, set)) else [raw_values]
+        keys: list[str] = []
+        for value in values:
+            for part in str(value or "").split(","):
+                key = part.strip()
+                if key and key not in keys:
+                    keys.append(key)
+        return keys
+
+    def fetch_app_filter_members(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        membership_kind: str,
+        parent_identity_key: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.app_filter_member_reads.append((principal_id, principal_type, user_id, membership_kind, parent_identity_key))
+        self.assert_user(user_id)
+        if not self.app_membership_cache_ready.get(membership_kind, False):
+            return {"cache_ready": False, "items": []}
+        rows = [
+            row for row in self.app_member_rows.get(membership_kind, [])
+            if row.get("parent_identity_key") == parent_identity_key
+        ]
+        return {"cache_ready": True, "items": rows[:limit]}
+
+    def fetch_app_filter_linked_stocks(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        membership_kind: str,
+        parent_identity_key: str,
+        limit: int,
+        view: str = "matched",
+    ) -> dict[str, Any]:
+        self.app_filter_linked_stock_reads.append(
+            (principal_id, principal_type, user_id, membership_kind, parent_identity_key)
+        )
+        self.assert_user(user_id)
+        view = "all" if view == "all" else "matched"
+        if not self.app_membership_cache_ready.get(membership_kind, False):
+            return {
+                "cache_ready": False,
+                "items": [],
+                "membership_count": 0,
+                "linked_count": 0,
+                "missing_count": 0,
+                "view": view,
+                "current_view_count": 0,
+            }
+        if not self.app_filter_cache_ready.get("stock", False):
+            return {
+                "cache_ready": False,
+                "items": [],
+                "membership_count": 0,
+                "linked_count": 0,
+                "missing_count": 0,
+                "view": view,
+                "current_view_count": 0,
+            }
+        memberships = [
+            row for row in self.app_member_rows.get(membership_kind, [])
+            if row.get("parent_identity_key") == parent_identity_key
+        ]
+        stock_rows = {
+            row.get("stock_identity_key") or row.get("identity_key"): row
+            for row in self.app_filter_rows.get("stock", [])
+        }
+        linked_rows: list[dict[str, Any]] = []
+        for membership in memberships:
+            stock_row = stock_rows.get(membership.get("stock_identity_key"))
+            if stock_row:
+                linked = dict(stock_row)
+                linked.update(
+                    {
+                        "membership_kind": membership_kind,
+                        "membership_trade_date": membership.get("trade_date"),
+                        "parent_identity_key": membership.get("parent_identity_key"),
+                        "parent_code": membership.get("parent_code"),
+                        "parent_name": membership.get("parent_name"),
+                        "stock_identity_key": membership.get("stock_identity_key"),
+                        "stock_code": membership.get("stock_code"),
+                        "stock_name": membership.get("stock_name"),
+                        "board_type": membership.get("board_type") or stock_row.get("board_type"),
+                        "membership_source_version": membership.get("source_version"),
+                        "membership_source_batch_id": membership.get("source_batch_id"),
+                        "in_stock_filter": True,
+                        "stock_filter_status": "in_filter",
+                    }
+                )
+            elif view == "all":
+                linked = {
+                    "asset_kind": "stock",
+                    "identity_key": membership.get("stock_identity_key"),
+                    "stock_identity_key": membership.get("stock_identity_key"),
+                    "code": membership.get("stock_code"),
+                    "display_code": membership.get("stock_code"),
+                    "name": membership.get("stock_name"),
+                    "display_name": membership.get("stock_name"),
+                    "membership_kind": membership_kind,
+                    "membership_trade_date": membership.get("trade_date"),
+                    "parent_identity_key": membership.get("parent_identity_key"),
+                    "parent_code": membership.get("parent_code"),
+                    "parent_name": membership.get("parent_name"),
+                    "stock_code": membership.get("stock_code"),
+                    "stock_name": membership.get("stock_name"),
+                    "board_type": membership.get("board_type"),
+                    "membership_source_version": membership.get("source_version"),
+                    "membership_source_batch_id": membership.get("source_batch_id"),
+                    "in_stock_filter": False,
+                    "stock_filter_status": "not_in_filter",
+                    "quality_status": "membership_only",
+                    "last_signal_state": "—",
+                }
+            else:
+                continue
+            linked_rows.append(linked)
+        linked_count = sum(1 for membership in memberships if membership.get("stock_identity_key") in stock_rows)
+        linked_rows = linked_rows[:limit]
+        return {
+            "cache_ready": True,
+            "items": linked_rows,
+            "membership_count": len(memberships),
+            "linked_count": linked_count,
+            "missing_count": max(0, len(memberships) - linked_count),
+            "view": view,
+            "current_view_count": len(linked_rows),
+        }
+
+    def fetch_app_membership_stocks(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        entity_type: str,
+        identity_key: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        from ashare_v3.user.membership_drilldown import resolve_membership
+
+        self.app_membership_reads.append((principal_id, principal_type, user_id, entity_type, identity_key))
+        self.assert_user(user_id)
+        if not self.app_membership_cache_ready.get(entity_type, False):
+            return {"members": [], "member_count": 0}
+        members = resolve_membership(entity_type, identity_key, self.app_member_rows)
+        members = members[:limit]
+        return {"members": members, "member_count": len(members)}
+
+    def fetch_app_monitor_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str | None = None,
+        limit: int = 500,
+        monitor_status: str = "active",
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        self.app_monitor_reads.append((principal_id, principal_type, user_id, asset_kind, for_trade_date))
+        self.assert_user(user_id)
+        available_for_trade_dates = self._fake_available_filter_trade_dates(asset_kind)
+        requested_for_trade_date = str(for_trade_date or "").strip()
+        selected_for_trade_date = requested_for_trade_date
+        if not selected_for_trade_date and available_for_trade_dates:
+            selected_for_trade_date = available_for_trade_dates[0]
+        current_filter_batch = self._fake_current_filter_batch(selected_for_trade_date)
+        raw_items = [
+            self._monitor_row_with_validity(dict(row), current_filter_batch)
+            for row in self.app_monitor_rows
+            if row["principal_id"] == principal_id
+            and row["principal_type"] == principal_type
+            and row["status"] != "removed"
+            and (asset_kind is None or row["asset_kind"] == asset_kind)
+        ]
+        if requested_for_trade_date:
+            raw_items = [
+                row
+                for row in raw_items
+                if str(row.get("valid_for_trade_date") or "") == requested_for_trade_date
+            ]
+        status_counts = self._fake_monitor_status_counts(raw_items)
+        monitor_status = monitor_status if monitor_status in {"active", "expired", "all"} else "active"
+        if monitor_status != "all":
+            raw_items = [row for row in raw_items if row["effective_status"] == monitor_status]
+        items = [self._monitor_row_with_relationships(row, selected_for_trade_date) for row in raw_items[:limit]]
+        return {
+            "tables_ready": True,
+            "items": items,
+            "monitor_status_filter": monitor_status,
+            "current_filter_batch": current_filter_batch,
+            "selected_for_trade_date": selected_for_trade_date,
+            "available_for_trade_dates": available_for_trade_dates,
+            "status_counts": status_counts,
+        }
+
+    def _fake_available_filter_trade_dates(self, asset_kind: str | None = None) -> list[str]:
+        asset_kinds = [asset_kind] if asset_kind else ["stock", "board", "index"]
+        dates = {
+            str(row.get("for_trade_date") or "")
+            for kind in asset_kinds
+            for row in self.app_filter_rows.get(kind or "", [])
+            if str(row.get("for_trade_date") or "")
+        }
+        return sorted(dates, reverse=True)
+
+    def _fake_current_filter_batch(self, for_trade_date: str = "") -> dict[str, dict[str, str]]:
+        batches: dict[str, dict[str, str]] = {}
+        for asset_kind in ("stock", "board", "index"):
+            rows = list(self.app_filter_rows.get(asset_kind, []))
+            if for_trade_date:
+                rows = [row for row in rows if str(row.get("for_trade_date") or "") == for_trade_date]
+            rows.sort(key=lambda row: str(row.get("source_trade_date") or ""), reverse=True)
+            row = rows[0] if rows else {}
+            batches[asset_kind] = {
+                "source_trade_date": str(row.get("source_trade_date") or ""),
+                "for_trade_date": str(row.get("for_trade_date") or ""),
+                "source_run_id": str(row.get("source_run_id") or row.get("run_id") or ""),
+            }
+        return batches
+
+    def _monitor_row_with_validity(
+        self,
+        row: dict[str, Any],
+        current_filter_batch: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        snapshot = row.get("source_snapshot_json")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        current_batch = current_filter_batch.get(row.get("asset_kind"), {})
+        original_batch = {
+            "source_trade_date": str(row.get("valid_source_trade_date") or snapshot.get("source_trade_date") or ""),
+            "for_trade_date": str(row.get("valid_for_trade_date") or snapshot.get("for_trade_date") or ""),
+            "source_run_id": str(row.get("valid_source_run_id") or snapshot.get("source_run_id") or row.get("source_run_id") or ""),
+        }
+        normalized_current = {
+            "source_trade_date": str(current_batch.get("source_trade_date") or ""),
+            "for_trade_date": str(current_batch.get("for_trade_date") or ""),
+            "source_run_id": str(current_batch.get("source_run_id") or ""),
+        }
+        effective_active = (
+            row.get("status") == "active"
+            and original_batch["source_trade_date"] == normalized_current["source_trade_date"]
+            and original_batch["for_trade_date"] == normalized_current["for_trade_date"]
+            and original_batch["source_run_id"] == normalized_current["source_run_id"]
+        )
+        row["valid_source_trade_date"] = original_batch["source_trade_date"]
+        row["valid_for_trade_date"] = original_batch["for_trade_date"]
+        row["valid_source_run_id"] = original_batch["source_run_id"]
+        row["effective_active"] = effective_active
+        row["effective_status"] = "active" if effective_active else "expired"
+        row["effective_status_label"] = "有效" if effective_active else "已失效"
+        row["expired_reason"] = "" if effective_active else (row.get("expired_reason") or "filter_batch_changed")
+        row["expired_reason_label"] = "" if effective_active else "筛选中心已更新"
+        row["validity"] = {"original_batch": original_batch, "current_batch": normalized_current}
+        return row
+
+    def _fake_monitor_status_counts(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+        counts = {
+            asset_kind: {"active": 0, "expired": 0, "removed": 0, "all": 0}
+            for asset_kind in ("stock", "board", "index")
+        }
+        for row in rows:
+            asset_kind = row.get("asset_kind")
+            if asset_kind not in counts:
+                continue
+            status = row.get("effective_status") or "expired"
+            counts[asset_kind]["all"] += 1
+            counts[asset_kind][status] += 1
+        return counts
+
+    def _monitor_row_with_relationships(self, row: dict[str, Any], selected_for_trade_date: str = "") -> dict[str, Any]:
+        snapshot = row.get("source_snapshot_json")
+        if isinstance(snapshot, dict):
+            source_key_map = {
+                "source_parent_asset_kind": "parent_asset_kind",
+                "source_parent_identity_key": "parent_identity_key",
+                "source_parent_code": "parent_code",
+                "source_parent_name": "parent_name",
+                "source_parent_trade_date": "membership_trade_date",
+                "source_parent_source_version": "membership_source_version",
+                "source_parent_source_batch_id": "membership_source_batch_id",
+                "source_linked_mode": "linked_mode",
+            }
+            for target_key, snapshot_key in source_key_map.items():
+                if snapshot.get(snapshot_key) is not None:
+                    row[target_key] = snapshot[snapshot_key]
+        display_row = next(
+            (
+                dict(candidate)
+                for candidate in self.app_filter_rows.get(str(row.get("asset_kind") or ""), [])
+                if candidate.get("identity_key") == row.get("identity_key")
+                and (
+                    not selected_for_trade_date
+                    or str(candidate.get("for_trade_date") or "") == selected_for_trade_date
+                )
+            ),
+            {},
+        )
+        row["current_display_row_json"] = display_row
+
+        current = {
+            "indexes": [],
+            "boards": [],
+            "index_count": 0,
+            "board_count": 0,
+            "summary_label": "所属指数 0 个 / 所属板块 0 个",
+        }
+        if row.get("asset_kind") == "stock":
+            stock_identity_key = row.get("identity_key")
+            for membership in self.app_member_rows.get("index", []):
+                if membership.get("stock_identity_key") != stock_identity_key:
+                    continue
+                current["indexes"].append(
+                    {
+                        "asset_kind": "index",
+                        "identity_key": membership.get("parent_identity_key"),
+                        "display_code": membership.get("parent_code"),
+                        "display_name": membership.get("parent_name"),
+                        "trade_date": membership.get("trade_date", "20260604"),
+                        "source_version": membership.get("source_version"),
+                        "source_batch_id": membership.get("source_batch_id"),
+                    }
+                )
+            for membership in self.app_member_rows.get("board", []):
+                if membership.get("stock_identity_key") != stock_identity_key:
+                    continue
+                display_row = row.get("current_display_row_json")
+                display_row = display_row if isinstance(display_row, dict) else {}
+                if str(membership.get("board_type") or "").strip() == "tdx_industry":
+                    display_row = dict(display_row)
+                    display_row.setdefault("industry_code", membership.get("parent_code"))
+                    display_row.setdefault("industry_name", membership.get("parent_name"))
+                    row["current_display_row_json"] = display_row
+                current["boards"].append(
+                    {
+                        "asset_kind": "board",
+                        "identity_key": membership.get("parent_identity_key"),
+                        "display_code": membership.get("parent_code"),
+                        "display_name": membership.get("parent_name"),
+                        "board_type": membership.get("board_type"),
+                        "trade_date": membership.get("trade_date", "20260604"),
+                        "source_version": membership.get("source_version"),
+                        "source_batch_id": membership.get("source_batch_id"),
+                    }
+                )
+            current["index_count"] = len(current["indexes"])
+            current["board_count"] = len(current["boards"])
+            current["summary_label"] = f"所属指数 {current['index_count']} 个 / 所属板块 {current['board_count']} 个"
+        row["current_memberships"] = current
+        return row
+
+    def add_app_monitor_item(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+        direction: str,
+        source: str = "single_row",
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_monitor_writes.append(
+            {
+                "operation": "add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "asset_kind": asset_kind,
+                "identity_key": identity_key,
+                "direction": direction,
+                "source": source,
+                "for_trade_date": for_trade_date,
+            }
+        )
+        rows = self.app_filter_rows.get(asset_kind, [])
+        source_row = next(
+            (
+                row for row in rows
+                if row.get("identity_key") == identity_key
+                and (not for_trade_date or str(row.get("for_trade_date") or "") == for_trade_date)
+            ),
+            None,
+        )
+        if not source_row:
+            return {"ok": False, "status": "not_found", "error": "source_not_found"}
+        existing = self._active_monitor_row(
+            principal_id,
+            principal_type,
+            asset_kind,
+            identity_key,
+            direction,
+            source_row=source_row,
+        )
+        if existing:
+            return {
+                "ok": True,
+                "status": "already_exists",
+                "added_count": 0,
+                "skipped_count": 1,
+                "item": dict(existing),
+            }
+        item = self._new_monitor_row(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+            direction=direction,
+            source=source,
+            source_row=source_row,
+        )
+        self.app_monitor_rows.append(item)
+        self.forbidden_writes["user_monitor"] += 1
+        return {"ok": True, "status": "added", "added_count": 1, "skipped_count": 0, "item": dict(item)}
+
+    def bulk_add_app_monitor_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        direction: str,
+        filters: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_monitor_writes.append(
+            {
+                "operation": "bulk_add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "asset_kind": asset_kind,
+                "direction": direction,
+                "filters": dict(filters),
+            }
+        )
+        result = self.fetch_app_filter_items(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            asset_kind=asset_kind,
+            filters=filters,
+            limit=10000,
+            include_all_fields=False,
+        )
+        added = 0
+        skipped = 0
+        for source_row in result["items"]:
+            identity_key = str(source_row["identity_key"])
+            if self._active_monitor_row(
+                principal_id,
+                principal_type,
+                asset_kind,
+                identity_key,
+                direction,
+                source_row=source_row,
+            ):
+                skipped += 1
+                continue
+            self.app_monitor_rows.append(
+                self._new_monitor_row(
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    asset_kind=asset_kind,
+                    identity_key=identity_key,
+                    direction=direction,
+                    source="filter_result",
+                    source_row=source_row,
+                )
+            )
+            added += 1
+        if added:
+            self.forbidden_writes["user_monitor"] += added
+        return {
+            "ok": True,
+            "status": "completed",
+            "asset_kind": asset_kind,
+            "direction": direction,
+            "filtered_count": result["filtered_count"],
+            "added_count": added,
+            "skipped_count": skipped,
+            "failed_count": 0,
+        }
+
+    def selected_add_app_monitor_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        direction: str,
+        identity_keys: list[str],
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_monitor_writes.append(
+            {
+                "operation": "selected_add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "asset_kind": asset_kind,
+                "direction": direction,
+                "identity_keys": list(identity_keys),
+                "for_trade_date": for_trade_date,
+            }
+        )
+        rows_by_identity = {
+            str(row.get("identity_key")): row
+            for row in self.app_filter_rows.get(asset_kind, [])
+            if row.get("identity_key")
+            and (not for_trade_date or str(row.get("for_trade_date") or "") == for_trade_date)
+        }
+        added = 0
+        skipped = 0
+        failed = 0
+        for identity_key in identity_keys:
+            source_row = rows_by_identity.get(str(identity_key))
+            if not source_row:
+                failed += 1
+                continue
+            if self._active_monitor_row(
+                principal_id,
+                principal_type,
+                asset_kind,
+                str(identity_key),
+                direction,
+                source_row=source_row,
+            ):
+                skipped += 1
+                continue
+            self.app_monitor_rows.append(
+                self._new_monitor_row(
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    asset_kind=asset_kind,
+                    identity_key=str(identity_key),
+                    direction=direction,
+                    source="selected_rows",
+                    source_row=source_row,
+                )
+            )
+            added += 1
+        if added:
+            self.forbidden_writes["user_monitor"] += added
+        return {
+            "ok": True,
+            "status": "completed",
+            "asset_kind": asset_kind,
+            "direction": direction,
+            "requested_count": len(identity_keys),
+            "added_count": added,
+            "skipped_count": skipped,
+            "failed_count": failed,
+        }
+
+    def add_app_linked_stock_monitor_items(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        parent_asset_kind: str,
+        parent_identity_key: str,
+        mode: str,
+        stock_identity_keys: list[str],
+        direction: str,
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_monitor_writes.append(
+            {
+                "operation": "linked_stock_add",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "parent_asset_kind": parent_asset_kind,
+                "parent_identity_key": parent_identity_key,
+                "mode": mode,
+                "stock_identity_keys": list(stock_identity_keys),
+                "direction": direction,
+            }
+        )
+        if parent_asset_kind not in {"index", "board"} or mode not in {"selected", "matched_stock_filter"}:
+            return {"ok": False, "status": "invalid_request", "error": "invalid_monitor_request"}
+        result = self.fetch_app_filter_linked_stocks(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            membership_kind=parent_asset_kind,
+            parent_identity_key=parent_identity_key,
+            limit=10000,
+            view="matched",
+        )
+        if not result.get("cache_ready"):
+            return {"ok": False, "status": "data_not_ready", "error": "linked_stock_source_not_ready"}
+        rows = list(result.get("items") or [])
+        selected_keys = {str(key).strip() for key in stock_identity_keys if str(key or "").strip()}
+        if mode == "selected":
+            rows = [
+                row for row in rows
+                if str(row.get("stock_identity_key") or row.get("identity_key") or "").strip() in selected_keys
+            ]
+        added = 0
+        skipped = 0
+        source = f"{parent_asset_kind}_linked_stock"
+        for source_row in rows:
+            identity_key = str(source_row.get("stock_identity_key") or source_row.get("identity_key") or "").strip()
+            if not identity_key:
+                continue
+            if self._active_monitor_row(
+                principal_id,
+                principal_type,
+                "stock",
+                identity_key,
+                direction,
+                source_row=source_row,
+            ):
+                skipped += 1
+                continue
+            row_with_parent = dict(source_row)
+            row_with_parent["parent_asset_kind"] = parent_asset_kind
+            row_with_parent["parent_identity_key"] = parent_identity_key
+            self.app_monitor_rows.append(
+                self._new_monitor_row(
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    asset_kind="stock",
+                    identity_key=identity_key,
+                    direction=direction,
+                    source=source,
+                    source_row=row_with_parent,
+                )
+            )
+            added += 1
+        if added:
+            self.forbidden_writes["user_monitor"] += added
+        return {
+            "ok": True,
+            "status": "completed",
+            "asset_kind": "stock",
+            "direction": direction,
+            "parent_asset_kind": parent_asset_kind,
+            "parent_identity_key": parent_identity_key,
+            "mode": mode,
+            "membership_count": result.get("membership_count", 0),
+            "candidate_count": len(rows),
+            "added_count": added,
+            "skipped_count": skipped,
+            "failed_count": 0,
+        }
+
+    def remove_app_monitor_item(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        monitor_id: int,
+    ) -> dict[str, Any]:
+        self.assert_user(user_id)
+        self.app_monitor_writes.append(
+            {
+                "operation": "remove",
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "monitor_id": monitor_id,
+            }
+        )
+        for row in self.app_monitor_rows:
+            if row["monitor_id"] != monitor_id:
+                continue
+            if row["principal_id"] != principal_id or row["principal_type"] != principal_type:
+                return {"ok": False, "status": "not_found", "error": "monitor_not_found"}
+            row["status"] = "removed"
+            row["removed_at"] = "2026-06-14T09:30:00+08:00"
+            self.forbidden_writes["user_monitor"] += 1
+            return {"ok": True, "status": "removed", "monitor_id": monitor_id}
+        return {"ok": False, "status": "not_found", "error": "monitor_not_found"}
+
+    def fetch_index_board_c1_minute_rows(self, trade_date: str) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "index": [dict(row) for row in self.c1_minute_rows.get("index", [])],
+            "board": [dict(row) for row in self.c1_minute_rows.get("board", [])],
+        }
+
+    def _active_monitor_row(
+        self,
+        principal_id: int,
+        principal_type: str,
+        asset_kind: str,
+        identity_key: str,
+        direction: str,
+        source_row: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        current_filter_batch = self._fake_current_filter_batch()
+        requested_batch = None
+        if source_row is not None:
+            requested_batch = {
+                "source_trade_date": str(source_row.get("source_trade_date") or ""),
+                "for_trade_date": str(source_row.get("for_trade_date") or ""),
+                "source_run_id": str(source_row.get("source_run_id") or source_row.get("run_id") or ""),
+            }
+        for row in self.app_monitor_rows:
+            if (
+                row["principal_id"] == principal_id
+                and row["principal_type"] == principal_type
+                and row["asset_kind"] == asset_kind
+                and row["identity_key"] == identity_key
+                and row["direction"] == direction
+                and row["status"] != "removed"
+            ):
+                candidate = self._monitor_row_with_validity(dict(row), current_filter_batch)
+                if requested_batch is not None:
+                    candidate_batch = {
+                        "source_trade_date": str(candidate.get("valid_source_trade_date") or ""),
+                        "for_trade_date": str(candidate.get("valid_for_trade_date") or ""),
+                        "source_run_id": str(candidate.get("valid_source_run_id") or ""),
+                    }
+                    if candidate_batch == requested_batch:
+                        return row
+                    continue
+                if candidate.get("effective_status") == "active":
+                    return row
+        return None
+
+    def _new_monitor_row(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        asset_kind: str,
+        identity_key: str,
+        direction: str,
+        source: str,
+        source_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        monitor_id = self.next_app_monitor_id
+        self.next_app_monitor_id += 1
+        snapshot = {
+            "display_name": source_row.get("display_name") or source_row.get("name"),
+            "display_code": source_row.get("display_code") or source_row.get("code"),
+            "source_display_basis_id": source_row.get("source_display_basis_id"),
+            "source_trade_date": source_row.get("source_trade_date"),
+            "for_trade_date": source_row.get("for_trade_date"),
+            "source_run_id": source_row.get("source_run_id") or source_row.get("run_id"),
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+        }
+        for key in (
+            "parent_asset_kind",
+            "parent_identity_key",
+            "parent_code",
+            "parent_name",
+            "membership_trade_date",
+            "membership_source_version",
+            "membership_source_batch_id",
+            "linked_mode",
+        ):
+            if source_row.get(key) is not None:
+                snapshot[key] = source_row.get(key)
+        return {
+            "monitor_id": monitor_id,
+            "principal_id": principal_id,
+            "principal_type": principal_type,
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+            "direction": direction,
+            "source": source,
+            "display_name": source_row.get("display_name") or source_row.get("name"),
+            "display_code": source_row.get("display_code") or source_row.get("code"),
+            "condition_key": source_row.get("condition_key"),
+            "source_run_id": source_row.get("source_run_id") or source_row.get("run_id"),
+            "projection_run_id": source_row.get("projection_run_id"),
+            "source_display_basis_id": source_row.get("source_display_basis_id"),
+            "source_trade_date": source_row.get("source_trade_date"),
+            "for_trade_date": source_row.get("for_trade_date"),
+            "quality_status": source_row.get("quality_status", "reviewed"),
+            "last_signal_state": source_row.get("last_signal_state", "—"),
+            "status": "active",
+            "created_at": "2026-06-14T09:00:00+08:00",
+            "updated_at": "2026-06-14T09:00:00+08:00",
+            "removed_at": None,
+            "valid_source_trade_date": source_row.get("source_trade_date"),
+            "valid_for_trade_date": source_row.get("for_trade_date"),
+            "valid_source_run_id": source_row.get("source_run_id") or source_row.get("run_id"),
+            "expired_at": None,
+            "expired_reason": None,
+            "source_snapshot_json": snapshot,
+        }
+
+    def assert_user(self, user_id: int) -> None:
+        user = self.user_by_id(user_id)
+        if user is None or user.status != "active":
+            raise AssertionError(f"unexpected user_id {user_id}")
+
+    def user_by_id(self, user_id: int) -> UserAccount | None:
+        for user in self.users_by_login.values():
+            if user.user_id == user_id:
+                return user
+        return None
+
+
+class FakeVirtualBuyExecutionRepository:
+    def __init__(self) -> None:
+        self.account = {
+            "virtual_account_id": 1,
+            "principal_id": 1,
+            "principal_type": "admin",
+            "virtual_account_status": "active",
+        }
+        self.cash_snapshot = {
+            "cash_snapshot_id": 201,
+            "virtual_account_id": 1,
+            "available_cash": "100000.0000",
+            "frozen_cash": "0.0000",
+            "total_cash": "100000.0000",
+            "source_ledger_max_id": 200,
+        }
+        self.position = None
+        self.calls: list[str] = []
+        self.inserted: dict[str, dict[str, Any]] = {}
+
+    def fetch_signal_for_buy(self, user_signal_projection_id: int, principal_id: int, principal_type: str) -> None:
+        self.calls.append("fetch_signal")
+        return None
+
+    def fetch_active_virtual_account(self, principal_id: int, principal_type: str) -> dict[str, Any] | None:
+        self.calls.append("fetch_account")
+        if self.account is None:
+            return None
+        return dict(self.account)
+
+    def fetch_current_cash_snapshot(self, virtual_account_id: int) -> dict[str, Any] | None:
+        self.calls.append("fetch_cash")
+        if self.cash_snapshot is None:
+            return None
+        return dict(self.cash_snapshot)
+
+    def fetch_position_for_update(
+        self,
+        virtual_account_id: int,
+        asset_kind: str,
+        identity_key: str,
+    ) -> dict[str, Any] | None:
+        self.calls.append("fetch_position")
+        return dict(self.position) if self.position else None
+
+    def insert_virtual_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("order")
+        self.inserted["order"] = dict(payload)
+        return {"virtual_order_id": 301}
+
+    def insert_virtual_trade(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("trade")
+        self.inserted["trade"] = dict(payload)
+        return {"virtual_trade_id": 401}
+
+    def insert_cash_ledger(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("cash_ledger")
+        self.inserted["cash_ledger"] = dict(payload)
+        return {"cash_ledger_id": 501}
+
+    def insert_cash_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("cash_snapshot")
+        self.inserted["cash_snapshot"] = dict(payload)
+        return {"cash_snapshot_id": 601}
+
+    def upsert_virtual_position(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("position")
+        self.inserted["position"] = dict(payload)
+        return {"virtual_position_id": 701}
+
+    def insert_position_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("position_event")
+        self.inserted["position_event"] = dict(payload)
+        return {"position_event_id": 801}
+
+
+class FixedPasswordVerifier:
+    def __init__(self, result: bool) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, password: str, password_hash: str, password_hash_algo: str) -> bool:
+        self.calls.append((password, password_hash, password_hash_algo))
+        return self.result
+
+
+class FixedPasswordHasher:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, password: str) -> HashResult:
+        self.calls.append(password)
+        return HashResult(password_hash="hashed-for-test", password_hash_algo="argon2id")
+
+
+def build_client(
+    *,
+    repository: FakeN6UserRepository | None = None,
+    buy_execution_repository: FakeVirtualBuyExecutionRepository | None = None,
+    verifier: FixedPasswordVerifier | None = None,
+    hasher: FixedPasswordHasher | None = None,
+    post_close_fastlane_docs_root: str | None = None,
+    rag_docs_root: str | None = None,
+    rag_sql_root: str | None = None,
+    replay_docs_root: str | None = None,
+) -> tuple[TestClient, FakeN6UserRepository, FixedPasswordVerifier, FixedPasswordHasher]:
+    repo = repository or FakeN6UserRepository()
+    password_verifier = verifier or FixedPasswordVerifier(True)
+    password_hasher = hasher or FixedPasswordHasher()
+    app = create_app(
+        repository=repo,
+        buy_execution_repository=buy_execution_repository,
+        config=N6UserWebConfig(
+            cookie_secure=False,
+            session_ttl_seconds=3600,
+            post_close_fastlane_docs_root=post_close_fastlane_docs_root or "docs/post_close_fastlane",
+            rag_docs_root=rag_docs_root or "docs",
+            rag_sql_root=rag_sql_root or "sql",
+            replay_docs_root=replay_docs_root or "docs/replay",
+        ),
+        password_verifier=password_verifier,
+        password_hasher=password_hasher,
+    )
+    return TestClient(app, follow_redirects=False), repo, password_verifier, password_hasher
+
+
+def seed_effective_monitor_for_signal(
+    repo: FakeN6UserRepository,
+    signal_row: dict[str, Any],
+    *,
+    principal_id: int = 1,
+    principal_type: str = "admin",
+    for_trade_date: str | None = None,
+    source_trade_date: str | None = None,
+    source_run_id: str | None = None,
+) -> dict[str, Any]:
+    asset_kind = str(signal_row.get("asset_kind") or "")
+    current_batch = repo._fake_current_filter_batch().get(asset_kind, {})
+    resolved_for_trade_date = str(for_trade_date or current_batch.get("for_trade_date") or "")
+    resolved_source_trade_date = str(source_trade_date or current_batch.get("source_trade_date") or "")
+    resolved_source_run_id = str(source_run_id or current_batch.get("source_run_id") or "")
+    signal_row["trade_date"] = resolved_for_trade_date
+    display_payload = signal_row.setdefault("display_payload_json", {})
+    if isinstance(display_payload, dict):
+        display_payload["trade_date"] = resolved_for_trade_date
+    monitor_row = {
+        "monitor_id": repo.next_app_monitor_id,
+        "principal_id": principal_id,
+        "principal_type": principal_type,
+        "asset_kind": asset_kind,
+        "identity_key": signal_row.get("identity_key"),
+        "direction": signal_row.get("direction"),
+        "source": "signal_scope_test",
+        "source_type": "signal_scope_test",
+        "condition_key": signal_row.get("condition_key"),
+        "source_run_id": resolved_source_run_id,
+        "projection_run_id": signal_row.get("user_projection_run_id"),
+        "status": "active",
+        "quality_status": "passed",
+        "last_signal_state": signal_row.get("action_state"),
+        "valid_source_trade_date": resolved_source_trade_date,
+        "valid_for_trade_date": resolved_for_trade_date,
+        "valid_source_run_id": resolved_source_run_id,
+        "source_snapshot_json": {
+            "source_trade_date": resolved_source_trade_date,
+            "for_trade_date": resolved_for_trade_date,
+            "source_run_id": resolved_source_run_id,
+            "display_code": signal_row.get("code"),
+            "display_name": signal_row.get("name"),
+        },
+        "created_at": "2026-06-14T09:30:00+08:00",
+        "updated_at": "2026-06-14T09:30:00+08:00",
+        "removed_at": None,
+    }
+    repo.next_app_monitor_id += 1
+    repo.app_monitor_rows.append(monitor_row)
+    return monitor_row
+
+
+def make_b_track_buy_signal(
+    base_row: dict[str, Any],
+    *,
+    projection_id: int,
+    asset_kind: str,
+    identity_key: str,
+    code: str,
+    name: str,
+    action_state: str,
+    blocked_reason: str | None = None,
+    condition_key: str = "BUY:M,W,D",
+) -> dict[str, Any]:
+    row = copy.deepcopy(base_row)
+    row.update(
+        {
+            "user_signal_projection_id": projection_id,
+            "user_signal_card_id": projection_id + 10000,
+            "asset_kind": asset_kind,
+            "identity_key": identity_key,
+            "code": code,
+            "display_code": code,
+            "name": name,
+            "display_name": name,
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "action_state": action_state,
+            "blocked_reason": blocked_reason,
+            "condition_key": condition_key,
+            "primary_trigger_period": "30m",
+            "trigger_price": "12.34",
+            "triggered_periods": '["30m"]',
+            "board_code": "881001",
+            "board_name": "行业一",
+        }
+    )
+    for payload_key in ("display_payload_json", "source_payload_json", "trace_json"):
+        payload = row.setdefault(payload_key, {})
+        if isinstance(payload, dict):
+            payload["condition_key"] = condition_key
+            payload["trigger_price"] = "12.34"
+            payload["triggered_periods"] = ["30m"]
+            payload["primary_trigger_period"] = "30m"
+            if blocked_reason:
+                payload["blocked_reason"] = blocked_reason
+    return row
+
+
+def seed_buy_message_monitor(
+    repo: FakeN6UserRepository,
+    signal_row: dict[str, Any],
+    *,
+    source_type: str = "single_row",
+    parent_asset_kind: str | None = None,
+    parent_identity_key: str | None = None,
+    parent_code: str | None = None,
+    parent_name: str | None = None,
+    membership_trade_date: str | None = None,
+    principal_id: int = 1,
+    principal_type: str = "admin",
+) -> dict[str, Any]:
+    monitor = seed_effective_monitor_for_signal(
+        repo,
+        signal_row,
+        principal_id=principal_id,
+        principal_type=principal_type,
+    )
+    monitor["source_type"] = source_type
+    monitor["source_snapshot_json"].update(
+        {
+            "parent_asset_kind": parent_asset_kind,
+            "parent_identity_key": parent_identity_key,
+            "parent_code": parent_code,
+            "parent_name": parent_name,
+            "membership_trade_date": membership_trade_date,
+        }
+    )
+    return monitor
+
+
+def write_post_close_fastlane_fixture(
+    docs_root: Path,
+    *,
+    for_trade_date: str = "20260612",
+    result: str = "EXECUTE_PASS",
+    failed_step_id: str | None = None,
+) -> Path:
+    run_dir = docs_root / for_trade_date
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (docs_root / "latest").symlink_to(for_trade_date)
+    (run_dir / "00_status.json").write_text(
+        json.dumps(
+            {
+                "result": result,
+                "source_trade_date": "20260611",
+                "for_trade_date": for_trade_date,
+                "failed_step_id": failed_step_id,
+                "updated_at": "2026-06-11T23:25:13+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "01_oneshot_execute_report.json").write_text(
+        json.dumps(
+            {
+                "result": result,
+                "source_trade_date": "20260611",
+                "for_trade_date": for_trade_date,
+                "failed_step_id": failed_step_id,
+                "sub_steps": [
+                    {"step_id": "calendar_repair", "layer_role": "N1_ingestion", "returncode": 0},
+                    {"step_id": "n1_source_facts", "layer_role": "N1_ingestion", "returncode": 0},
+                    {"step_id": "n2_condition", "layer_role": "N2_condition", "returncode": 0},
+                    {"step_id": "n3_subscription", "layer_role": "N3_market_data", "returncode": 0},
+                    {"step_id": "n3_a0_preload_dry_run", "layer_role": "N3_market_data", "returncode": 0},
+                    {"step_id": "n3_a1_contract", "layer_role": "N3_market_data", "returncode": 0},
+                    {
+                        "step_id": "n3_a1_preload",
+                        "layer_role": "N3_market_data",
+                        "returncode": 0 if failed_step_id != "n3_a1_preload" else 2,
+                    },
+                    {
+                        "step_id": "n3_a1_cumulative_amount",
+                        "layer_role": "N3_market_data",
+                        "returncode": 0 if failed_step_id != "n3_a1_cumulative_amount" else 2,
+                        "report_paths": [
+                            str(run_dir / "51_n3_a1_cumulative_amount_execute_report.json"),
+                            str(run_dir / "51_n3_a1_cumulative_amount_execute_report.md"),
+                        ],
+                    },
+                    {
+                        "step_id": "n4_trigger_context_snapshot",
+                        "layer_role": "N4_trigger",
+                        "returncode": 0,
+                        "report_paths": [
+                            str(run_dir / "52_n4_trigger_context_snapshot_execute_report.json"),
+                            str(run_dir / "52_n4_trigger_context_snapshot_execute_report.md"),
+                        ],
+                    },
+                    {
+                        "step_id": "n4_context_rollback_ready",
+                        "layer_role": "runtime_control",
+                        "returncode": 0,
+                        "report_paths": [
+                            str(run_dir / "53_n4_context_rollback_ready_report.json"),
+                            str(run_dir / "53_n4_context_rollback_ready_report.md"),
+                        ],
+                    },
+                    {
+                        "step_id": "preopen_readiness_noop",
+                        "layer_role": "runtime_control",
+                        "returncode": 0,
+                        "report_paths": [
+                            str(run_dir / "54_preopen_readiness_noop_report.json"),
+                            str(run_dir / "54_preopen_readiness_noop_report.md"),
+                        ],
+                    },
+                    {
+                        "step_id": "lineage_pollution_guard",
+                        "layer_role": "runtime_control",
+                        "returncode": 0,
+                        "report_paths": [
+                            str(run_dir / "55_lineage_pollution_guard_report.json"),
+                            str(run_dir / "55_lineage_pollution_guard_report.md"),
+                        ],
+                    },
+                    {
+                        "step_id": "worker_launchd_guard",
+                        "layer_role": "runtime_control",
+                        "returncode": 0,
+                        "report_paths": [
+                            str(run_dir / "56_worker_launchd_guard_report.json"),
+                            str(run_dir / "56_worker_launchd_guard_report.md"),
+                        ],
+                    },
+                ],
+                "forbidden_scope_proof": {
+                    "n3_b_c_b2_executed": False,
+                    "n4_n5_n6_entered": False,
+                    "outbox_inbox_checkpoint_consumed_or_updated": False,
+                    "worker_started": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "50_n3_a1_preload_execute_report.json").write_text(
+        json.dumps(
+            {
+                "stage": "N3-A1",
+                "source_trade_date": "20260611",
+                "for_trade_date": for_trade_date,
+                "write_result": {
+                    "objects_processed": 297,
+                    "minute_rows_written": 71280,
+                    "preload_status_rows_written": 297,
+                    "event_outbox_rows_written": 0,
+                },
+                "quality": {"p0_count": 0, "p1_count": 0, "p2_count": 0, "items": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "51_n3_a1_cumulative_amount_execute_report.json").write_text(
+        json.dumps(
+            {
+                "stage": "N3_A1_previous_day_cumulative_amount_fastlane",
+                "source_previous_day_minute_run_id": (
+                    "previous_day_minute_preload_20260611_for_20260612__"
+                    "market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1"
+                ),
+                "source_trade_date": "20260611",
+                "for_trade_date": for_trade_date,
+                "result": "EXECUTE_PASS",
+                "write_action": "inserted",
+                "row_count_by_asset": {"stock": 422640, "index": 2160, "board": 30480},
+                "object_count_by_asset": {"stock": 1761, "index": 9, "board": 127},
+                "side_effect_guard": {
+                    "cumulative_table_written": True,
+                    "common_market_data_run_written": False,
+                    "outbox_written": False,
+                    "inbox_checkpoint_touched": False,
+                    "downstream_runtime_entered": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "51_n3_a1_cumulative_amount_execute_report.md").write_text(
+        "# N3-A1 cumulative amount\n\n- result: `EXECUTE_PASS`\n",
+        encoding="utf-8",
+    )
+    (run_dir / "52_n4_trigger_context_snapshot_execute_report.json").write_text(
+        json.dumps(
+            {
+                "result": "EXECUTE_PASS",
+                "stage": "N4-3",
+                "layer_role": "N4_trigger",
+                "run_id": f"trigger_context_snapshot_{for_trade_date}_condition_layer_20260611_source_20260611_for_{for_trade_date}_v1__atomic_rule_v1",
+                "rollback_sql_path": f"sql/N4_trigger_context_snapshot_{for_trade_date}_rollback.sql",
+                "side_effects": {
+                    "trigger_context_snapshot_written": True,
+                    "trigger_state_written": False,
+                    "trigger_match_written": False,
+                    "event_outbox_written": False,
+                    "worker_started": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in [
+        "52_n4_trigger_context_snapshot_execute_report.md",
+        "53_n4_context_rollback_ready_report.md",
+        "54_preopen_readiness_noop_report.md",
+        "55_lineage_pollution_guard_report.md",
+        "56_worker_launchd_guard_report.md",
+    ]:
+        (run_dir / name).write_text(f"# {name}\n\n- result: `PASS`\n", encoding="utf-8")
+    for name in [
+        "53_n4_context_rollback_ready_report.json",
+        "54_preopen_readiness_noop_report.json",
+        "55_lineage_pollution_guard_report.json",
+        "56_worker_launchd_guard_report.json",
+    ]:
+        (run_dir / name).write_text(json.dumps({"result": "PASS", "writes_database": False}), encoding="utf-8")
+    return run_dir
+
+
+def write_post_close_fastlane_overlay_fixture(run_dir: Path) -> Path:
+    overlay_path = run_dir / "02_manual_lineage_refresh_status.json"
+    overlay_path.write_text(
+        json.dumps(
+            {
+                "result": "EXECUTE_PASS",
+                "status_source": "manual_lineage_refresh_overlay",
+                "current_effective_lineage": "v4",
+                "source_trade_date": "20260615",
+                "for_trade_date": run_dir.name,
+                "n1_active_financial_source": "stock_financial_20260615_v3",
+                "n2_active_condition_run": "condition_layer_20260615_source_20260615_for_20260616_v4",
+                "n3_subscription_run": "market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4",
+                "n3_a1_preload_run": "previous_day_minute_preload_20260615_for_20260616__market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4",
+                "original_oneshot": {
+                    "result": "EXECUTE_PASS",
+                    "status_path": str(run_dir / "00_status.json"),
+                    "report_path": str(run_dir / "01_oneshot_execute_report.json"),
+                    "superseded_for_display_by_manual_overlay": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return overlay_path
+
+
+def write_rag_artifact_fixture(root: Path) -> tuple[Path, Path]:
+    docs_root = root / "docs"
+    sql_root = root / "sql"
+    status_dir = docs_root / "post_close_fastlane" / "20260617"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    sql_root.mkdir(parents=True, exist_ok=True)
+    (status_dir / "00_status.json").write_text(
+        json.dumps(
+            {
+                "result": "EXECUTE_PASS",
+                "source_trade_date": "20260616",
+                "for_trade_date": "20260617",
+                "failed_step_id": None,
+                "updated_at": "2026-06-16T22:26:32+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (status_dir / "01_oneshot_execute_report.json").write_text(
+        json.dumps(
+            {
+                "result": "EXECUTE_PASS",
+                "sub_steps": [
+                    {"step_id": "n1_source_facts", "returncode": 0},
+                    {"step_id": "n2_condition", "returncode": 0},
+                    {"step_id": "n3_subscription", "returncode": 0},
+                    {"step_id": "n3_a1_preload", "returncode": 0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (docs_root / "RUNTIME_CONTROL_20260616_TO_20260617_POST_CLOSE_FASTLANE_REVALIDATION.json").write_text(
+        json.dumps(
+            {
+                "result": "REVALIDATION_PASS",
+                "rerun_required": False,
+                "recommended_next_gate": "NONE",
+                "current_one_shot_proof": {
+                    "result": "EXECUTE_PASS",
+                    "source_trade_date": "20260616",
+                    "for_trade_date": "20260617",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (docs_root / "N2_CONDITION_SOURCE_REFRESH_FOR_STOCK_FINANCIAL_20260615_V3_POST_REVIEW.json").write_text(
+        json.dumps(
+            {
+                "result": "POST_REVIEW_PASS",
+                "execute_run_id": "condition_layer_20260615_source_20260615_for_20260616_v4",
+                "active_supersede_proof": {"v4_status": "passed_active", "active_run_count": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (docs_root / "N6_A_TRACK_READ_ONLY_RAG_STATUS_ASSISTANT_CLOSEOUT.json").write_text(
+        json.dumps(
+            {
+                "result": "CLOSEOUT_PASS",
+                "gate": "N6_A_TRACK_READ_ONLY_RAG_STATUS_ASSISTANT_CLOSEOUT_GATE",
+                "implementation_summary": {
+                    "rag_page": "/n6/rag",
+                    "rag_api": "/api/n6/ui/v1/rag-search",
+                    "navigation_label": "RAG问答",
+                },
+                "closeout_decision": {
+                    "can_mark_read_only_rag_status_assistant_v1_complete": True,
+                    "recommended_next_gate": "NONE",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (docs_root / "huge_snapshot_v1.json").write_text("x" * 250000, encoding="utf-8")
+    (sql_root / "N2_condition_source_refresh_for_stock_financial_20260615_v3_rollback.sql").write_text(
+        "RAISE EXCEPTION 'disabled by default';\nDELETE FROM common_condition_run WHERE run_id = 'v4';\n",
+        encoding="utf-8",
+    )
+    return docs_root, sql_root
+
+
+def load_b_track_v2_field_visibility_contract() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[1]
+    return json.loads(
+        (root / "docs/B_TRACK_V2_FIELD_VISIBILITY_POLICY_IMPLEMENTATION_CONTRACT.json").read_text(encoding="utf-8")
+    )
+
+
+class RecordingCursor:
+    def __init__(
+        self,
+        *,
+        existing_relations: set[str] | None = None,
+        filter_rows: list[dict[str, Any]] | None = None,
+        columns_by_table: dict[str, list[str]] | None = None,
+    ) -> None:
+        self.executions: list[tuple[str, Any]] = []
+        self.existing_relations = existing_relations or set()
+        self.filter_rows = [dict(row) for row in (filter_rows or [])]
+        self.columns_by_table_override = columns_by_table
+        self._last_sql = ""
+        self._last_params: Any = None
+
+    def __enter__(self) -> "RecordingCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if isinstance(params, dict):
+            recorded_params: Any = dict(params)
+            none_filter_params = {
+                key: value
+                for key, value in recorded_params.items()
+                if key not in {"user_id", "limit"} and value is None
+            }
+            if none_filter_params:
+                raise AssertionError(f"nullable filter params should be omitted: {sorted(none_filter_params)}")
+        elif params is None:
+            recorded_params = {}
+        else:
+            recorded_params = tuple(params)
+        self._last_sql = sql
+        self._last_params = recorded_params
+        self.executions.append((sql, recorded_params))
+
+    def fetchone(self) -> dict[str, Any] | None:
+        if "to_regclass" in self._last_sql and isinstance(self._last_params, tuple) and self._last_params:
+            relation_name = str(self._last_params[0])
+            if relation_name in self.existing_relations:
+                return {"relation_name": relation_name}
+            return {"relation_name": None}
+        return None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        if "SELECT DISTINCT for_trade_date::text AS for_trade_date" in self._last_sql:
+            return [{"for_trade_date": "20260625"}]
+        if "information_schema.columns" in self._last_sql and isinstance(self._last_params, tuple) and self._last_params:
+            table_name = str(self._last_params[0])
+            columns_by_table = self.columns_by_table_override or {
+                "v_n6_stock_condition_display_basis": [
+                    "identity_key",
+                    "for_trade_date",
+                    "source_trade_date",
+                    "updated_at",
+                    "score",
+                    "display_name",
+                ],
+                "v_n6_index_condition_display_basis": [
+                    "identity_key",
+                    "for_trade_date",
+                    "source_trade_date",
+                    "updated_at",
+                    "score",
+                    "display_name",
+                ],
+                "v_n6_board_condition_display_basis": [
+                    "identity_key",
+                    "for_trade_date",
+                    "source_trade_date",
+                    "updated_at",
+                    "score",
+                    "display_name",
+                ],
+                "user_monitor_stock": [
+                    "monitor_id",
+                    "principal_id",
+                    "principal_type",
+                    "user_id",
+                    "asset_kind",
+                    "identity_key",
+                    "direction",
+                    "source_snapshot_json",
+                    "valid_source_trade_date",
+                    "valid_for_trade_date",
+                    "valid_source_run_id",
+                ],
+                "user_monitor_index": [
+                    "monitor_id",
+                    "principal_id",
+                    "principal_type",
+                    "user_id",
+                    "asset_kind",
+                    "identity_key",
+                    "direction",
+                    "source_snapshot_json",
+                    "valid_source_trade_date",
+                    "valid_for_trade_date",
+                    "valid_source_run_id",
+                ],
+                "user_monitor_board": [
+                    "monitor_id",
+                    "principal_id",
+                    "principal_type",
+                    "user_id",
+                    "asset_kind",
+                    "identity_key",
+                    "direction",
+                    "source_snapshot_json",
+                    "valid_source_trade_date",
+                    "valid_for_trade_date",
+                    "valid_source_run_id",
+                ],
+            }
+            return [{"column_name": column} for column in columns_by_table.get(table_name, [])]
+        if "FROM v_n6_stock_condition_display_basis t" in self._last_sql:
+            return [dict(row) for row in self.filter_rows]
+        return []
+
+
+class RecordingConnection:
+    def __init__(self, cursor: RecordingCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> "RecordingConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> RecordingCursor:
+        return self._cursor
+
+
+class N6UserAppTest(unittest.TestCase):
+    def test_login_success_writes_session_hash_and_cookie_raw_token(self) -> None:
+        client, repo, verifier, _ = build_client()
+
+        response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertEqual(len(repo.created_sessions), 1)
+        raw_cookie = response.cookies.get(COOKIE_NAME)
+        self.assertIsNotNone(raw_cookie)
+        session_row = repo.created_sessions[0]
+        self.assertEqual(session_row["session_token_hash_algo"], "sha256")
+        self.assertEqual(session_row["session_token_hash"], hash_session_token(str(raw_cookie)))
+        self.assertNotEqual(session_row["session_token_hash"], raw_cookie)
+        self.assertEqual(verifier.calls, [("correct-password", "stored-password-hash", "argon2id")])
+        set_cookie = response.headers["set-cookie"]
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=lax", set_cookie)
+        self.assertIn("Path=/", set_cookie)
+
+    def test_b_track_app_unauthenticated_redirects_to_login_with_next(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/app", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/login?next=/n6/app")
+
+    def test_b_track_app_child_page_unauthenticated_redirects_to_login_with_next(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/app/account", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/login?next=/n6/app/account")
+
+    def test_login_redirects_to_safe_b_track_next(self) -> None:
+        client, repo, _, _ = build_client()
+
+        response = client.post(
+            "/api/n6/auth/login?next=/n6/app",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/app")
+        self.assertEqual(len(repo.created_sessions), 1)
+
+    def test_admin_login_without_next_defaults_to_post_close_fastlane_status_entry(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+
+    def test_login_rejects_open_redirect_next_and_uses_role_default(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.post(
+            "/api/n6/auth/login?next=http://evil.com",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+
+    def test_login_page_exposes_safe_next_for_b_track_entry(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/login?next=/n6/app/account")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('name="next"', response.text)
+        self.assertIn('value="/n6/app/account"', response.text)
+
+    def test_login_page_without_next_does_not_force_b_track_next(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/login")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('name="next"', response.text)
+        self.assertIn('value=""', response.text)
+        self.assertIn("response.url", response.text)
+        self.assertIn("window.location.assign(redirectTarget)", response.text)
+
+    def test_login_page_sanitizes_malicious_next_to_empty_role_default(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/login?next=http://evil.com")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('value=""', response.text)
+
+    def test_login_failure_uses_generic_error_and_writes_no_session(self) -> None:
+        client, repo, _, _ = build_client(verifier=FixedPasswordVerifier(False))
+
+        response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "wrong-password"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "invalid_login")
+        self.assertEqual(repo.created_sessions, [])
+
+    def test_me_is_read_only_and_redacts_password_hash(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/me")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["user"]["login_name"], "admin")
+        self.assertNotIn("password_hash", payload["user"])
+        self.assertEqual(len(repo.created_sessions), 1)
+        self.assertEqual(repo.revoked_session_hashes, [])
+
+    def test_unauthenticated_home_redirects_to_login(self) -> None:
+        client, _, _, _ = build_client()
+
+        response = client.get("/n6/", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/login")
+
+    def test_authenticated_home_redirects_to_post_close_fastlane_status_and_keeps_messages_secondary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(Path(tmp) / "missing"))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/n6/", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+            self.assertEqual(repo.card_reads, 0)
+            self.assertEqual(repo.strategy_reads, 0)
+            self.assertEqual(repo.board_reads, 0)
+            self.assertEqual(repo.profile_reads, 0)
+
+            status_response = client.get("/n6/post-close-fastlane-status")
+            self.assertEqual(status_response.status_code, 200)
+            self.assertIn("收盘后 Fast Lane 状态", status_response.text)
+            self.assertIn("NO_STATUS", status_response.text)
+            self.assertIn('href="/n6/admin/users"', status_response.text)
+
+            messages_response = client.get("/n6/input-messages")
+            self.assertEqual(messages_response.status_code, 200)
+            self.assertIn("N6输入消息中心", messages_response.text)
+            self.assertIn('href="/n6/admin/users"', messages_response.text)
+
+            users_response = client.get("/n6/admin/users")
+        self.assertEqual(users_response.status_code, 200)
+        self.assertIn("收盘状态", users_response.text)
+        self.assertIn('href="/n6/post-close-fastlane-status"', users_response.text)
+        self.assertIn("N3消息", users_response.text)
+        self.assertIn('href="/n6/n3-messages"', users_response.text)
+        self.assertIn("N4消息", users_response.text)
+        self.assertIn('href="/n6/n4-messages"', users_response.text)
+        self.assertIn("N6输入消息", users_response.text)
+        self.assertIn('href="/n6/input-messages"', users_response.text)
+        self.assertIn("N5消息", users_response.text)
+        self.assertIn('href="/n6/n5-messages"', users_response.text)
+        self.assertIn("N5动作", users_response.text)
+        self.assertIn('href="/n6/n5-actions"', users_response.text)
+        self.assertIn("用户管理", users_response.text)
+        for hidden_label in ("动作消息", "状态监控", "系统账户状态", "监控筛选", "持仓", "手机播报"):
+            self.assertNotIn(hidden_label, users_response.text)
+
+    def test_monitor_page_is_productized_and_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertEqual(repo.card_reads, 0)
+        self.assertEqual(repo.strategy_reads, 0)
+        self.assertEqual(repo.board_reads, 0)
+        self.assertEqual(repo.profile_reads, 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+
+    def test_monitor_filter_query_redirects_to_action_events_without_writes(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/?filter_submitted=1&strategy=chase", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertEqual(repo.card_reads, 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_post_close_fastlane_status_api_reads_latest_artifact_without_database_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            write_post_close_fastlane_fixture(docs_root)
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/api/n6/ui/v1/post-close-fastlane-status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "Post-Close Fast Lane Status")
+        self.assertEqual(payload["result"], "EXECUTE_PASS")
+        self.assertEqual(payload["selected_for_trade_date"], "20260612")
+        self.assertEqual(payload["status"]["source_trade_date"], "20260611")
+        self.assertEqual(payload["status"]["failed_step_id"], "—")
+        self.assertEqual(payload["sub_steps"][-1]["step_id"], "worker_launchd_guard")
+        self.assertEqual(payload["sub_steps"][-1]["status"], "PASS")
+        self.assertEqual(payload["sub_steps"][-1]["label"], "Worker/launchd guard")
+        self.assertIn("51_n3_a1_cumulative_amount_execute_report.json", [row["file_name"] for row in payload["artifacts"]])
+        self.assertIn("52_n4_trigger_context_snapshot_execute_report.json", [row["file_name"] for row in payload["artifacts"]])
+        self.assertIn("53_n4_context_rollback_ready_report.json", [row["file_name"] for row in payload["artifacts"]])
+        self.assertIn("56_worker_launchd_guard_report.json", [row["file_name"] for row in payload["artifacts"]])
+        self.assertEqual(payload["n3_a1_summary"]["objects_processed"], 297)
+        self.assertEqual(payload["n3_a1_summary"]["minute_rows_written"], 71280)
+        self.assertEqual(payload["n3_a1_summary"]["preload_status_rows_written"], 297)
+        self.assertEqual(payload["n3_a1_summary"]["event_outbox_rows_written"], 0)
+        self.assertEqual(payload["n3_a1_summary"]["P0"], 0)
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_api_prefers_manual_overlay_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            run_dir = write_post_close_fastlane_fixture(docs_root, for_trade_date="20260616")
+            write_post_close_fastlane_overlay_fixture(run_dir)
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/api/n6/ui/v1/post-close-fastlane-status?for_trade_date=20260616")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["result"], "EXECUTE_PASS")
+        self.assertEqual(payload["status"]["source_trade_date"], "20260615")
+        self.assertEqual(payload["status"]["status_source"], "manual_lineage_refresh_overlay")
+        self.assertEqual(payload["status"]["current_effective_lineage"], "v4")
+        self.assertEqual(payload["status"]["n1_active_financial_source"], "stock_financial_20260615_v3")
+        self.assertEqual(payload["status"]["n2_active_condition_run"], "condition_layer_20260615_source_20260615_for_20260616_v4")
+        self.assertEqual(
+            payload["status"]["n3_subscription_run"],
+            "market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4",
+        )
+        self.assertTrue(payload["status"]["superseded_for_display_by_manual_overlay"])
+        self.assertEqual(payload["status"]["original_oneshot_result"], "EXECUTE_PASS")
+        self.assertIn("02_manual_lineage_refresh_status.json", [row["file_name"] for row in payload["artifacts"]])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_api_defaults_to_latest_attempted_not_older_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            older_dir = write_post_close_fastlane_fixture(docs_root, for_trade_date="20260701")
+            write_post_close_fastlane_overlay_fixture(older_dir)
+            (docs_root / "latest").unlink()
+            write_post_close_fastlane_fixture(
+                docs_root,
+                for_trade_date="20260702",
+                result="PARTIAL_BLOCKED",
+                failed_step_id="worker_launchd_guard",
+            )
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/api/n6/ui/v1/post-close-fastlane-status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["selected_for_trade_date"], "20260702")
+        self.assertEqual(payload["latest_for_trade_date"], "20260702")
+        self.assertEqual(payload["result"], "PARTIAL_BLOCKED")
+        self.assertEqual(payload["status"]["status_source"], "00_status_json")
+        self.assertEqual(payload["status"]["failed_step_id"], "worker_launchd_guard")
+        self.assertEqual(payload["effective_manual_overlay"]["for_trade_date"], "20260701")
+        self.assertEqual(payload["effective_manual_overlay"]["status_source"], "manual_lineage_refresh_overlay")
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_api_falls_back_when_overlay_missing_or_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            missing_overlay_dir = write_post_close_fastlane_fixture(docs_root, for_trade_date="20260612")
+            (docs_root / "latest").unlink()
+            invalid_overlay_dir = write_post_close_fastlane_fixture(docs_root, for_trade_date="20260613")
+            (invalid_overlay_dir / "02_manual_lineage_refresh_status.json").write_text("{invalid", encoding="utf-8")
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            missing_response = client.get("/api/n6/ui/v1/post-close-fastlane-status?for_trade_date=20260612")
+            invalid_response = client.get("/api/n6/ui/v1/post-close-fastlane-status?for_trade_date=20260613")
+
+        self.assertEqual(missing_overlay_dir.name, "20260612")
+        self.assertEqual(missing_response.status_code, 200)
+        missing_payload = missing_response.json()
+        self.assertEqual(missing_payload["status"]["source_trade_date"], "20260611")
+        self.assertEqual(missing_payload["status"]["status_source"], "00_status_json")
+        self.assertEqual(missing_payload["status"]["current_effective_lineage"], "—")
+        self.assertFalse(missing_payload["status"]["superseded_for_display_by_manual_overlay"])
+        self.assertEqual(invalid_response.status_code, 200)
+        invalid_payload = invalid_response.json()
+        self.assertEqual(invalid_payload["status"]["source_trade_date"], "20260611")
+        self.assertEqual(invalid_payload["status"]["status_source"], "00_status_json")
+        self.assertEqual(invalid_payload["status"]["current_effective_lineage"], "—")
+        self.assertFalse(invalid_payload["status"]["superseded_for_display_by_manual_overlay"])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_page_renders_artifacts_and_has_no_execute_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            write_post_close_fastlane_fixture(docs_root)
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/n6/post-close-fastlane-status")
+            alias = client.get("/n6/fastlane-status", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(alias.status_code, 303)
+        self.assertEqual(alias.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertIn("收盘后 Fast Lane 状态", response.text)
+        self.assertIn("EXECUTE_PASS", response.text)
+        self.assertIn("20260611", response.text)
+        self.assertIn("20260612", response.text)
+        self.assertIn("n1_source_facts", response.text)
+        self.assertIn("n3_a1_preload", response.text)
+        self.assertIn("n3_a1_cumulative_amount", response.text)
+        self.assertIn("n4_trigger_context_snapshot", response.text)
+        self.assertIn("n4_context_rollback_ready", response.text)
+        self.assertIn("preopen_readiness_noop", response.text)
+        self.assertIn("lineage_pollution_guard", response.text)
+        self.assertIn("worker_launchd_guard", response.text)
+        self.assertIn("71280", response.text)
+        self.assertIn("00_status.json", response.text)
+        self.assertIn("01_oneshot_execute_report.json", response.text)
+        self.assertIn("50_n3_a1_preload_execute_report.json", response.text)
+        self.assertIn("51_n3_a1_cumulative_amount_execute_report.json", response.text)
+        self.assertIn("52_n4_trigger_context_snapshot_execute_report.json", response.text)
+        self.assertIn("N3-A1 preload rollback", response.text)
+        self.assertIn("N3-A1 cumulative rollback", response.text)
+        self.assertIn("N4 context snapshot rollback", response.text)
+        self.assertIn("不执行命令", response.text)
+        self.assertIn("不写数据库", response.text)
+        self.assertNotIn("--execute", response.text)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_page_renders_manual_overlay_lineage_without_execute_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "post_close_fastlane"
+            run_dir = write_post_close_fastlane_fixture(docs_root, for_trade_date="20260616")
+            write_post_close_fastlane_overlay_fixture(run_dir)
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(docs_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/n6/post-close-fastlane-status?for_trade_date=20260616")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("manual_lineage_refresh_overlay", response.text)
+        self.assertIn("current_effective_lineage", response.text)
+        self.assertIn("v4", response.text)
+        self.assertIn("stock_financial_20260615_v3", response.text)
+        self.assertIn("condition_layer_20260615_source_20260615_for_20260616_v4", response.text)
+        self.assertIn("market_data_subscription_20260616_condition_layer_20260615_source_20260615_for_20260616_v4", response.text)
+        self.assertIn("02_manual_lineage_refresh_status.json", response.text)
+        self.assertIn("superseded_for_display_by_manual_overlay", response.text)
+        self.assertNotIn("--execute", response.text)
+        self.assertNotIn(">rollback<", response.text.lower())
+        self.assertNotIn(">worker<", response.text.lower())
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_post_close_fastlane_status_api_returns_no_status_for_missing_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client, repo, _, _ = build_client(post_close_fastlane_docs_root=str(Path(tmp) / "missing"))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/api/n6/ui/v1/post-close-fastlane-status?for_trade_date=20260612")
+            page = client.get("/n6/post-close-fastlane-status?for_trade_date=20260612")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["result"], "NO_STATUS")
+        self.assertEqual(payload["selected_for_trade_date"], "20260612")
+        self.assertEqual(payload["sub_steps"], [])
+        self.assertEqual(payload["n3_a1_summary"]["objects_processed"], 0)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("NO_STATUS", page.text)
+        self.assertIn("还没有找到该交易日的 one-shot 状态文件", page.text)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_rag_search_answers_post_close_completion_with_artifact_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root, sql_root = write_rag_artifact_fixture(Path(tmp))
+            client, repo, _, _ = build_client(rag_docs_root=str(docs_root), rag_sql_root=str(sql_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get(
+                "/api/n6/ui/v1/rag-search",
+                params={"q": "20260616 20260617 N1 N2 N3-A1 完成了吗"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["answer_status"], "ANSWERED")
+        self.assertIn("EXECUTE_PASS", payload["answer"])
+        self.assertFalse(payload["safety"]["executes_commands"])
+        self.assertFalse(payload["safety"]["writes_database"])
+        evidence_paths = [row["path"] for row in payload["evidence"]]
+        self.assertIn("docs/post_close_fastlane/20260617/00_status.json", evidence_paths)
+        self.assertNotIn("docs/huge_snapshot_v1.json", evidence_paths)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_rag_search_answers_rerun_required_from_revalidation_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root, sql_root = write_rag_artifact_fixture(Path(tmp))
+            client, _, _, _ = build_client(rag_docs_root=str(docs_root), rag_sql_root=str(sql_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get(
+                "/api/n6/ui/v1/rag-search",
+                params={"q": "20260617 rerun_required 是否需要重跑"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["answer_status"], "ANSWERED")
+        self.assertIn("rerun_required=false", payload["answer"])
+        self.assertEqual(payload["suggested_next_question"], "查看 20260617 Fast Lane 状态")
+        self.assertIn(
+            "docs/RUNTIME_CONTROL_20260616_TO_20260617_POST_CLOSE_FASTLANE_REVALIDATION.json",
+            [row["path"] for row in payload["evidence"]],
+        )
+
+    def test_rag_search_prioritizes_exact_closeout_artifact_over_status_boost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root, sql_root = write_rag_artifact_fixture(Path(tmp))
+            client, _, _, _ = build_client(rag_docs_root=str(docs_root), rag_sql_root=str(sql_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get(
+                "/api/n6/ui/v1/rag-search",
+                params={"q": "RAG 状态助手 closeout N6_A_TRACK_READ_ONLY_RAG_STATUS_ASSISTANT_CLOSEOUT"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["answer_status"], "ANSWERED")
+        self.assertEqual(
+            payload["evidence"][0]["path"],
+            "docs/N6_A_TRACK_READ_ONLY_RAG_STATUS_ASSISTANT_CLOSEOUT.json",
+        )
+        self.assertIn("CLOSEOUT_PASS", payload["answer"])
+
+    def test_rag_search_returns_no_evidence_without_guessing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root, sql_root = write_rag_artifact_fixture(Path(tmp))
+            client, _, _, _ = build_client(rag_docs_root=str(docs_root), rag_sql_root=str(sql_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/api/n6/ui/v1/rag-search", params={"q": "19990101 是否完成"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["answer_status"], "NO_EVIDENCE")
+        self.assertEqual(payload["evidence"], [])
+        self.assertIn("没有找到", payload["answer"])
+
+    def test_rag_page_renders_query_results_and_has_no_execution_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root, sql_root = write_rag_artifact_fixture(Path(tmp))
+            client, repo, _, _ = build_client(rag_docs_root=str(docs_root), rag_sql_root=str(sql_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            response = client.get("/n6/rag?q=20260616+20260617+是否完成")
+            users_response = client.get("/n6/admin/users")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("RAG问答", response.text)
+        self.assertIn("EXECUTE_PASS", response.text)
+        self.assertIn("docs/post_close_fastlane/20260617/00_status.json", response.text)
+        self.assertIn("只读本地 artifact", response.text)
+        self.assertNotIn("--execute", response.text)
+        self.assertNotIn("<button>retry</button>", response.text.lower())
+        self.assertNotIn("<button>rollback</button>", response.text.lower())
+        self.assertNotIn("<button>worker</button>", response.text.lower())
+        self.assertIn('href="/n6/rag"', users_response.text)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_admin_n5_messages_alias_redirects_to_message_center(self) -> None:
+        client, _, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/admin/n5-messages", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/n5-messages")
+
+    def test_hidden_monitor_page_legacy_assertions_removed(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/action-events")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_strategy_type_mapping_uses_five_period_transition_rank(self) -> None:
+        cases = [
+            (("volume_up", "volume_up", "volume_up", "volume_up", "volume_up"), "追涨策略"),
+            (("volume_up", "volume_up", "volume_up", "volume_up", "flat"), "超短策略"),
+            (("volume_up", "volume_up", "volume_up", "flat", "flat"), "短线策略"),
+            (("volume_up", "volume_up", "flat", "flat", "flat"), "中线策略"),
+            (("volume_up", "flat", "flat", "flat", "flat"), "长线策略"),
+            (("flat", "flat", "flat", "flat", "flat"), "长线策略"),
+        ]
+        for transitions, expected_label in cases:
+            with self.subTest(transitions=transitions):
+                result = strategy_type_from_transitions(
+                    {
+                        "period_transition_y": transitions[0],
+                        "period_transition_q": transitions[1],
+                        "period_transition_m": transitions[2],
+                        "period_transition_w": transitions[3],
+                        "period_transition_d": transitions[4],
+                    }
+                )
+
+                self.assertEqual(result["label"], expected_label)
+
+    def test_portfolio_page_is_hidden_and_redirects_to_action_events_without_writes(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/portfolio", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertEqual(repo.sim_account_reads, 0)
+        self.assertEqual(repo.sim_position_reads, 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+        self.assertEqual(repo.forbidden_writes["user_sim"], 0)
+
+    def test_notifications_page_is_hidden_and_redirects_to_action_events_without_writes(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/notifications", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/n6/post-close-fastlane-status")
+        self.assertEqual(repo.notification_reads, 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_action_events_page_reads_n5_outbox_without_consuming_it(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/action-events")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("动作消息", response.text)
+        self.assertIn("管理员消息看板", response.text)
+        self.assertIn("只读预览", response.text)
+        self.assertIn("不消费 outbox", response.text)
+        self.assertIn("不触发真实通知/交易", response.text)
+        self.assertIn("今日 N4 TriggerMatched pending", response.text)
+        self.assertIn("N4/N5 消息分布", response.text)
+        self.assertIn("TriggerMatched / pending 3", response.text)
+        self.assertIn("blocked_reason 分布", response.text)
+        self.assertIn("price_confirmation_failed", response.text)
+        self.assertIn("N6 shadow 状态", response.text)
+        self.assertIn("最近 run 状态", response.text)
+        self.assertNotIn('href="/n6/status-monitor"', response.text)
+        self.assertNotIn('href="/n6/admin/account"', response.text)
+        self.assertIn("消息筛选", response.text)
+        self.assertIn("全链路消息统计", response.text)
+        self.assertIn("N4 TriggerMatched", response.text)
+        self.assertIn(">605<", response.text)
+        self.assertIn("消息卡片", response.text)
+        self.assertIn("市场动作未确认", response.text)
+        self.assertIn("市场动作确认成立", response.text)
+        self.assertIn("class=\"message-card\"", response.text)
+        self.assertIn("class=\"detail-drawer\"", response.text)
+        self.assertIn("total 2", response.text)
+        self.assertIn("filtered 2", response.text)
+        self.assertIn("ActionBlocked", response.text)
+        self.assertIn("ActionExecuted", response.text)
+        self.assertEqual(repo.ui_v1_message_dashboard_reads, 1)
+        self.assertEqual(repo.ui_v1_signal_reads, 1)
+        self.assertEqual(repo.ui_v1_signal_count_reads, 2)
+        self.assertEqual(repo.ui_v1_signal_statistics_reads, 1)
+        self.assertEqual(repo.action_event_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+        self.assertEqual(repo.forbidden_writes["user_sim"], 0)
+
+    def test_message_dashboard_api_is_read_only_and_shows_runtime_counts(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/message-dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "Message Dashboard")
+        self.assertTrue(payload["safety_banner"]["read_only_preview"])
+        self.assertFalse(payload["safety_banner"]["outbox_consumed"])
+        self.assertFalse(payload["safety_banner"]["delivery_triggered"])
+        self.assertEqual(payload["admin_dashboard"]["today_n4_trigger_matched_pending"], 3)
+        self.assertEqual(payload["admin_dashboard"]["n5_outbox_pending"], 1)
+        self.assertEqual(payload["admin_dashboard"]["n6_queued_only"], 2)
+        self.assertEqual(payload["message_dashboard"]["event_distribution"][0]["event_type"], "TriggerMatched")
+        self.assertEqual(payload["blocked_reason_distribution"][0]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(payload["messages"][0]["source_layer"], "N5_action")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_message_dashboard_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.delivery_side_effects, 0)
+
+    def test_n4_messages_api_returns_raw_n4_outbox_events_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n4-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N4 Messages")
+        self.assertEqual(payload["source_layer"], "N4_trigger")
+        self.assertFalse(payload["include_all"])
+        self.assertEqual(payload["total_count"], 5)
+        self.assertEqual(payload["filtered_count"], 3)
+        self.assertEqual(payload["returned_count"], 3)
+        self.assertTrue(payload["date_filter_defaulted"])
+        self.assertEqual(payload["latest_event_date"], "2026-06-05")
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05"})
+        self.assertEqual(payload["standard_event_types"], [
+            "TriggerMatched",
+            "TriggerPendingMarketData",
+            "TriggerStateChanged",
+        ])
+        self.assertEqual(payload["legacy_event_types"], ["TriggerCleared", "TriggerLiveChanged"])
+        self.assertEqual(
+            [row["event_type"] for row in payload["items"]],
+            [
+                "TriggerMatched",
+                "TriggerPendingMarketData",
+                "TriggerStateChanged",
+            ],
+        )
+        matched = payload["items"][0]
+        self.assertEqual(matched["payload_json"]["trigger_time"], "2026-06-05 11:06:59+08:00")
+        self.assertEqual(matched["payload_json"]["trigger_price"], "43.73")
+        self.assertEqual(matched["payload_json"]["triggered_periods"], ["D"])
+        self.assertIn({"label": "trigger_time", "value": "2026-06-05 11:06:59+08:00"}, matched["output_fields"])
+        self.assertEqual(matched["payload_json_text"].splitlines()[0], "{")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_n4_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n3_messages_api_returns_raw_n3_outbox_events_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n3-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N3 Messages")
+        self.assertEqual(payload["source_layer"], "N3_market_data")
+        self.assertFalse(payload["include_all"])
+        self.assertEqual(payload["total_count"], 4)
+        self.assertEqual(payload["filtered_count"], 4)
+        self.assertEqual(payload["returned_count"], 4)
+        self.assertTrue(payload["date_filter_defaulted"])
+        self.assertEqual(payload["latest_event_date"], "2026-06-05")
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05"})
+        self.assertEqual(payload["summary"]["pending"], 4)
+        self.assertEqual(payload["summary"]["MarketSnapshotUpdated"], 1)
+        self.assertEqual(payload["summary"]["MinuteBarClosed"], 1)
+        self.assertEqual(payload["summary"]["MarketDisplaySnapshotUpdated"], 1)
+        self.assertEqual(
+            payload["event_types"],
+            [
+                "MarketSnapshotUpdated",
+                "MinuteBarClosed",
+                "MinuteBarCorrected",
+                "MarketDataDelayed",
+                "MarketDataMissing",
+                "MarketDisplaySnapshotUpdated",
+            ],
+        )
+        self.assertEqual(
+            [row["event_type"] for row in payload["items"]],
+            [
+                "MarketDisplaySnapshotUpdated",
+                "MarketSnapshotUpdated",
+                "MinuteBarClosed",
+                "MarketDataMissing",
+            ],
+        )
+        snapshot = payload["items"][1]
+        self.assertEqual(snapshot["payload_json"]["data_quality_status"], "passed")
+        self.assertEqual(snapshot["payload_json"]["source_adapter"], "mootdx")
+        self.assertEqual(snapshot["output_fields"][0], {"label": "data_quality_status", "value": "passed"})
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_n3_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n3_messages_page_renders_output_cards_and_diagnostics(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/n3-messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N3消息", response.text)
+        self.assertIn("N3 行情输出消息", response.text)
+        self.assertIn("默认最新日期", response.text)
+        self.assertIn("显示全部日期", response.text)
+        self.assertIn("当前未选择日期，已自动使用最新事件日期 2026-06-05", response.text)
+        self.assertIn("当前筛选命中", response.text)
+        self.assertIn("MarketSnapshotUpdated", response.text)
+        self.assertIn("MinuteBarClosed", response.text)
+        self.assertIn("MarketDataMissing", response.text)
+        self.assertIn("MarketDisplaySnapshotUpdated", response.text)
+        self.assertIn("payload_json", response.text)
+        self.assertIn("data_quality_status", response.text)
+        self.assertIn("source_adapter", response.text)
+        self.assertIn("subscription_id", response.text)
+        self.assertIn("pull_plan_id", response.text)
+        self.assertIn('class="message-list"', response.text)
+        self.assertIn('class="message-card"', response.text)
+        self.assertIn("查看明细", response.text)
+        self.assertIn('class="detail-drawer"', response.text)
+        self.assertIn("payload_json 明细", response.text)
+        first_card_summary = response.text.split('<article class="message-card">', 1)[1].split(
+            '<div class="message-actions">', 1
+        )[0]
+        self.assertIn("data_quality_status", first_card_summary)
+        self.assertIn("passed", first_card_summary)
+        self.assertIn("source_adapter", first_card_summary)
+        self.assertNotIn("schema", first_card_summary)
+        self.assertNotIn("partition_key", first_card_summary)
+        self.assertNotIn("attempt_count", first_card_summary)
+        self.assertNotIn("created_at", first_card_summary)
+        self.assertNotIn("updated_at", first_card_summary)
+        first_detail_source = response.text.split('<div class="message-detail-source"', 1)[1].split("</article>", 1)[0]
+        self.assertIn("event_schema_version", first_detail_source)
+        self.assertIn("partition_key", first_detail_source)
+        self.assertIn("attempt_count", first_detail_source)
+        self.assertIn("created_at", first_detail_source)
+        self.assertIn("updated_at", first_detail_source)
+        self.assertNotIn("<table>", response.text)
+        self.assertNotIn("真实交易", response.text)
+        self.assertNotIn("已下单", response.text)
+        self.assertNotIn("voice", response.text)
+        self.assertEqual(repo.ui_v1_n3_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n3_messages_filters_by_event_date_type_status_asset_and_query(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/api/n6/ui/v1/n3-messages?event_date=2026-06-05"
+            "&event_type=MarketSnapshotUpdated&status=pending&asset_kind=stock&q=600000"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["returned_count"], 1)
+        self.assertEqual(
+            payload["filters"],
+            {
+                "event_date": "2026-06-05",
+                "event_type": "MarketSnapshotUpdated",
+                "status": "pending",
+                "asset_kind": "stock",
+                "q": "600000",
+            },
+        )
+        self.assertEqual(payload["items"][0]["event_type"], "MarketSnapshotUpdated")
+        self.assertEqual(payload["items"][0]["asset_kind"], "stock")
+
+        show_all_response = client.get("/api/n6/ui/v1/n3-messages?show_all=1&event_type=MinuteBarClosed")
+        self.assertEqual(show_all_response.status_code, 200)
+        show_all_payload = show_all_response.json()
+        self.assertTrue(show_all_payload["include_all"])
+        self.assertFalse(show_all_payload["date_filter_defaulted"])
+        self.assertEqual(show_all_payload["filters"], {"event_type": "MinuteBarClosed"})
+        self.assertEqual(show_all_payload["filtered_count"], 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n4_messages_page_renders_raw_format_and_show_all_control(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/n4-messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N4消息", response.text)
+        self.assertIn("N4 原始输出消息", response.text)
+        self.assertIn("默认最新日期", response.text)
+        self.assertIn("显示全部日期", response.text)
+        self.assertIn("当前未选择日期，已自动使用最新事件日期 2026-06-05", response.text)
+        self.assertIn("当前筛选命中", response.text)
+        self.assertIn("TriggerMatched", response.text)
+        self.assertIn("TriggerPendingMarketData", response.text)
+        self.assertIn("TriggerStateChanged", response.text)
+        self.assertIn("TriggerCleared", response.text)
+        self.assertIn("TriggerLiveChanged", response.text)
+        self.assertIn("legacy", response.text)
+        self.assertIn("payload_json", response.text)
+        self.assertIn("trigger_price", response.text)
+        self.assertIn("43.73", response.text)
+        self.assertIn("triggered_periods", response.text)
+        self.assertIn('class="message-list"', response.text)
+        self.assertIn('class="message-card"', response.text)
+        self.assertIn("查看明细", response.text)
+        self.assertIn('class="detail-drawer"', response.text)
+        self.assertIn("payload_json 明细", response.text)
+        first_card_summary = response.text.split('<article class="message-card">', 1)[1].split(
+            '<div class="message-actions">', 1
+        )[0]
+        self.assertIn("trigger_time", first_card_summary)
+        self.assertIn("2026-06-05 11:06", first_card_summary)
+        self.assertNotIn("2026-06-05 11:06:59+08:00", first_card_summary)
+        self.assertEqual(first_card_summary.count("trigger_time"), 1)
+        self.assertIn("trigger_price", first_card_summary)
+        self.assertIn("43.73", first_card_summary)
+        self.assertIn("trigger_live", first_card_summary)
+        self.assertNotIn("schema", first_card_summary)
+        self.assertNotIn("partition_key", first_card_summary)
+        self.assertNotIn("attempt_count", first_card_summary)
+        self.assertNotIn("created_at", first_card_summary)
+        self.assertNotIn("updated_at", first_card_summary)
+        first_detail_source = response.text.split('<div class="message-detail-source"', 1)[1].split("</article>", 1)[0]
+        self.assertIn("event_schema_version", first_detail_source)
+        self.assertIn("partition_key", first_detail_source)
+        self.assertIn("attempt_count", first_detail_source)
+        self.assertIn("created_at", first_detail_source)
+        self.assertIn("updated_at", first_detail_source)
+        self.assertNotIn("<table>", response.text)
+        self.assertNotIn("dedup_key", response.text)
+        self.assertNotIn("n4:matched:688690", response.text)
+        self.assertNotIn("source_run_id", response.text)
+        self.assertNotIn("trigger_execute_20260605_condition_layer_20260604_source_20260604_v1", response.text)
+        self.assertNotIn("<th>event_id</th>", response.text)
+        self.assertNotIn("n4-trigger-matched-1", response.text)
+        self.assertNotIn("市场动作确认成立", response.text)
+        self.assertNotIn("市场动作未确认", response.text)
+        self.assertNotIn("已下单", response.text)
+        self.assertNotIn("已成交", response.text)
+        self.assertNotIn("真实交易", response.text)
+        self.assertNotIn("虚拟成交", response.text)
+        self.assertNotIn("建议买入", response.text)
+        self.assertNotIn('href="/n6/action-events"', response.text)
+        self.assertNotIn('href="/n6/status-monitor"', response.text)
+        self.assertNotIn('href="/n6/admin/account"', response.text)
+        self.assertEqual(repo.ui_v1_n4_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        show_all_response = client.get("/api/n6/ui/v1/n4-messages?show_all=1")
+        self.assertEqual(show_all_response.status_code, 200)
+        self.assertTrue(show_all_response.json()["include_all"])
+        self.assertFalse(show_all_response.json()["date_filter_defaulted"])
+        self.assertEqual(show_all_response.json()["filtered_count"], 5)
+
+    def test_n4_messages_filters_by_event_time_date_and_event_type(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n4-messages?event_date=2026-06-05&event_type=TriggerMatched")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total_count"], 5)
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["returned_count"], 1)
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05", "event_type": "TriggerMatched"})
+        self.assertEqual(payload["items"][0]["event_type"], "TriggerMatched")
+        self.assertIn("2026-06-05", payload["items"][0]["event_time"])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        page = client.get("/n6/n4-messages?event_date=2026-06-05&event_type=TriggerMatched")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('value="2026-06-05"', page.text)
+        self.assertIn('<option value="TriggerMatched" selected>', page.text)
+        self.assertIn("当前筛选命中", page.text)
+        self.assertIn(">1<", page.text)
+
+    def test_n4_messages_filters_by_stock_index_board_code_or_identity_query(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        index_response = client.get("/api/n6/ui/v1/n4-messages?event_date=2026-06-05&q=000300")
+        self.assertEqual(index_response.status_code, 200)
+        index_payload = index_response.json()
+        self.assertEqual(index_payload["filtered_count"], 1)
+        self.assertEqual(index_payload["filters"], {"event_date": "2026-06-05", "q": "000300"})
+        self.assertEqual(index_payload["items"][0]["asset_kind"], "index")
+        self.assertEqual(index_payload["items"][0]["identity_key"], "index:SH:000300")
+
+        board_response = client.get("/api/n6/ui/v1/n4-messages?event_date=2026-06-05&q=881001")
+        self.assertEqual(board_response.status_code, 200)
+        board_payload = board_response.json()
+        self.assertEqual(board_payload["filtered_count"], 1)
+        self.assertEqual(board_payload["items"][0]["asset_kind"], "board")
+        self.assertEqual(board_payload["items"][0]["identity_key"], "board:TDX:881001")
+
+        page = client.get("/n6/n4-messages?event_date=2026-06-05&q=688690")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("代码 / identity / event_id", page.text)
+        self.assertIn("代码 / identity_key / event_id", page.text)
+        self.assertIn('name="q"', page.text)
+        self.assertIn('value="688690"', page.text)
+        self.assertIn("stock:SH:688690", page.text)
+        self.assertNotIn("index:SH:000300", page.text)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_raw_message_keyword_predicate_uses_index_friendly_identity_candidates(self) -> None:
+        candidates = n6_user_app_module.raw_message_identity_candidates("301611")
+
+        self.assertIn("stock:SZ:301611", candidates)
+        self.assertIn("stock:SH:301611", candidates)
+        self.assertIn("index:SZ:301611", candidates)
+
+        board_candidates = n6_user_app_module.raw_message_identity_candidates("881001")
+        self.assertIn("board:TDX:881001", board_candidates)
+
+        predicate, params = n6_user_app_module.raw_message_keyword_predicate("301611")
+        self.assertIn("partition_key = ANY", predicate)
+        self.assertNotIn("identity_key = ANY", predicate)
+        self.assertNotIn("payload_json", predicate)
+        self.assertEqual(params, [candidates])
+
+        fallback_predicate, fallback_params = n6_user_app_module.raw_message_keyword_predicate("partial-text")
+        self.assertIn("identity_key ILIKE", fallback_predicate)
+        self.assertNotIn("payload_json", fallback_predicate)
+        self.assertEqual(fallback_params, ["%partial-text%", "%partial-text%", "%partial-text%"])
+
+    def test_n4_messages_defaults_to_fixed_20260612_lineage_to_avoid_superseded_duplicates(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        stale_row = {
+            "outbox_id": 991,
+            "event_id": "stale-n4-state-machine-002056-0931",
+            "event_type": "TriggerMatched",
+            "event_schema_version": "n4.trigger.v4",
+            "trade_date": "20260612",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:002056",
+            "event_time": datetime(2026, 6, 12, 1, 31, tzinfo=timezone.utc),
+            "source_layer": "N4_trigger",
+            "source_run_id": "v3_n4_trigger_replay_20260612_after_n3_full_day_metric_state_machine_v3",
+            "dedup_key": "stale-n4-state-machine-002056-0931",
+            "partition_key": "stock:SZ:002056",
+            "status": "pending",
+            "attempt_count": 0,
+            "payload_json": {
+                "condition_key": "BUY:M,W,D",
+                "trigger_period": "30m",
+                "triggered_periods": [],
+                "all_trigger_periods": ["30m"],
+            },
+            "created_at": datetime(2026, 6, 13, 1, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 6, 13, 1, 0, tzinfo=timezone.utc),
+        }
+        fixed_row = {
+            **stale_row,
+            "outbox_id": 992,
+            "event_id": "fixed-n4-trigger-period-baseline-002056-0931",
+            "source_run_id": "v3_n4_trigger_replay_20260612_after_trigger_period_baseline_fix_v1",
+            "dedup_key": "fixed-n4-trigger-period-baseline-002056-0931",
+            "payload_json": {
+                "condition_key": "BUY_HINT",
+                "trigger_period": "30m",
+                "triggered_periods": [],
+                "all_trigger_periods": ["30m"],
+                "trigger_mark_candidate": "30m_volume",
+            },
+        }
+        repo.n4_messages.extend([stale_row, fixed_row])
+
+        response = client.get("/api/n6/ui/v1/n4-messages?event_date=2026-06-12&q=002056")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["filters"]["source_run_id"],
+            "v3_n4_trigger_replay_20260612_after_trigger_period_baseline_fix_v1",
+        )
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["items"][0]["event_id"], "fixed-n4-trigger-period-baseline-002056-0931")
+
+        audit_response = client.get("/api/n6/ui/v1/n4-messages?show_all=1&event_date=2026-06-12&q=002056")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_payload = audit_response.json()
+        self.assertNotIn("source_run_id", audit_payload["filters"])
+        self.assertEqual(audit_payload["filtered_count"], 2)
+
+    def test_n4_messages_defaults_to_20260622_periodguard_lineage_and_keeps_old_runs_auditable(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        old_formal_run_id = (
+            "trigger_replay_phase2d_20260622_formal_until_1500__"
+            "condition_layer_20260618_source_20260618_for_20260622_v1"
+        )
+        old_formal_unitfix_run_id = (
+            "trigger_replay_phase2d_20260622_formal_unitfix_until_1500__"
+            "condition_layer_20260618_source_20260618_for_20260622_v1"
+        )
+        old_dseed_run_id = (
+            "trigger_replay_phase2d_20260622_formal_unitfix_dseed_until_1500__"
+            "condition_layer_20260618_source_20260618_for_20260622_v1"
+        )
+        active_periodguard_run_id = (
+            "trigger_replay_phase2d_20260622_formal_unitfix_dseed_periodguard_until_1500__"
+            "condition_layer_20260618_source_20260618_for_20260622_v1"
+        )
+        old_row = {
+            "outbox_id": 221001,
+            "event_id": "old-formal-unitfix-399006-buy-m",
+            "event_type": "TriggerMatched",
+            "event_schema_version": "n4.trigger.v4",
+            "trade_date": "20260622",
+            "asset_kind": "index",
+            "identity_key": "index:SZ:399006",
+            "event_time": datetime(2026, 6, 22, 6, 29, tzinfo=timezone.utc),
+            "source_layer": "N4_trigger",
+            "source_run_id": old_formal_unitfix_run_id,
+            "dedup_key": "old-formal-unitfix-399006-buy-m",
+            "partition_key": "index:SZ:399006",
+            "status": "pending",
+            "attempt_count": 0,
+            "payload_json": {
+                "condition_key": "BUY:M",
+                "triggered_periods": ["M"],
+                "trigger_mark_candidate": "30m_volume",
+            },
+            "created_at": datetime(2026, 6, 22, 7, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 6, 22, 7, 0, tzinfo=timezone.utc),
+        }
+        old_dseed_row = {
+            **old_row,
+            "outbox_id": 221002,
+            "event_id": "old-dseed-300085-match",
+            "event_type": "TriggerMatched",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:300085",
+            "event_time": datetime(2026, 6, 22, 5, 11, tzinfo=timezone.utc),
+            "source_run_id": old_dseed_run_id,
+            "dedup_key": "old-dseed-300085-match",
+            "partition_key": "stock:SZ:300085",
+            "payload_json": {
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "triggered_periods": ["D"],
+                "trigger_price": "32.33",
+                "current_status": "matched",
+            },
+        }
+        old_formal_row = {
+            **old_dseed_row,
+            "outbox_id": 221003,
+            "event_id": "old-formal-300085-match",
+            "source_run_id": old_formal_run_id,
+            "dedup_key": "old-formal-300085-match",
+        }
+        periodguard_matched_row = {
+            **old_dseed_row,
+            "outbox_id": 221004,
+            "event_id": "periodguard-300085-match",
+            "event_time": datetime(2026, 6, 22, 2, 56, tzinfo=timezone.utc),
+            "source_run_id": active_periodguard_run_id,
+            "dedup_key": "periodguard-300085-match",
+            "payload_json": {
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "triggered_periods": ["D"],
+                "trigger_price": "29.59",
+                "current_status": "matched",
+            },
+        }
+        periodguard_state_row = {
+            **periodguard_matched_row,
+            "outbox_id": 221005,
+            "event_id": "periodguard-300085-state",
+            "event_type": "TriggerStateChanged",
+            "event_time": datetime(2026, 6, 22, 3, 3, tzinfo=timezone.utc),
+            "dedup_key": "periodguard-300085-state",
+            "payload_json": {
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "triggered_periods": ["W", "D"],
+                "trigger_price": "30.02",
+                "current_status": "matched",
+            },
+        }
+        repo.n4_messages.extend([old_row, old_dseed_row, old_formal_row, periodguard_matched_row, periodguard_state_row])
+
+        response = client.get("/api/n6/ui/v1/n4-messages?event_date=2026-06-22&q=300085")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filters"]["source_run_id"], active_periodguard_run_id)
+        self.assertEqual(payload["filtered_count"], 2)
+        self.assertEqual(
+            {item["event_id"] for item in payload["items"]},
+            {"periodguard-300085-match", "periodguard-300085-state"},
+        )
+        self.assertEqual(
+            {tuple(item["payload_json"].get("triggered_periods") or []) for item in payload["items"]},
+            {("D",), ("W", "D")},
+        )
+        self.assertNotIn("old-dseed-300085-match", {item["event_id"] for item in payload["items"]})
+
+        audit_response = client.get("/api/n6/ui/v1/n4-messages?show_all=1&event_date=2026-06-22&q=300085")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_payload = audit_response.json()
+        self.assertNotIn("source_run_id", audit_payload["filters"])
+        self.assertEqual(audit_payload["filtered_count"], 4)
+
+        explicit_old_response = client.get(
+            "/api/n6/ui/v1/n4-messages"
+            f"?event_date=2026-06-22&q=300085&source_run_id={old_dseed_run_id}"
+        )
+        self.assertEqual(explicit_old_response.status_code, 200)
+        explicit_old_payload = explicit_old_response.json()
+        self.assertEqual(explicit_old_payload["filters"]["source_run_id"], old_dseed_run_id)
+        self.assertEqual(explicit_old_payload["filtered_count"], 1)
+        self.assertEqual(explicit_old_payload["items"][0]["event_id"], "old-dseed-300085-match")
+
+    def test_n5_messages_api_returns_raw_n5_outbox_events_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n5-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N5 Messages")
+        self.assertEqual(payload["source_layer"], "N5_action")
+        self.assertFalse(payload["include_all"])
+        self.assertEqual(payload["total_count"], 8)
+        self.assertEqual(payload["filtered_count"], 4)
+        self.assertEqual(payload["returned_count"], 4)
+        self.assertTrue(payload["date_filter_defaulted"])
+        self.assertEqual(payload["latest_event_date"], "2026-06-05")
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05"})
+        self.assertEqual(payload["summary"]["pending"], 4)
+        self.assertEqual(payload["summary"]["ActionBlocked"], 1)
+        self.assertEqual(payload["summary"]["ActionExecuted"], 1)
+        self.assertEqual(payload["summary"]["legacy"], 0)
+        self.assertIn("2026-06-05", payload["summary"]["latest_event_time"])
+        self.assertEqual(payload["standard_event_types"], [
+            "ActionEligible",
+            "ActionBlocked",
+            "ActionExecuted",
+            "ActionSkipped",
+        ])
+        self.assertEqual(payload["legacy_event_types"], ["ActionEvent", "HintEvent", "RiskEvent", "PositionEvent"])
+        self.assertEqual(
+            [row["event_type"] for row in payload["items"]],
+            [
+                "ActionEligible",
+                "ActionBlocked",
+                "ActionExecuted",
+                "ActionSkipped",
+            ],
+        )
+        blocked = payload["items"][1]
+        self.assertEqual(blocked["payload_json"]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(blocked["payload_json"]["source_trigger_event_id"], "n4-trigger-matched-1")
+        self.assertEqual(blocked["payload_json_text"].splitlines()[0], "{")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_n5_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+
+    def test_n5_messages_defaults_to_fixed_20260612_lineage_to_avoid_superseded_duplicates(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        old_row = {
+            "outbox_id": 901,
+            "event_id": "old-v2-002056-0931",
+            "event_type": "ActionExecuted",
+            "event_schema_version": "n5.canonical.v1",
+            "trade_date": "20260612",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:002056",
+            "event_time": datetime(2026, 6, 12, 1, 31, tzinfo=timezone.utc),
+            "source_layer": "N5_action",
+            "source_run_id": "v3_n5_action_replay_20260612_after_n4_mark_only_fix_v2",
+            "dedup_key": "old-v2-002056-0931",
+            "partition_key": "stock:SZ:002056",
+            "status": "pending",
+            "attempt_count": 0,
+            "payload_json": {
+                "action_state": "executed",
+                "action_mark": "30m_volume",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W,D",
+            },
+            "created_at": datetime(2026, 6, 13, 1, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 6, 13, 1, 0, tzinfo=timezone.utc),
+        }
+        stale_state_machine_row = {
+            **old_row,
+            "outbox_id": 902,
+            "event_id": "stale-state-machine-002056-0931",
+            "source_run_id": "v3_n5_action_replay_20260612_after_n4_state_machine_v3",
+            "dedup_key": "stale-state-machine-002056-0931",
+        }
+        fixed_row = {
+            **old_row,
+            "outbox_id": 903,
+            "event_id": "fixed-trigger-period-baseline-002056-0931",
+            "source_run_id": "v3_n5_action_replay_20260612_after_n4_trigger_period_baseline_fix_v1",
+            "dedup_key": "fixed-trigger-period-baseline-002056-0931",
+        }
+        repo.n5_messages.extend([old_row, stale_state_machine_row, fixed_row])
+
+        response = client.get("/api/n6/ui/v1/n5-messages?event_date=2026-06-12&q=002056")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["filters"]["source_run_id"],
+            "v3_n5_action_replay_20260612_after_n4_trigger_period_baseline_fix_v1",
+        )
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["items"][0]["event_id"], "fixed-trigger-period-baseline-002056-0931")
+
+        audit_response = client.get("/api/n6/ui/v1/n5-messages?show_all=1&event_date=2026-06-12&q=002056")
+        self.assertEqual(audit_response.status_code, 200)
+        audit_payload = audit_response.json()
+        self.assertNotIn("source_run_id", audit_payload["filters"])
+        self.assertEqual(audit_payload["filtered_count"], 3)
+
+    def test_n5_messages_page_renders_raw_format_and_show_all_control(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/n5-messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N5消息", response.text)
+        self.assertIn("N5消息中心", response.text)
+        self.assertIn("来自 N5 层的动作消息", response.text)
+        self.assertIn("默认最新日期", response.text)
+        self.assertIn("显示全部日期", response.text)
+        self.assertIn("当前未选择日期，已自动使用最新事件日期 2026-06-05", response.text)
+        self.assertIn("当前筛选命中", response.text)
+        self.assertIn("pending", response.text)
+        self.assertIn("ActionBlocked", response.text)
+        self.assertIn("ActionExecuted", response.text)
+        self.assertIn("latest event_time", response.text)
+        self.assertIn("ActionEligible", response.text)
+        self.assertIn("ActionBlocked", response.text)
+        self.assertIn("ActionExecuted", response.text)
+        self.assertIn("ActionSkipped", response.text)
+        self.assertIn("ActionEvent", response.text)
+        self.assertIn("HintEvent", response.text)
+        self.assertIn("RiskEvent", response.text)
+        self.assertIn("PositionEvent", response.text)
+        self.assertIn("legacy", response.text)
+        self.assertIn("payload_json", response.text)
+        self.assertIn("blocked_reason", response.text)
+        self.assertIn("price_confirmation_failed", response.text)
+        self.assertIn("source_trigger_event_id", response.text)
+        self.assertIn('class="message-list"', response.text)
+        self.assertIn('class="message-card"', response.text)
+        self.assertIn("查看明细", response.text)
+        self.assertIn('class="detail-drawer"', response.text)
+        self.assertIn("payload_json 明细", response.text)
+        first_card_summary = response.text.split('<article class="message-card">', 1)[1].split(
+            '<div class="message-actions">', 1
+        )[0]
+        self.assertIn("action_state", first_card_summary)
+        self.assertIn("eligible", first_card_summary)
+        self.assertIn("action_mark", first_card_summary)
+        self.assertIn("normal", first_card_summary)
+        self.assertIn("signal_type", first_card_summary)
+        self.assertIn("B_BUY", first_card_summary)
+        self.assertNotIn("schema", first_card_summary)
+        self.assertNotIn("partition_key", first_card_summary)
+        self.assertNotIn("attempt_count", first_card_summary)
+        self.assertNotIn("created_at", first_card_summary)
+        self.assertNotIn("updated_at", first_card_summary)
+        first_detail_source = response.text.split('<div class="message-detail-source"', 1)[1].split("</article>", 1)[0]
+        self.assertIn("event_schema_version", first_detail_source)
+        self.assertIn("partition_key", first_detail_source)
+        self.assertIn("attempt_count", first_detail_source)
+        self.assertIn("created_at", first_detail_source)
+        self.assertIn("updated_at", first_detail_source)
+        self.assertIn("source_run_id", response.text)
+        self.assertIn("action_consumer_action_pipeline_20260605", response.text)
+        self.assertIn("event_id", response.text)
+        self.assertIn("n5-action-blocked-1", response.text)
+        self.assertNotIn("<table>", response.text)
+        self.assertNotIn("dedup_key", response.text)
+        self.assertNotIn("n5:eligible:600001", response.text)
+        self.assertNotIn("<th>event_id</th>", response.text)
+        self.assertNotIn("市场动作确认成立", response.text)
+        self.assertNotIn("市场动作未确认", response.text)
+        self.assertNotIn("已下单", response.text)
+        self.assertNotIn("已成交", response.text)
+        self.assertNotIn("真实交易", response.text)
+        self.assertNotIn("虚拟成交", response.text)
+        self.assertNotIn("建议买入", response.text)
+        self.assertNotIn('href="/n6/action-events"', response.text)
+        self.assertNotIn('href="/n6/status-monitor"', response.text)
+        self.assertNotIn('href="/n6/admin/account"', response.text)
+        self.assertEqual(repo.ui_v1_n5_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        show_all_response = client.get("/api/n6/ui/v1/n5-messages?show_all=1")
+        self.assertEqual(show_all_response.status_code, 200)
+        self.assertTrue(show_all_response.json()["include_all"])
+        self.assertFalse(show_all_response.json()["date_filter_defaulted"])
+        self.assertEqual(show_all_response.json()["filtered_count"], 8)
+
+    def test_n5_messages_filters_by_event_time_date_and_event_type(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n5-messages?event_date=2026-06-05&event_type=ActionBlocked")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total_count"], 8)
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["returned_count"], 1)
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05", "event_type": "ActionBlocked"})
+        self.assertEqual(payload["items"][0]["event_type"], "ActionBlocked")
+        self.assertIn("2026-06-05", payload["items"][0]["event_time"])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        page = client.get("/n6/n5-messages?event_date=2026-06-05&event_type=ActionBlocked")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('value="2026-06-05"', page.text)
+        self.assertIn('<option value="ActionBlocked" selected>', page.text)
+        self.assertIn("当前筛选命中", page.text)
+        self.assertIn(">1<", page.text)
+
+        scoped = client.get("/api/n6/ui/v1/n5-messages?show_all=1&status=pending&asset_kind=index&q=000300")
+        self.assertEqual(scoped.status_code, 200)
+        scoped_payload = scoped.json()
+        self.assertEqual(scoped_payload["filters"], {"status": "pending", "asset_kind": "index", "q": "000300"})
+        self.assertEqual(scoped_payload["filtered_count"], 1)
+        self.assertEqual(scoped_payload["items"][0]["event_type"], "ActionExecuted")
+        self.assertEqual(scoped_payload["summary"]["ActionExecuted"], 1)
+        self.assertEqual(scoped_payload["summary"]["pending"], 1)
+
+    def test_n5_actions_api_reads_latest_action_run_and_live_window_fields_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n5-actions")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N5 Actions")
+        self.assertEqual(payload["title"], "N5动作")
+        self.assertEqual(payload["source_layer"], "N5_action")
+        self.assertEqual(payload["action_run_id"], repo.latest_passed_n5_action_run_id)
+        self.assertEqual(payload["filters"]["source_run_id"], repo.latest_passed_n5_action_run_id)
+        self.assertEqual(payload["filters"]["action_run_id"], repo.latest_passed_n5_action_run_id)
+        self.assertEqual(payload["total_count"], 2)
+        self.assertEqual(payload["filtered_count"], 2)
+        self.assertEqual(payload["summary"]["ActionExecuted"], 1)
+        self.assertEqual(payload["summary"]["ActionEligible"], 1)
+        self.assertEqual(payload["summary"]["pending"], 2)
+        self.assertEqual(
+            [item["event_type"] for item in payload["items"]],
+            ["ActionExecuted", "ActionEligible"],
+        )
+
+        executed = payload["items"][0]
+        self.assertEqual(executed["identity_key"], "index:SH:000300")
+        self.assertEqual(executed["action_state"], "executed")
+        self.assertEqual(executed["action_type"], "buy_candidate")
+        self.assertEqual(executed["condition_key"], "BUY:M")
+        self.assertEqual(executed["selected_metric_id"], "338343")
+        self.assertEqual(executed["selected_metric_time"], "2026-06-23T14:01:00+08:00")
+        self.assertEqual(executed["trigger_metric_time"], "2026-06-23T13:56:00+08:00")
+        self.assertTrue(executed["live_window_confirmation"])
+        self.assertTrue(executed["multi_action_window"])
+        self.assertEqual(executed["action_key"], "action-key-selected-metric-338343")
+        self.assertEqual(executed["status"], "pending")
+
+        eligible = payload["items"][1]
+        self.assertEqual(eligible["event_type"], "ActionEligible")
+        self.assertEqual(eligible["action_state"], "eligible")
+        self.assertEqual(eligible["selected_metric_id"], "")
+        self.assertEqual(eligible["selected_metric_time"], "")
+        self.assertEqual(eligible["trigger_metric_time"], "2026-06-23T13:42:00+08:00")
+        self.assertTrue(eligible["live_window_confirmation"])
+        self.assertFalse(eligible["multi_action_window"])
+
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(payload["side_effects"]["inbox_writes"], 0)
+        self.assertEqual(payload["side_effects"]["checkpoint_writes"], 0)
+        self.assertFalse(payload["side_effects"]["sim_written"])
+        self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+        self.assertFalse(payload["side_effects"]["voice_triggered"])
+        self.assertFalse(payload["side_effects"]["mobile_triggered"])
+        self.assertEqual(repo.ui_v1_n5_action_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["user_sim"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+
+    def test_n5_actions_filters_and_page_render_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/api/n6/ui/v1/n5-actions"
+            f"?action_run_id={repo.latest_passed_n5_action_run_id}"
+            "&asset_kind=index&action_state=executed&q=338343"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["filters"]["asset_kind"], "index")
+        self.assertEqual(payload["filters"]["action_state"], "executed")
+        self.assertEqual(payload["filters"]["q"], "338343")
+        self.assertEqual(payload["items"][0]["event_id"], "n5-action-executed-live-window-000300-1401")
+        self.assertEqual(payload["items"][0]["selected_metric_id"], "338343")
+
+        page = client.get(
+            "/n6/n5-actions"
+            f"?action_run_id={repo.latest_passed_n5_action_run_id}"
+            "&asset_kind=index&action_state=executed&q=338343"
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("N5动作", page.text)
+        self.assertIn("READ ONLY", page.text)
+        self.assertIn("不消费 outbox", page.text)
+        self.assertIn("不写 inbox/checkpoint", page.text)
+        self.assertIn("不触发交易", page.text)
+        self.assertIn("ActionExecuted", page.text)
+        self.assertIn("index:SH:000300", page.text)
+        self.assertIn("338343", page.text)
+        self.assertIn("2026-06-23T14:01:00+08:00", page.text)
+        self.assertIn("2026-06-23T13:56:00+08:00", page.text)
+        self.assertIn("multi_action_window", page.text)
+        self.assertIn("action-key-selected-metric-338343", page.text)
+        self.assertNotIn("n5-action-blocked-hidden", page.text)
+        self.assertNotIn("已下单", page.text)
+        self.assertNotIn("真实交易", page.text)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+
+    def test_n5_actions_explicit_source_run_id_and_action_eligible_empty_metric(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/api/n6/ui/v1/n5-actions"
+            f"?source_run_id={repo.latest_passed_n5_action_run_id}"
+            "&event_type=ActionEligible&q=002824"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["filters"]["source_run_id"], repo.latest_passed_n5_action_run_id)
+        self.assertEqual(payload["filters"]["event_type"], "ActionEligible")
+        item = payload["items"][0]
+        self.assertEqual(item["identity_key"], "stock:SZ:002824")
+        self.assertEqual(item["action_state"], "eligible")
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["selected_metric_id"], "")
+        self.assertEqual(item["selected_metric_time"], "")
+        self.assertEqual(item["trigger_metric_time"], "2026-06-23T13:42:00+08:00")
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_b_track_buy_signals_api_defaults_to_provisional_buy_action_eligible_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/b-track/v1/buy-signals")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Buy Signals")
+        self.assertEqual(payload["title"], "B轨买入信号")
+        self.assertEqual(payload["action_run_id"], repo.latest_b_track_action_run_id)
+        self.assertEqual(payload["filters"]["action_type"], "buy")
+        self.assertEqual(payload["total_count"], 18)
+        self.assertEqual(payload["filtered_count"], 17)
+        self.assertEqual(payload["returned_count"], 17)
+        self.assertEqual(payload["summary"]["buy"], 17)
+        self.assertEqual(payload["summary"]["sell"], 0)
+        self.assertEqual(payload["summary"]["ActionEligible"], 17)
+        self.assertEqual(payload["summary"]["ActionExecuted"], 0)
+        self.assertEqual(payload["summary"]["ActionBlocked"], 0)
+        self.assertEqual(payload["summary"]["ActionSkipped"], 0)
+        self.assertTrue(all(item["action_type"] == "buy" for item in payload["items"]))
+        self.assertTrue(all(item["action_state"] == "eligible" for item in payload["items"]))
+        self.assertTrue(all(item["provisional"] for item in payload["items"]))
+        self.assertTrue(
+            all(item["action_confirmation_mode"] == "eligibility_only" for item in payload["items"])
+        )
+        first = payload["items"][0]
+        self.assertEqual(first["event_id"], "n5-provisional-buy-17")
+        self.assertEqual(first["signal_type"], "B_BUY")
+        self.assertEqual(first["condition_key"], "BUY_HINT")
+        self.assertEqual(first["projection_30m_type"], "volume_up")
+        self.assertEqual(first["trigger_mark_candidate"], "30m_volume")
+        self.assertEqual(first["source_trigger_event_id"], "n4-provisional-trigger-17")
+        self.assertEqual(repo.b_track_buy_signal_reads, 1)
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(payload["side_effects"]["inbox_writes"], 0)
+        self.assertEqual(payload["side_effects"]["checkpoint_writes"], 0)
+        self.assertEqual(payload["side_effects"]["virtual_account_writes"], 0)
+        self.assertEqual(payload["side_effects"]["order_writes"], 0)
+        self.assertEqual(payload["side_effects"]["position_writes"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+        self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_projection"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_buy_signals_filters_all_sell_and_excludes_non_contract_events(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        all_response = client.get("/api/n6/b-track/v1/buy-signals?action_type=all")
+        sell_response = client.get("/api/n6/b-track/v1/buy-signals?action_type=sell")
+        query_response = client.get("/api/n6/b-track/v1/buy-signals?action_type=all&q=8018")
+
+        self.assertEqual(all_response.status_code, 200)
+        all_payload = all_response.json()
+        self.assertEqual(all_payload["filtered_count"], 18)
+        self.assertEqual(all_payload["summary"]["buy"], 17)
+        self.assertEqual(all_payload["summary"]["sell"], 1)
+        self.assertNotIn("n5-provisional-executed-excluded", [item["event_id"] for item in all_payload["items"]])
+        self.assertNotIn("n5-non-provisional-eligible-excluded", [item["event_id"] for item in all_payload["items"]])
+        self.assertNotIn("n5-wrong-mode-eligible-excluded", [item["event_id"] for item in all_payload["items"]])
+
+        self.assertEqual(sell_response.status_code, 200)
+        sell_payload = sell_response.json()
+        self.assertEqual(sell_payload["filtered_count"], 1)
+        self.assertEqual(sell_payload["items"][0]["event_id"], "n5-provisional-sell-01")
+        self.assertEqual(sell_payload["items"][0]["action_type"], "sell")
+        self.assertEqual(sell_payload["items"][0]["signal_type"], "S_SELL")
+        self.assertEqual(sell_payload["items"][0]["condition_key"], "SELL_HINT")
+
+        self.assertEqual(query_response.status_code, 200)
+        query_payload = query_response.json()
+        self.assertEqual(query_payload["filtered_count"], 1)
+        self.assertEqual(query_payload["items"][0]["projection_id"], "8018")
+        self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+        self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_projection"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_buy_signals_page_renders_read_only_boundary(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/b-track/buy-signals")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("B轨买入信号", response.text)
+        self.assertIn("READ ONLY", response.text)
+        self.assertIn("不消费 outbox", response.text)
+        self.assertIn("不写 inbox/checkpoint", response.text)
+        self.assertIn("不建仓", response.text)
+        self.assertIn("不扣资金", response.text)
+        self.assertIn("不触发虚拟账户/交易", response.text)
+        self.assertIn("n5-provisional-buy-17", response.text)
+        self.assertIn("BUY_HINT", response.text)
+        self.assertIn("30m_volume", response.text)
+        self.assertNotIn("n5-provisional-sell-01", response.text)
+        self.assertNotIn("立即买入", response.text)
+        self.assertNotIn("虚拟下单", response.text)
+        self.assertNotIn("建仓", response.text.replace("不建仓", ""))
+        self.assertEqual(repo.b_track_buy_signal_reads, 1)
+        self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+        self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_projection"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+
+    def test_input_messages_api_returns_formal_n6_inputs_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/input-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N6 Input Messages")
+        self.assertEqual(payload["title"], "N6输入消息中心")
+        self.assertEqual(payload["source_layers"], ["N5_action", "N3_market_data"])
+        self.assertFalse(payload["include_all"])
+        self.assertEqual(payload["total_count"], 9)
+        self.assertEqual(payload["filtered_count"], 5)
+        self.assertEqual(payload["returned_count"], 5)
+        self.assertEqual(payload["filters"], {"event_date": "2026-06-05"})
+        self.assertEqual(payload["summary"]["total"], 5)
+        self.assertEqual(payload["summary"]["pending"], 5)
+        self.assertEqual(payload["summary"]["n5_canonical"], 4)
+        self.assertEqual(payload["summary"]["n5_legacy"], 0)
+        self.assertEqual(payload["summary"]["n3_display_input"], 1)
+        self.assertEqual(
+            [row["event_type"] for row in payload["items"]],
+            [
+                "MarketDisplaySnapshotUpdated",
+                "ActionEligible",
+                "ActionBlocked",
+                "ActionExecuted",
+                "ActionSkipped",
+            ],
+        )
+        self.assertEqual(payload["items"][0]["source_category"], "n3_display_input")
+        self.assertEqual(payload["items"][1]["source_category"], "n5_canonical")
+        self.assertNotIn("MarketSnapshotUpdated", payload["event_types"])
+        self.assertNotIn("MinuteBarClosed", payload["event_types"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_input_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_input_messages_page_renders_tabs_filters_and_diagnostics(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/input-messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N6输入消息中心", response.text)
+        self.assertIn("N5 -> N6 主输入", response.text)
+        self.assertIn("N3 -> N6 展示输入", response.text)
+        self.assertIn("全部输入", response.text)
+        self.assertIn("N5动作输入", response.text)
+        self.assertIn("N3展示输入", response.text)
+        self.assertIn("legacy", response.text)
+        self.assertIn("MarketDisplaySnapshotUpdated", response.text)
+        self.assertIn("ActionBlocked", response.text)
+        self.assertIn("ActionExecuted", response.text)
+        self.assertIn("source_layer", response.text)
+        self.assertIn("event_id", response.text)
+        self.assertIn("source_run_id", response.text)
+        self.assertIn("event_schema_version", response.text)
+        self.assertIn("payload_json 明细", response.text)
+        self.assertNotIn("MarketSnapshotUpdated", response.text)
+        self.assertNotIn("MinuteBarClosed", response.text)
+        self.assertIn("不消费/update outbox", response.text)
+        self.assertNotIn("真实交易", response.text)
+        self.assertNotIn("已下单", response.text)
+        self.assertEqual(repo.ui_v1_input_message_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_input_messages_filters_by_source_layer_event_type_group_and_query(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        n3_response = client.get(
+            "/api/n6/ui/v1/input-messages?show_all=1"
+            "&source_layer=N3_market_data&event_type=MarketDisplaySnapshotUpdated"
+        )
+
+        self.assertEqual(n3_response.status_code, 200)
+        n3_payload = n3_response.json()
+        self.assertEqual(
+            n3_payload["filters"],
+            {"source_layer": "N3_market_data", "event_type": "MarketDisplaySnapshotUpdated"},
+        )
+        self.assertEqual(n3_payload["filtered_count"], 1)
+        self.assertEqual(n3_payload["items"][0]["event_type"], "MarketDisplaySnapshotUpdated")
+        self.assertEqual(n3_payload["items"][0]["source_category"], "n3_display_input")
+
+        legacy_response = client.get("/api/n6/ui/v1/input-messages?show_all=1&input_group=legacy&q=legacy")
+        self.assertEqual(legacy_response.status_code, 200)
+        legacy_payload = legacy_response.json()
+        self.assertEqual(legacy_payload["filters"], {"input_group": "legacy", "q": "legacy"})
+        self.assertEqual(legacy_payload["filtered_count"], 4)
+        self.assertEqual(legacy_payload["summary"]["n5_legacy"], 4)
+        self.assertTrue(all(row["legacy"] for row in legacy_payload["items"]))
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n2_condition_basis_api_returns_split_asset_tables_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/n2-condition-basis?asset_kind=index")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "N2 Condition Basis")
+        self.assertEqual(payload["source_layer"], "N2_condition")
+        self.assertEqual(payload["asset_kind"], "index")
+        self.assertEqual(payload["asset_label"], "指数")
+        self.assertEqual(payload["source_table"], "index_condition_basis")
+        self.assertFalse(payload["include_all"])
+        self.assertEqual(payload["total_count"], 2)
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["returned_count"], 1)
+        self.assertTrue(payload["date_filter_defaulted"])
+        self.assertEqual(payload["latest_source_trade_date"], "20260608")
+        self.assertEqual(payload["filters"], {"source_trade_date": "20260608"})
+        item = payload["items"][0]
+        self.assertEqual(item["identity_key"], "index:SH:000300")
+        self.assertEqual(item["source_table"], "index_condition_basis")
+        self.assertEqual(item["condition_keys"], [
+            "BUY:M,W,D",
+            "SELL:M,W,D",
+            "BUY:FULL",
+            "SELL:FULL",
+            "BUY_HINT",
+            "SELL_HINT",
+        ])
+        self.assertEqual(item["row_json"]["index_condition_basis_id"], 1001)
+        self.assertEqual(item["row_json_text"].splitlines()[0], "{")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(repo.ui_v1_n2_condition_basis_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        show_all_response = client.get("/api/n6/ui/v1/n2-condition-basis?asset_kind=index&show_all=1")
+        self.assertEqual(show_all_response.status_code, 200)
+        self.assertTrue(show_all_response.json()["include_all"])
+        self.assertFalse(show_all_response.json()["date_filter_defaulted"])
+        self.assertEqual(show_all_response.json()["filtered_count"], 2)
+
+        board_response = client.get(
+            "/api/n6/ui/v1/n2-condition-basis?asset_kind=board&source_trade_date=2026-06-08&condition_key=SELL_HINT"
+        )
+        self.assertEqual(board_response.status_code, 200)
+        board_payload = board_response.json()
+        self.assertEqual(board_payload["asset_kind"], "board")
+        self.assertEqual(board_payload["source_table"], "board_condition_basis")
+        self.assertEqual(board_payload["filtered_count"], 1)
+        self.assertEqual(board_payload["items"][0]["board_type"], "tdx_industry")
+
+        stock_response = client.get("/api/n6/ui/v1/n2-condition-basis?asset_kind=stock")
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertEqual(stock_response.json()["source_table"], "stock_condition_basis")
+
+    def test_n2_condition_basis_pages_render_three_asset_tabs_and_cards(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/n2-condition-basis/index")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N2条件基础表", response.text)
+        self.assertIn("指数条件基础", response.text)
+        self.assertIn("index_condition_basis", response.text)
+        self.assertIn("只读 N2 condition_basis", response.text)
+        self.assertIn("默认最新日期", response.text)
+        self.assertIn("显示全部日期", response.text)
+        self.assertIn("导出最近日期Excel", response.text)
+        self.assertIn('href="/n6/n2-condition-basis/export-latest.xlsx"', response.text)
+        self.assertIn("当前未选择日期，已自动使用最新 source_trade_date 2026-06-08", response.text)
+        self.assertIn('href="/n6/n2-condition-basis/index"', response.text)
+        self.assertIn('href="/n6/n2-condition-basis/board"', response.text)
+        self.assertIn('href="/n6/n2-condition-basis/stock"', response.text)
+        self.assertIn("指数", response.text)
+        self.assertIn("板块", response.text)
+        self.assertIn("个股", response.text)
+        self.assertIn("沪深300", response.text)
+        self.assertIn("BUY:M,W,D", response.text)
+        self.assertIn("SELL_HINT", response.text)
+        self.assertIn('class="condition-list"', response.text)
+        self.assertIn('class="condition-card"', response.text)
+        self.assertIn("查看明细", response.text)
+        self.assertIn('class="detail-drawer"', response.text)
+        self.assertIn("row_json 明细", response.text)
+        self.assertNotIn("<table>", response.text)
+        self.assertNotIn('href="/n6/action-events"', response.text)
+        self.assertNotIn('href="/n6/status-monitor"', response.text)
+        self.assertNotIn('href="/n6/admin/account"', response.text)
+        self.assertNotIn("已下单", response.text)
+        self.assertNotIn("已成交", response.text)
+        self.assertNotIn("真实交易", response.text)
+        self.assertNotIn("投资建议", response.text)
+        self.assertEqual(repo.ui_v1_n2_condition_basis_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+        board_page = client.get("/n6/n2-condition-basis/board?source_trade_date=2026-06-08&condition_key=SELL_HINT")
+        self.assertEqual(board_page.status_code, 200)
+        self.assertIn("板块条件基础", board_page.text)
+        self.assertIn("board_condition_basis", board_page.text)
+        self.assertIn('value="2026-06-08"', board_page.text)
+        self.assertIn('value="SELL_HINT"', board_page.text)
+        self.assertIn("tdx_industry", board_page.text)
+        self.assertIn(">1<", board_page.text)
+
+        stock_page = client.get("/n6/n2-condition-basis/stock")
+        self.assertEqual(stock_page.status_code, 200)
+        self.assertIn("个股条件基础", stock_page.text)
+        self.assertIn("stock_condition_basis", stock_page.text)
+
+    def test_n2_condition_basis_export_latest_xlsx_uses_chinese_headers_and_latest_date(self) -> None:
+        from openpyxl import load_workbook
+
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/n2-condition-basis/export-latest.xlsx")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn("attachment", response.headers["content-disposition"])
+        self.assertIn("N2%E6%9D%A1%E4%BB%B6%E5%9F%BA%E7%A1%80%E8%A1%A8", response.headers["content-disposition"])
+        workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=True)
+        self.assertEqual(workbook.sheetnames, ["指数", "板块", "个股"])
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            headers = [cell.value for cell in next(worksheet.iter_rows(min_row=1, max_row=1))]
+            self.assertEqual(headers[:8], ["资产类型", "来源表", "条件基础ID", "运行批次", "来源日期", "适用交易日", "标识", "代码"])
+            self.assertIn("条件键", headers)
+            self.assertIn("质量状态", headers)
+            rows = list(worksheet.iter_rows(min_row=2, values_only=True))
+            self.assertTrue(rows)
+            source_date_index = headers.index("来源日期")
+            self.assertTrue(all(str(row[source_date_index]) == "20260608" for row in rows))
+        self.assertEqual(workbook["指数"]["J2"].value, "沪深300")
+        self.assertEqual(workbook["板块"]["J2"].value, "银行")
+        self.assertEqual(workbook["个股"]["J2"].value, "浦发银行")
+        self.assertEqual(repo.ui_v1_n2_condition_basis_export_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n2_condition_basis_export_route_is_get_only_and_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        route_methods = {
+            tuple(sorted(route.methods or set()))
+            for route in client.app.routes
+            if getattr(route, "path", "") == "/n6/n2-condition-basis/export-latest.xlsx"
+        }
+        self.assertEqual(route_methods, {("GET",)})
+        for method_name in ("post", "put", "patch", "delete"):
+            response = getattr(client, method_name)("/n6/n2-condition-basis/export-latest.xlsx")
+            self.assertIn(response.status_code, {404, 405})
+        self.assertEqual(repo.ui_v1_n2_condition_basis_export_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_n6_replay_page_and_api_create_local_only_artifact(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client, repo, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            page = client.get("/n6/replay")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("全日回放", page.text)
+            self.assertIn("LOCAL REPLAY ONLY", page.text)
+            self.assertIn("No DB write / No outbox consumption / No checkpoint update", page.text)
+            self.assertIn('id="trade-date"', page.text)
+            self.assertIn("<select", page.text)
+            self.assertIn('id="replay-engine-version"', page.text)
+            self.assertIn('id="asset-scope"', page.text)
+            self.assertIn('id="source-bundle-key"', page.text)
+            self.assertIn('id="validation-mode"', page.text)
+            self.assertIn('id="timeline-body"', page.text)
+            self.assertIn("/timeline", page.text)
+            self.assertIn("canonical_plan_v1", page.text)
+            self.assertIn("fixture_v1", page.text)
+            self.assertIn("index_board_only", page.text)
+            self.assertIn("asset_unit_fix_delta_v1", page.text)
+            self.assertIn("full_day_shadow_v1", page.text)
+            self.assertIn("original_condition_key", page.text)
+            self.assertIn("trigger_mark_candidate", page.text)
+            self.assertIn("source_trigger_event_type", page.text)
+            self.assertIn("final_proof_source", page.text)
+            self.assertIn("Source Bundle", page.text)
+
+            dates_before = client.get("/api/n6/ui/v1/replay/dates")
+            self.assertEqual(dates_before.status_code, 200)
+            self.assertEqual(dates_before.json()["dates"], [])
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            created_payload = created.json()
+            self.assertTrue(created_payload["job_id"].startswith("local_replay_20260626_"))
+            self.assertEqual(created_payload["replay_engine_version"], "canonical_plan_v1")
+            self.assertFalse(created_payload["safety_flags"]["database_write"])
+            self.assertFalse(created_payload["safety_flags"]["consume_outbox"])
+            self.assertFalse(created_payload["safety_flags"]["update_checkpoint"])
+
+            job_id = created_payload["job_id"]
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{job_id}")
+            self.assertEqual(job.status_code, 200)
+            self.assertEqual(job.json()["summary"]["replay_engine_version"], "canonical_plan_v1")
+            self.assertEqual(job.json()["summary"]["validation_mode"], "none")
+            self.assertEqual(job.json()["summary"]["source_policy"], "historical_minute_local_replay")
+            self.assertEqual(job.json()["summary"]["historical_source_status"], "available")
+            self.assertIn("source_meta", job.json()["summary"])
+            self.assertEqual(job.json()["summary"]["n3"]["source_mode"], "replay")
+            self.assertIn("canonical_planner_trace", job.json()["summary"])
+            self.assertEqual(job.json()["summary"]["n5"]["ActionExecuted"], 0)
+
+            n4 = client.get(f"/api/n6/ui/v1/replay/jobs/{job_id}/n4-messages")
+            self.assertEqual(n4.status_code, 200)
+            self.assertEqual(n4.json()["returned_count"], 4)
+            self.assertEqual(n4.json()["summary"]["hint_TriggerMatched"], 2)
+
+            n5 = client.get(f"/api/n6/ui/v1/replay/jobs/{job_id}/n5-messages")
+            self.assertEqual(n5.status_code, 200)
+            self.assertEqual(n5.json()["summary"]["ActionEligible"], 3)
+            self.assertEqual(n5.json()["summary"]["BUY_HINT_ActionEligible"], 1)
+            self.assertEqual(n5.json()["summary"]["SELL_HINT_ActionEligible"], 1)
+            self.assertEqual(n5.json()["summary"]["b2_hint_final_proof_rows"], 0)
+
+            timeline = client.get(f"/api/n6/ui/v1/replay/jobs/{job_id}/timeline")
+            self.assertEqual(timeline.status_code, 200)
+            self.assertEqual(timeline.json()["returned_count"], 240)
+            self.assertEqual(timeline.json()["items"][29]["minute"], "10:00")
+            self.assertEqual(timeline.json()["items"][29]["n4_ordinary"], 1)
+            self.assertEqual(timeline.json()["items"][29]["n5_eligible"], 1)
+            self.assertEqual(timeline.json()["items"][30]["minute"], "10:01")
+            self.assertEqual(timeline.json()["items"][30]["n5_executed"], 0)
+            self.assertEqual(timeline.json()["items"][239]["minute"], "15:00")
+            thirteen_thirty = [row for row in timeline.json()["items"] if row["minute"] == "13:30"][0]
+            self.assertEqual(thirteen_thirty["n4_ordinary"], 1)
+
+            export = client.get(f"/api/n6/ui/v1/replay/jobs/{job_id}/export.xlsx")
+            self.assertEqual(export.status_code, 200)
+            self.assertEqual(
+                export.headers["content-type"],
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            workbook = load_workbook(BytesIO(export.content), read_only=True, data_only=True)
+            self.assertIn("n4_hint_messages", workbook.sheetnames)
+            self.assertIn("n5_action_executed", workbook.sheetnames)
+            lineage_rows = list(workbook["lineage_and_safety"].iter_rows(values_only=True))
+            self.assertIn(("replay_engine_version", "canonical_plan_v1"), lineage_rows)
+            n4_headers = [cell.value for cell in next(workbook["n4_hint_messages"].iter_rows(min_row=1, max_row=1))]
+            n5_headers = [cell.value for cell in next(workbook["n5_action_executed"].iter_rows(min_row=1, max_row=1))]
+            self.assertIn("original_condition_key", n4_headers)
+            self.assertIn("trigger_mark_candidate", n4_headers)
+            self.assertIn("source_mode", n4_headers)
+            self.assertIn("lineage_summary", n4_headers)
+            self.assertIn("original_condition_key", n5_headers)
+            self.assertIn("source_trigger_event_type", n5_headers)
+            self.assertIn("replay_engine_version", n5_headers)
+
+            dates_after = client.get("/api/n6/ui/v1/replay/dates")
+            self.assertEqual(dates_after.json()["dates"], ["2026-06-26"])
+            self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+            self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+            self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+
+    def test_n6_replay_explicit_source_bundle_exposes_source_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            target_source = seeded_root / "_sources" / "20260626" / "source_bundle.json"
+            _write_test_explicit_replay_source_bundle(target_source)
+
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{created.json()['job_id']}")
+            self.assertEqual(job.status_code, 200)
+            self.assertEqual(job.json()["summary"]["historical_source_kind"], "local_json")
+            self.assertEqual(job.json()["summary"]["source_meta"]["historical_source_type"], "explicit_source_bundle")
+            self.assertEqual(job.json()["summary"]["source_meta"]["candidate_count"], 4)
+            self.assertEqual(job.json()["summary"]["source_meta"]["context_count"], 4)
+            self.assertEqual(job.json()["summary"]["source_meta"]["b2_snapshot_row_count"], 2)
+
+    def test_n6_replay_api_accepts_asset_unit_fix_delta_validation_mode(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            target_source = seeded_root / "_sources" / "20260626_asset_unit_fix_delta" / "source_bundle.json"
+            _write_test_asset_unit_fix_delta_source_bundle(target_source)
+
+            client, repo, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "14:47",
+                    "end_hhmm": "14:47",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                    "source_bundle_key": "20260626_asset_unit_fix_delta",
+                    "validation_mode": "asset_unit_fix_delta_v1",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertEqual(payload["validation_mode"], "asset_unit_fix_delta_v1")
+
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}")
+            self.assertEqual(job.status_code, 200)
+            summary = job.json()["summary"]
+            self.assertTrue(summary["asset_unit_fix_delta_validation"])
+            self.assertEqual(summary["asset_unit_fix_delta"]["corrected_full_trigger_matched"], 406)
+            self.assertEqual(summary["asset_unit_fix_delta"]["old_unified_trigger_matched"], 295)
+            self.assertEqual(summary["asset_unit_fix_delta"]["corrected_only"], 111)
+            self.assertEqual(summary["asset_unit_fix_delta"]["index_board_delta"], 21)
+            self.assertEqual(summary["asset_unit_fix_delta"]["excluded_stock_replay"], 90)
+            self.assertEqual(summary["n5_delta_only"]["ActionEligible"], 21)
+            self.assertEqual(summary["n5_delta_only"]["stock_ActionEligible"], 0)
+            self.assertEqual(summary["n5_delta_only"]["stock_ActionExecuted"], 0)
+            self.assertEqual(summary["n5_delta_only"]["b2_hint_final_proof_rows"], 0)
+
+            artifact_dir = Path(job.json()["artifact_dir"])
+            self.assertTrue((artifact_dir / "n4_delta_attribution.jsonl").exists())
+            self.assertTrue((artifact_dir / "n5_delta_only_messages.jsonl").exists())
+            n5_delta_rows = [
+                json.loads(line)
+                for line in (artifact_dir / "n5_delta_only_messages.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(n5_delta_rows), 21)
+            self.assertEqual({row["asset_kind"] for row in n5_delta_rows}, {"index", "board"})
+            self.assertEqual(
+                {row["source_condition_run_id"] for row in n5_delta_rows},
+                {"condition_layer_20260625_source_20260625_for_20260626_v1"},
+            )
+
+            export = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/export.xlsx")
+            workbook = load_workbook(BytesIO(export.content), read_only=True, data_only=True)
+            self.assertIn("n4_delta_attribution", workbook.sheetnames)
+            self.assertIn("n5_delta_only_messages", workbook.sheetnames)
+            self.assertIn("excluded_stock_replay_risk", workbook.sheetnames)
+            lineage_rows = list(workbook["lineage_and_safety"].iter_rows(values_only=True))
+            self.assertIn(("validation_mode", "asset_unit_fix_delta_v1"), lineage_rows)
+            self.assertIn(("asset_unit_fix_delta.index_board_delta", 21), lineage_rows)
+            self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+            self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+
+    def test_n6_replay_api_accepts_full_day_shadow_validation_mode(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            full_scope = seeded_root / "_sources" / "20260626" / "source_bundle.json"
+            _write_test_mixed_asset_scope_bundle(full_scope)
+            source_bundle = json.loads(full_scope.read_text(encoding="utf-8"))
+            target_source = seeded_root / "_sources" / "20260626_index_board_only" / "source_bundle.json"
+            target_source.parent.mkdir(parents=True, exist_ok=True)
+            source_bundle["source_records"] = {
+                key: rows
+                for key, rows in source_bundle["source_records"].items()
+                if rows and rows[0].get("asset_kind") in {"index", "board"}
+            }
+            source_bundle["candidates"] = [
+                row for row in source_bundle["candidates"] if row.get("asset_kind") in {"index", "board"}
+            ]
+            source_bundle["n4_context_snapshot_rows"] = [
+                row for row in source_bundle["n4_context_snapshot_rows"] if row.get("asset_kind") in {"index", "board"}
+            ]
+            source_bundle["b2_input"]["snapshot_rows"] = [
+                row for row in source_bundle["b2_input"]["snapshot_rows"] if row.get("asset_kind") in {"index", "board"}
+            ]
+            source_bundle["b2_input"]["live_current_rows_by_asset"] = {
+                key: rows
+                for key, rows in source_bundle["b2_input"]["live_current_rows_by_asset"].items()
+                if key in {"index", "board"}
+            }
+            source_bundle["b2_input"]["previous_day_rows_by_asset"] = {
+                key: rows
+                for key, rows in source_bundle["b2_input"]["previous_day_rows_by_asset"].items()
+                if key in {"index", "board"}
+            }
+            source_bundle["source_meta"].update({
+                "historical_source_type": "explicit_source_bundle_index_board_only",
+                "historical_source_path": str(target_source),
+                "historical_source_hash": "test-ui-index-board-shadow-source-hash",
+                "source_row_count": 4,
+                "candidate_count": len(source_bundle["candidates"]),
+                "context_count": len(source_bundle["n4_context_snapshot_rows"]),
+                "b2_snapshot_row_count": len(source_bundle["b2_input"]["snapshot_rows"]),
+            })
+            target_source.write_text(json.dumps(source_bundle, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+            client, repo, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            repo.c1_minute_rows = {
+                "index": _test_c1_rows(asset_kind="index", identity_key="index:SH:000300", code="000300"),
+                "board": _test_c1_rows(asset_kind="board", identity_key="board:TDX:881001", code="881001"),
+            }
+            exported = client.post(
+                "/api/n6/ui/v1/replay/source-bundles/from-c1",
+                json={
+                    "trade_date": "2026-06-26",
+                    "asset_scope": "index_board_only",
+                    "template_source_bundle_key": "20260626_index_board_only",
+                },
+            )
+            self.assertEqual(exported.status_code, 200)
+
+            page = client.get("/n6/replay")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("full_day_shadow_v1", page.text)
+            self.assertIn("20260626_index_board_only_full_day", page.text)
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                    "asset_scope": "index_board_only",
+                    "source_bundle_key": "20260626_index_board_only_full_day",
+                    "validation_mode": "full_day_shadow_v1",
+                    "n3p_strategy": "prefilter_audit",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertEqual(payload["validation_mode"], "full_day_shadow_v1")
+            self.assertEqual(payload["n3p_strategy"], "prefilter_audit")
+            self.assertEqual(payload["n3p_reduction_mode"], "none")
+
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}")
+            self.assertEqual(job.status_code, 200)
+            summary = job.json()["summary"]
+            self.assertTrue(summary["shadow_mode"])
+            self.assertEqual(summary["n3p_strategy"], "prefilter_audit")
+            self.assertEqual(summary["n3p_reduction_mode"], "none")
+            self.assertEqual(summary["n3p_prefilter"]["false_negative_count"], 0)
+            self.assertEqual(summary["shadow"]["stock_n4_messages"], 0)
+            self.assertEqual(summary["shadow"]["stock_n5_messages"], 0)
+            self.assertEqual(summary["shadow"]["trigger_state_changed_action_entries"], 0)
+            self.assertEqual(summary["shadow"]["ActionEligible"], summary["shadow"]["TriggerMatched"])
+
+            artifact_dir = Path(job.json()["artifact_dir"])
+            self.assertTrue((artifact_dir / "n4_shadow_state_transitions.jsonl").exists())
+            self.assertTrue((artifact_dir / "n5_shadow_action_windows.jsonl").exists())
+            self.assertTrue((artifact_dir / "shadow_validation_report.json").exists())
+            self.assertTrue((artifact_dir / "n4_lightweight_prefilter_audit.jsonl").exists())
+            self.assertTrue((artifact_dir / "n3p_demand_plan.jsonl").exists())
+            export = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/export.xlsx")
+            workbook = load_workbook(BytesIO(export.content), read_only=True, data_only=True)
+            self.assertIn("n4_shadow_state_transitions", workbook.sheetnames)
+            self.assertIn("n5_shadow_action_windows", workbook.sheetnames)
+            self.assertIn("n4_prefilter_audit", workbook.sheetnames)
+            self.assertIn("n3p_demand_plan", workbook.sheetnames)
+            lineage_rows = list(workbook["lineage_and_safety"].iter_rows(values_only=True))
+            self.assertIn(("validation_mode", "full_day_shadow_v1"), lineage_rows)
+            self.assertIn(("n3p_strategy", "prefilter_audit"), lineage_rows)
+            self.assertIn(("n3p_reduction_mode", "none"), lineage_rows)
+            self.assertIn(("shadow_mode", True), lineage_rows)
+
+    def test_n6_replay_page_exposes_n3p_strategy_and_reduction_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            target_source = seeded_root / "_sources" / "20260626_index_board_only_full_day" / "source_bundle.json"
+            _write_test_index_board_source_bundle(target_source)
+
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            page = client.get("/n6/replay")
+
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('id="n3p-strategy"', page.text)
+            self.assertIn("prefilter_audit", page.text)
+            self.assertIn("prefilter_prune", page.text)
+            self.assertIn('id="n3p-reduction-mode"', page.text)
+            self.assertIn("active_state_fast_path", page.text)
+
+    def test_n6_replay_c1_readiness_api_reports_passed_and_blocked(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        repo.c1_minute_rows = {
+            "index": _test_c1_rows(asset_kind="index", identity_key="index:SH:000300", code="000300"),
+            "board": _test_c1_rows(asset_kind="board", identity_key="board:TDX:881001", code="881001"),
+        }
+
+        passed = client.get("/api/n6/ui/v1/replay/c1-readiness?trade_date=2026-06-26&asset_scope=index_board_only")
+        self.assertEqual(passed.status_code, 200)
+        self.assertTrue(passed.json()["ok"])
+        self.assertEqual(passed.json()["readiness"]["status"], "passed")
+        self.assertEqual(passed.json()["readiness"]["expected_minutes_per_object"], 240)
+
+        repo.c1_minute_rows["index"] = repo.c1_minute_rows["index"][:-1]
+        blocked = client.get("/api/n6/ui/v1/replay/c1-readiness?trade_date=2026-06-26&asset_scope=index_board_only")
+        self.assertEqual(blocked.status_code, 200)
+        self.assertFalse(blocked.json()["ok"])
+        self.assertEqual(blocked.json()["readiness"]["blocked_reason"], "BLOCKED_REPLAY_C1_SOURCE_INCOMPLETE")
+
+    def test_postgres_c1_readiness_maps_physical_identity_columns(self) -> None:
+        source = inspect.getsource(PostgresN6UserRepository.fetch_index_board_c1_minute_rows)
+        self.assertIn("index_identity_key", source)
+        self.assertIn("board_identity_key", source)
+        self.assertIn("AS identity_key", source)
+        self.assertIn("bar_id", source)
+
+    def test_n6_replay_exports_full_day_source_bundle_from_c1(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            partial_source = seeded_root / "_sources" / "20260626_index_board_only" / "source_bundle.json"
+            _write_test_index_board_source_bundle(partial_source)
+            client, repo, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            repo.c1_minute_rows = {
+                "index": _test_c1_rows(asset_kind="index", identity_key="index:SH:000300", code="000300"),
+                "board": _test_c1_rows(asset_kind="board", identity_key="board:TDX:881001", code="881001"),
+            }
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/source-bundles/from-c1",
+                json={
+                    "trade_date": "2026-06-26",
+                    "asset_scope": "index_board_only",
+                    "template_source_bundle_key": "20260626_index_board_only",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertEqual(payload["source_bundle_key"], "20260626_index_board_only_full_day")
+            source_path = Path(payload["source_bundle_path"])
+            self.assertTrue(source_path.exists())
+            self.assertTrue(source_path.is_relative_to(seeded_root.resolve() / "_sources"))
+            bundle = json.loads(source_path.read_text(encoding="utf-8"))
+            self.assertEqual(bundle["source_meta"]["source_origin"], "c1_read_only_export")
+            self.assertEqual(bundle["source_meta"]["c1_readiness_status"], "passed")
+
+    def test_n6_replay_page_exposes_c1_readiness_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client, repo, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            page = client.get("/n6/replay")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('id="check-c1-readiness"', page.text)
+            self.assertIn('id="export-c1-source-bundle"', page.text)
+            self.assertIn("C1 Readiness", page.text)
+            self.assertIn("/api/n6/ui/v1/replay/c1-readiness", page.text)
+            self.assertIn("/api/n6/ui/v1/replay/source-bundles/from-c1", page.text)
+            self.assertEqual(repo.forbidden_writes["common_event_inbox"], 0)
+            self.assertEqual(repo.forbidden_writes["checkpoint"], 0)
+
+    def test_n6_replay_api_supports_explicit_fixture_engine_and_blocks_unknown_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            fixture_created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                    "replay_engine_version": "fixture_v1",
+                },
+            )
+            self.assertEqual(fixture_created.status_code, 200)
+            fixture_payload = fixture_created.json()
+            self.assertEqual(fixture_payload["replay_engine_version"], "fixture_v1")
+
+            fixture_job = client.get(f"/api/n6/ui/v1/replay/jobs/{fixture_payload['job_id']}")
+            self.assertEqual(fixture_job.status_code, 200)
+            self.assertEqual(fixture_job.json()["summary"]["replay_engine_version"], "fixture_v1")
+            self.assertEqual(
+                fixture_job.json()["summary"]["source_policy"],
+                "fixture harness, not canonical planner proof",
+            )
+            self.assertEqual(fixture_job.json()["summary"]["historical_source_kind"], "fixture")
+
+            blocked = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "mode": "local_only",
+                    "replay_engine_version": "unknown_engine_v9",
+                },
+            )
+            self.assertEqual(blocked.status_code, 400)
+            self.assertEqual(blocked.json()["error"], "BLOCKED_REPLAY_SIDE_EFFECT_RISK")
+
+            blocked_validation = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "mode": "local_only",
+                    "validation_mode": "unknown_validation_mode_v9",
+                },
+            )
+            self.assertEqual(blocked_validation.status_code, 400)
+            self.assertEqual(blocked_validation.json()["error"], "BLOCKED_REPLAY_SIDE_EFFECT_RISK")
+            self.assertIn("BLOCKED_REPLAY_INVALID_VALIDATION_MODE", blocked_validation.json()["detail"])
+
+    def test_n6_replay_api_accepts_asset_scope_and_records_scope_lineage(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            target_source = seeded_root / "_sources" / "20260626" / "source_bundle.json"
+            _write_test_mixed_asset_scope_bundle(target_source)
+
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                    "asset_scope": "index_board_only",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertEqual(payload["asset_scope"], "index_board_only")
+
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}")
+            self.assertEqual(job.status_code, 200)
+            summary = job.json()["summary"]
+            self.assertEqual(summary["asset_scope"], "index_board_only")
+            self.assertTrue(summary["asset_scope_filter_applied"])
+            self.assertEqual(summary["asset_scope_allowed_asset_kinds"], ["index", "board"])
+            self.assertEqual(summary["asset_scope_source_counts_after"]["candidates"]["stock"], 0)
+            self.assertEqual(summary["asset_scope_source_counts_after"]["context"]["stock"], 0)
+            self.assertEqual(summary["asset_scope_source_counts_after"]["b2_snapshot"]["stock"], 0)
+            self.assertGreater(summary["asset_scope_source_counts_after"]["source_records"]["index"], 0)
+            self.assertGreater(summary["asset_scope_source_counts_after"]["source_records"]["board"], 0)
+
+            export = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/export.xlsx")
+            workbook = load_workbook(BytesIO(export.content), read_only=True, data_only=True)
+            lineage_rows = list(workbook["lineage_and_safety"].iter_rows(values_only=True))
+            self.assertIn(("asset_scope", "index_board_only"), lineage_rows)
+            self.assertIn(("asset_scope_filter_applied", True), lineage_rows)
+            self.assertIn(("asset_scope_source_counts_after.candidates.stock", 0), lineage_rows)
+
+    def test_n6_replay_api_accepts_source_bundle_key_and_records_selector_lineage(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            target_source = seeded_root / "_sources" / "20260626_index_board_only" / "source_bundle.json"
+            _write_test_index_board_source_bundle(target_source)
+
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            page = client.get("/n6/replay")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("20260626_index_board_only", page.text)
+
+            created = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "start_hhmm": "09:31",
+                    "end_hhmm": "15:00",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                    "asset_scope": "index_board_only",
+                    "source_bundle_key": "20260626_index_board_only",
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertEqual(payload["source_bundle_key"], "20260626_index_board_only")
+
+            job = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}")
+            self.assertEqual(job.status_code, 200)
+            summary = job.json()["summary"]
+            self.assertEqual(summary["source_bundle_key"], "20260626_index_board_only")
+            self.assertEqual(summary["source_bundle_selector_mode"], "explicit")
+            self.assertTrue(summary["resolved_source_bundle_path"].endswith("20260626_index_board_only/source_bundle.json"))
+            self.assertEqual(summary["source_meta"]["historical_source_type"], "explicit_source_bundle_index_board_only")
+            self.assertEqual(summary["asset_scope_source_counts_after"]["candidates"]["stock"], 0)
+            self.assertGreaterEqual(summary["n3p_cache_stats"]["n3p_cache_hits"], 1)
+            self.assertGreaterEqual(summary["n3p_cache_stats"]["empty_minute_fast_path_count"], 1)
+
+            n4 = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/n4-messages")
+            n5 = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/n5-messages")
+            self.assertNotIn("stock", {row.get("asset_kind") for row in n4.json()["items"]})
+            self.assertNotIn("stock", {row.get("asset_kind") for row in n5.json()["items"]})
+
+            export = client.get(f"/api/n6/ui/v1/replay/jobs/{payload['job_id']}/export.xlsx")
+            workbook = load_workbook(BytesIO(export.content), read_only=True, data_only=True)
+            lineage_rows = list(workbook["lineage_and_safety"].iter_rows(values_only=True))
+            self.assertIn(("source_bundle_key", "20260626_index_board_only"), lineage_rows)
+            self.assertIn(("source_bundle_selector_mode", "explicit"), lineage_rows)
+            self.assertIn(("n3p_cache_stats.n3p_cache_key_count", 1), lineage_rows)
+
+    def test_n6_replay_api_rejects_unsafe_or_missing_source_bundle_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_root = Path(tmp)
+            _write_test_index_board_source_bundle(
+                seeded_root / "_sources" / "20260626_index_board_only" / "source_bundle.json"
+            )
+
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            for source_bundle_key in ("missing_bundle_key", "../20260626", "/tmp/source", "trigger_real_run_id"):
+                with self.subTest(source_bundle_key=source_bundle_key):
+                    blocked = client.post(
+                        "/api/n6/ui/v1/replay/jobs",
+                        json={
+                            "trade_date": "2026-06-26",
+                            "mode": "local_only",
+                            "replay_engine_version": "canonical_plan_v1",
+                            "source_bundle_key": source_bundle_key,
+                        },
+                    )
+                    self.assertEqual(blocked.status_code, 400)
+                    self.assertEqual(blocked.json()["error"], "BLOCKED_REPLAY_SOURCE_BUNDLE_NOT_FOUND")
+                    self.assertIn("BLOCKED_REPLAY_SOURCE_BUNDLE_NOT_FOUND", blocked.json()["detail"])
+
+    def test_n6_replay_api_rejects_unknown_asset_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            blocked = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={
+                    "trade_date": "2026-06-26",
+                    "mode": "local_only",
+                    "replay_engine_version": "canonical_plan_v1",
+                    "asset_scope": "scope_unknown_v9",
+                },
+            )
+            self.assertEqual(blocked.status_code, 400)
+            self.assertEqual(blocked.json()["error"], "BLOCKED_REPLAY_SIDE_EFFECT_RISK")
+
+    def test_n6_replay_api_rejects_non_admin_and_non_local_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = FakeN6UserRepository()
+            repo.users_by_login["viewer"] = UserAccount(
+                user_id=2,
+                login_name="viewer",
+                display_name="Viewer",
+                role="viewer",
+                status="active",
+                password_hash="stored-password-hash",
+                password_hash_algo="argon2id",
+            )
+            client, _, _, _ = build_client(repository=repo, replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "viewer", "password": "correct-password"})
+
+            forbidden = client.get("/api/n6/ui/v1/replay/dates")
+            self.assertEqual(forbidden.status_code, 403)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client, _, _, _ = build_client(replay_docs_root=tmp)
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            blocked = client.post(
+                "/api/n6/ui/v1/replay/jobs",
+                json={"trade_date": "2026-06-26", "mode": "shadow_db"},
+            )
+            self.assertEqual(blocked.status_code, 400)
+            self.assertEqual(blocked.json()["error"], "BLOCKED_REPLAY_SIDE_EFFECT_RISK")
+
+    def test_n2_condition_basis_postgres_export_model_is_read_only_without_name_error(self) -> None:
+        class DummyCursor:
+            def __enter__(self) -> "DummyCursor":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+                return None
+
+            def fetchone(self) -> dict[str, Any]:
+                return {"latest_source_trade_date": "20260608"}
+
+        class DummyConnection:
+            def __enter__(self) -> "DummyConnection":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def cursor(self) -> DummyCursor:
+                return DummyCursor()
+
+        repo = PostgresN6UserRepository("postgresql://unused")
+        repo._readonly_connection = lambda: DummyConnection()  # type: ignore[method-assign]
+
+        def fake_fetch(
+            *,
+            asset_kind: str,
+            filters: dict[str, Any] | None = None,
+            limit: int,
+            include_all: bool = False,
+        ) -> dict[str, Any]:
+            return {
+                "asset_kind": asset_kind,
+                "asset_label": {"index": "指数", "board": "板块", "stock": "个股"}[asset_kind],
+                "source_table": f"{asset_kind}_condition_basis" if asset_kind != "board" else "board_condition_basis",
+                "items": [],
+            }
+
+        repo.fetch_ui_v1_n2_condition_basis = fake_fetch  # type: ignore[method-assign]
+
+        data = repo.fetch_ui_v1_n2_condition_basis_latest_export()
+
+        self.assertEqual(data["latest_source_trade_date"], "20260608")
+        self.assertFalse(data["side_effects"]["writes_database"])
+        self.assertEqual(set(data["assets"]), {"index", "board", "stock"})
+
+    def test_virtual_account_api_is_read_only_and_uses_phase3_account(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/virtual-account")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "Virtual Account Summary")
+        account = payload["virtual_account"]
+        self.assertEqual(account["virtual_account_id"], 1)
+        self.assertEqual(account["account_name"], "Admin Virtual Account")
+        self.assertEqual(account["base_currency"], "CNY")
+        self.assertEqual(account["initial_cash"], 1000000.0)
+        self.assertEqual(account["seed_run_id"], "n6_phase3_virtual_account_seed_20260605_v1")
+        self.assertTrue(payload["readonly"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+        self.assertEqual(repo.ui_v1_virtual_account_reads, 1)
+        self.assertEqual(repo.sim_account_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_cash_snapshot_and_ledger_apis_are_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        snapshot_response = client.get("/api/n6/ui/v1/cash-snapshot")
+        ledger_response = client.get("/api/n6/ui/v1/cash-ledger?limit=5")
+
+        self.assertEqual(snapshot_response.status_code, 200)
+        snapshot_payload = snapshot_response.json()
+        snapshot = snapshot_payload["cash_snapshot"]
+        self.assertEqual(snapshot["available_cash"], 1000000.0)
+        self.assertEqual(snapshot["frozen_cash"], 0.0)
+        self.assertEqual(snapshot["total_cash"], 1000000.0)
+        self.assertEqual(snapshot["currency"], "CNY")
+        self.assertTrue(snapshot_payload["readonly"])
+        self.assertFalse(snapshot_payload["side_effects"]["writes_database"])
+        self.assertEqual(ledger_response.status_code, 200)
+        ledger_payload = ledger_response.json()
+        self.assertEqual(ledger_payload["component"], "Cash Ledger")
+        self.assertEqual(ledger_payload["items"][0]["ledger_type"], "initial_deposit")
+        self.assertEqual(ledger_payload["items"][0]["amount"], 1000000.0)
+        self.assertIsNone(ledger_payload["items"][0]["source_virtual_order_id"])
+        self.assertIsNone(ledger_payload["items"][0]["source_virtual_trade_id"])
+        self.assertFalse(ledger_payload["side_effects"]["order_generated"])
+        self.assertFalse(ledger_payload["side_effects"]["trade_generated"])
+        self.assertEqual(repo.ui_v1_cash_snapshot_reads, 1)
+        self.assertEqual(repo.ui_v1_cash_ledger_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_admin_account_page_displays_virtual_account_and_hidden_modules_stay_hidden(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/admin/account")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("系统账户状态", response.text)
+        self.assertIn("本页仅用于管理员审计 admin virtual account 初始化状态，不是多用户前台账户页面。", response.text)
+        self.assertNotIn("<h1>账户</h1>", response.text)
+        self.assertNotIn(">账户</a>", response.text)
+        self.assertIn("Admin Virtual Account", response.text)
+        self.assertIn("Virtual Account Summary", response.text)
+        self.assertIn("Cash Snapshot", response.text)
+        self.assertIn("Cash Ledger", response.text)
+        self.assertIn("1,000,000.00", response.text)
+        for label in (
+            "READ ONLY",
+            "NO ORDER",
+            "NO TRADE",
+            "NO POSITION UPDATE",
+            "NO REAL TRADE",
+            "NOT INVESTMENT ADVICE",
+        ):
+            self.assertIn(label, response.text)
+        for hidden in ("监控筛选", "持仓", "手机播报"):
+            self.assertNotIn(hidden, response.text)
+        for forbidden_word in ("已下单", "已成交", "真实交易", "投资建议"):
+            self.assertNotIn(forbidden_word, response.text)
+        self.assertEqual(repo.ui_v1_virtual_account_reads, 1)
+        self.assertEqual(repo.ui_v1_cash_snapshot_reads, 1)
+        self.assertEqual(repo.ui_v1_cash_ledger_reads, 1)
+        self.assertEqual(repo.sim_account_reads, 0)
+        self.assertEqual(repo.sim_position_reads, 0)
+
+    def test_admin_users_page_is_admin_only_and_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/admin/users")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("用户管理", response.text)
+        self.assertIn("新增用户", response.text)
+        self.assertIn("admin", response.text)
+        self.assertIn("active", response.text)
+        self.assertIn("筛选配置", response.text)
+        self.assertNotIn("监控筛选", response.text)
+        self.assertNotIn("持仓", response.text)
+        self.assertNotIn("手机播报", response.text)
+        self.assertIn('name="password" type="password" autocomplete="new-password" required minlength="6"', response.text)
+        self.assertNotIn('minlength="12"', response.text)
+        self.assertNotIn("password_hash", response.text)
+        self.assertEqual(repo.user_reads, 1)
+
+    def test_admin_can_create_user_with_independent_filter_and_sim_account(self) -> None:
+        client, repo, _, hasher = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/admin/users",
+            json={
+                "login_name": "trader01",
+                "display_name": "一号交易员",
+                "role": "user",
+                "password": "LongEnough*123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["user"]["login_name"], "trader01")
+        self.assertNotIn("password_hash", payload["user"])
+        self.assertEqual(hasher.calls, ["LongEnough*123"])
+        self.assertEqual(repo.created_users[0]["password_hash"], "hashed-for-test")
+        self.assertNotEqual(repo.created_users[0]["password_hash"], "LongEnough*123")
+        self.assertEqual(repo.created_filter_profiles, [{"user_id": 2, "profile_name": "MVP default", "is_default": True}])
+        self.assertEqual(repo.created_sim_accounts[0]["user_id"], 2)
+        self.assertEqual(repo.created_sim_accounts[0]["initial_cash"], 1000000000)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_admin_can_create_user_with_six_digit_numeric_password(self) -> None:
+        client, repo, _, hasher = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/admin/users",
+            json={
+                "login_name": "trader02",
+                "display_name": "二号交易员",
+                "role": "user",
+                "password": "123456",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(hasher.calls, ["123456"])
+        self.assertEqual(repo.created_users[0]["password_hash"], "hashed-for-test")
+        self.assertNotEqual(repo.created_users[0]["password_hash"], "123456")
+        self.assertNotIn("password_hash", response.json()["user"])
+
+    def test_admin_create_user_rejects_short_password_without_writes(self) -> None:
+        client, repo, _, hasher = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/admin/users",
+            json={"login_name": "trader01", "display_name": "一号交易员", "role": "user", "password": "short"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("password_too_short", response.json()["blockers"])
+        self.assertEqual(hasher.calls, [])
+        self.assertEqual(repo.created_users, [])
+        self.assertEqual(repo.created_filter_profiles, [])
+        self.assertEqual(repo.created_sim_accounts, [])
+
+    def test_admin_can_soft_delete_other_user_and_revoke_sessions(self) -> None:
+        repo = FakeN6UserRepository()
+        repo.users.append(
+            {
+                "user_id": 2,
+                "login_name": "trader01",
+                "display_name": "一号交易员",
+                "role": "user",
+                "status": "active",
+                "filter_profile_count": 1,
+                "sim_account_count": 1,
+                "active_position_count": 0,
+            }
+        )
+        client, _, _, _ = build_client(repository=repo)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post("/api/n6/admin/users/2/delete")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(repo.deleted_users, [{"target_user_id": 2, "deleted_by_user_id": 1}])
+        self.assertEqual(repo.revoked_user_session_ids, [2])
+
+    def test_admin_cannot_delete_self(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post("/api/n6/admin/users/1/delete")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "cannot_delete_self")
+        self.assertEqual(repo.deleted_users, [])
+
+    def test_admin_users_page_rejects_non_admin_session(self) -> None:
+        repo = FakeN6UserRepository()
+        repo.users_by_login["admin"] = UserAccount(
+            user_id=1,
+            login_name="admin",
+            display_name="Initial Admin",
+            role="user",
+            status="active",
+            password_hash="stored-password-hash",
+            password_hash_algo="argon2id",
+        )
+        client, _, _, _ = build_client(repository=repo)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/admin/users")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_regular_user_can_use_core_pages_but_not_admin_management(self) -> None:
+        repo = FakeN6UserRepository()
+        repo.users_by_login["trader01"] = UserAccount(
+            user_id=2,
+            login_name="trader01",
+            display_name="一号交易员",
+            role="user",
+            status="active",
+            password_hash="stored-user-password-hash",
+            password_hash_algo="argon2id",
+        )
+        repo.users.append(
+            {
+                "user_id": 2,
+                "login_name": "trader01",
+                "display_name": "一号交易员",
+                "role": "user",
+                "status": "active",
+                "filter_profile_count": 1,
+                "sim_account_count": 1,
+                "active_position_count": 0,
+            }
+        )
+        repo.sim_accounts[2] = {
+            "user_sim_account_id": 2,
+            "account_name": "MVP T+1 shadow account",
+            "initial_cash": 1000000000,
+            "cash_balance": 1000000000,
+            "frozen_cash": 0,
+            "settlement_mode": "T_PLUS_1",
+            "account_status": "active",
+        }
+        repo.sim_positions[2] = []
+        client, _, verifier, _ = build_client(repository=repo)
+
+        login_response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "trader01", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(login_response.status_code, 302)
+        self.assertEqual(login_response.headers["location"], "/n6/app")
+        self.assertEqual(verifier.calls, [("correct-password", "stored-user-password-hash", "argon2id")])
+        for path in ("/n6/", "/n6/portfolio", "/n6/notifications"):
+            with self.subTest(path=path):
+                response = client.get(path, follow_redirects=True)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("N6 多用户前台", response.text)
+                self.assertNotIn("用户管理", response.text)
+                self.assertNotIn("监控筛选", response.text)
+                self.assertNotIn("手机播报", response.text)
+                self.assertNotIn("动作消息", response.text)
+
+        action_response = client.get("/n6/action-events", follow_redirects=True)
+        self.assertEqual(action_response.status_code, 200)
+        self.assertNotIn("用户管理", action_response.text)
+        self.assertNotIn("监控筛选", action_response.text)
+        self.assertNotIn("手机播报", action_response.text)
+        self.assertIn("ActionBlocked", action_response.text)
+
+        admin_response = client.get("/n6/admin/users")
+
+        self.assertEqual(admin_response.status_code, 403)
+        self.assertEqual(repo.user_reads, 0)
+        self.assertEqual(repo.card_read_user_ids, [])
+        self.assertEqual(repo.notification_read_user_ids, [])
+        self.assertEqual(repo.ui_v1_message_dashboard_reads, 1)
+        self.assertEqual(repo.action_event_reads, 0)
+
+    def test_logout_revokes_current_session_and_clears_cookie(self) -> None:
+        client, repo, _, _ = build_client()
+        login_response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        raw_cookie = str(login_response.cookies.get(COOKIE_NAME))
+
+        response = client.post("/api/n6/auth/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(repo.revoked_session_hashes, [hash_session_token(raw_cookie)])
+        self.assertIn(f"{COOKIE_NAME}=", response.headers["set-cookie"])
+        self.assertIn("Max-Age=0", response.headers["set-cookie"])
+
+    def test_n5_outbox_and_forbidden_tables_are_not_touched(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        client.get("/n6/")
+        client.get("/n6/portfolio")
+        client.get("/n6/notifications")
+        client.get("/n6/action-events")
+        client.get("/n6/admin/users")
+        client.post("/api/n6/auth/logout")
+
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_decision"], 0)
+        self.assertEqual(repo.forbidden_writes["user_sim"], 0)
+        self.assertEqual(repo.forbidden_writes["user_watchlist"], 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_ui_v1_signal_list_components_are_read_only_and_wording_safe(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/signals")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "Signal List")
+        self.assertEqual([row["user_signal_projection_id"] for row in payload["items"]], [101, 102])
+        blocked = payload["items"][0]
+        executed = payload["items"][1]
+        self.assertEqual(blocked["action_card"]["component"], "ActionBlocked Card")
+        self.assertEqual(blocked["action_card"]["title"], "市场动作未确认")
+        self.assertEqual(blocked["action_card"]["blocked_reason"], "price_confirmation_failed")
+        self.assertNotIn("交易失败", blocked["action_card"]["display_text"])
+        self.assertFalse(blocked["action_card"]["decision_buttons_enabled"])
+        self.assertFalse(blocked["action_card"]["sim_enabled"])
+        self.assertFalse(blocked["action_card"]["real_trade_enabled"])
+        self.assertEqual(executed["action_card"]["component"], "ActionExecuted Card")
+        self.assertIn("市场动作确认成立", executed["action_card"]["display_text"])
+        for forbidden_word in ("已成交", "已下单", "已交易"):
+            self.assertNotIn(forbidden_word, executed["action_card"]["display_text"])
+        self.assertFalse(executed["action_card"]["sim_enabled"])
+        self.assertFalse(executed["action_card"]["real_trade_enabled"])
+        self.assertEqual(payload["side_effects"]["writes_database"], False)
+        self.assertEqual(payload["side_effects"]["outbox_status_updates"], 0)
+        self.assertEqual(payload["side_effects"]["delivery_triggered"], False)
+        self.assertEqual(repo.ui_v1_signal_reads, 1)
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.funds_reads, 0)
+        self.assertEqual(repo.position_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.delivery_side_effects, 0)
+
+    def test_ui_v1_signal_detail_shows_lineage_audit_and_sanitized_preview(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/signals/101")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "Signal Detail")
+        self.assertEqual(payload["lineage"]["N4"]["run_id"], "trigger_rule_v4_execute_20260603")
+        self.assertEqual(payload["lineage"]["N5"]["action_run_id"], "action_consumer_market_action_confirmation_v1_20260603")
+        self.assertEqual(payload["lineage"]["N5"]["event_id"], "evt_blocked_1")
+        self.assertEqual(payload["lineage"]["N6"]["run_id"], "user_projection_shadow_20260603_v1")
+        self.assertTrue(payload["audit_panel"]["rollback_safe"])
+        self.assertEqual(payload["audit_panel"]["rollback_sql_path"], "sql/N6_projection_business_rollback.sql")
+        eligibility = payload["proposal_eligibility"]
+        self.assertEqual(eligibility["source_action_event_type"], "ActionBlocked")
+        self.assertEqual(eligibility["behavior"], "display_only")
+        self.assertFalse(eligibility["proposal_generated"])
+        self.assertFalse(eligibility["order_generated"])
+        self.assertFalse(eligibility["trade_generated"])
+        self.assertFalse(eligibility["position_updated"])
+        preview = payload["notification_preview"]
+        self.assertEqual(preview["component"], "Notification Preview")
+        self.assertEqual(preview["queue_status"], "queued_only")
+        self.assertEqual(preview["delivery_triggered"], False)
+        provider_payload = preview["provider_visible_payload"]["notification_payload_json"]
+        self.assertIsInstance(provider_payload, dict)
+        for forbidden_key in ("trace_json", "source_payload_json", "raw_payload", "source_event_payload"):
+            self.assertNotIn(forbidden_key, provider_payload)
+        self.assertEqual(payload["disabled_entrypoints"]["sim"], True)
+        self.assertEqual(payload["disabled_entrypoints"]["position"], True)
+        self.assertEqual(payload["disabled_entrypoints"]["real_trade"], True)
+        self.assertEqual(repo.ui_v1_signal_detail_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.funds_reads, 0)
+        self.assertEqual(repo.position_reads, 0)
+
+    def test_ui_v1_signal_detail_executed_is_projection_only_without_order_generation(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/signals/102")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        eligibility = payload["proposal_eligibility"]
+        self.assertEqual(eligibility["source_action_event_type"], "ActionExecuted")
+        self.assertIn(eligibility["behavior"], {"projection_only", "display_only", "no_order_no_trade"})
+        self.assertFalse(eligibility["future_eligible"])
+        self.assertFalse(eligibility["proposal_generated"])
+        self.assertFalse(eligibility["order_generated"])
+        self.assertFalse(eligibility["trade_generated"])
+        self.assertFalse(eligibility["position_updated"])
+        self.assertFalse(eligibility["pnl_generated"])
+        self.assertNotIn("proposal_candidate", str(payload))
+        for forbidden_word in ("已下单", "已成交", "真实交易", "投资建议"):
+            self.assertNotIn(forbidden_word, str(payload))
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_ui_v1_signal_list_postgres_filters_omit_nullable_params(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            self.assertEqual(repo.fetch_ui_v1_signals(1, {}, 500), [])
+            self.assertEqual(
+                repo.fetch_ui_v1_signals(
+                    1,
+                    {"action_state": "blocked", "blocked_reason": "price_confirmation_failed"},
+                    500,
+                ),
+                [],
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        empty_sql, empty_params = cursor.executions[0]
+        normal_sql, normal_params = cursor.executions[1]
+        self.assertEqual(empty_params["user_id"], 1)
+        self.assertEqual(empty_params["limit"], 500)
+        self.assertEqual(empty_params["offset"], 0)
+        self.assertEqual(empty_params["stale_source_action_run_ids"], list(stale_source_action_run_ids()))
+        self.assertIn("FROM user_projection_run upr", empty_sql)
+        self.assertIn("upr.status = 'passed'", empty_sql)
+        self.assertIn("p.user_projection_run_id =", empty_sql)
+        self.assertIn("stale_source_action_run_ids", empty_sql)
+        self.assertEqual(normal_params["action_state"], "blocked")
+        self.assertEqual(normal_params["blocked_reason"], "price_confirmation_failed")
+        self.assertNotIn("trade_date", normal_params)
+        self.assertNotIn("asset_kind", normal_params)
+        self.assertNotIn("signal_type", normal_params)
+        self.assertIn("blocked_reason", normal_sql)
+
+    def test_ui_v1_signal_postgres_uses_repaired_trigger_fact_payload(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            self.assertEqual(repo.fetch_ui_v1_signals(1, {}, 500), [])
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql, _ = cursor.executions[0]
+        self.assertIn("LEFT JOIN common_event_outbox e", sql)
+        self.assertIn("e.event_id = p.source_event_id", sql)
+        self.assertIn("e.payload_json->>'trigger_price'", sql)
+        self.assertIn("e.payload_json->>'all_trigger_periods'", sql)
+        self.assertIn("e.payload_json->>'triggered_periods'", sql)
+        self.assertIn("e.payload_json->>'baseline_source'", sql)
+        self.assertIn("e.payload_json->>'trigger_kind'", sql)
+        self.assertIn("e.payload_json->>'primary_trigger_period'", sql)
+        self.assertNotIn("required_periods", sql)
+
+    def test_app_v1_signal_periods_prefer_all_trigger_periods_from_projection_payload(self) -> None:
+        source = inspect.getsource(PostgresN6UserRepository._app_v1_triggered_periods_expr)
+        all_periods_expr = "p.source_payload_json->'payload_json'->>'all_trigger_periods'"
+        triggered_expr = "p.source_payload_json->'payload_json'->>'triggered_periods'"
+        self.assertIn(all_periods_expr, source)
+        self.assertIn(triggered_expr, source)
+        self.assertLess(source.index(all_periods_expr), source.index(triggered_expr))
+
+    def test_message_dashboard_reads_standard_outbox_source_run_id(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            dashboard = repo.fetch_message_dashboard(100)
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        self.assertEqual(dashboard["messages"], [])
+        messages_sql = cursor.executions[-1][0]
+        self.assertIn("source_run_id", messages_sql)
+        self.assertNotIn("source_condition_run_id", messages_sql)
+
+    def test_n5_messages_postgres_repository_populates_summary(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            page = repo.fetch_ui_v1_n5_messages(filters={}, limit=5, include_all=False)
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        self.assertEqual(
+            page["summary"],
+            {
+                "total": 0,
+                "pending": 0,
+                "ActionBlocked": 0,
+                "ActionExecuted": 0,
+                "legacy": 0,
+                "latest_event_time": None,
+            },
+        )
+        summary_sql = cursor.executions[3][0]
+        self.assertIn("count(*) FILTER (WHERE status = 'pending')", summary_sql)
+        self.assertIn("count(*) FILTER (WHERE event_type = 'ActionBlocked')", summary_sql)
+        self.assertIn("count(*) FILTER (WHERE event_type = 'ActionExecuted')", summary_sql)
+
+    def test_b_track_v2_filter_repository_reads_official_views_without_cache_fanout(self) -> None:
+        source_views = {
+            "v_n6_stock_condition_display_basis",
+            "v_n6_index_condition_display_basis",
+            "v_n6_board_condition_display_basis",
+            "v_n6_index_membership_fact",
+            "v_n6_board_membership_fact",
+        }
+        cursor = RecordingCursor(existing_relations=source_views)
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            self.assertTrue(
+                repo.fetch_app_filter_items(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    asset_kind="stock",
+                    filters={
+                        "direction": "buy",
+                        "condition_key": "BUY:M,W,D",
+                        "year_overheat_level": "低位",
+                        "q": "浦发",
+                    },
+                    limit=200,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_items(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    asset_kind="index",
+                    filters={"direction": "buy"},
+                    limit=200,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_items(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    asset_kind="board",
+                    filters={"board_type": "tdx_industry", "day_overheat_level": "启动"},
+                    limit=200,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_members(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    membership_kind="index",
+                    parent_identity_key="index:SH:000300",
+                    limit=500,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_members(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    membership_kind="board",
+                    parent_identity_key="board:TDX:881001",
+                    limit=500,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_linked_stocks(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    membership_kind="index",
+                    parent_identity_key="index:SH:000300",
+                    limit=100,
+                )["cache_ready"]
+            )
+            self.assertTrue(
+                repo.fetch_app_filter_linked_stocks(
+                    principal_id=1,
+                    principal_type="admin",
+                    user_id=1,
+                    membership_kind="board",
+                    parent_identity_key="board:TDX:881001",
+                    limit=100,
+                )["cache_ready"]
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql_blob = "\n".join(sql for sql, _ in cursor.executions)
+        self.assertIn("FROM v_n6_stock_condition_display_basis", sql_blob)
+        self.assertIn("FROM v_n6_index_condition_display_basis", sql_blob)
+        self.assertIn("FROM v_n6_board_condition_display_basis", sql_blob)
+        self.assertIn("FROM v_n6_index_membership_fact", sql_blob)
+        self.assertIn("FROM v_n6_board_membership_fact", sql_blob)
+        self.assertIn("JOIN v_n6_stock_condition_display_basis", sql_blob)
+        self.assertIn("membership_rows", sql_blob)
+        self.assertIn("period_grade_y", sql_blob)
+        self.assertIn("period_grade_d", sql_blob)
+        self.assertIn("selected_directions", sql_blob)
+        self.assertIn("selected_condition_keys", sql_blob)
+        self.assertNotIn("period_summary_json->>'year_overheat_level'", sql_blob)
+
+    def test_b_track_v2_stock_filter_repository_uses_current_membership_display_cache_for_industry_columns(self) -> None:
+        source_views = {
+            "v_n6_stock_condition_display_basis",
+            "n6_index_membership_display_cache",
+            "n6_board_membership_display_cache",
+        }
+        cursor = RecordingCursor(
+            existing_relations=source_views,
+            filter_rows=[
+                {
+                    "identity_key": "stock:SH:600000",
+                    "stock_identity_key": "stock:SH:600000",
+                    "source_trade_date": "20260624",
+                    "for_trade_date": "20260625",
+                    "display_name": "浦发银行",
+                }
+            ],
+        )
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            repo.fetch_app_filter_items(
+                principal_id=1,
+                principal_type="admin",
+                user_id=1,
+                asset_kind="stock",
+                filters={},
+                limit=200,
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql_blob = "\n".join(sql for sql, _ in cursor.executions)
+        self.assertIn("FROM n6_index_membership_display_cache", sql_blob)
+        self.assertIn("FROM n6_board_membership_display_cache", sql_blob)
+        self.assertIn("board_type = 'tdx_industry'", sql_blob)
+        self.assertIn("max(source_trade_date)", sql_blob)
+        self.assertIn("source_trade_date <= %(membership_source_trade_date)s", sql_blob)
+        self.assertIn("stock_identity_key = ANY(%(membership_stock_identity_keys)s)", sql_blob)
+        self.assertNotIn("condition_basis", sql_blob)
+        self.assertNotIn("condition_pool", sql_blob)
+        self.assertNotIn("common_event_outbox", sql_blob)
+
+    def test_b_track_v2_filter_repository_orders_by_safe_view_column_before_limit(self) -> None:
+        source_views = {
+            "v_n6_stock_condition_display_basis",
+            "v_n6_index_condition_display_basis",
+            "v_n6_board_condition_display_basis",
+        }
+        cursor = RecordingCursor(existing_relations=source_views)
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            repo.fetch_app_filter_items(
+                principal_id=1,
+                principal_type="admin",
+                user_id=1,
+                asset_kind="stock",
+                filters={"sort": "score", "sort_dir": "desc"},
+                limit=200,
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql_blob = "\n".join(sql for sql, _ in cursor.executions)
+        self.assertIn('ORDER BY t."score" DESC NULLS LAST, t.identity_key ASC', sql_blob)
+        self.assertNotIn("monitor_object", sql_blob)
+        self.assertNotIn("user_monitor_", sql_blob)
+        self.assertNotIn("n6_virtual", sql_blob)
+
+    def test_b_track_v2_filter_repository_ignores_unsafe_sort_columns(self) -> None:
+        source_views = {"v_n6_stock_condition_display_basis"}
+        cursor = RecordingCursor(existing_relations=source_views)
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            repo.fetch_app_filter_items(
+                principal_id=1,
+                principal_type="admin",
+                user_id=1,
+                asset_kind="stock",
+                filters={"sort": "score; DROP TABLE monitor_object", "sort_dir": "desc"},
+                limit=200,
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql_blob = "\n".join(sql for sql, _ in cursor.executions)
+        self.assertNotIn("DROP TABLE", sql_blob)
+        self.assertIn("ORDER BY t.updated_at DESC NULLS LAST, t.identity_key ASC", sql_blob)
+
+        for physical_source in (
+            "n6_stock_display_cache",
+            "n6_index_display_cache",
+            "n6_board_display_cache",
+            "n6_index_membership_display_cache",
+            "n6_board_membership_display_cache",
+            "stock_condition_display_basis",
+            "index_condition_display_basis",
+            "board_condition_display_basis",
+        ):
+            self.assertNotRegex(sql_blob, rf"\bFROM\s+{physical_source}\b")
+        upper_sql = sql_blob.upper()
+        for fanout_token in ("CROSS JOIN", "UNNEST(", "JSONB_ARRAY_ELEMENTS"):
+            self.assertNotIn(fanout_token, upper_sql)
+
+    def test_b_track_v2_monitor_existing_lookup_omits_nullable_batch_guards(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+
+        try:
+            repo._app_v2_fetch_existing_monitor(
+                cursor,
+                table_name="user_monitor_index",
+                principal_id=3,
+                principal_type="human_user",
+                identity_key="index:SH:000001",
+                direction="buy",
+                valid_source_trade_date="20260612",
+                valid_for_trade_date="20260615",
+                valid_source_run_id="condition_layer_20260612_source_20260612_for_20260615_v1",
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql, params = cursor.executions[-1]
+        self.assertEqual(params["valid_source_trade_date"], "20260612")
+        self.assertEqual(params["valid_for_trade_date"], "20260615")
+        self.assertEqual(params["valid_source_run_id"], "condition_layer_20260612_source_20260612_for_20260615_v1")
+        self.assertIn(
+            "COALESCE(valid_source_trade_date, source_snapshot_json->>'source_trade_date') = %(valid_source_trade_date)s",
+            sql,
+        )
+        self.assertIn(
+            "COALESCE(valid_for_trade_date, source_snapshot_json->>'for_trade_date') = %(valid_for_trade_date)s",
+            sql,
+        )
+        self.assertIn(
+            "COALESCE(valid_source_run_id, source_snapshot_json->>'source_run_id') = %(valid_source_run_id)s",
+            sql,
+        )
+        self.assertIn("AND user_id = %(user_id)s", sql)
+        self.assertNotIn("%(valid_source_trade_date)s IS NULL", sql)
+        self.assertNotIn("%(valid_for_trade_date)s IS NULL", sql)
+        self.assertNotIn("%(valid_source_run_id)s IS NULL", sql)
+
+    def test_b_track_v2_monitor_insert_precheck_can_ignore_batch_for_live_unique_index(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+
+        try:
+            repo._app_v2_fetch_existing_monitor(
+                cursor,
+                table_name="user_monitor_index",
+                principal_id=1,
+                principal_type="admin",
+                identity_key="index:SH:000001",
+                direction="buy",
+                valid_source_trade_date="20260703",
+                valid_for_trade_date="20260706",
+                valid_source_run_id="condition_layer_20260703_source_20260703_for_20260706_v1",
+                require_matching_batch=False,
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql, params = cursor.executions[-1]
+        self.assertEqual(params["principal_id"], 1)
+        self.assertEqual(params["principal_type"], "admin")
+        self.assertEqual(params["identity_key"], "index:SH:000001")
+        self.assertEqual(params["direction"], "buy")
+        self.assertNotIn("valid_source_trade_date", params)
+        self.assertNotIn("valid_for_trade_date", params)
+        self.assertNotIn("valid_source_run_id", params)
+        self.assertNotIn("source_snapshot_json->>'source_trade_date' = %(valid_source_trade_date)s", sql)
+        self.assertNotIn("source_snapshot_json->>'for_trade_date' = %(valid_for_trade_date)s", sql)
+        self.assertNotIn("source_snapshot_json->>'source_run_id' = %(valid_source_run_id)s", sql)
+        self.assertIn("AND status <> 'removed'", sql)
+
+    def test_b_track_dashboard_helpers_read_official_views_without_base_table_fallback(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            self.assertIsNone(repo.fetch_top_index_strategy())
+            self.assertEqual(repo.fetch_strong_boards(3), [])
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        sql_blob = "\n".join(sql for sql, _ in cursor.executions)
+        self.assertIn("FROM v_n6_index_condition_display_basis", sql_blob)
+        self.assertIn("FROM v_n6_board_condition_display_basis", sql_blob)
+        for forbidden_source in (
+            "index_condition_display_basis",
+            "board_condition_display_basis",
+            "stock_condition_display_basis",
+            "n6_index_display_cache",
+            "n6_board_display_cache",
+            "n6_stock_display_cache",
+        ):
+            self.assertNotRegex(sql_blob, rf"\bFROM\s+{forbidden_source}\b")
+
+    def test_ui_v1_signal_filters_apply_without_side_effects(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/signals?action_state=blocked&blocked_reason=price_confirmation_failed")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filters"]["action_state"], "blocked")
+        self.assertEqual(payload["filters"]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual([row["user_signal_projection_id"] for row in payload["items"]], [101])
+        self.assertEqual(repo.ui_v1_signal_reads, 1)
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.funds_reads, 0)
+        self.assertEqual(repo.position_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_ui_v1_signal_api_returns_pagination_statistics_and_event_type_filter(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/signals?event_type=ActionExecuted&limit=1&offset=0")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["filters"]["event_type"], "ActionExecuted")
+        self.assertEqual(payload["pagination"]["total_count"], 2)
+        self.assertEqual(payload["pagination"]["filtered_count"], 1)
+        self.assertEqual(payload["pagination"]["limit"], 1)
+        self.assertEqual(payload["pagination"]["offset"], 0)
+        self.assertEqual(payload["statistics"]["ActionExecuted"], 1)
+        self.assertEqual(payload["statistics"]["ActionBlocked"], 1)
+        self.assertEqual(payload["statistics"]["TriggerMatched"], 0)
+        self.assertEqual(payload["statistics"]["blocked_reason_distribution"]["price_confirmation_failed"], 1)
+        self.assertEqual([row["user_signal_projection_id"] for row in payload["items"]], [102])
+        self.assertEqual(payload["items"][0]["event_type"], "ActionExecuted")
+        self.assertEqual(payload["items"][0]["status_label"], "市场动作确认成立")
+        self.assertEqual(repo.ui_v1_signal_reads, 1)
+        self.assertGreaterEqual(repo.ui_v1_signal_count_reads, 1)
+        self.assertEqual(repo.ui_v1_signal_statistics_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_ui_v1_lineage_stats_api_returns_n4_n5_counts_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/lineage-stats")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["title"], "全链路消息统计")
+        self.assertEqual(payload["lineage_stats"]["N4"]["TriggerMatched"]["pending"], 605)
+        self.assertEqual(payload["lineage_stats"]["N4"]["TriggerPendingMarketData"]["pending"], 0)
+        self.assertEqual(payload["lineage_stats"]["N4"]["TriggerStateChanged"]["pending"], 0)
+        self.assertEqual(payload["legacy"]["N4"]["TriggerCleared"]["pending"], 0)
+        self.assertEqual(payload["legacy"]["N4"]["TriggerCleared"]["display"], "hidden_by_default")
+        self.assertEqual(payload["legacy"]["N4"]["TriggerLiveChanged"]["pending"], 0)
+        self.assertEqual(payload["lineage_stats"]["N5"]["ActionExecuted"]["pending"], 1)
+        self.assertEqual(payload["lineage_stats"]["N5"]["ActionBlocked"]["pending"], 604)
+        self.assertEqual(payload["blocked_reason"]["price_confirmation_failed"], 587)
+        self.assertEqual(payload["blocked_reason"]["amount_confirmation_failed"], 17)
+        self.assertEqual(payload["blocked_reason"]["metric_missing"], 0)
+        self.assertEqual(repo.ui_v1_lineage_stats_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_status_monitor_api_returns_event_relationship_and_status_model_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/ui/v1/status-monitor?status=active&limit=1")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["title"], "N6 Status Monitor")
+        self.assertEqual(payload["page_route"], "/n6/status-monitor")
+        self.assertEqual(payload["event_summary"]["N4"]["TriggerMatched"]["pending"], 605)
+        self.assertTrue(payload["event_summary"]["N4"]["TriggerMatched"]["action_entry"])
+        self.assertEqual(payload["event_summary"]["N4"]["TriggerPendingMarketData"]["pending"], 0)
+        self.assertFalse(payload["event_summary"]["N4"]["TriggerPendingMarketData"]["action_entry"])
+        self.assertFalse(payload["event_summary"]["N4"]["TriggerStateChanged"]["action_entry"])
+        self.assertEqual(payload["event_summary"]["N5"]["ActionExecuted"]["pending"], 1)
+        self.assertEqual(payload["event_summary"]["N5"]["ActionBlocked"]["pending"], 604)
+        self.assertEqual(payload["relationship_summary"]["matched_to_action"]["unmatched"], 0)
+        self.assertTrue(payload["relationship_summary"]["matched_to_action"]["pass"])
+        self.assertEqual(payload["relationship_summary"]["status_only"]["TriggerPendingMarketData_action_entries"], 0)
+        self.assertEqual(payload["relationship_summary"]["status_only"]["TriggerStateChanged_action_entries"], 0)
+        self.assertEqual(payload["status_summary"]["active"]["count"], 605)
+        self.assertTrue(payload["status_summary"]["active"]["trigger_live"])
+        self.assertEqual(payload["status_summary"]["pending_market_data"]["count"], 0)
+        self.assertFalse(payload["status_summary"]["pending_market_data"]["trigger_live"])
+        self.assertEqual(payload["pagination"]["limit"], 1)
+        self.assertEqual(payload["pagination"]["filtered_count"], 3)
+        self.assertEqual(payload["items"][0]["source_layer"], "N4_trigger")
+        self.assertEqual(payload["items"][0]["status"], "active")
+        self.assertEqual(payload["items"][0]["event_source"], "N4_trigger / TriggerMatched")
+        self.assertEqual(payload["items"][0]["object"], "stock:SH:600000")
+        self.assertEqual(payload["items"][0]["detail_drawer"]["event_id"], "n4-trigger-matched-1")
+        self.assertEqual(payload["items"][0]["detail_drawer"]["event_time"], "2026-06-05 10:05")
+        self.assertEqual(payload["items"][0]["detail_drawer"]["object"], "stock:SH:600000")
+
+        n5_response = client.get("/api/n6/ui/v1/status-monitor?action_event_type=ActionBlocked&limit=1")
+        self.assertEqual(n5_response.status_code, 200)
+        n5_payload = n5_response.json()
+        self.assertEqual(n5_payload["items"][0]["source_layer"], "N5_action")
+        self.assertEqual(n5_payload["items"][0]["detail_drawer"]["action_state"], "blocked")
+        self.assertEqual(n5_payload["items"][0]["detail_drawer"]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(n5_payload["items"][0]["detail_drawer"]["related_n4_event_id"], "n4-trigger-matched-1")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["voice_triggered"])
+        self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+        self.assertEqual(repo.ui_v1_status_monitor_reads, 2)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+
+    def test_status_monitor_page_renders_groups_tabs_and_read_only_details(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/status-monitor?action_event_type=ActionBlocked")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("N6 Status Monitor", response.text)
+        self.assertIn("N4 Events", response.text)
+        self.assertIn("TriggerMatched", response.text)
+        self.assertIn("TriggerPendingMarketData", response.text)
+        self.assertIn("TriggerStateChanged", response.text)
+        self.assertIn("N5 Relationship", response.text)
+        self.assertIn("ActionExecuted", response.text)
+        self.assertIn("ActionBlocked", response.text)
+        self.assertIn("Matched reconciliation PASS", response.text)
+        self.assertIn("active 605", response.text)
+        self.assertIn("pending_market_data 0", response.text)
+        self.assertIn("inactive 0", response.text)
+        self.assertIn("n5-action-blocked-1", response.text)
+        self.assertIn("blocked", response.text)
+        self.assertIn("price_confirmation_failed", response.text)
+        self.assertIn("n4-trigger-matched-1", response.text)
+        self.assertIn("READ ONLY", response.text)
+        self.assertIn("NO ORDER", response.text)
+        self.assertIn("NO TRADE", response.text)
+        self.assertIn("NOT INVESTMENT ADVICE", response.text)
+        for forbidden_word in (
+            "已下单",
+            "已成交",
+            "真实交易",
+            "虚拟成交",
+            "建议买入",
+            "交易失败",
+            "下单失败",
+            "持仓失败",
+        ):
+            self.assertNotIn(forbidden_word, response.text)
+        self.assertEqual(repo.ui_v1_status_monitor_reads, 1)
+        self.assertEqual(repo.ui_v1_signal_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_ui_v1_signal_api_extended_filters_include_keyword_and_date(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/api/n6/ui/v1/signals"
+            "?date_from=2026-06-02&date_to=2026-06-02&time_field=event_time"
+            "&q=600000&signal_type=B_BUY"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filters"]["date_from"], "2026-06-02")
+        self.assertEqual(payload["filters"]["date_to"], "2026-06-02")
+        self.assertEqual(payload["filters"]["time_field"], "event_time")
+        self.assertEqual(payload["filters"]["q"], "600000")
+        self.assertEqual(payload["pagination"]["filtered_count"], 1)
+        self.assertEqual(payload["items"][0]["identity_key"], "stock:SH:600000")
+        self.assertEqual(payload["items"][0]["event_time"], "2026-06-02 11:05")
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_action_events_page_uses_filter_cards_and_detail_drawers(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/action-events?event_type=ActionExecuted")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('name="date_from"', response.text)
+        self.assertIn('name="date_to"', response.text)
+        self.assertIn('name="time_field"', response.text)
+        self.assertIn('name="event_type"', response.text)
+        self.assertIn('name="blocked_reason"', response.text)
+        self.assertIn('name="q"', response.text)
+        self.assertIn('class="stat-card"', response.text)
+        self.assertIn("全链路消息统计", response.text)
+        self.assertIn("N4 Events", response.text)
+        self.assertIn("N4 TriggerMatched", response.text)
+        self.assertIn("N4 TriggerPendingMarketData", response.text)
+        self.assertIn("N4 TriggerStateChanged", response.text)
+        self.assertIn('<option value="TriggerPendingMarketData"', response.text)
+        self.assertIn('<option value="TriggerStateChanged"', response.text)
+        self.assertIn("N5 Actions", response.text)
+        self.assertIn(">605<", response.text)
+        self.assertIn("source_layer=N4_trigger&event_type=TriggerMatched", response.text)
+        self.assertIn("source_layer=N4_trigger&event_type=TriggerPendingMarketData", response.text)
+        self.assertIn("source_layer=N4_trigger&event_type=TriggerStateChanged", response.text)
+        self.assertIn("source_layer=N5_action&event_type=ActionExecuted", response.text)
+        self.assertIn("source_layer=N5_action&event_type=ActionBlocked", response.text)
+        self.assertNotIn("TriggerMatched</span><strong>" + "0</strong>", response.text)
+        self.assertNotIn("N4 TriggerPendingMarketData</span><strong>587</strong>", response.text)
+        self.assertNotIn("N4 TriggerStateChanged</span><strong>17</strong>", response.text)
+        self.assertIn('class="message-card"', response.text)
+        self.assertIn('class="detail-drawer"', response.text)
+        self.assertIn("市场动作确认成立", response.text)
+        self.assertIn("projection_only", response.text)
+        self.assertIn("READ ONLY", response.text)
+        self.assertIn("NO ORDER", response.text)
+        self.assertIn("NO TRADE", response.text)
+        self.assertIn("NOT INVESTMENT ADVICE", response.text)
+        for forbidden_word in ("已下单", "已成交", "真实交易", "虚拟成交", "建议买入", "交易失败", "下单失败", "持仓失败"):
+            self.assertNotIn(forbidden_word, response.text)
+        self.assertEqual(repo.ui_v1_signal_reads, 1)
+        self.assertEqual(repo.ui_v1_signal_statistics_reads, 1)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
+    def test_ui_v1_dashboard_artifacts_and_rollback_summary_are_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        metrics_response = client.get("/api/n6/ui/v1/dashboard/metrics")
+        artifacts_response = client.get("/api/n6/ui/v1/artifacts")
+        rollback_response = client.get("/api/n6/ui/v1/rollback-summary")
+
+        self.assertEqual(metrics_response.status_code, 200)
+        self.assertEqual(metrics_response.json()["metrics"]["today_signal_count"], 2)
+        self.assertEqual(metrics_response.json()["metrics"]["action_blocked"], 1)
+        self.assertEqual(metrics_response.json()["metrics"]["action_executed"], 1)
+        self.assertEqual(metrics_response.json()["metrics"]["queued_only"], 2)
+        self.assertTrue(metrics_response.json()["metrics"]["rollback_safe"])
+        self.assertEqual(artifacts_response.status_code, 200)
+        self.assertIn("docs/N6_USER_INTERFACE_SPEC_v1.md", artifacts_response.json()["artifacts"])
+        self.assertEqual(rollback_response.status_code, 200)
+        rollback = rollback_response.json()["rollback_summary"]
+        self.assertEqual(
+            rollback["delete_order"],
+            ["user_notification_queue", "user_signal_card", "user_signal_projection", "user_projection_run"],
+        )
+        self.assertIn("decision", rollback["hard_fail_guards"])
+        self.assertFalse(rollback_response.json()["execute_enabled"])
+        self.assertEqual(repo.ui_v1_dashboard_reads, 1)
+        self.assertEqual(repo.ui_v1_artifact_reads, 1)
+        self.assertEqual(repo.ui_v1_rollback_reads, 1)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_b_track_me_resolves_admin_principal_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/me")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Me")
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["principal"]["principal_type"], "admin")
+        self.assertEqual(payload["principal"]["app_scope"], "n6_multi_user_app")
+        self.assertIn("read:own_virtual_account", payload["principal"]["permissions"])
+        self.assertNotIn("password_hash", str(payload))
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(repo.app_principal_reads, 1)
+
+    def test_b_track_account_is_principal_scoped_and_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/account")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        account = payload["virtual_account"]
+        self.assertEqual(account["virtual_account_id"], 1)
+        self.assertEqual(account["principal_id"], 1)
+        self.assertEqual(account["principal_type"], "admin")
+        self.assertEqual(account["account_name"], "Admin Virtual Account")
+        self.assertEqual(account["initial_cash"], 1000000.0)
+        self.assertEqual(account["available_cash"], 1000000.0)
+        self.assertEqual(account["frozen_cash"], 0.0)
+        self.assertEqual(account["total_cash"], 1000000.0)
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertEqual(repo.app_virtual_account_reads, [(1, "admin")])
+        self.assertEqual(repo.app_cash_snapshot_reads, [1])
+        self.assertEqual(repo.ui_v1_virtual_account_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_account_page_renders_readonly_account_quality_without_mutation_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/account")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("我的账户", response.text)
+        self.assertIn("Admin Virtual Account", response.text)
+        self.assertIn("可展示现金", response.text)
+        self.assertIn("质量状态", response.text)
+        self.assertIn("passed", response.text)
+        self.assertIn("只读模式 · 不下单 · 不更新持仓 · 不构成投资建议", response.text)
+        self.assertNotIn("修改账户", response.text)
+        self.assertNotIn("一键下单", response.text)
+        self.assertNotIn("真实收益", response.text)
+        self.assertEqual(repo.app_virtual_account_reads, [(1, "admin")])
+        self.assertEqual(repo.app_cash_snapshot_reads, [1])
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_empty_planned_apis_and_disclaimers_are_get_only_read_only(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        expected_components = {
+            "/api/n6/app/v1/proposals": "B Track Proposals",
+            "/api/n6/app/v1/portfolio": "B Track Portfolio",
+            "/api/n6/app/v1/pnl": "B Track PnL",
+            "/api/n6/app/v1/leaderboard": "B Track Leaderboard",
+        }
+        for path, component in expected_components.items():
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["component"], component)
+                self.assertIn(payload["status"], {"locked_planned", "locked_empty", "locked_readiness_only"})
+                self.assertTrue(payload["locked"])
+                self.assertFalse(payload["side_effects"]["writes_database"])
+                self.assertFalse(payload["side_effects"]["proposal_generated"])
+                self.assertFalse(payload["side_effects"]["order_generated"])
+                self.assertFalse(payload["side_effects"]["trade_generated"])
+                if path.endswith("/pnl") or path.endswith("/leaderboard"):
+                    self.assertEqual(payload["disclaimer"], ["非实际业绩", "非投资建议", "不代表未来结果"])
+
+        for method in ("post", "put", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(client, method)("/api/n6/app/v1/proposals")
+                self.assertIn(response.status_code, {404, 405})
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_b_track_signals_use_allowlist_without_raw_or_outbox_reads(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?action_state=executed")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Signals")
+        self.assertEqual(payload["component_label"], "我的监控消息列表")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertEqual(payload["items"][0]["action_state"], "executed")
+        self.assertEqual(payload["items"][0]["proposal_eligibility"]["behavior"], "proposal_candidate")
+        required_allowed = {
+            "reviewed N6 projections",
+            "reviewed signal cards",
+            "n6_display_stock_condition_cache",
+            "n6_display_index_condition_cache",
+            "n6_display_board_condition_cache",
+            "n6_display_index_membership_cache",
+            "n6_display_board_membership_cache",
+        }
+        self.assertLessEqual(required_allowed, set(payload["source_policy"]["allowed_sources"]))
+        self.assertIn("raw K", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("condition_basis", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("condition_pool", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("minute_target_scope", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("unreviewed outbox / raw facts", payload["source_policy"]["forbidden_sources"])
+        self.assertFalse(payload["source_policy"]["raw_k_read"])
+        self.assertFalse(payload["source_policy"]["n1_raw_facts_read"])
+        self.assertFalse(payload["source_policy"]["direct_live_market_read"])
+        self.assertFalse(payload["source_policy"]["condition_basis_read"])
+        self.assertFalse(payload["source_policy"]["condition_pool_read"])
+        self.assertFalse(payload["source_policy"]["minute_target_scope_read"])
+        self.assertFalse(payload["source_policy"]["unreviewed_outbox_or_raw_facts_read"])
+        item = payload["items"][0]
+        self.assertIn("user_signal_card_id", item)
+        self.assertIn("user_projection_run_id", item)
+        self.assertEqual(item["display_code"], "600000")
+        self.assertEqual(item["display_name"], "浦发银行")
+        self.assertEqual(item["asset_kind_label"], "个股")
+        self.assertEqual(item["direction_label"], "买向观察")
+        self.assertEqual(item["action_state_label"], "已确认")
+        self.assertEqual(item["event_label"], "市场动作确认成立 (ActionExecuted)")
+        self.assertEqual(item["projection_run_id"], "user_projection_shadow_20260602_1105")
+        self.assertEqual(item["source_run_id"], "action_consumer_action_confirmation_metric_execute_20260602_1105")
+        self.assertEqual(item["quality_status"], "reviewed")
+        self.assertIn("市场动作确认成立 (ActionExecuted)", item["tags"])
+        self.assertEqual(item["condition_trace"]["condition_key"], "BUY:M,W,D")
+        self.assertEqual(item["condition_trace"]["rendering_policy"], "source_trace_only_not_advice")
+        self.assertIn("N2_display_basis", item["evidence_chain"])
+        self.assertIn("N3_market_data", item["evidence_chain"])
+        self.assertIn("N4_trigger", item["evidence_chain"])
+        self.assertIn("N5_action", item["evidence_chain"])
+        self.assertIn("N6_projection", item["evidence_chain"])
+        self.assertFalse(item["detail_page"]["buy_button_visible"])
+        self.assertFalse(item["detail_page"]["sell_button_visible"])
+        self.assertFalse(item["detail_page"]["one_click_order_visible"])
+        self.assertFalse(item["detail_page"]["investment_advice"])
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.ui_v1_signal_reads, 0)
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+
+    def test_b_track_signals_are_scoped_to_effective_monitor_and_for_trade_date(self) -> None:
+        client, repo, _, _ = build_client()
+        matched = copy.deepcopy(repo.ui_v1_signals[1])
+        matched["user_signal_projection_id"] = 901
+        matched["identity_key"] = "stock:SH:600000"
+        matched["code"] = "600000"
+        matched["name"] = "浦发银行"
+        matched["direction"] = "buy"
+        matched["action_state"] = "executed"
+        seed_effective_monitor_for_signal(repo, matched)
+
+        wrong_trade_date = copy.deepcopy(matched)
+        wrong_trade_date["user_signal_projection_id"] = 902
+        wrong_trade_date["trade_date"] = "20260616"
+        wrong_trade_date["display_payload_json"]["trade_date"] = "20260616"
+
+        unmonitored = copy.deepcopy(matched)
+        unmonitored["user_signal_projection_id"] = 903
+        unmonitored["identity_key"] = "stock:SH:600004"
+        unmonitored["code"] = "600004"
+        unmonitored["name"] = "白云机场"
+
+        missing_trade_date = copy.deepcopy(matched)
+        missing_trade_date["user_signal_projection_id"] = 904
+        missing_trade_date["trade_date"] = None
+        missing_trade_date["display_payload_json"].pop("trade_date", None)
+
+        repo.ui_v1_signals = [matched, wrong_trade_date, unmonitored, missing_trade_date]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component_label"], "我的监控消息列表")
+        self.assertEqual(payload["scope_mode"], "effective_monitor")
+        self.assertEqual(payload["effective_monitor_count"], 1)
+        self.assertEqual(payload["expired_monitor_count"], 0)
+        self.assertEqual(payload["matched_signal_count"], 1)
+        self.assertEqual(payload["excluded_reason_counts"]["message_trade_date_missing"], 1)
+        self.assertEqual(payload["excluded_reason_counts"]["message_trade_date_mismatch"], 1)
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [901])
+        self.assertEqual(payload["current_filter_batch"]["stock"]["for_trade_date"], "20260605")
+        self.assertEqual(payload["current_filter_batch"]["stock"]["source_trade_date"], "20260604")
+
+        scoped_detail = client.get("/api/n6/app/v1/signals/901")
+        self.assertEqual(scoped_detail.status_code, 200)
+        out_of_scope_detail = client.get("/api/n6/app/v1/signals/902")
+        self.assertEqual(out_of_scope_detail.status_code, 404)
+
+    def test_app_signals_defaults_to_current_for_trade_date(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current["user_signal_projection_id"] = 9301
+        seed_effective_monitor_for_signal(repo, current)
+        repo.ui_v1_signals = [current]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [9301])
+        self.assertEqual(payload["filters"]["trade_date"], "20260605")
+        self.assertEqual(repo.app_signal_filter_reads[-1]["trade_date"], "20260605")
+        self.assertNotIn("historical_projection_mode", repo.app_signal_filter_reads[-1])
+        self.assertIn("available_trade_dates", payload)
+        self.assertEqual(payload["selected_trade_date"], "20260605")
+        self.assertIn("20260605", payload["available_trade_dates"])
+
+    def test_app_signals_explicit_historical_trade_date_uses_user_monitor_scope(self) -> None:
+        client, repo, _, _ = build_client()
+        monitored = copy.deepcopy(repo.ui_v1_signals[1])
+        monitored.update(
+            {
+                "user_signal_projection_id": 9302,
+                "asset_kind": "index",
+                "identity_key": "index:SZ:399006",
+                "code": "399006",
+                "name": "创业板指",
+                "direction": "sell",
+            }
+        )
+        unmonitored_sz = copy.deepcopy(monitored)
+        unmonitored_sz.update(
+            {
+                "user_signal_projection_id": 9303,
+                "identity_key": "index:SZ:399001",
+                "code": "399001",
+                "name": "深证成指",
+            }
+        )
+        unmonitored_sh = copy.deepcopy(monitored)
+        unmonitored_sh.update(
+            {
+                "user_signal_projection_id": 9304,
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        for signal in (monitored, unmonitored_sz, unmonitored_sh):
+            signal["trade_date"] = "20260703"
+            signal["display_payload_json"]["trade_date"] = "20260703"
+        seed_effective_monitor_for_signal(
+            repo,
+            monitored,
+            for_trade_date="20260703",
+            source_trade_date="20260702",
+            source_run_id="condition_layer_20260702_to_20260703",
+        )["direction"] = "buy"
+        repo.ui_v1_signals = [monitored, unmonitored_sz, unmonitored_sh]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?asset_kind=index&trade_date=20260703")
+        cards_response = client.get("/api/n6/app/v2/message-dashboard?asset_kind=index&trade_date=20260703")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scope_mode"], "historical_projection")
+        self.assertEqual(payload["filters"]["trade_date"], "20260703")
+        self.assertEqual(payload["selected_asset_kind"], "index")
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [9302])
+        self.assertEqual([item["identity_key"] for item in payload["items"]], ["index:SZ:399006"])
+        self.assertTrue(repo.app_signal_filter_reads[-1]["historical_projection_mode"])
+        self.assertEqual(payload["selected_trade_date"], "20260703")
+        self.assertIn("20260703", payload["available_trade_dates"])
+        self.assertNotEqual(payload["empty_state"]["reason"], "no_effective_monitor")
+        self.assertEqual(cards_response.status_code, 200)
+        cards_payload = cards_response.json()
+        self.assertFalse(cards_payload["source_policy"]["direction_match_required"])
+        self.assertEqual([item["user_signal_projection_id"] for item in cards_payload["card_items"]], [9302])
+
+    def test_app_signals_explicit_historical_trade_date_uses_non_removed_historical_monitor_scope(self) -> None:
+        client, repo, _, _ = build_client()
+        historical = copy.deepcopy(repo.ui_v1_signals[1])
+        historical.update(
+            {
+                "user_signal_projection_id": 9361,
+                "user_signal_card_id": 9461,
+                "asset_kind": "index",
+                "identity_key": "index:SZ:399006",
+                "code": "399006",
+                "name": "创业板指",
+                "direction": "sell",
+                "trade_date": "20260703",
+            }
+        )
+        historical["display_payload_json"]["trade_date"] = "20260703"
+        monitor_row = seed_effective_monitor_for_signal(
+            repo,
+            historical,
+            for_trade_date="20260703",
+            source_trade_date="20260702",
+            source_run_id="condition_layer_20260702_to_20260703",
+        )
+        monitor_row["status"] = "expired"
+        repo.ui_v1_signals = [historical]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?asset_kind=index&trade_date=20260703")
+        cards_response = client.get("/api/n6/app/v2/message-dashboard?asset_kind=index&trade_date=20260703")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scope_mode"], "historical_projection")
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [9361])
+        self.assertEqual(payload["items"][0]["identity_key"], "index:SZ:399006")
+        self.assertEqual(cards_response.status_code, 200)
+        cards_payload = cards_response.json()
+        self.assertEqual([item["user_signal_projection_id"] for item in cards_payload["card_items"]], [9361])
+
+    def test_app_signals_current_trade_date_does_not_use_expired_monitor_scope(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current.update(
+            {
+                "user_signal_projection_id": 9362,
+                "asset_kind": "index",
+                "identity_key": "index:SH:999999",
+                "code": "999999",
+                "name": "非默认指数",
+                "trade_date": "20260605",
+            }
+        )
+        current["display_payload_json"]["trade_date"] = "20260605"
+        current["display_payload_json"]["identity_key"] = "index:SH:999999"
+        current["display_payload_json"]["code"] = "999999"
+        current["display_payload_json"]["name"] = "非默认指数"
+        monitor_row = seed_effective_monitor_for_signal(repo, current)
+        monitor_row["status"] = "expired"
+        repo.ui_v1_signals = [current]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?asset_kind=index")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scope_mode"], "effective_monitor")
+        self.assertEqual(payload["items"], [])
+
+    def test_b_track_realtime_scope_page_is_independent_from_watchlist_and_defaults_to_fixed_indexes(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/realtime-scope")
+        watchlist_response = client.get("/n6/app/watchlist")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("实时监控范围", response.text)
+        self.assertIn("identity_key", response.text)
+        self.assertIn("display_name", response.text)
+        self.assertIn("操作", response.text)
+        for identity_key in (
+            "index:SH:000001",
+            "index:SH:000016",
+            "index:SH:000300",
+            "index:SH:000688",
+            "index:SH:000852",
+            "index:SH:000905",
+            "index:SZ:399001",
+            "index:SZ:399006",
+            "index:SZ:399303",
+        ):
+            self.assertIn(identity_key, response.text)
+        self.assertEqual(watchlist_response.status_code, 200)
+        self.assertIn("关注池", watchlist_response.text)
+        self.assertEqual(repo.forbidden_writes["user_watchlist"], 0)
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_realtime_scope_expands_current_messages_but_not_historical_messages(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current.update(
+            {
+                "user_signal_projection_id": 9601,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+                "trade_date": "20260605",
+            }
+        )
+        current["display_payload_json"]["trade_date"] = "20260605"
+        historical = copy.deepcopy(current)
+        historical.update({"user_signal_projection_id": 9602, "trade_date": "20260703"})
+        historical["display_payload_json"]["trade_date"] = "20260703"
+        unscoped = copy.deepcopy(current)
+        unscoped.update(
+            {
+                "user_signal_projection_id": 9603,
+                "identity_key": "index:SH:999999",
+                "code": "999999",
+                "name": "未纳入指数",
+            }
+        )
+        repo.ui_v1_signals = [current, historical, unscoped]
+        repo.app_realtime_scope_rows = [
+            {
+                "realtime_scope_id": 1,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "user_id": 1,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "display_name": "上证指数",
+                "status": "active",
+            }
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        current_response = client.get("/api/n6/app/v1/signals?asset_kind=index")
+        historical_response = client.get("/api/n6/app/v1/signals?asset_kind=index&trade_date=20260703")
+
+        self.assertEqual(current_response.status_code, 200)
+        current_payload = current_response.json()
+        self.assertEqual(current_payload["scope_mode"], "effective_monitor")
+        self.assertEqual([item["user_signal_projection_id"] for item in current_payload["items"]], [9601])
+        self.assertEqual(current_payload["items"][0]["identity_key"], "index:SH:000001")
+        self.assertEqual(historical_response.status_code, 200)
+        historical_payload = historical_response.json()
+        self.assertEqual(historical_payload["scope_mode"], "historical_projection")
+        self.assertEqual(historical_payload["items"], [])
+
+    def test_app_signals_trading_session_blocks_historical_api_and_page_falls_back_current(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current["user_signal_projection_id"] = 9311
+        seed_effective_monitor_for_signal(repo, current)
+        historical = copy.deepcopy(repo.ui_v1_signals[1])
+        historical["user_signal_projection_id"] = 9312
+        historical["trade_date"] = "20260602"
+        historical["display_payload_json"]["trade_date"] = "20260602"
+        repo.ui_v1_signals = [current, historical]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+            create=True,
+        ):
+            api_response = client.get("/api/n6/app/v1/signals?trade_date=20260602")
+            page_response = client.get("/n6/app/signals?trade_date=20260602")
+
+        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("交易时段仅显示当前交易日，历史查询收盘后可用", page_response.text)
+        self.assertIn('value="20260605" selected', page_response.text)
+        self.assertNotIn('value="20260602" selected', page_response.text)
+        self.assertIn("自动刷新中，每 5 秒", page_response.text)
+        self.assertEqual(repo.app_signal_filter_reads[-1]["trade_date"], "20260605")
+        self.assertNotIn("historical_projection_mode", repo.app_signal_filter_reads[-1])
+
+    def test_b_track_signals_page_renders_trade_date_selector_for_history(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current["user_signal_projection_id"] = 9303
+        current["trade_date"] = "20260605"
+        current["display_payload_json"]["trade_date"] = "20260605"
+        historical = copy.deepcopy(repo.ui_v1_signals[1])
+        historical["user_signal_projection_id"] = 9304
+        historical["trade_date"] = "20260602"
+        historical["display_payload_json"]["trade_date"] = "20260602"
+        seed_effective_monitor_for_signal(repo, current)
+        seed_effective_monitor_for_signal(
+            repo,
+            historical,
+            for_trade_date="20260602",
+            source_trade_date="20260601",
+            source_run_id="condition_layer_20260601_to_20260602",
+        )
+        repo.ui_v1_signals = [current, historical]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/signals?trade_date=20260602")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('name="trade_date"', response.text)
+        self.assertIn('value="20260602" selected', response.text)
+        self.assertIn('value="20260605"', response.text)
+        self.assertIn("浦发银行", response.text)
+        expected_headers = [
+            "交易日",
+            "时间",
+            "类型",
+            "标的",
+            "identity_key",
+            "方向",
+            "条件 trace",
+            "触发周期",
+            "主触发周期",
+            "动作状态",
+            "action_mark",
+            "未确认原因",
+        ]
+        for header in expected_headers:
+            self.assertIn(f"<th>{header}</th>", response.text)
+        self.assertLess(response.text.index("<th>交易日</th>"), response.text.index("<th>时间</th>"))
+        self.assertLess(response.text.index("<th>时间</th>"), response.text.index("<th>类型</th>"))
+        self.assertLess(response.text.index("<th>触发周期</th>"), response.text.index("<th>主触发周期</th>"))
+        self.assertLess(response.text.index("<th>主触发周期</th>"), response.text.index("<th>动作状态</th>"))
+        self.assertIn("2026-06-02 11:05", response.text)
+        self.assertIn("M,W,D", response.text)
+        self.assertIn("<td>30m</td>", response.text)
+        self.assertNotIn("<th>标签</th>", response.text)
+        self.assertNotIn("<th>质量</th>", response.text)
+        self.assertNotIn("当前没有有效监控对象", response.text)
+        self.assertNotIn("运行批次", response.text)
+        self.assertNotIn("action_consumer_action_confirmation_metric_execute_20260602_1105", response.text)
+        self.assertNotIn("user_projection_shadow_20260602_1105", response.text)
+
+    def test_b_track_signals_exclude_stale_hint_30m_source_action_runs(self) -> None:
+        client, repo, _, _ = build_client()
+        stale = copy.deepcopy(repo.ui_v1_signals[1])
+        stale.update(
+            {
+                "user_signal_projection_id": 9101,
+                "user_projection_run_id": "v3_n6_user_projection_20260615_stale_hint_30m_v1",
+                "trade_date": "20260615",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881470",
+                "code": "881470",
+                "name": "工程咨询服务",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_HINT",
+                "original_condition_key": "BUY_HINT",
+                "action_state": "executed",
+                "action_mark": "30m_volume",
+                "source_action_run_id": HINT_30M_STALE_SOURCE_ACTION_RUN_IDS[0],
+                "source_action_event_type": "ActionExecuted",
+                "source_n4_run_id": "v3_n4_trigger_replay_20260615_after_n3_full_universe_metric_v1",
+            }
+        )
+        stale["display_payload_json"] = {"trade_date": "20260615", "event_time": "2026-06-15T09:31:00+08:00"}
+        active = copy.deepcopy(stale)
+        active.update(
+            {
+                "user_signal_projection_id": 9102,
+                "user_projection_run_id": "v3_n6_user_projection_20260615_after_hint_30m_policy_fix_v1",
+                "action_mark": "normal",
+                "source_action_run_id": "v3_n5_action_replay_20260615_attachment_rule_canonical_policy_fix_v1",
+            }
+        )
+        repo.app_filter_rows["board"][0].update(
+            {
+                "source_trade_date": "20260614",
+                "for_trade_date": "20260615",
+                "source_run_id": "condition_layer_20260614_source_20260614_v1",
+                "run_id": "condition_layer_20260614_source_20260614_v1",
+            }
+        )
+        repo.ui_v1_signals = [stale, active]
+        seed_effective_monitor_for_signal(repo, active)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?trade_date=20260615&asset_kind=board&q=881470")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [9102])
+        self.assertEqual(payload["items"][0]["source_run_id"], "v3_n5_action_replay_20260615_attachment_rule_canonical_policy_fix_v1")
+        self.assertNotEqual(payload["items"][0]["action_mark"], "30m_volume")
+        stale_detail = client.get("/api/n6/app/v1/signals/9101")
+        self.assertEqual(stale_detail.status_code, 404)
+
+    def test_active_ui_excludes_20260617_superseded_source_action_run(self) -> None:
+        client, repo, _, _ = build_client()
+        stale = copy.deepcopy(repo.ui_v1_signals[0])
+        stale.update(
+            {
+                "user_signal_projection_id": 9201,
+                "identity_key": "stock:SZ:300938",
+                "code": "300938",
+                "name": "信测标准",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,D",
+                "original_condition_key": "BUY:M,D",
+                "action_state": "executed",
+                "action_mark": "30m_volume",
+                "source_action_run_id": N2_D_ANCHOR_STALE_SOURCE_ACTION_RUN_IDS[0],
+                "source_action_event_type": "ActionExecuted",
+                "source_n4_run_id": N2_D_ANCHOR_STALE_SOURCE_TRIGGER_RUN_IDS[0],
+            }
+        )
+        stale["display_payload_json"] = {"trade_date": "20260617", "event_time": "2026-06-17T13:52:00+08:00"}
+        active = copy.deepcopy(stale)
+        active.update(
+            {
+                "user_signal_projection_id": 9202,
+                "action_mark": "normal",
+                "source_action_run_id": "action_consumer_execute_20260617_after_current_accepted_lineage_v1",
+            }
+        )
+        repo.ui_v1_signals = [stale, active]
+        seed_effective_monitor_for_signal(repo, active)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals?q=300938")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["user_signal_projection_id"] for item in payload["items"]], [9202])
+        self.assertEqual(payload["items"][0]["source_run_id"], "action_consumer_execute_20260617_after_current_accepted_lineage_v1")
+        stale_detail = client.get("/api/n6/app/v1/signals/9201")
+        self.assertEqual(stale_detail.status_code, 404)
+
+    def test_n4_message_item_marks_stale_hint_30m_trigger_lineage(self) -> None:
+        row = {
+            "outbox_id": 1,
+            "event_id": "evt_stale_n4",
+            "event_type": "TriggerMatched",
+            "event_schema_version": "v1",
+            "trade_date": "20260615",
+            "asset_kind": "board",
+            "identity_key": "board:TDX:881470",
+            "event_time": "2026-06-15 09:31:00+08:00",
+            "source_layer": "N4_trigger",
+            "source_run_id": HINT_30M_STALE_SOURCE_TRIGGER_RUN_IDS[0],
+            "dedup_key": "dedup",
+            "partition_key": "board:TDX:881470",
+            "payload_json": {"condition_key": "BUY_HINT", "trigger_mark_candidate": "30m_volume"},
+            "status": "pending",
+            "attempt_count": 0,
+        }
+
+        item = n4_message_item(row)
+
+        self.assertTrue(item["stale_lineage"])
+        self.assertEqual(item["lineage_classification"], "STALE")
+        self.assertIn({"label": "lineage_classification", "value": "STALE"}, item["output_fields"])
+
+    def test_n5_message_item_marks_stale_hint_30m_action_lineage(self) -> None:
+        row = {
+            "outbox_id": 2,
+            "event_id": "evt_stale_n5",
+            "event_type": "ActionExecuted",
+            "event_schema_version": "v1",
+            "trade_date": "20260615",
+            "asset_kind": "board",
+            "identity_key": "board:TDX:881470",
+            "event_time": "2026-06-15 09:31:00+08:00",
+            "source_layer": "N5_action",
+            "source_run_id": HINT_30M_STALE_SOURCE_ACTION_RUN_IDS[0],
+            "dedup_key": "dedup",
+            "partition_key": "board:TDX:881470",
+            "payload_json": {"condition_key": "BUY_HINT", "action_mark": "30m_volume"},
+            "status": "pending",
+            "attempt_count": 0,
+        }
+
+        item = n5_message_item(row)
+
+        self.assertTrue(item["stale_lineage"])
+        self.assertEqual(item["lineage_classification"], "STALE")
+        self.assertIn({"label": "lineage_classification", "value": "STALE"}, item["output_fields"])
+
+    def test_b_track_postgres_signals_adapter_is_independent_from_a_track_sql(self) -> None:
+        adapter_source = inspect.getsource(PostgresN6UserRepository.fetch_app_signals)
+        self.assertNotIn("fetch_ui_v1_signals", adapter_source)
+        self.assertNotIn("_ui_v1_signal_from_sql", adapter_source)
+        self.assertNotIn("common_event_outbox", adapter_source)
+        for forbidden_source in (
+            "stock_condition_basis",
+            "index_condition_basis",
+            "board_condition_basis",
+            "stock_condition_pool",
+            "index_condition_pool",
+            "board_condition_pool",
+            "stock_minute_target_scope",
+            "index_minute_target_scope",
+            "board_minute_target_scope",
+        ):
+            self.assertNotIn(forbidden_source, adapter_source)
+        self.assertIn("principal_id", adapter_source)
+        self.assertIn("principal_type", adapter_source)
+        self.assertIn("user_signal_projection", adapter_source)
+        self.assertIn("user_signal_card", adapter_source)
+
+    def test_b_track_postgres_signals_adapter_uses_effective_monitor_scope_and_for_trade_date(self) -> None:
+        adapter_source = "\n".join(
+            [
+                inspect.getsource(PostgresN6UserRepository.fetch_app_signals),
+                inspect.getsource(PostgresN6UserRepository.fetch_app_signal_detail),
+                inspect.getsource(PostgresN6UserRepository._app_v1_signal_where),
+                inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_clause),
+                inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_cte),
+                inspect.getsource(PostgresN6UserRepository._app_v1_monitor_validity_sql_exprs),
+                inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_select),
+            ]
+        )
+        self.assertIn("effective_monitor_scope", adapter_source)
+        self.assertIn("user_monitor_stock", adapter_source)
+        self.assertIn("user_monitor_index", adapter_source)
+        self.assertIn("user_monitor_board", adapter_source)
+        self.assertIn("valid_for_trade_date", adapter_source)
+        self.assertIn("v_n6_stock_condition_display_basis", adapter_source)
+        self.assertIn("v_n6_index_condition_display_basis", adapter_source)
+        self.assertIn("v_n6_board_condition_display_basis", adapter_source)
+        self.assertIn('historical_projection_mode = bool(filters.get("historical_projection_mode"))', adapter_source)
+        self.assertIn("include_expired=historical_projection_mode", adapter_source)
+        self.assertIn("include_realtime_scope=not historical_projection_mode", adapter_source)
+        self.assertIn("m.status <> 'removed'", adapter_source)
+        self.assertNotIn("common_event_outbox", adapter_source)
+        for forbidden_source in (
+            "stock_condition_basis",
+            "index_condition_basis",
+            "board_condition_basis",
+            "stock_condition_pool",
+            "index_condition_pool",
+            "board_condition_pool",
+            "stock_minute_target_scope",
+            "index_minute_target_scope",
+            "board_minute_target_scope",
+        ):
+            self.assertNotIn(forbidden_source, adapter_source)
+        metadata_source = inspect.getsource(PostgresN6UserRepository.fetch_app_signal_scope_metadata)
+        self.assertNotIn("fetch_app_monitor_items", metadata_source)
+        self.assertNotIn("v_n6_index_membership_fact", metadata_source)
+        self.assertNotIn("v_n6_board_membership_fact", metadata_source)
+
+    def test_b_track_postgres_realtime_scope_is_current_date_only(self) -> None:
+        repo = PostgresN6UserRepository("postgresql://example.invalid/n6")
+        monitor_columns = {
+            "monitor_id",
+            "principal_id",
+            "principal_type",
+            "user_id",
+            "asset_kind",
+            "identity_key",
+            "direction",
+            "status",
+            "source_type",
+            "source_run_id",
+            "source_snapshot_json",
+            "valid_source_trade_date",
+            "valid_for_trade_date",
+            "valid_source_run_id",
+        }
+
+        with patch.object(repo, "_app_v2_relation_exists", return_value=True), patch.object(
+            repo,
+            "_app_v2_monitor_columns",
+            return_value=monitor_columns,
+        ):
+            current_scope_sql = repo._app_v1_effective_monitor_scope_cte(
+                include_expired=False,
+                include_realtime_scope=True,
+            )
+            historical_scope_sql = repo._app_v1_effective_monitor_scope_cte(
+                include_expired=True,
+                include_realtime_scope=False,
+            )
+
+        fetch_source = inspect.getsource(PostgresN6UserRepository.fetch_app_signals)
+        self.assertIn("user_realtime_monitor_scope", current_scope_sql)
+        self.assertNotIn("user_realtime_monitor_scope", historical_scope_sql)
+        self.assertIn("historical_projection_mode = bool(filters.get(\"historical_projection_mode\"))", fetch_source)
+        self.assertIn("include_realtime_scope=not historical_projection_mode", fetch_source)
+
+    def test_b_track_postgres_signal_scope_uses_snapshot_fallback_when_lifecycle_columns_absent(self) -> None:
+        legacy_monitor_columns = {
+            table_name: [
+                "monitor_id",
+                "principal_id",
+                "principal_type",
+                "asset_kind",
+                "identity_key",
+                "direction",
+                "source_snapshot_json",
+            ]
+            for table_name in ("user_monitor_stock", "user_monitor_index", "user_monitor_board")
+        }
+        cursor = RecordingCursor(columns_by_table=legacy_monitor_columns)
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            sql_blob = "\n".join(
+                [
+                    repo._app_v1_effective_monitor_scope_cte(),
+                    repo._app_v1_all_monitor_scope_cte(),
+                ]
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        self.assertIn("m.source_snapshot_json->>'source_trade_date'", sql_blob)
+        self.assertIn("m.source_snapshot_json->>'for_trade_date'", sql_blob)
+        self.assertIn("COALESCE(m.source_snapshot_json->>'source_run_id', m.source_run_id)", sql_blob)
+        self.assertNotIn("m.valid_source_trade_date", sql_blob)
+        self.assertNotIn("m.valid_for_trade_date", sql_blob)
+        self.assertNotIn("m.valid_source_run_id", sql_blob)
+        self.assertIn("m.status = 'active'", sql_blob)
+        self.assertIn("NULLIF(m.source_snapshot_json->>'for_trade_date', '') IS NOT NULL", sql_blob)
+        self.assertNotIn("JOIN LATERAL", sql_blob)
+        self.assertNotIn("condition_basis", sql_blob)
+        self.assertNotIn("condition_pool", sql_blob)
+        self.assertNotIn("minute_target_scope", sql_blob)
+
+    def test_b_track_available_trade_dates_use_shared_message_pool_not_current_user_scope(self) -> None:
+        cursor = RecordingCursor()
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            with patch.object(repo, "_app_v1_signal_scope_relations_ready", return_value=True):
+                repo.fetch_app_signal_scope_metadata(principal_id=3, principal_type="human_user", user_id=3)
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        available_trade_date_sql = next(
+            sql
+            for sql, _ in cursor.executions
+            if "SELECT DISTINCT" in sql and " AS trade_date" in sql and "FROM user_signal_projection p" in sql
+        )
+        self.assertNotIn("p.user_id = %(user_id)s", available_trade_date_sql)
+        self.assertNotIn("n6_principal principal_scope", available_trade_date_sql)
+        self.assertNotIn("effective_monitor_scope", available_trade_date_sql)
+        self.assertIn("p.projection_status IN ('visible', 'blocked')", available_trade_date_sql)
+
+    def test_b_track_signal_detail_is_readonly_and_does_not_render_advice_or_order_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/signals/101")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Signal Detail")
+        self.assertEqual(payload["component_label"], "消息详情")
+        signal = payload["signal"]
+        self.assertEqual(signal["user_signal_projection_id"], 101)
+        self.assertEqual(signal["action_state"], "blocked")
+        self.assertEqual(signal["action_state_label"], "未确认")
+        self.assertEqual(signal["blocked_reason_label"], "价格确认未通过")
+        self.assertEqual(signal["event_label"], "市场动作未确认 (ActionBlocked)")
+        self.assertIn("市场动作未确认 (ActionBlocked)", signal["tags"])
+        self.assertEqual(signal["condition_trace"]["condition_key"], "SELL:M,W,D")
+        self.assertEqual(signal["condition_trace"]["rendering_policy"], "source_trace_only_not_advice")
+        self.assertFalse(signal["detail_page"]["buy_button_visible"])
+        self.assertFalse(signal["detail_page"]["sell_button_visible"])
+        self.assertFalse(signal["detail_page"]["one_click_order_visible"])
+        self.assertFalse(signal["detail_page"]["investment_advice"])
+        self.assertNotIn("一键下单", str(payload))
+        self.assertNotIn("提示股", str(payload))
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.ui_v1_signal_detail_reads, 0)
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+
+    def test_b_track_dashboard_api_shows_readonly_operating_overview(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Dashboard")
+        self.assertEqual(payload["component_label"], "B轨首页")
+        self.assertTrue(payload["readonly"])
+        self.assertIn("只读模式 · 不下单 · 不更新持仓 · 不构成投资建议", payload["safety_banner"])
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["principal"]["principal_type"], "admin")
+
+        overview = payload["today_overview"]
+        self.assertEqual(overview["trade_date"], "20260605")
+        self.assertEqual(overview["latest_projection_run_id"], "user_projection_shadow_20260603_v1")
+        self.assertEqual(overview["action_counts"]["ActionExecuted"], 1)
+        self.assertEqual(overview["action_counts"]["ActionBlocked"], 1)
+        self.assertEqual(overview["blocked_reason_distribution"]["price_confirmation_failed"], 1)
+        self.assertEqual(overview["blocked_reason_labels"]["price_confirmation_failed"], "价格确认未通过")
+        self.assertEqual(overview["wording"]["ActionExecuted"], "市场动作确认成立 (ActionExecuted)")
+        self.assertEqual(overview["wording"]["ActionBlocked"], "市场动作未确认 (ActionBlocked)")
+
+        self.assertEqual(payload["account_summary"]["account_name"], "Admin Virtual Account")
+        self.assertEqual(payload["account_summary"]["available_cash"], "1000000.00")
+        self.assertEqual(payload["signals_summary"]["total_count"], 2)
+        self.assertEqual(payload["signals_summary"]["latest_items"][0]["user_signal_projection_id"], 101)
+        guide = payload["user_operation_guide"]
+        self.assertEqual(guide["title"], "B轨新用户操作说明书")
+        self.assertIn("筛选中心", [step["title"] for step in guide["steps"]])
+        self.assertIn("监控对象", [step["title"] for step in guide["steps"]])
+        self.assertIn("实时监控范围", [step["title"] for step in guide["steps"]])
+        self.assertIn("消息列表", [step["title"] for step in guide["steps"]])
+        self.assertIn("卡片消息", [step["title"] for step in guide["steps"]])
+        self.assertIn("/n6/app/filter-center", [link["href"] for link in guide["quick_links"]])
+        self.assertIn("/n6/app/my-monitor", [link["href"] for link in guide["quick_links"]])
+        self.assertIn("/n6/app/realtime-scope", [link["href"] for link in guide["quick_links"]])
+        self.assertIn("/n6/app/signals", [link["href"] for link in guide["quick_links"]])
+        self.assertIn("/n6/app/messages", [link["href"] for link in guide["quick_links"]])
+        self.assertEqual(payload["watchlist_summary"]["status"], "readonly_shell")
+        self.assertFalse(payload["watchlist_summary"]["mutation_enabled"])
+        self.assertEqual(payload["ai_users_summary"]["mode"], "shadow_observer")
+        self.assertFalse(payload["ai_users_summary"]["generated_signal_enabled"])
+        self.assertFalse(payload["ai_users_summary"]["auto_trade_enabled"])
+        self.assertGreaterEqual(len(payload["future_modules_locked"]), 5)
+        self.assertTrue(all(item["locked"] for item in payload["future_modules_locked"]))
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertFalse(payload["side_effects"]["pnl_generated"])
+
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_virtual_account_reads, [(1, "admin")])
+        self.assertEqual(repo.app_cash_snapshot_reads, [1])
+        self.assertEqual(repo.app_position_reads, [])
+        self.assertEqual(repo.app_pnl_reads, [])
+        self.assertEqual(repo.ui_v1_dashboard_reads, 0)
+        self.assertEqual(repo.ui_v1_message_dashboard_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_b_track_dashboard_page_renders_operating_overview_without_trade_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("B轨首页", response.text)
+        self.assertIn("B轨新用户操作说明书", response.text)
+        self.assertIn("筛选中心=共享只读候选池", response.text)
+        self.assertIn("监控对象=当前用户自己的历史/日内监控范围", response.text)
+        self.assertIn("实时监控范围=当前用户自己的当前交易日实时消息默认范围", response.text)
+        self.assertIn("消息列表=共享消息池按当前用户范围过滤后的表格消息", response.text)
+        self.assertIn("卡片消息=共享卡片池按当前用户范围过滤后的卡片展示", response.text)
+        self.assertIn("共享筛选中心", response.text)
+        self.assertIn("当前用户范围过滤", response.text)
+        self.assertIn('href="/n6/app/filter-center"', response.text)
+        self.assertIn('href="/n6/app/my-monitor"', response.text)
+        self.assertIn('href="/n6/app/realtime-scope"', response.text)
+        self.assertIn('href="/n6/app/signals"', response.text)
+        self.assertIn('href="/n6/app/messages"', response.text)
+        self.assertNotIn("最新投影批次", response.text)
+        self.assertNotIn("user_projection_shadow_20260603_v1", response.text)
+        self.assertNotIn("市场动作确认成立 (ActionExecuted)", response.text)
+        self.assertNotIn("市场动作未确认 (ActionBlocked)", response.text)
+        self.assertNotIn("价格确认未通过", response.text)
+        self.assertNotIn("账户名称:", response.text)
+        self.assertNotIn("可展示现金:", response.text)
+        self.assertNotIn("我的监控消息:", response.text)
+        self.assertNotIn("未确认原因", response.text)
+        self.assertNotIn("关注数量:", response.text)
+        self.assertNotIn("可修改:", response.text)
+        self.assertNotIn("模式: 只读观察员", response.text)
+        self.assertNotIn("生成信号: False", response.text)
+        self.assertNotIn("自动交易: False", response.text)
+        self.assertNotIn("未来功能", response.text)
+        self.assertNotIn("方案 · 未开放", response.text)
+        self.assertNotIn("数据边界", response.text)
+        self.assertNotIn("allowlist adapter", response.text)
+        self.assertNotIn("一键下单", response.text)
+        self.assertNotIn("买入按钮", response.text)
+        self.assertNotIn("卖出按钮", response.text)
+        self.assertNotIn("真实收益", response.text)
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_position_reads, [])
+        self.assertEqual(repo.app_pnl_reads, [])
+
+    def test_b_track_watchlist_api_is_readonly_projection_from_reviewed_signals(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/watchlist")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Watchlist")
+        self.assertEqual(payload["component_label"], "关注池")
+        self.assertTrue(payload["readonly"])
+        self.assertFalse(payload["controls"]["add_enabled"])
+        self.assertFalse(payload["controls"]["delete_enabled"])
+        self.assertFalse(payload["controls"]["sort_persist_enabled"])
+        self.assertEqual(payload["controls"]["source"], "reviewed_n6_projection_only")
+        self.assertEqual(len(payload["items"]), 2)
+
+        first = payload["items"][0]
+        self.assertEqual(first["asset_kind"], "stock")
+        self.assertEqual(first["identity_key"], "stock:SZ:302132")
+        self.assertEqual(first["display_name"], "测试股份")
+        self.assertEqual(first["display_code"], "302132")
+        self.assertEqual(first["status"], "market_action_not_confirmed")
+        self.assertEqual(first["asset_kind_label"], "个股")
+        self.assertEqual(first["status_label"], "市场动作未确认")
+        self.assertEqual(first["action"]["action_state"], "blocked")
+        self.assertEqual(first["action"]["action_state_label"], "未确认")
+        self.assertEqual(first["action"]["action_mark"], "normal")
+        self.assertEqual(first["action"]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(first["action"]["blocked_reason_label"], "价格确认未通过")
+        self.assertEqual(first["condition_source"]["condition_key"], "SELL:M,W,D")
+        self.assertEqual(first["condition_source"]["rendering_policy"], "source_trace_only_not_advice")
+        self.assertIn("n6_display_stock_condition_cache", first["condition_source"]["display_cache_source"])
+        self.assertEqual(first["recent_signal"]["source_action_event_type"], "ActionBlocked")
+        self.assertEqual(first["recent_signal"]["event_label"], "市场动作未确认 (ActionBlocked)")
+        self.assertFalse(first["advice_enabled"])
+        self.assertFalse(first["order_enabled"])
+        self.assertFalse(first["position_update_enabled"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertFalse(payload["side_effects"]["pnl_generated"])
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_position_reads, [])
+        self.assertEqual(repo.app_pnl_reads, [])
+        self.assertEqual(repo.ui_v1_signal_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["user_watchlist"], 0)
+
+    def test_b_track_watchlist_page_renders_items_without_mutation_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/watchlist")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("关注池", response.text)
+        self.assertIn("stock:SZ:302132", response.text)
+        self.assertIn("stock:SH:600000", response.text)
+        self.assertIn("市场动作未确认", response.text)
+        self.assertIn("市场动作确认成立", response.text)
+        self.assertIn("价格确认未通过", response.text)
+        self.assertIn("n6_display_stock_condition_cache", response.text)
+        self.assertIn("市场动作未确认 (ActionBlocked)", response.text)
+        self.assertIn("市场动作确认成立 (ActionExecuted)", response.text)
+        self.assertNotIn("新增自选", response.text)
+        self.assertNotIn("删除自选", response.text)
+        self.assertNotIn("保存排序", response.text)
+        self.assertNotIn("一键下单", response.text)
+        self.assertNotIn("真实收益", response.text)
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.forbidden_writes["user_watchlist"], 0)
+
+    def test_b_track_v2_filter_api_returns_data_not_ready_without_raw_fallback(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/filter/stocks?direction=buy")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track V2 Stock Filter")
+        self.assertEqual(payload["component_label"], "个股筛选")
+        self.assertEqual(payload["status"], "data_not_ready")
+        self.assertEqual(payload["empty_state"], "筛选数据尚未准备完成")
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["principal"]["principal_type"], "admin")
+        self.assertTrue(payload["readonly"])
+        self.assertEqual(payload["controls"]["add_monitor_label"], "加入个股监控")
+        self.assertTrue(payload["controls"]["add_monitor_enabled"])
+        self.assertTrue(payload["controls"]["write_route_registered"])
+        self.assertTrue(payload["controls"]["write_route_enabled"])
+        self.assertIn("v_n6_stock_condition_display_basis", payload["source_policy"]["allowed_sources"])
+        self.assertIn("n6_stock_display_cache", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("condition_basis", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("condition_pool", payload["source_policy"]["forbidden_sources"])
+        self.assertIn("minute_target_scope", payload["source_policy"]["forbidden_sources"])
+        self.assertFalse(payload["source_policy"]["raw_k_read"])
+        self.assertFalse(payload["source_policy"]["n1_raw_facts_read"])
+        self.assertFalse(payload["source_policy"]["n4_raw_bypass_read"])
+        self.assertFalse(payload["source_policy"]["n5_raw_bypass_read"])
+        self.assertFalse(payload["source_policy"]["condition_basis_read"])
+        self.assertFalse(payload["source_policy"]["condition_pool_read"])
+        self.assertFalse(payload["source_policy"]["minute_target_scope_read"])
+        self.assertFalse(payload["source_policy"]["direct_live_market_read"])
+        self.assertFalse(payload["source_policy"]["unreviewed_outbox_read"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["outbox_consumed"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertEqual(repo.app_filter_reads, [(1, "admin", 1, "stock", {"direction": "buy"})])
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_n6_local_display_cache_schema_artifacts_are_safe_and_complete(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        schema_sql = (root / "sql/N6_local_display_cache_schema.sql").read_text()
+        rollback_sql = (root / "sql/N6_local_display_cache_schema_rollback.sql").read_text()
+        implementation = json.loads((root / "docs/N6_LOCAL_DISPLAY_CACHE_SCHEMA_IMPLEMENTATION.json").read_text())
+
+        cache_tables = [
+            "n6_display_cache_run",
+            "n6_stock_display_cache",
+            "n6_index_display_cache",
+            "n6_board_display_cache",
+            "n6_index_membership_display_cache",
+            "n6_board_membership_display_cache",
+        ]
+        required_common_fields = [
+            "cache_run_id",
+            "cache_version",
+            "source_condition_run_id",
+            "source_trade_date",
+            "source_table",
+            "source_version",
+            "synced_at",
+            "row_hash",
+        ]
+        required_display_fields = [
+            "identity_key",
+            "code",
+            "name",
+            "display_title",
+            "display_summary",
+            "condition_key",
+            "direction",
+            "period_summary_json",
+            "label_json",
+            "explanation_json",
+            "quality_status",
+        ]
+
+        for table in cache_tables:
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", schema_sql)
+            self.assertIn(f"DROP TABLE IF EXISTS {table}", rollback_sql)
+
+        for field in required_common_fields:
+            self.assertIn(field, schema_sql)
+
+        for field in required_display_fields:
+            self.assertIn(field, schema_sql)
+
+        for index_hint in [
+            "idx_n6_display_cache_run_active",
+            "idx_n6_stock_display_cache_identity",
+            "idx_n6_stock_display_cache_direction_condition",
+            "idx_n6_index_display_cache_identity",
+            "idx_n6_board_display_cache_identity_board_type",
+            "idx_n6_index_membership_display_cache_stock",
+            "idx_n6_board_membership_display_cache_parent_board_type",
+        ]:
+            self.assertIn(f"CREATE INDEX IF NOT EXISTS {index_hint}", schema_sql)
+
+        self.assertIn("CHECK (asset_kind = 'stock')", schema_sql)
+        self.assertIn("CHECK (asset_kind = 'index')", schema_sql)
+        self.assertIn("CHECK (asset_kind = 'board')", schema_sql)
+        self.assertIn("CHECK (direction IN ('buy', 'sell'))", schema_sql)
+        self.assertIn("CHECK (status IN ('building', 'passed', 'failed', 'rolled_back'))", schema_sql)
+        self.assertIn("n6_display_cache_run_active_once", schema_sql)
+        self.assertNotIn("condition_basis", schema_sql)
+        self.assertNotIn("condition_pool", schema_sql)
+        self.assertNotIn("minute_target_scope", schema_sql)
+        self.assertIsNone(re.search(r"\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP)\b", schema_sql, flags=re.IGNORECASE))
+
+        guard_position = rollback_sql.index("RAISE EXCEPTION")
+        first_drop_position = rollback_sql.index("DROP TABLE IF EXISTS")
+        self.assertLess(guard_position, first_drop_position)
+        self.assertIn("N6 local display cache schema rollback blocked", rollback_sql)
+        self.assertNotIn("stock_condition_display_basis", rollback_sql)
+        self.assertNotIn("index_condition_display_basis", rollback_sql)
+        self.assertNotIn("board_condition_display_basis", rollback_sql)
+        self.assertNotIn("common_event_outbox", rollback_sql)
+        self.assertNotIn("common_event_inbox", rollback_sql)
+        self.assertNotIn("common_event_consumer_checkpoint", rollback_sql)
+        self.assertNotIn("user_signal_projection", rollback_sql)
+        self.assertNotIn("user_signal_card", rollback_sql)
+
+        self.assertEqual(implementation["result"], "IMPLEMENTATION_PASS")
+        self.assertEqual(implementation["layer_role"], "N6_user")
+        self.assertEqual(implementation["schema_sql"], "sql/N6_local_display_cache_schema.sql")
+        self.assertEqual(implementation["rollback_sql"], "sql/N6_local_display_cache_schema_rollback.sql")
+        self.assertEqual(implementation["created_schema"], cache_tables)
+        self.assertFalse(implementation["side_effects"]["sync_executed"])
+        self.assertFalse(implementation["side_effects"]["cache_activated"])
+        self.assertEqual(implementation["next_gate"], "N6_LOCAL_DISPLAY_CACHE_SYNC_DRY_RUN_GATE")
+
+    def test_n6_realtime_scope_schema_seed_uses_active_user_accounts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        schema_sql = (root / "sql/N6_user_realtime_monitor_scope_schema_seed_migration.sql").read_text()
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS user_realtime_monitor_scope", schema_sql)
+        self.assertIn("FROM user_account u", schema_sql)
+        self.assertNotIn("FROM n6_principal", schema_sql)
+        self.assertIn("u.status = 'active'", schema_sql)
+        self.assertIn("WHEN u.role = 'admin' THEN 'admin'", schema_sql)
+        self.assertIn("ELSE 'human_user'", schema_sql)
+        self.assertIn("u.user_id AS principal_id", schema_sql)
+        self.assertIn("u.user_id AS user_id", schema_sql)
+        self.assertIn("ON CONFLICT (principal_id, principal_type, user_id, asset_kind, identity_key)", schema_sql)
+        self.assertIn("DO NOTHING", schema_sql)
+        self.assertEqual(schema_sql.count("('index', 'index:"), 9)
+        for identity_key in [
+            "index:SH:000001",
+            "index:SH:000016",
+            "index:SH:000300",
+            "index:SH:000688",
+            "index:SH:000852",
+            "index:SH:000905",
+            "index:SZ:399001",
+            "index:SZ:399006",
+            "index:SZ:399303",
+        ]:
+            self.assertIn(identity_key, schema_sql)
+
+    def test_b_track_v2_filter_apis_return_display_cache_rows_and_memberships(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_response = client.get("/api/n6/app/v2/filter/stocks?direction=buy&year_overheat_level=低位")
+        board_response = client.get("/api/n6/app/v2/filter/boards?direction=buy&board_type=tdx_industry")
+        index_response = client.get("/api/n6/app/v2/filter/indexes?direction=buy")
+        board_members_response = client.get(
+            "/api/n6/app/v2/filter/board-members?identity_key=board:TDX:881001"
+        )
+        index_members_response = client.get(
+            "/api/n6/app/v2/filter/index-members?identity_key=index:SH:000300"
+        )
+
+        self.assertEqual(stock_response.status_code, 200)
+        stock_payload = stock_response.json()
+        self.assertEqual(stock_payload["status"], "ready")
+        self.assertEqual(stock_payload["total_count"], 1)
+        self.assertEqual(stock_payload["filtered_count"], 1)
+        self.assertEqual(stock_payload["returned_count"], 1)
+        stock_row = stock_payload["rows"][0]
+        self.assertEqual(stock_row["identity_key"], "stock:SH:600000")
+        self.assertEqual(stock_payload["items"][0]["asset_kind_label"], "个股")
+        self.assertEqual(stock_payload["default_monitor_direction_label"], "买向观察")
+        self.assertEqual(stock_row["last_signal_state"], "blocked")
+        self.assertEqual(stock_payload["items"][0]["source_table"], "n6_display_stock_condition_cache")
+        self.assertEqual(stock_row["condition_key"], "BUY:M,W,D")
+        self.assertEqual(stock_row["selected_directions"], ["buy"])
+        self.assertEqual(stock_row["selected_condition_keys"], ["BUY:M,W,D"])
+        self.assertEqual(stock_row["selected_signal_types"], ["BUY"])
+        self.assertEqual(stock_row["year_overheat_level"], "低位")
+        self.assertEqual(stock_payload["schema"], list(stock_row.keys()))
+
+        board_payload = board_response.json()
+        self.assertEqual(board_payload["component_label"], "板块筛选")
+        self.assertEqual(board_payload["total_count"], 1)
+        self.assertEqual(board_payload["filtered_count"], 1)
+        self.assertEqual(board_payload["returned_count"], 1)
+        self.assertEqual(board_payload["items"][0]["source_table"], "n6_display_board_condition_cache")
+        self.assertEqual(board_payload["rows"][0]["board_type"], "tdx_industry")
+        self.assertEqual(board_payload["controls"]["add_monitor_label"], "加入板块监控")
+        self.assertTrue(board_payload["controls"]["members_lookup_enabled"])
+
+        index_payload = index_response.json()
+        self.assertEqual(index_payload["component_label"], "指数筛选")
+        self.assertEqual(index_payload["total_count"], 1)
+        self.assertEqual(index_payload["filtered_count"], 1)
+        self.assertEqual(index_payload["returned_count"], 1)
+        self.assertEqual(index_payload["items"][0]["source_table"], "n6_display_index_condition_cache")
+        self.assertEqual(index_payload["controls"]["add_monitor_label"], "加入指数监控")
+        self.assertTrue(index_payload["controls"]["members_lookup_enabled"])
+
+        board_members_payload = board_members_response.json()
+        self.assertEqual(board_members_payload["component_label"], "板块成分股")
+        self.assertEqual(board_members_payload["status"], "ready")
+        self.assertEqual(board_members_payload["parent_identity_key"], "board:TDX:881001")
+        self.assertEqual(board_members_payload["items"][0]["stock_identity_key"], "stock:SH:600000")
+        self.assertEqual(board_members_payload["source_table"], "n6_display_board_membership_cache")
+
+        index_members_payload = index_members_response.json()
+        self.assertEqual(index_members_payload["component_label"], "指数成分股")
+        self.assertEqual(index_members_payload["status"], "ready")
+        self.assertEqual(index_members_payload["parent_identity_key"], "index:SH:000300")
+        self.assertEqual(index_members_payload["items"][0]["stock_code"], "600000")
+        self.assertEqual(index_members_payload["source_table"], "n6_display_index_membership_cache")
+
+    def test_b_track_v2_filter_api_returns_condition_display_rows_with_fixed_display_columns(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0].update(
+            {
+                "exchange": "SH",
+                "display_name": "浦发银行",
+                "dynamic_numeric_metric": "12.34",
+                "dynamic_date_metric": "20260609",
+                "dynamic_text_metric": "alpha",
+                "nullable_dynamic_metric": None,
+                "condition_summary_json": {"metric": "passed"},
+                "raw_json": {"stock_identity_key": "stock:SH:600000", "raw": True},
+            }
+        )
+        repo.app_filter_rows["index"][0].update(
+            {
+                "exchange": "SH",
+                "display_name": "沪深300",
+                "dynamic_numeric_metric": "8.88",
+                "dynamic_date_metric": "20260608",
+                "condition_summary_json": {"metric": "passed"},
+            }
+        )
+        repo.app_filter_rows["board"][0].update(
+            {
+                "display_name": "银行",
+                "dynamic_numeric_metric": "3.21",
+                "dynamic_date_metric": "20260607",
+                "condition_summary_json": {"metric": "passed"},
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        index_payload = client.get("/api/n6/app/v2/filter/indexes").json()
+        board_payload = client.get("/api/n6/app/v2/filter/boards").json()
+
+        for payload in (stock_payload, index_payload, board_payload):
+            self.assertIn("rows", payload)
+            self.assertIn("schema", payload)
+            self.assertIn("columns", payload)
+            self.assertNotIn("display_columns", payload)
+            row = payload["rows"][0]
+            self.assertEqual(payload["schema"], list(row.keys()))
+            self.assertNotEqual([column["key"] for column in payload["columns"]], payload["schema"])
+            self.assertTrue(all(column["sortable"] for column in payload["columns"]))
+            self.assertTrue(all(f"sort={column['key']}" in column["sort_href"] for column in payload["columns"]))
+            self.assertNotIn("_include_all_fields", row)
+            self.assertIn("condition_summary_json", row)
+            self.assertIn("dynamic_numeric_metric", row)
+        self.assertIn("raw_json", stock_payload["rows"][0])
+
+        stock_columns = {column["key"]: column for column in stock_payload["columns"]}
+        stock_cells = {cell["key"]: cell for cell in stock_payload["grid_rows"][0]["cells"]}
+        expected_stock_columns = [
+            key for key in n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["stock"] if key in stock_payload["schema"]
+        ]
+        self.assertEqual([column["key"] for column in stock_payload["columns"]], expected_stock_columns)
+        self.assertNotIn("dynamic_numeric_metric", stock_columns)
+        self.assertNotIn("dynamic_numeric_metric", stock_cells)
+        self.assertEqual(stock_cells["display_name"]["value"], "浦发银行")
+        self.assertEqual(stock_payload["controls"]["add_monitor_label"], "加入个股监控")
+        self.assertEqual(index_payload["controls"]["add_monitor_label"], "加入指数监控")
+        self.assertEqual(board_payload["controls"]["add_monitor_label"], "加入板块监控")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_pages_hide_trace_columns_from_default_table(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        for rows in repo.app_filter_rows.values():
+            for row in rows:
+                row.setdefault("source_trade_date", "20260608")
+                row.setdefault("exchange", "SH")
+                row.setdefault("display_name", "测试名称")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for page in ("stocks", "indexes", "boards"):
+            with self.subTest(page=page):
+                response = client.get(f"/n6/app/filter-center/{page}")
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn('data-sort-key="source_trade_date"', response.text)
+                self.assertNotIn('data-field-key="source_trade_date"', response.text)
+                self.assertNotIn('data-sort-key="exchange"', response.text)
+                self.assertNotIn('data-field-key="exchange"', response.text)
+                self.assertIn('data-sort-key="for_trade_date"', response.text)
+                self.assertIn('data-sort-key="identity_key"', response.text)
+                self.assertIn('data-sort-key="display_name"', response.text)
+
+    def test_b_track_v2_filter_percent_fields_display_two_decimal_places(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0].update(
+            {
+                "buy_expected_return_pct": "38.10909155118766619718309859",
+                "up_secondary_expected_return_pct": "7.909258123850398528510116493",
+                "cash_realization_rate": "0.37715517241379310344827586",
+            }
+        )
+        repo.app_filter_rows["index"][0].update(
+            {
+                "buy_expected_return_pct": "3.603189205765102729224164367",
+                "up_secondary_expected_return_pct": "12.16747863044874508742980936",
+            }
+        )
+        repo.app_filter_rows["board"][0].update(
+            {
+                "buy_expected_return_pct": "26.43444592423763953153103676",
+                "up_secondary_expected_return_pct": "10.59486427577982992277969884",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        index_payload = client.get("/api/n6/app/v2/filter/indexes").json()
+        board_payload = client.get("/api/n6/app/v2/filter/boards").json()
+
+        stock_cells = {cell["key"]: cell for cell in stock_payload["grid_rows"][0]["cells"]}
+        index_cells = {cell["key"]: cell for cell in index_payload["grid_rows"][0]["cells"]}
+        board_cells = {cell["key"]: cell for cell in board_payload["grid_rows"][0]["cells"]}
+        self.assertEqual(stock_cells["buy_expected_return_pct"]["value"], "38.11")
+        self.assertEqual(stock_cells["up_secondary_expected_return_pct"]["value"], "7.91")
+        self.assertEqual(stock_cells["cash_realization_rate"]["value"], "0.38")
+        self.assertEqual(index_cells["buy_expected_return_pct"]["value"], "3.60")
+        self.assertEqual(index_cells["up_secondary_expected_return_pct"]["value"], "12.17")
+        self.assertEqual(board_cells["buy_expected_return_pct"]["value"], "26.43")
+        self.assertEqual(board_cells["up_secondary_expected_return_pct"]["value"], "10.59")
+        self.assertEqual(stock_payload["rows"][0]["buy_expected_return_pct"], "38.10909155118766619718309859")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_numeric_fields_display_at_most_two_decimal_places(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0].update(
+            {
+                "buy_target_price": "15.01343344034499350862073709",
+                "up_secondary_target_price": "20.000000000000000000000",
+                "score": "51.7071242651",
+            }
+        )
+        repo.app_filter_rows["index"][0].update(
+            {
+                "buy_target_price": "12.16747863044874508742980936",
+                "level_up_score": "87.0000000000000000000",
+            }
+        )
+        repo.app_filter_rows["board"][0].update(
+            {
+                "buy_target_price": "26.43444592423763953153103676",
+                "level_up_score": "311.0000000000000000000",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        index_payload = client.get("/api/n6/app/v2/filter/indexes").json()
+        board_payload = client.get("/api/n6/app/v2/filter/boards").json()
+
+        stock_cells = {cell["key"]: cell for cell in stock_payload["grid_rows"][0]["cells"]}
+        index_cells = {cell["key"]: cell for cell in index_payload["grid_rows"][0]["cells"]}
+        board_cells = {cell["key"]: cell for cell in board_payload["grid_rows"][0]["cells"]}
+        self.assertEqual(stock_cells["buy_target_price"]["value"], "15.01")
+        self.assertEqual(stock_cells["up_secondary_target_price"]["value"], "20")
+        self.assertEqual(stock_cells["score"]["value"], "51.71")
+        self.assertEqual(index_cells["buy_target_price"]["value"], "12.17")
+        self.assertEqual(index_cells["level_up_score"]["value"], "87")
+        self.assertEqual(board_cells["buy_target_price"]["value"], "26.43")
+        self.assertEqual(board_cells["level_up_score"]["value"], "311")
+        self.assertEqual(stock_payload["rows"][0]["buy_target_price"], "15.01343344034499350862073709")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_expected_return_slider_filters_all_asset_pages(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        asset_page = {"stock": "stocks", "index": "indexes", "board": "boards"}
+        for asset_kind, rows in repo.app_filter_rows.items():
+            low = dict(rows[0])
+            low.update(
+                {
+                    "identity_key": f"{asset_kind}:LOW",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:LOW",
+                    "code": "000001",
+                    "display_code": "000001",
+                    "display_name": f"{asset_kind}-低收益",
+                    "buy_expected_return_pct": "29.99",
+                }
+            )
+            high = dict(rows[0])
+            high.update(
+                {
+                    "identity_key": f"{asset_kind}:HIGH",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:HIGH",
+                    "code": "000002",
+                    "display_code": "000002",
+                    "display_name": f"{asset_kind}-高收益",
+                    "buy_expected_return_pct": "30.00",
+                }
+            )
+            repo.app_filter_rows[asset_kind] = [low, high]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for asset_kind, page in asset_page.items():
+            with self.subTest(asset_kind=asset_kind):
+                response = client.get(f"/api/n6/app/v2/filter/{page}?buy_expected_return_pct_min=30")
+                payload = response.json()
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(payload["filtered_count"], 1)
+                self.assertEqual(payload["rows"][0]["identity_key"], f"{asset_kind}:HIGH")
+                self.assertEqual(payload["expected_return_filter"]["value"], "30")
+                self.assertEqual(payload["expected_return_filter"]["label"], "预期收益率")
+
+    def test_b_track_v2_filter_expected_return_slider_page_preserves_filters_and_bulk_payload(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?buy_expected_return_pct_min=30"
+            "&year_overheat_level=volume_up"
+            "&sort=buy_expected_return_pct"
+            "&sort_dir=desc"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("预期收益率", response.text)
+        self.assertIn('type="range"', response.text)
+        self.assertIn('name="buy_expected_return_pct_min"', response.text)
+        self.assertIn('min="0"', response.text)
+        self.assertIn('max="100"', response.text)
+        self.assertIn('step="1"', response.text)
+        self.assertIn("显示筛选结果", response.text)
+        self.assertIn("预期收益率 &gt;= 30%", response.text)
+        self.assertIn('name="year_overheat_level" value="volume_up"', response.text)
+        self.assertIn('name="sort" value="buy_expected_return_pct"', response.text)
+        self.assertIn("buy_expected_return_pct_min", response.text)
+        self.assertIn("&#34;30&#34;", response.text)
+
+    def test_b_track_v2_board_filter_links_filtered_result_to_stock_filter(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        base = dict(repo.app_filter_rows["board"][0])
+        repo.app_filter_rows["board"] = [
+            {
+                **base,
+                "identity_key": "board:LOW",
+                "board_identity_key": "board:LOW",
+                "display_name": "低收益板块",
+                "for_trade_date": "20260706",
+                "buy_expected_return_pct": "12",
+                "year_overheat_level": "volume_up",
+            },
+            {
+                **base,
+                "identity_key": "board:HIGH",
+                "board_identity_key": "board:HIGH",
+                "display_name": "高收益板块",
+                "for_trade_date": "20260706",
+                "buy_expected_return_pct": "28",
+                "year_overheat_level": "volume_up",
+            },
+            {
+                **base,
+                "identity_key": "board:OTHER",
+                "board_identity_key": "board:OTHER",
+                "display_name": "其它板块",
+                "for_trade_date": "20260706",
+                "buy_expected_return_pct": "45",
+                "year_overheat_level": "flat",
+            },
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/boards"
+            "?for_trade_date=20260706"
+            "&buy_expected_return_pct_min=17"
+            "&year_overheat_level=volume_up"
+            "&sort=buy_expected_return_pct"
+            "&sort_dir=desc"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("按当前板块筛选结果查看个股", response.text)
+        self.assertIn("来源板块筛选结果：1 个板块", response.text)
+        self.assertIn("/n6/app/filter-center/stocks?", response.text)
+        self.assertIn("source_asset_type=board", response.text)
+        self.assertIn("source_identity_keys=board%3AHIGH", response.text)
+        self.assertNotIn("source_identity_keys=board%3ALOW", response.text)
+        self.assertIn("for_trade_date=20260706", response.text)
+        self.assertIn("buy_expected_return_pct_min=17", response.text)
+        self.assertIn("year_overheat_level=volume_up", response.text)
+        self.assertIn("sort=buy_expected_return_pct", response.text)
+        self.assertIn("sort_dir=desc", response.text)
+
+        stock_response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260706"
+            "&source_asset_type=board"
+            "&source_identity_keys=board:HIGH"
+            "&buy_expected_return_pct_min=17"
+            "&year_overheat_level=volume_up"
+            "&sort=buy_expected_return_pct"
+            "&sort_dir=desc"
+        )
+
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertIn("来源板块筛选结果：1 个板块", stock_response.text)
+        self.assertIn("source_asset_type", stock_response.text)
+        self.assertIn("board:HIGH", stock_response.text)
+        self.assertIn("&#34;source_asset_type&#34;: &#34;board&#34;", stock_response.text)
+        self.assertIn("&#34;source_identity_keys&#34;: [&#34;board:HIGH&#34;]", stock_response.text)
+        self.assertIn("&#34;buy_expected_return_pct_min&#34;: &#34;17&#34;", stock_response.text)
+
+    def test_b_track_v2_board_filter_link_uses_all_filtered_rows_not_page_limit(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        base = dict(repo.app_filter_rows["board"][0])
+        repo.app_filter_rows["board"] = [
+            {
+                **base,
+                "identity_key": f"board:TDX:{881000 + index}",
+                "board_identity_key": f"board:TDX:{881000 + index}",
+                "for_trade_date": "20260706",
+                "buy_expected_return_pct": "30",
+                "year_overheat_level": "volume_up",
+            }
+            for index in range(1, 205)
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/boards"
+            "?for_trade_date=20260706"
+            "&buy_expected_return_pct_min=17"
+            "&year_overheat_level=volume_up"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("来源板块筛选结果：204 个板块", response.text)
+        self.assertIn("source_identity_keys=board%3ATDX%3A881001%2Cboard%3ATDX%3A881002", response.text)
+        self.assertIn("board%3ATDX%3A881204", response.text)
+
+    def test_b_track_v2_filter_expected_return_invalid_value_is_ignored(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        base = dict(repo.app_filter_rows["stock"][0])
+        high = dict(base)
+        high["identity_key"] = "stock:HIGH"
+        high["stock_identity_key"] = "stock:HIGH"
+        high["buy_expected_return_pct"] = "80"
+        low = dict(base)
+        low["identity_key"] = "stock:LOW"
+        low["stock_identity_key"] = "stock:LOW"
+        low["buy_expected_return_pct"] = "10"
+        repo.app_filter_rows["stock"] = [high, low]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/filter/stocks?buy_expected_return_pct_min=abc")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["filtered_count"], 2)
+        self.assertEqual(response.json()["expected_return_filter"]["value"], "")
+
+    def test_b_track_v2_filter_level_up_recommendation_filters_board_and_stock_by_index_max(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        index_base = dict(repo.app_filter_rows["index"][0])
+        board_base = dict(repo.app_filter_rows["board"][0])
+        stock_base = dict(repo.app_filter_rows["stock"][0])
+        repo.app_filter_rows["index"] = [
+            {**index_base, "identity_key": "index:LOW", "index_identity_key": "index:LOW", "for_trade_date": "20260706", "level_up_score": "64"},
+            {**index_base, "identity_key": "index:MAX", "index_identity_key": "index:MAX", "for_trade_date": "20260706", "level_up_score": "87"},
+            {**index_base, "identity_key": "index:OLD", "index_identity_key": "index:OLD", "for_trade_date": "20260703", "level_up_score": "999"},
+        ]
+        repo.app_filter_rows["board"] = [
+            {**board_base, "identity_key": "board:LOW", "board_identity_key": "board:LOW", "for_trade_date": "20260706", "level_up_score": "86", "buy_expected_return_pct": "80"},
+            {**board_base, "identity_key": "board:EDGE", "board_identity_key": "board:EDGE", "for_trade_date": "20260706", "level_up_score": "87", "buy_expected_return_pct": "10"},
+            {**board_base, "identity_key": "board:HIGH", "board_identity_key": "board:HIGH", "for_trade_date": "20260706", "level_up_score": "90", "buy_expected_return_pct": "40"},
+        ]
+        repo.app_filter_rows["stock"] = [
+            {**stock_base, "identity_key": "stock:LOW", "stock_identity_key": "stock:LOW", "for_trade_date": "20260706", "level_up_score": "50"},
+            {**stock_base, "identity_key": "stock:EDGE", "stock_identity_key": "stock:EDGE", "for_trade_date": "20260706", "level_up_score": "87"},
+            {**stock_base, "identity_key": "stock:HIGH", "stock_identity_key": "stock:HIGH", "for_trade_date": "20260706", "level_up_score": "120"},
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        board_response = client.get("/api/n6/app/v2/filter/boards?level_up_score_recommendation=index_max")
+        stock_response = client.get("/api/n6/app/v2/filter/stocks?level_up_score_recommendation=index_max")
+        stacked_response = client.get(
+            "/api/n6/app/v2/filter/boards"
+            "?level_up_score_recommendation=index_max"
+            "&buy_expected_return_pct_min=30"
+        )
+
+        self.assertEqual(board_response.status_code, 200)
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertEqual(
+            [row["identity_key"] for row in board_response.json()["rows"]],
+            ["board:EDGE", "board:HIGH"],
+        )
+        self.assertEqual(
+            [row["identity_key"] for row in stock_response.json()["rows"]],
+            ["stock:EDGE", "stock:HIGH"],
+        )
+        self.assertEqual(board_response.json()["level_up_recommendation_filter"]["threshold"], "87")
+        self.assertEqual(stock_response.json()["level_up_recommendation_filter"]["threshold"], "87")
+        self.assertEqual([row["identity_key"] for row in stacked_response.json()["rows"]], ["board:HIGH"])
+
+    def test_b_track_v2_filter_level_up_recommendation_page_button_and_bulk_payload(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["index"][0]["level_up_score"] = "87"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        board_response = client.get(
+            "/n6/app/filter-center/boards"
+            "?level_up_score_recommendation=index_max"
+            "&buy_expected_return_pct_min=30"
+            "&sort=level_up_score"
+            "&sort_dir=desc"
+        )
+        stock_response = client.get("/n6/app/filter-center/stocks")
+        index_response = client.get("/n6/app/filter-center/indexes")
+
+        self.assertEqual(board_response.status_code, 200)
+        self.assertIn("推荐板块", board_response.text)
+        self.assertIn("推荐板块：level_up_score &gt;= 87", board_response.text)
+        self.assertIn("清除推荐筛选", board_response.text)
+        self.assertIn("level_up_score_recommendation", board_response.text)
+        self.assertIn("index_max", board_response.text)
+        self.assertIn("buy_expected_return_pct_min", board_response.text)
+        self.assertIn("&#34;level_up_score_recommendation&#34;", board_response.text)
+        self.assertIn("推荐个股", stock_response.text)
+        self.assertNotIn("推荐指数", index_response.text)
+
+    def test_b_track_v2_filter_level_up_recommendation_missing_index_max_fails_closed(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["index"] = []
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/filter/boards?level_up_score_recommendation=index_max")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filtered_count"], 0)
+        self.assertEqual(payload["rows"], [])
+        self.assertFalse(payload["level_up_recommendation_filter"]["available"])
+        self.assertEqual(
+            payload["level_up_recommendation_filter"]["blocker"],
+            "index_level_up_score_max_unavailable",
+        )
+
+    def test_b_track_v2_filter_level_up_recommendation_invalid_value_is_ignored(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/filter/boards?level_up_score_recommendation=bad")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["filtered_count"], len(repo.app_filter_rows["board"]))
+        self.assertFalse(response.json()["level_up_recommendation_filter"]["active"])
+
+    def test_b_track_v2_filter_api_schema_contains_prd_required_fields_without_cropping(self) -> None:
+        stock_required_fields = [
+            "for_trade_date",
+            "source_trade_date",
+            "identity_key",
+            "exchange",
+            "display_name",
+            "buy_expected_return_pct",
+            "up_secondary_expected_return_pct",
+            "buy_target_price",
+            "up_secondary_target_price",
+            "up_sell_reference_period",
+            "score",
+            "pe_core",
+            "prev_up_str",
+            "prev_dn_str",
+            "level_up_score",
+            "period_transition_y",
+            "period_transition_q",
+            "period_transition_m",
+            "period_transition_w",
+            "period_transition_d",
+            "cash_realization_rate",
+            "revenue_yoy_pct",
+            "core_profit_yoy_pct",
+            "report_core_revenue",
+            "report_core_profit",
+            "core_profit_ttm",
+            "core_gt_revenue_yoy",
+            "revenue_growth_streak_q",
+            "core_growth_streak_q",
+            "core_gt_revenue_streak_q",
+            "forecast_type",
+            "forecast_score",
+        ]
+        index_board_required_fields = [
+            "for_trade_date",
+            "source_trade_date",
+            "identity_key",
+            "exchange",
+            "display_name",
+            "buy_expected_return_pct",
+            "up_secondary_expected_return_pct",
+            "buy_target_price",
+            "up_secondary_target_price",
+            "up_sell_reference_period",
+            "prev_up_str",
+            "prev_dn_str",
+            "level_up_score",
+            "period_transition_y",
+            "period_transition_q",
+            "period_transition_m",
+            "period_transition_w",
+            "period_transition_d",
+        ]
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        for field in stock_required_fields:
+            repo.app_filter_rows["stock"][0].setdefault(field, f"stock-{field}")
+        for asset_kind in ("index", "board"):
+            for field in index_board_required_fields:
+                repo.app_filter_rows[asset_kind][0].setdefault(field, f"{asset_kind}-{field}")
+            repo.app_filter_rows[asset_kind][0]["raw_extra_field_not_in_prd"] = "must_passthrough"
+        repo.app_filter_rows["stock"][0]["raw_extra_field_not_in_prd"] = "must_passthrough"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        index_payload = client.get("/api/n6/app/v2/filter/indexes").json()
+        board_payload = client.get("/api/n6/app/v2/filter/boards").json()
+
+        self.assertTrue(set(stock_required_fields).issubset(set(stock_payload["schema"])))
+        self.assertTrue(set(index_board_required_fields).issubset(set(index_payload["schema"])))
+        self.assertTrue(set(index_board_required_fields).issubset(set(board_payload["schema"])))
+        expected_columns = {
+            "stock": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["stock"]),
+            "index": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["index"]),
+            "board": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["board"]),
+        }
+        for asset_kind, payload in (("stock", stock_payload), ("index", index_payload), ("board", board_payload)):
+            self.assertIn("raw_extra_field_not_in_prd", payload["schema"])
+            self.assertEqual([column["key"] for column in payload["columns"]], expected_columns[asset_kind])
+            self.assertEqual(list(payload["rows"][0].keys()), payload["schema"])
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_api_and_page_handle_empty_dynamic_schema(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"] = []
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        page_response = client.get("/n6/app/filter-center/stocks")
+
+        self.assertEqual(api_payload["rows"], [])
+        self.assertEqual(api_payload["schema"], [])
+        self.assertEqual(api_payload["columns"], [])
+        self.assertEqual(api_payload["grid_rows"], [])
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("暂无符合条件的对象", page_response.text)
+        self.assertIn('data-schema-count="0"', page_response.text)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_model_keeps_schema_columns_rows_and_cells_aligned(self) -> None:
+        principal = {
+            "principal_id": 1,
+            "principal_type": "admin",
+            "display_name": "admin",
+            "principal_status": "active",
+        }
+        user = {"user_id": 1, "login_name": "admin", "display_name": "admin", "role": "admin", "status": "active"}
+        payload = n6_app_v1_module.app_v2_filter_model(
+            principal,
+            user=user,
+            asset_kind="stock",
+            result={
+                "cache_ready": True,
+                "items": [
+                    {
+                        "identity_key": "stock:SH:600001",
+                        "display_name": "第一行",
+                        "for_trade_date": "20260625",
+                        "metric_a": "10",
+                    },
+                    {
+                        "identity_key": "stock:SH:600002",
+                        "display_name": "第二行",
+                        "for_trade_date": "20260625",
+                        "metric_b": "20260624",
+                    },
+                ],
+                "total_count": 2,
+                "filtered_count": 2,
+                "returned_count": 2,
+                "available_for_trade_dates": ["20260625"],
+                "selected_for_trade_date": "20260625",
+            },
+            filters={},
+            base_href="/n6/app/filter-center/stocks",
+        )
+
+        expected_columns = [
+            key for key in n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["stock"] if key in payload["schema"]
+        ]
+        self.assertEqual([column["key"] for column in payload["columns"]], expected_columns)
+        for row in payload["rows"]:
+            self.assertEqual(list(row.keys()), payload["schema"])
+        for grid_row in payload["grid_rows"]:
+            self.assertEqual([cell["key"] for cell in grid_row["cells"]], expected_columns)
+            self.assertEqual(len(grid_row["cells"]), len(payload["columns"]))
+
+        first_cells = {cell["key"]: cell for cell in payload["grid_rows"][0]["cells"]}
+        second_cells = {cell["key"]: cell for cell in payload["grid_rows"][1]["cells"]}
+        self.assertNotIn("metric_a", first_cells)
+        self.assertNotIn("metric_b", second_cells)
+        self.assertEqual(payload["grid_rows"][0]["all_fields"][-1]["name"], "metric_b")
+
+    def test_b_track_v2_filter_page_sorts_dynamic_schema_without_database_writes(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        first = dict(repo.app_filter_rows["stock"][0])
+        first.update(
+            {
+                "identity_key": "stock:SH:600001",
+                "stock_identity_key": "stock:SH:600001",
+                "code": "600001",
+                "display_name": "高分个股",
+                "dynamic_numeric_metric": "10",
+                "dynamic_date_metric": "20260605",
+            }
+        )
+        second = dict(repo.app_filter_rows["stock"][0])
+        second.update(
+            {
+                "identity_key": "stock:SH:600002",
+                "stock_identity_key": "stock:SH:600002",
+                "code": "600002",
+                "display_name": "低分个股",
+                "dynamic_numeric_metric": "2",
+                "dynamic_date_metric": "20260606",
+            }
+        )
+        repo.app_filter_rows["stock"] = [first, second]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        score_response = client.get("/api/n6/app/v2/filter/stocks?sort=dynamic_numeric_metric&sort_dir=asc")
+        date_response = client.get("/api/n6/app/v2/filter/stocks?sort=dynamic_date_metric&sort_dir=desc")
+        page_response = client.get("/n6/app/filter-center/stocks?sort=dynamic_numeric_metric&sort_dir=asc")
+
+        self.assertEqual(score_response.status_code, 200)
+        self.assertEqual(
+            [row["identity_key"] for row in score_response.json()["rows"]],
+            ["stock:SH:600002", "stock:SH:600001"],
+        )
+        self.assertEqual(
+            [row["identity_key"] for row in date_response.json()["rows"]],
+            ["stock:SH:600002", "stock:SH:600001"],
+        )
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn('data-sort-key="dynamic_numeric_metric"', page_response.text)
+        self.assertNotIn('data-sort-key="dynamic_date_metric"', page_response.text)
+        self.assertIn('data-sort-key="display_name"', page_response.text)
+        self.assertIn("加入个股监控", page_response.text)
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_center_supports_for_trade_date_switching(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        current = dict(repo.app_filter_rows["stock"][0])
+        current.update(
+            {
+                "identity_key": "stock:SH:600001",
+                "stock_identity_key": "stock:SH:600001",
+                "display_name": "当前个股",
+                "for_trade_date": "20260605",
+                "source_trade_date": "20260604",
+            }
+        )
+        historical = dict(repo.app_filter_rows["stock"][0])
+        historical.update(
+            {
+                "identity_key": "stock:SH:600002",
+                "stock_identity_key": "stock:SH:600002",
+                "display_name": "历史个股",
+                "for_trade_date": "20260604",
+                "source_trade_date": "20260603",
+            }
+        )
+        repo.app_filter_rows["stock"] = [historical, current]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        default_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        historical_payload = client.get("/api/n6/app/v2/filter/stocks?for_trade_date=20260604").json()
+        page_response = client.get("/n6/app/filter-center/stocks?for_trade_date=20260604")
+
+        self.assertEqual(default_payload["selected_for_trade_date"], "20260605")
+        self.assertEqual([row["identity_key"] for row in default_payload["rows"]], ["stock:SH:600001"])
+        self.assertEqual(historical_payload["selected_for_trade_date"], "20260604")
+        self.assertEqual(historical_payload["available_for_trade_dates"], ["20260605", "20260604"])
+        self.assertEqual([row["identity_key"] for row in historical_payload["rows"]], ["stock:SH:600002"])
+        self.assertEqual(historical_payload["total_count"], 1)
+        self.assertEqual(historical_payload["filtered_count"], 1)
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("当前生效日期", page_response.text)
+        self.assertIn('name="for_trade_date"', page_response.text)
+        self.assertIn('value="20260604" selected', page_response.text)
+        self.assertIn("历史个股", page_response.text)
+        self.assertNotIn("当前个股", page_response.text)
+        self.assertIn('href="/n6/app/filter-center/indexes?for_trade_date=20260604"', page_response.text)
+        self.assertIn('href="/n6/app/filter-center/boards?for_trade_date=20260604"', page_response.text)
+        self.assertEqual(repo.app_filter_reads[-1], (1, "admin", 1, "stock", {"for_trade_date": "20260604"}))
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_center_trading_session_blocks_historical_api_and_page_falls_back_current(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        current = dict(repo.app_filter_rows["index"][0])
+        current.update({"identity_key": "index:SH:000001", "display_name": "当前指数", "for_trade_date": "20260605"})
+        historical = dict(repo.app_filter_rows["index"][0])
+        historical.update({"identity_key": "index:SH:000002", "display_name": "历史指数", "for_trade_date": "20260604"})
+        repo.app_filter_rows["index"] = [historical, current]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+            create=True,
+        ):
+            api_response = client.get("/api/n6/app/v2/filter/indexes?for_trade_date=20260604")
+            page_response = client.get("/n6/app/filter-center/indexes?for_trade_date=20260604")
+
+        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("交易时段仅显示当前交易日，历史查询收盘后可用", page_response.text)
+        self.assertIn('value="20260605" selected', page_response.text)
+        self.assertIn("当前指数", page_response.text)
+        self.assertNotIn("历史指数", page_response.text)
+        self.assertEqual(repo.app_filter_reads[-1], (1, "admin", 1, "index", {"for_trade_date": "20260605"}))
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v1_stock_filter_api_supports_index_and_board_source_context_readonly(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        stock_2 = dict(repo.app_filter_rows["stock"][0])
+        stock_2.update(
+            {
+                "identity_key": "stock:SH:600004",
+                "stock_identity_key": "stock:SH:600004",
+                "code": "600004",
+                "display_code": "600004",
+                "name": "白云机场",
+                "display_name": "白云机场",
+            }
+        )
+        repo.app_filter_rows["stock"].append(stock_2)
+        index_2 = dict(repo.app_filter_rows["index"][0])
+        index_2.update(
+            {
+                "identity_key": "index:SZ:399001",
+                "index_identity_key": "index:SZ:399001",
+                "code": "399001",
+                "display_code": "399001",
+                "name": "深证成指",
+                "display_name": "深证成指",
+            }
+        )
+        repo.app_filter_rows["index"].append(index_2)
+        repo.app_member_rows["index"][0]["trade_date"] = "20260604"
+        repo.app_member_rows["index"].append(
+            {
+                "membership_kind": "index",
+                "parent_identity_key": "index:SZ:399001",
+                "parent_code": "399001",
+                "parent_name": "深证成指",
+                "stock_identity_key": "stock:SH:600004",
+                "stock_code": "600004",
+                "stock_name": "白云机场",
+                "trade_date": "20260604",
+            }
+        )
+        repo.app_member_rows["board"][0]["trade_date"] = "20260604"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        default_payload = client.get("/api/n6/app/v2/filter/stocks?for_trade_date=20260605").json()
+        index_payload = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?for_trade_date=20260605"
+            "&source_asset_type=index"
+            "&source_identity_keys=index:SH:000300,index:SZ:399001"
+            "&sort=identity_key"
+            "&sort_dir=asc"
+        ).json()
+        board_payload = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?for_trade_date=20260605"
+            "&source_asset_type=board"
+            "&source_identity_key=board:TDX:881001"
+        ).json()
+
+        self.assertEqual(default_payload["source_context"]["source_asset_type"], None)
+        self.assertEqual([row["identity_key"] for row in default_payload["rows"]], ["stock:SH:600000", "stock:SH:600004"])
+        self.assertEqual(index_payload["source_context"]["source_asset_type"], "index")
+        self.assertEqual(
+            index_payload["source_context"]["source_identity_keys"],
+            ["index:SH:000300", "index:SZ:399001"],
+        )
+        self.assertEqual(index_payload["source_context"]["source_display_names"], ["沪深300", "深证成指"])
+        self.assertEqual(index_payload["source_context"]["membership_source_table"], "v_n6_index_membership_fact")
+        self.assertEqual(index_payload["source_context"]["membership_trade_date"], "20260604")
+        self.assertEqual(index_payload["source_context"]["membership_count"], 2)
+        self.assertEqual(index_payload["source_context"]["matched_stock_count"], 2)
+        self.assertFalse(index_payload["source_context"]["fallback_used"])
+        self.assertEqual(
+            [row["identity_key"] for row in index_payload["rows"]],
+            ["stock:SH:600000", "stock:SH:600004"],
+        )
+        self.assertEqual(board_payload["source_context"]["source_asset_type"], "board")
+        self.assertEqual(board_payload["source_context"]["source_display_names"], ["银行"])
+        self.assertEqual(board_payload["source_context"]["membership_source_table"], "v_n6_board_membership_fact")
+        self.assertEqual([row["identity_key"] for row in board_payload["rows"]], ["stock:SH:600000"])
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v1_stock_filter_source_context_empty_invalid_and_no_intersection_are_safe(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        repo.app_member_rows["index"] = []
+        no_members = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?source_asset_type=index"
+            "&source_identity_key=index:SH:000300"
+        )
+
+        repo.app_member_rows["index"] = [
+            {
+                "membership_kind": "index",
+                "parent_identity_key": "index:SH:000300",
+                "parent_code": "000300",
+                "parent_name": "沪深300",
+                "stock_identity_key": "stock:SH:699999",
+                "stock_code": "699999",
+                "stock_name": "不存在个股",
+                "trade_date": "20260604",
+            }
+        ]
+        no_intersection = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?source_asset_type=index"
+            "&source_identity_key=index:SH:000300"
+        )
+        invalid = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?source_asset_type=sector"
+            "&source_identity_key=index:SH:000300"
+        )
+
+        self.assertEqual(no_members.status_code, 200)
+        self.assertEqual(no_members.json()["rows"], [])
+        self.assertEqual(no_members.json()["source_context"]["empty_state"], "暂无成分股")
+        self.assertEqual(no_intersection.status_code, 200)
+        self.assertEqual(no_intersection.json()["rows"], [])
+        self.assertEqual(no_intersection.json()["source_context"]["membership_count"], 1)
+        self.assertEqual(no_intersection.json()["source_context"]["matched_stock_count"], 0)
+        self.assertEqual(no_intersection.json()["source_context"]["empty_state"], "成分股中无符合当前筛选条件的个股")
+        self.assertEqual(invalid.status_code, 200)
+        self.assertEqual(invalid.json()["rows"], [])
+        self.assertEqual(invalid.json()["source_context"]["empty_state"], "非法来源类型")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v1_filter_center_source_context_links_and_chips_are_readonly(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        repo.app_member_rows["index"][0]["trade_date"] = "20260604"
+        repo.app_member_rows["board"][0]["trade_date"] = "20260604"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        index_page = client.get(
+            "/n6/app/filter-center/indexes?for_trade_date=20260605&sort=identity_key&sort_dir=asc"
+        )
+        board_page = client.get("/n6/app/filter-center/boards?for_trade_date=20260605")
+        stock_page = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260605"
+            "&source_asset_type=index"
+            "&source_identity_keys=index:SH:000300"
+            "&sort=identity_key"
+            "&sort_dir=asc"
+        )
+
+        self.assertEqual(index_page.status_code, 200)
+        self.assertNotIn("按当前指数结果查看关联个股", index_page.text)
+        self.assertNotIn("source_asset_type=index", index_page.text)
+        self.assertNotIn("source_identity_keys=index%3ASH%3A000300", index_page.text)
+        self.assertEqual(board_page.status_code, 200)
+        self.assertIn("按当前板块筛选结果查看个股", board_page.text)
+        self.assertIn("来源板块筛选结果：1 个板块", board_page.text)
+        self.assertIn("source_asset_type=board", board_page.text)
+        self.assertIn("source_identity_keys=board%3ATDX%3A881001", board_page.text)
+        self.assertEqual(stock_page.status_code, 200)
+        self.assertIn("来自指数：沪深300", stock_page.text)
+        self.assertIn("清除来源，查看全部个股", stock_page.text)
+        self.assertIn("source_identity_keys=index%3ASH%3A000300", stock_page.text)
+        self.assertIn("sort=identity_key", stock_page.text)
+        self.assertNotIn("/api/n6/app/v2/monitor/linked-stocks", stock_page.text)
+        self.assertFalse(repo.app_monitor_writes)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_center_table_markup_stabilizes_dynamic_grid_layout(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0].update(
+            {
+                "dynamic_numeric_metric": "12.34",
+                "dynamic_date_metric": "20260625",
+                "nullable_dynamic_metric": None,
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260605"
+            "&sort=dynamic_numeric_metric"
+            "&sort_dir=asc"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="filter-table"', response.text)
+        self.assertIn('data-schema-count="', response.text)
+        self.assertIn('data-column-count="', response.text)
+        self.assertIn('data-cell-count="', response.text)
+        self.assertNotIn('data-sort-key="dynamic_numeric_metric"', response.text)
+        self.assertIn('data-sort-key="identity_key"', response.text)
+        self.assertIn('name="sort" value="dynamic_numeric_metric"', response.text)
+        self.assertIn('name="sort_dir" value="asc"', response.text)
+        self.assertNotIn("<span>nullable_dynamic_metric</span>", response.text)
+        self.assertNotIn("所有字段 · 字段数:", response.text)
+        self.assertIn('border-collapse: separate;', response.text)
+        self.assertNotIn('border-collapse: collapse;', response.text)
+
+    def test_b_track_v2_filter_center_uses_dense_data_workspace_layout(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/filter-center/stocks")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="wrap n6-data-workspace"', response.text)
+        self.assertIn('class="wrap topbar n6-data-workspace"', response.text)
+        self.assertIn(".n6-data-workspace {", response.text)
+        self.assertIn("width: calc(100vw - 16px);", response.text)
+        self.assertIn(".n6-data-workspace .table-wrap {", response.text)
+        self.assertIn("max-height: calc(100vh - 260px);", response.text)
+        self.assertIn(".n6-data-workspace .filter-table th,", response.text)
+        self.assertIn("padding: 6px 8px;", response.text)
+        self.assertIn("font-size: 12px;", response.text)
+
+    def test_b_track_v2_filter_center_supports_local_column_reorder_for_all_assets(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            ("/n6/app/filter-center/indexes", "index", "for_trade_date"),
+            ("/n6/app/filter-center/boards", "board", "for_trade_date"),
+            ("/n6/app/filter-center/stocks", "stock", "for_trade_date"),
+        )
+        for path, asset_kind, sample_column in cases:
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(f'data-asset-kind="{asset_kind}"', response.text)
+                self.assertIn(
+                    f'data-column-order-storage-key="n6.filterCenter.{asset_kind}.columnOrder"',
+                    response.text,
+                )
+                self.assertIn('data-column-fixed="true"', response.text)
+                self.assertIn(f'data-column-key="{sample_column}"', response.text)
+                self.assertIn('draggable="true"', response.text)
+                self.assertIn("拖动表头可调整列顺序", response.text)
+                self.assertIn('data-column-order-reset', response.text)
+
+        self.assertIn("const n6FilterColumnOrder", response.text)
+        self.assertIn("localStorage.setItem(storageKey, JSON.stringify(order));", response.text)
+        self.assertIn('table.addEventListener("dragstart"', response.text)
+        self.assertIn('table.addEventListener("drop"', response.text)
+
+    def test_b_track_v2_stock_filter_shows_industry_from_membership_display_cache(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        repo.app_member_rows["board"][0].update(
+            {
+                "trade_date": "20260604",
+                "parent_code": "881001",
+                "parent_name": "银行",
+                "board_type": "tdx_industry",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/filter-center/stocks")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("industry_code", response.text)
+        self.assertIn("industry_name", response.text)
+        self.assertIn("881001", response.text)
+        self.assertIn("银行", response.text)
+
+    def test_b_track_v2_filter_center_action_cell_renders_asset_and_button_inline(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            ("/n6/app/filter-center/indexes", "指数", "000300", "加入指数监控"),
+            ("/n6/app/filter-center/boards", "板块", "881001", "加入板块监控"),
+            ("/n6/app/filter-center/stocks", "个股", "600000", "加入个股监控"),
+        )
+        for path, asset_label, display_code, action_label in cases:
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('class="row-action-line"', response.text)
+                self.assertIn(asset_label, response.text)
+                self.assertIn(display_code, response.text)
+                self.assertIn(action_label, response.text)
+                self.assertNotIn(f"<br><span class=\"subtle\">{display_code}</span>", response.text)
+
+    def test_b_track_v2_filter_linked_stock_apis_return_membership_intersection(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        repo.app_member_rows["board"].append(
+            {
+                "membership_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "parent_code": "881001",
+                "parent_name": "银行",
+                "stock_identity_key": "stock:SH:600004",
+                "stock_code": "600004",
+                "stock_name": "白云机场",
+                "board_type": "tdx_industry",
+                "source_version": "board_membership_20260604_v1",
+                "source_batch_id": "condition_source_activation_20260604_v1",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        board_response = client.get(
+            "/api/n6/app/v2/filter/board-linked-stocks?board_identity_key=board:TDX:881001"
+        )
+        index_response = client.get(
+            "/api/n6/app/v2/filter/index-linked-stocks?index_identity_key=index:SH:000300"
+        )
+
+        self.assertEqual(board_response.status_code, 200)
+        board_payload = board_response.json()
+        self.assertEqual(board_payload["component_label"], "板块关联个股")
+        self.assertEqual(board_payload["status"], "ready")
+        self.assertEqual(board_payload["parent_identity_key"], "board:TDX:881001")
+        self.assertEqual(board_payload["membership_count"], 2)
+        self.assertEqual(board_payload["linked_count"], 1)
+        self.assertEqual(board_payload["missing_count"], 1)
+        self.assertEqual(board_payload["source_table"], "n6_display_stock_condition_cache")
+        self.assertEqual(board_payload["read_source_table"], "v_n6_stock_condition_display_basis")
+        self.assertEqual(board_payload["membership_source_table"], "n6_display_board_membership_cache")
+        self.assertEqual(board_payload["membership_read_source_table"], "v_n6_board_membership_fact")
+        self.assertEqual(board_payload["controls"]["default_view_label"], "符合个股筛选")
+        self.assertEqual(board_payload["controls"]["all_members_label"], "全部成分股")
+        self.assertEqual(board_payload["items"][0]["identity_key"], "stock:SH:600000")
+        self.assertEqual(board_payload["items"][0]["parent_identity_key"], "board:TDX:881001")
+        self.assertEqual(board_payload["items"][0]["membership_source_table"], "n6_display_board_membership_cache")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_payload = index_response.json()
+        self.assertEqual(index_payload["component_label"], "指数关联个股")
+        self.assertEqual(index_payload["membership_count"], 1)
+        self.assertEqual(index_payload["linked_count"], 1)
+        self.assertEqual(index_payload["missing_count"], 0)
+        self.assertEqual(index_payload["membership_read_source_table"], "v_n6_index_membership_fact")
+        self.assertEqual(index_payload["items"][0]["stock_code"], "600000")
+        self.assertEqual(index_payload["items"][0]["parent_identity_key"], "index:SH:000300")
+        self.assertEqual(
+            repo.app_filter_linked_stock_reads,
+            [
+                (1, "admin", 1, "board", "board:TDX:881001"),
+                (1, "admin", 1, "index", "index:SH:000300"),
+            ],
+        )
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_v1_membership_drilldown_engine_and_api_are_readonly(self) -> None:
+        from ashare_v3.user import membership_drilldown as membership_drilldown_module
+        from ashare_v3.user.membership_drilldown import (
+            get_board_membership_stocks,
+            get_index_membership_stocks,
+            resolve_membership,
+        )
+
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready["index"] = True
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        repo.app_member_rows["index"][0].update(
+            {
+                "trade_date": "20260624",
+                "display_name": "浦发银行",
+                "weight": "12.30",
+            }
+        )
+        repo.app_member_rows["board"][0].update(
+            {
+                "trade_date": "20260624",
+                "display_name": "浦发银行",
+                "weight": None,
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        index_members = get_index_membership_stocks("index:SH:000300", repo.app_member_rows["index"])
+        board_members = get_board_membership_stocks("board:TDX:881001", repo.app_member_rows["board"])
+
+        self.assertEqual(
+            index_members,
+            [
+                {
+                    "stock_identity_key": "stock:SH:600000",
+                    "display_name": "浦发银行",
+                    "membership_date": "20260624",
+                    "weight": "12.30",
+                }
+            ],
+        )
+        self.assertEqual(board_members[0]["stock_identity_key"], "stock:SH:600000")
+        self.assertEqual(board_members[0]["membership_date"], "20260624")
+        self.assertIsNone(board_members[0]["weight"])
+        self.assertEqual(resolve_membership("stock", "stock:SH:600000", {}), [])
+
+        index_response = client.get("/api/n6/app/v2/membership/index/index:SH:000300")
+        board_response = client.get("/api/n6/app/v2/membership/board/board:TDX:881001")
+
+        self.assertEqual(index_response.status_code, 200)
+        index_payload = index_response.json()
+        self.assertEqual(index_payload["identity_key"], "index:SH:000300")
+        self.assertEqual(index_payload["members"], index_members)
+        self.assertTrue(index_payload["readonly"])
+        self.assertEqual(index_payload["source_table"], "v_n6_index_membership_fact")
+
+        self.assertEqual(board_response.status_code, 200)
+        board_payload = board_response.json()
+        self.assertEqual(board_payload["identity_key"], "board:TDX:881001")
+        self.assertEqual(board_payload["members"], board_members)
+        self.assertEqual(board_payload["source_table"], "v_n6_board_membership_fact")
+
+        page_response = client.get("/n6/app/filter-center/indexes")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn("查看成分股", page_response.text)
+        self.assertNotIn("/api/n6/app/v2/membership/index/index%3ASH%3A000300", page_response.text)
+        self.assertNotIn("/api/n6/app/v2/filter/index-linked-stocks", page_response.text)
+        self.assertNotIn("/api/n6/app/v2/monitor/linked-stocks", page_response.text)
+        self.assertNotIn("加入已选个股监控", page_response.text)
+        self.assertNotIn("将符合个股筛选加入个股监控", page_response.text)
+        self.assertNotIn("/api/n6/app/v2/membership/stock/", page_response.text)
+
+        source = inspect.getsource(membership_drilldown_module)
+        for forbidden in (
+            "ActionExecuted",
+            "monitor_object",
+            "n6_virtual",
+            "virtual_order",
+            "virtual_trade",
+            "virtual_position",
+            "@app.post",
+            "execute_virtual_buy",
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
+        ):
+            self.assertNotIn(forbidden, source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_linked_stock_api_all_view_marks_membership_only_rows(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        repo.app_member_rows["board"].append(
+            {
+                "membership_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "parent_code": "881001",
+                "parent_name": "银行",
+                "stock_identity_key": "stock:SH:600004",
+                "stock_code": "600004",
+                "stock_name": "白云机场",
+                "board_type": "tdx_industry",
+                "source_version": "board_membership_20260604_v1",
+                "source_batch_id": "condition_source_activation_20260604_v1",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        matched_response = client.get(
+            "/api/n6/app/v2/filter/board-linked-stocks?board_identity_key=board:TDX:881001"
+        )
+        all_response = client.get(
+            "/api/n6/app/v2/filter/board-linked-stocks?board_identity_key=board:TDX:881001&view=all"
+        )
+
+        self.assertEqual(matched_response.status_code, 200)
+        self.assertEqual(matched_response.json()["view"], "matched")
+        self.assertEqual(len(matched_response.json()["items"]), 1)
+        self.assertTrue(matched_response.json()["items"][0]["in_stock_filter"])
+        self.assertEqual(all_response.status_code, 200)
+        all_payload = all_response.json()
+        self.assertEqual(all_payload["view"], "all")
+        self.assertEqual(all_payload["membership_count"], 2)
+        self.assertEqual(all_payload["linked_count"], 1)
+        self.assertEqual(all_payload["missing_count"], 1)
+        self.assertEqual(all_payload["current_view_count"], 2)
+        self.assertEqual([item["stock_identity_key"] for item in all_payload["items"]], ["stock:SH:600000", "stock:SH:600004"])
+        self.assertTrue(all_payload["items"][0]["in_stock_filter"])
+        self.assertFalse(all_payload["items"][1]["in_stock_filter"])
+        self.assertEqual(all_payload["items"][1]["stock_filter_status"], "not_in_filter")
+        self.assertEqual(all_payload["controls"]["all_members_write_enabled"], False)
+        self.assertEqual(all_payload["controls"]["all_members_write_label"], "全部成分股加入监控（暂未开放）")
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_v2_filter_apis_match_visibility_contract_default_allowlists(self) -> None:
+        contract = load_b_track_v2_field_visibility_contract()
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        forbidden_defaults = set(contract["api_contract"]["forbidden_default_fields"])
+        for rows in repo.app_filter_rows.values():
+            for row in rows:
+                row.update(
+                    {
+                        "raw_json": {"raw": True},
+                        "raw_payload": {"raw": True},
+                        "period_trigger_baseline_json": {"Y": "hidden"},
+                        "target_price_trace_json": {"trace": "hidden"},
+                        "score_breakdown_json": {"score": "hidden"},
+                        "financial_warning_json": {"warning": "hidden"},
+                        "source_condition_basis_ids_json": [1],
+                        "source_condition_pool_ids_json": [2],
+                        "source_minute_target_scope_ids_json": [3],
+                        "source_row_count_json": {"stock": 1},
+                    }
+                )
+        for rows in repo.app_member_rows.values():
+            for row in rows:
+                row["raw_payload"] = {"raw": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        route_queries = {
+            "/api/n6/app/v2/filter/stocks": "?direction=buy&include=detail&include=audit",
+            "/api/n6/app/v2/filter/boards": "?direction=buy&board_type=tdx_industry&include=detail",
+            "/api/n6/app/v2/filter/indexes": "?direction=buy&include=audit",
+            "/api/n6/app/v2/filter/board-members": "?identity_key=board:TDX:881001&include=audit",
+            "/api/n6/app/v2/filter/index-members": "?identity_key=index:SH:000300&include=detail",
+        }
+        filter_asset_by_route = {
+            "/api/n6/app/v2/filter/stocks": "stock",
+            "/api/n6/app/v2/filter/boards": "board",
+            "/api/n6/app/v2/filter/indexes": "index",
+        }
+        for route, query in route_queries.items():
+            with self.subTest(route=route):
+                response = client.get(f"{route}{query}")
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["status"], "ready")
+                self.assertTrue(payload["items"])
+                if route in filter_asset_by_route:
+                    self.assertTrue(payload["rows"])
+                    row = payload["rows"][0]
+                    self.assertEqual(payload["schema"], list(row.keys()))
+                    expected_columns = [
+                        key
+                        for key in n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET[filter_asset_by_route[route]]
+                        if key in row
+                    ]
+                    self.assertEqual([column["key"] for column in payload["columns"]], expected_columns)
+                    self.assertTrue(set(expected_columns).issubset(set(payload["schema"])))
+                    self.assertIn("raw_json", row)
+                    self.assertIn("raw_payload", row)
+                    self.assertIn("period_trigger_baseline_json", row)
+                    self.assertIn("target_price_trace_json", row)
+                    self.assertIn("source_row_count_json", row)
+                    self.assertNotIn("_include_all_fields", row)
+                    self.assertEqual(payload["items"][0]["row"], row)
+                    self.assertFalse(any(str(key).startswith("_") for key in row))
+                    continue
+                item = payload["items"][0]
+                expected_keys = set(contract["api_contract"]["endpoints"][route]["item_allowlist"])
+                effective_forbidden_defaults = set(forbidden_defaults)
+                self.assertEqual(set(item), expected_keys)
+                self.assertFalse(effective_forbidden_defaults.intersection(item))
+
+    def test_b_track_v2_filter_center_page_renders_readonly_locked_buttons(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            (
+                "/n6/app/filter-center",
+                "index",
+                "index-filter",
+                "指数筛选",
+                "加入指数监控",
+                "读取表: v_n6_index_condition_display_basis",
+                "成分表: v_n6_index_membership_fact",
+                "展示标签: n6_display_index_condition_cache",
+                ("board-filter", "stock-filter"),
+                ("加入板块监控",),
+            ),
+            (
+                "/n6/app/filter-center/indexes",
+                "index",
+                "index-filter",
+                "指数筛选",
+                "加入指数监控",
+                "读取表: v_n6_index_condition_display_basis",
+                "成分表: v_n6_index_membership_fact",
+                "展示标签: n6_display_index_condition_cache",
+                ("board-filter", "stock-filter"),
+                ("加入板块监控",),
+            ),
+            (
+                "/n6/app/filter-center/boards",
+                "board",
+                "board-filter",
+                "板块筛选",
+                "加入板块监控",
+                "读取表: v_n6_board_condition_display_basis",
+                "成分表: v_n6_board_membership_fact",
+                "展示标签: n6_display_board_condition_cache",
+                ("index-filter", "stock-filter"),
+                ("加入指数监控",),
+            ),
+            (
+                "/n6/app/filter-center/stocks",
+                "stock",
+                "stock-filter",
+                "个股筛选",
+                "加入个股监控",
+                "读取表: v_n6_stock_condition_display_basis",
+                None,
+                "展示标签: n6_display_stock_condition_cache",
+                ("index-filter", "board-filter"),
+                ("加入指数监控", "加入板块监控"),
+            ),
+        )
+        for (
+            path,
+            expected_asset_kind,
+            expected_section_id,
+            expected_label,
+            expected_button,
+            expected_read_source,
+            expected_membership_source,
+            expected_display_source,
+            absent_section_ids,
+            absent_buttons,
+        ) in cases:
+            with self.subTest(path=path):
+                repo.app_filter_reads = []
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("筛选中心", response.text)
+                self.assertIn(expected_label, response.text)
+                self.assertIn("年过度分级", response.text)
+                self.assertIn("季过度分级", response.text)
+                self.assertIn("月过度分级", response.text)
+                self.assertIn("周过度分级", response.text)
+                self.assertIn("日过度分级", response.text)
+                self.assertIn("分级筛选", response.text)
+                self.assertIn('data-filter-panel="period-grade"', response.text)
+                self.assertIn('data-filter-field="year_overheat_level"', response.text)
+                self.assertIn('data-filter-field="quarter_overheat_level"', response.text)
+                self.assertIn('data-filter-field="month_overheat_level"', response.text)
+                self.assertIn('data-filter-field="week_overheat_level"', response.text)
+                self.assertIn('data-filter-field="day_overheat_level"', response.text)
+                self.assertNotIn(">nan<", response.text)
+                self.assertNotIn('data-filter-value="unknown"', response.text)
+                self.assertIn("放量上涨", response.text)
+                self.assertIn("放量下跌", response.text)
+                self.assertIn("缩量上涨", response.text)
+                self.assertIn("缩量下跌", response.text)
+                self.assertIn("震荡", response.text)
+                self.assertIn('data-filter-value="volume_up"', response.text)
+                self.assertIn('data-filter-value="low_volume_down"', response.text)
+                filter_href_path = {
+                    "index": "/n6/app/filter-center/indexes",
+                    "board": "/n6/app/filter-center/boards",
+                    "stock": "/n6/app/filter-center/stocks",
+                }[expected_asset_kind]
+                self.assertIn(f'href="{filter_href_path}?year_overheat_level=volume_up', response.text)
+                self.assertNotIn("<strong>year_overheat_level</strong>", response.text)
+                self.assertNotIn("<strong>quarter_overheat_level</strong>", response.text)
+                self.assertIn("买向观察", response.text)
+                self.assertIn("卖向观察", response.text)
+                self.assertIn("筛选数据尚未准备完成", response.text)
+                expected_selected_label = {
+                    "index": "加入到指数监控",
+                    "board": "加入已选到板块监控",
+                    "stock": "加入已选到个股监控",
+                }[expected_asset_kind]
+                expected_bulk_label = {
+                    "index": "当前筛选结果到指数监控",
+                    "board": "将当前筛选结果加入到板块监控",
+                    "stock": "将当前筛选结果加入到个股监控",
+                }[expected_asset_kind]
+                self.assertIn(expected_selected_label, response.text)
+                self.assertIn(expected_bulk_label, response.text)
+                self.assertIn("当前仅保存监控范围，不代表交易建议", response.text)
+                self.assertIn(expected_read_source, response.text)
+                self.assertIn(expected_display_source, response.text)
+                self.assertIn('href="/n6/app/filter-center/indexes"', response.text)
+                self.assertIn('href="/n6/app/filter-center/boards"', response.text)
+                self.assertIn('href="/n6/app/filter-center/stocks"', response.text)
+                self.assertIn(f'id="{expected_section_id}"', response.text)
+                for absent_section_id in absent_section_ids:
+                    self.assertNotIn(f'id="{absent_section_id}"', response.text)
+                for absent_button in absent_buttons:
+                    self.assertNotIn(absent_button, response.text)
+                if expected_membership_source:
+                    self.assertIn(expected_membership_source, response.text)
+                    self.assertNotIn("查看成分股", response.text)
+                    self.assertNotIn('class="linked-stocks-panel"', response.text)
+                    self.assertNotIn('class="linked-detail"', response.text)
+                else:
+                    self.assertNotIn("成分表:", response.text)
+                    self.assertNotIn("查看成分股", response.text)
+                    self.assertNotIn("查看关联个股", response.text)
+                self.assertNotIn("每条记录下方可展开所有字段", response.text)
+                self.assertNotIn("所有字段 · 字段数:", response.text)
+                self.assertNotIn('class="field-detail"', response.text)
+                self.assertIn("只读模式 · 监控偏好可保存 · 不下单 · 不构成投资建议 · principal scoped", response.text)
+                self.assertNotIn("买入到监控", response.text)
+                self.assertNotIn("建议买入", response.text)
+                self.assertNotIn("建议卖出", response.text)
+                self.assertNotIn("一键下单", response.text)
+                self.assertNotIn("买入机会", response.text)
+                self.assertNotIn("卖出提醒", response.text)
+                self.assertEqual(repo.app_filter_reads, [(1, "admin", 1, expected_asset_kind, {})])
+
+        missing_response = client.get("/n6/app/filter-center/unknown")
+        self.assertEqual(missing_response.status_code, 404)
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_v2_filter_center_page_hides_linked_stock_panels_for_index_and_board_rows(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            (
+                "/n6/app/filter-center/indexes",
+                "/api/n6/app/v2/filter/index-linked-stocks",
+            ),
+            (
+                "/n6/app/filter-center/boards",
+                "/api/n6/app/v2/filter/board-linked-stocks",
+            ),
+        )
+        for path, forbidden_url in cases:
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("查看成分股", response.text)
+                self.assertNotIn("成分股总数", response.text)
+                self.assertNotIn("当前显示数量", response.text)
+                self.assertNotIn("只读成分股", response.text)
+                self.assertNotIn('class="linked-stocks-panel"', response.text)
+                self.assertNotIn('class="linked-detail"', response.text)
+                self.assertNotIn(forbidden_url, response.text)
+                self.assertNotIn("/api/n6/app/v2/monitor/linked-stocks", response.text)
+                self.assertNotIn("已进入个股筛选数", response.text)
+                self.assertNotIn("未进入个股筛选数", response.text)
+                self.assertNotIn("加入已选个股监控", response.text)
+                self.assertNotIn("将符合个股筛选加入个股监控", response.text)
+                self.assertNotIn("查看全部成分股", response.text)
+                self.assertNotIn("全部成分股加入监控（暂未开放）", response.text)
+                self.assertNotIn("已选数量", response.text)
+                self.assertNotIn('data-linked-selected-add', response.text)
+                self.assertNotIn('data-linked-bulk-add', response.text)
+                self.assertNotIn("买入到监控", response.text)
+                self.assertNotIn("建议买入", response.text)
+                self.assertNotIn("建议卖出", response.text)
+                self.assertNotIn("一键下单", response.text)
+
+        stock_response = client.get("/n6/app/filter-center/stocks")
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertNotIn("查看关联个股", stock_response.text)
+        self.assertNotIn('class="linked-stocks-panel"', stock_response.text)
+
+    def test_b_track_v2_linked_stock_monitor_add_selected_and_matched_are_stock_only(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_membership_cache_ready = {"index": True, "board": True}
+        second_stock = dict(repo.app_filter_rows["stock"][0])
+        second_stock["identity_key"] = "stock:SH:600004"
+        second_stock["stock_identity_key"] = "stock:SH:600004"
+        second_stock["code"] = "600004"
+        second_stock["display_code"] = "600004"
+        second_stock["name"] = "白云机场"
+        second_stock["display_name"] = "白云机场"
+        repo.app_filter_rows["stock"].append(second_stock)
+        repo.app_member_rows["board"].append(
+            {
+                "membership_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "parent_code": "881001",
+                "parent_name": "银行",
+                "stock_identity_key": "stock:SH:600004",
+                "stock_code": "600004",
+                "stock_name": "白云机场",
+                "board_type": "tdx_industry",
+                "source_version": "board_membership_20260604_v1",
+                "source_batch_id": "condition_source_activation_20260604_v1",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        selected_response = client.post(
+            "/api/n6/app/v2/monitor/linked-stocks",
+            json={
+                "parent_asset_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "mode": "selected",
+                "stock_identity_keys": ["stock:SH:600000"],
+                "direction": "buy",
+            },
+        )
+        duplicate_response = client.post(
+            "/api/n6/app/v2/monitor/linked-stocks",
+            json={
+                "parent_asset_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "mode": "selected",
+                "stock_identity_keys": ["stock:SH:600000"],
+                "direction": "buy",
+            },
+        )
+        matched_response = client.post(
+            "/api/n6/app/v2/monitor/linked-stocks",
+            json={
+                "parent_asset_kind": "board",
+                "parent_identity_key": "board:TDX:881001",
+                "mode": "matched_stock_filter",
+                "direction": "buy",
+            },
+        )
+
+        self.assertEqual(selected_response.status_code, 200)
+        self.assertEqual(selected_response.json()["status"], "completed")
+        self.assertEqual(selected_response.json()["asset_kind"], "stock")
+        self.assertEqual(selected_response.json()["parent_asset_kind"], "board")
+        self.assertEqual(selected_response.json()["candidate_count"], 1)
+        self.assertEqual(selected_response.json()["added_count"], 1)
+        self.assertEqual(duplicate_response.status_code, 200)
+        self.assertEqual(duplicate_response.json()["skipped_count"], 1)
+        self.assertEqual(matched_response.status_code, 200)
+        self.assertEqual(matched_response.json()["candidate_count"], 2)
+        self.assertEqual(matched_response.json()["added_count"], 1)
+        self.assertEqual(matched_response.json()["skipped_count"], 1)
+        active_rows = [row for row in repo.app_monitor_rows if row["status"] != "removed"]
+        self.assertEqual([row["asset_kind"] for row in active_rows], ["stock", "stock"])
+        self.assertEqual({row["identity_key"] for row in active_rows}, {"stock:SH:600000", "stock:SH:600004"})
+        self.assertEqual({row["source"] for row in active_rows}, {"board_linked_stock"})
+        self.assertEqual(repo.forbidden_writes["user_sim"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_v2_filter_center_page_passes_grade_multiselect_filters(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0]["year_overheat_level"] = "volume_up"
+        repo.app_filter_rows["stock"][0]["period_grade_y"] = "volume_up"
+        repo.app_filter_rows["stock"][0]["month_overheat_level"] = "flat"
+        repo.app_filter_rows["stock"][0]["period_grade_m"] = "flat"
+        second_stock = dict(repo.app_filter_rows["stock"][0])
+        second_stock["identity_key"] = "stock:SH:600004"
+        second_stock["stock_identity_key"] = "stock:SH:600004"
+        second_stock["code"] = "600004"
+        second_stock["display_code"] = "600004"
+        second_stock["name"] = "白云机场"
+        second_stock["display_name"] = "白云机场"
+        second_stock["year_overheat_level"] = "volume_down"
+        second_stock["period_grade_y"] = "volume_down"
+        second_stock["month_overheat_level"] = "volume_up"
+        second_stock["period_grade_m"] = "volume_up"
+        repo.app_filter_rows["stock"].append(second_stock)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?year_overheat_level=volume_up"
+            "&year_overheat_level=volume_down"
+            "&month_overheat_level=flat"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("浦发银行", response.text)
+        self.assertNotIn("白云机场", response.text)
+        self.assertIn("总记录数: 2", response.text)
+        self.assertIn("筛选后数量: 1", response.text)
+        self.assertIn('data-filter-field="year_overheat_level"', response.text)
+        self.assertIn('data-filter-value="volume_up"', response.text)
+        self.assertIn('data-filter-value="volume_down"', response.text)
+        self.assertIn('data-filter-value="flat"', response.text)
+        self.assertIn(
+            'href="/n6/app/filter-center/stocks?month_overheat_level=flat&amp;'
+            'year_overheat_level=volume_down"',
+            response.text,
+        )
+        self.assertIn("放量上涨", response.text)
+        self.assertIn("放量下跌", response.text)
+        self.assertIn("震荡", response.text)
+        self.assertEqual(
+            repo.app_filter_reads,
+            [
+                (
+                    1,
+                    "admin",
+                    1,
+                    "stock",
+                    {
+                        "year_overheat_level": ["volume_up", "volume_down"],
+                        "month_overheat_level": ["flat"],
+                    },
+                )
+            ],
+        )
+
+    def test_b_track_v2_filter_center_pages_use_lightweight_default_rows_and_can_show_all(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+
+        def expand_rows(asset_kind: str, name_prefix: str) -> None:
+            base = dict(repo.app_filter_rows[asset_kind][0])
+            rows = []
+            for index in range(1, 251):
+                row = dict(base)
+                code = f"9{index:05d}"
+                if asset_kind == "stock":
+                    row["identity_key"] = f"stock:SH:{code}"
+                    row["stock_identity_key"] = row["identity_key"]
+                elif asset_kind == "index":
+                    row["identity_key"] = f"index:SH:{code}"
+                    row["index_identity_key"] = row["identity_key"]
+                else:
+                    row["identity_key"] = f"board:TDX:{code}"
+                    row["board_identity_key"] = row["identity_key"]
+                    row["board_code"] = code
+                    row["board_name"] = f"{name_prefix}{index}"
+                row["code"] = code
+                row["display_code"] = code
+                row["name"] = f"{name_prefix}{index}"
+                row["display_name"] = f"{name_prefix}{index}"
+                row["display_title"] = f"{code} {name_prefix}{index}"
+                rows.append(row)
+            repo.app_filter_rows[asset_kind] = rows
+
+        expand_rows("index", "测试指数")
+        expand_rows("board", "测试板块")
+        expand_rows("stock", "测试个股")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            ("/n6/app/filter-center/indexes", 200, "测试指数200", "测试指数250"),
+            ("/n6/app/filter-center/boards", 200, "测试板块200", "测试板块250"),
+            ("/n6/app/filter-center/stocks", 100, "测试个股100", "测试个股250"),
+        )
+        for path, expected_default_count, expected_default_last_name, expected_all_last_name in cases:
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("总记录数: 250", response.text)
+                self.assertIn("筛选后数量: 250", response.text)
+                self.assertIn(f"当前显示: {expected_default_count}", response.text)
+                self.assertIn("查看全部", response.text)
+                self.assertIn("show_all=1", response.text)
+                self.assertIn(expected_default_last_name, response.text)
+                self.assertNotIn(expected_all_last_name, response.text)
+                self.assertNotIn("所有字段 · 字段数:", response.text)
+                self.assertNotIn('class="field-detail"', response.text)
+
+                show_all_response = client.get(f"{path}?show_all=1")
+
+                self.assertEqual(show_all_response.status_code, 200)
+                self.assertIn("总记录数: 250", show_all_response.text)
+                self.assertIn("筛选后数量: 250", show_all_response.text)
+                self.assertIn("当前显示: 250", show_all_response.text)
+                self.assertIn(f"收起到默认{expected_default_count}条", show_all_response.text)
+                self.assertIn(expected_all_last_name, show_all_response.text)
+                self.assertNotIn("所有字段 · 字段数:", show_all_response.text)
+                self.assertNotIn('class="field-detail"', show_all_response.text)
+
+    def test_b_track_v2_filter_center_page_ignores_legacy_unknown_grade_filter(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/indexes"
+            "?year_overheat_level=unknown"
+            "&year_overheat_level=volume_down"
+            "&quarter_overheat_level=unknown"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(">nan<", response.text)
+        self.assertNotIn('data-filter-value="unknown"', response.text)
+        self.assertIn('data-filter-value="volume_down"', response.text)
+        self.assertEqual(
+            repo.app_filter_reads,
+            [
+                (
+                    1,
+                    "admin",
+                    1,
+                    "index",
+                    {
+                        "year_overheat_level": ["volume_down"],
+                    },
+                )
+            ],
+        )
+
+    def test_b_track_v2_filter_center_page_keeps_full_row_fields_api_only(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["index"][0].update(
+            {
+                "asset_kind": "index",
+                "source_display_basis_id": 1787,
+                "run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+                "condition_summary_json": {
+                    "condition_key_counts": {"BUY:M,W,D": 1, "SELL:M,W": 1},
+                    "condition_pool_row_count": 2,
+                },
+                "target_price_summary_json": {
+                    "base_price": None,
+                    "buy_target_price": None,
+                    "sell_target_price": None,
+                },
+                "reference_period_summary_json": {
+                    "clear_sell_ref_period": "D",
+                    "down_buy_reference_period": "D",
+                },
+                "period_trigger_baseline_json": {"D": {"amount_metric": "passed"}},
+                "target_price_trace_json": {"reference_target_price": 4200.12},
+                "period_grade_summary_json": {
+                    "D": "low_volume_down",
+                    "M": "volume_down",
+                },
+                "period_transition_summary_json": {
+                    "D": "low_volume_down",
+                    "M": "volume_down",
+                },
+                "display_policy_name": "default_condition_display_policy",
+                "display_policy_hash": "0dd4f1c2a3237d81920c584b1f3612292bf5479b047570603c7ecaacf8f9",
+                "condition_pool_policy_name": "default_condition_pool_policy",
+                "condition_pool_policy_hash": "2f2d8fdd9884d9441673de09a3aad323f6cb2c446aa8b05278308",
+                "selected_reason": ["all_index_universe", "condition_candidate_eligible"],
+                "source_row_count_json": {
+                    "condition_basis": 1,
+                    "condition_pool": 2,
+                    "minute_target_scope": 2,
+                },
+                "raw_json": {"identity_key": "index:SH:000300", "raw": True},
+                "source_condition_basis_ids_json": [1001],
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/filter-center/indexes")
+        api_response = client.get("/api/n6/app/v2/filter/indexes")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn("每条记录下方可展开所有字段", page_response.text)
+        self.assertNotIn("所有字段", page_response.text)
+        self.assertNotIn("字段数:", page_response.text)
+        self.assertNotIn('class="field-detail"', page_response.text)
+        self.assertEqual(page_response.text.count("<details open>"), 0)
+        self.assertNotIn("<th>方向</th>", page_response.text)
+        self.assertNotIn("<th>条件来源</th>", page_response.text)
+        self.assertNotIn("<th>最近信号状态</th>", page_response.text)
+        self.assertEqual(api_response.status_code, 200)
+        api_payload = api_response.json()
+        api_row = api_payload["rows"][0]
+        self.assertEqual(api_payload["schema"], list(api_row.keys()))
+        self.assertIn("raw_json", api_row)
+        self.assertIn("period_trigger_baseline_json", api_row)
+        self.assertIn("amount_metric", str(api_row["period_trigger_baseline_json"]))
+        self.assertIn("condition_layer_20260612_source_20260612_for_20260615_v1", str(api_row["run_id"]))
+        self.assertNotIn("_include_all_fields", api_row)
+
+    def test_b_track_v1_monitor_object_core_model_source_lifecycle_and_boundary(self) -> None:
+        from ashare_v3.user import monitor_object as monitor_object_module
+        from ashare_v3.user.monitor_object import (
+            MONITOR_OBJECT_SCHEMA,
+            create_board_drill_down_monitor_object,
+            create_direct_monitor_object,
+            create_index_drill_down_monitor_object,
+            get_user_monitor_objects,
+            update_monitor_status_by_trade_date,
+        )
+
+        self.assertEqual(
+            [column.name for column in MONITOR_OBJECT_SCHEMA],
+            [
+                "id",
+                "user_id",
+                "asset_type",
+                "identity_key",
+                "display_name",
+                "for_trade_date",
+                "source_trade_date",
+                "status",
+                "expired_reason",
+                "source_type",
+                "source_id",
+                "source_name",
+                "parent_type",
+                "parent_identity_key",
+                "membership_origin",
+                "created_at",
+                "updated_at",
+            ],
+        )
+
+        direct = create_direct_monitor_object(
+            id=1,
+            user_id=1,
+            asset_type="stock",
+            identity_key="stock:SH:600000",
+            display_name="浦发银行",
+            for_trade_date="20260625",
+            source_trade_date="20260624",
+        )
+        from_index = create_index_drill_down_monitor_object(
+            id=2,
+            user_id=1,
+            asset_type="stock",
+            identity_key="stock:SH:600001",
+            display_name="邯郸钢铁",
+            for_trade_date="20260625",
+            source_trade_date="20260624",
+            source_id="index:SH:000300",
+            source_name="沪深300",
+        )
+        from_board = create_board_drill_down_monitor_object(
+            id=3,
+            user_id=1,
+            asset_type="stock",
+            identity_key="stock:SH:600002",
+            display_name="齐鲁石化",
+            for_trade_date="20260624",
+            source_trade_date="20260623",
+            source_id="board:TDX:881001",
+            source_name="银行",
+        )
+
+        self.assertEqual(direct.source_type, "direct")
+        self.assertIsNone(direct.parent_type)
+        self.assertIsNone(direct.parent_identity_key)
+        self.assertFalse(direct.membership_origin)
+        self.assertEqual(from_index.source_type, "index")
+        self.assertEqual(from_index.parent_type, "index")
+        self.assertEqual(from_index.parent_identity_key, "index:SH:000300")
+        self.assertTrue(from_index.membership_origin)
+        self.assertEqual(from_board.source_type, "board")
+        self.assertEqual(from_board.parent_type, "board")
+        self.assertEqual(from_board.parent_identity_key, "board:TDX:881001")
+        self.assertTrue(from_board.membership_origin)
+
+        current = update_monitor_status_by_trade_date([direct, from_index, from_board], "20260625")
+        self.assertEqual([item.status for item in current], ["active", "active", "expired"])
+        self.assertEqual(current[2].expired_reason, "date_mismatch")
+        grouped = get_user_monitor_objects(current, user_id=1)
+        self.assertEqual([item["identity_key"] for item in grouped["active"]], ["stock:SH:600000", "stock:SH:600001"])
+        self.assertEqual([item["identity_key"] for item in grouped["expired"]], ["stock:SH:600002"])
+        self.assertEqual(grouped["expired"][0]["expired_reason"], "date_mismatch")
+
+        other_user = create_direct_monitor_object(
+            id=4,
+            user_id=2,
+            asset_type="stock",
+            identity_key="stock:SH:600003",
+            display_name="其他用户",
+            for_trade_date="20260625",
+            source_trade_date="20260624",
+        )
+        self.assertEqual(get_user_monitor_objects([*current, other_user], user_id=2)["active"][0]["id"], 4)
+
+        source = inspect.getsource(monitor_object_module)
+        for forbidden in (
+            "ActionExecuted",
+            "n6_virtual",
+            "virtual_order",
+            "virtual_trade",
+            "virtual_position",
+            "filter-center",
+            "condition_display_basis",
+            "common_action_event",
+            "common_trigger_match",
+            "psycopg",
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_b_track_v2_my_monitor_api_and_pages_show_active_user_monitor_objects(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_monitor_rows.append(
+            repo._new_monitor_row(
+                principal_id=1,
+                principal_type="admin",
+                asset_kind="stock",
+                identity_key="stock:SH:600000",
+                direction="buy",
+                source="single_row",
+                source_row=repo.app_filter_rows["stock"][0],
+            )
+        )
+        repo.app_monitor_rows.append(
+            repo._new_monitor_row(
+                principal_id=2,
+                principal_type="human_user",
+                asset_kind="stock",
+                identity_key="stock:SH:600004",
+                direction="buy",
+                source="single_row",
+                source_row=repo.app_filter_rows["stock"][0],
+            )
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_response = client.get("/api/n6/app/v2/monitor")
+        stock_api_response = client.get("/api/n6/app/v2/monitor/stocks")
+        page_response = client.get("/n6/app/my-monitor/stocks")
+
+        self.assertEqual(api_response.status_code, 200)
+        payload = api_response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track V2 My Monitor")
+        self.assertEqual(payload["component_label"], "我的监控对象")
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["empty_state"], "暂无监控对象")
+        self.assertEqual(payload["sections"]["stocks"]["title"], "我的个股监控")
+        self.assertEqual(payload["sections"]["stocks"]["status_label"], "已准备")
+        self.assertEqual(payload["sections"]["boards"]["title"], "我的板块监控")
+        self.assertEqual(payload["sections"]["indexes"]["title"], "我的指数监控")
+        self.assertTrue(payload["controls"]["write_route_registered"])
+        self.assertFalse(payload["controls"]["pause_monitor_enabled"])
+        self.assertTrue(payload["controls"]["remove_monitor_enabled"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertEqual(len(payload["sections"]["stocks"]["items"]), 1)
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["identity_key"], "stock:SH:600000")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["direction_label"], "买向观察")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["source_type_raw"], "single_row")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["source_type"], "direct")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["source_type_label"], "直接加入")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["source_object_kind"], "none")
+        self.assertIsNone(payload["sections"]["stocks"]["items"][0]["source_object_identity_key"])
+        self.assertIsNone(payload["sections"]["stocks"]["items"][0]["source_object_code"])
+        self.assertIsNone(payload["sections"]["stocks"]["items"][0]["source_object_name"])
+        self.assertIsNone(payload["sections"]["stocks"]["items"][0]["membership_relation_date"])
+        self.assertTrue(payload["sections"]["stocks"]["items"][0]["is_valid"])
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["is_invalid_label"], "否")
+        self.assertEqual(payload["sections"]["stocks"]["items"][0]["invalid_reason"], "")
+        self.assertEqual(payload["selected_for_trade_date"], "20260605")
+        self.assertIn("20260605", payload["available_for_trade_dates"])
+        stock_columns = payload["sections"]["stocks"]["columns"]
+        self.assertEqual(stock_columns[0]["label"], "是否失效")
+        self.assertEqual(stock_columns[1]["key"], "for_trade_date")
+        self.assertEqual(stock_columns[2]["key"], "identity_key")
+        self.assertEqual(stock_columns[3]["key"], "display_name")
+        self.assertEqual(stock_columns[4]["key"], "industry_code")
+        self.assertEqual(stock_columns[5]["key"], "industry_name")
+        stock_item = payload["sections"]["stocks"]["items"][0]
+        self.assertEqual(stock_item["cells"][0]["value"], "否")
+        self.assertEqual(stock_item["cells"][1]["value"], "20260605")
+        self.assertEqual(stock_item["cells"][2]["value"], "stock:SH:600000")
+        self.assertEqual(stock_item["cells"][3]["value"], "浦发银行")
+        self.assertEqual(stock_item["cells"][4]["value"], "881001")
+        self.assertEqual(stock_item["cells"][5]["value"], "银行")
+        self.assertEqual(stock_api_response.status_code, 200)
+        self.assertEqual(stock_api_response.json()["selected_asset_kind"], "stock")
+        self.assertEqual(
+            repo.app_monitor_reads,
+            [(1, "admin", 1, None, ""), (1, "admin", 1, "stock", ""), (1, "admin", 1, "stock", "")],
+        )
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("我的监控对象", page_response.text)
+        self.assertIn("我的个股监控", page_response.text)
+        self.assertIn("是否失效", page_response.text)
+        self.assertIn("buy_expected_return_pct", page_response.text)
+        self.assertIn("当前生效日期", page_response.text)
+        self.assertIn("浦发银行", page_response.text)
+        self.assertIn("stock:SH:600000", page_response.text)
+        self.assertIn("881001", page_response.text)
+        self.assertIn("银行", page_response.text)
+        self.assertLess(page_response.text.index("<th>操作</th>"), page_response.text.index("<th class=\"text\">是否失效</th>"))
+        self.assertIn('class="monitor-delete-button"', page_response.text)
+        self.assertIn("white-space: nowrap;", page_response.text)
+        self.assertLess(page_response.text.index(">删除</button>"), page_response.text.index("<td class=\"text\">否</td>"))
+        self.assertNotIn("直接加入", page_response.text)
+        self.assertNotIn("无来源指数/板块", page_response.text)
+        self.assertNotIn("single_row", page_response.text)
+        self.assertNotIn("stock:SH:600004", page_response.text)
+        self.assertIn("删除", page_response.text)
+        self.assertNotIn("删除监控", page_response.text)
+        self.assertIn("当前仅保存监控范围，不代表交易建议", page_response.text)
+        self.assertIn("暂停监控（暂未开放）", page_response.text)
+        self.assertNotIn("买入到监控", page_response.text)
+        self.assertNotIn("一键下单", page_response.text)
+
+    def test_b_track_v2_my_monitor_date_selector_drives_invalid_label_without_cross_user_leak(self) -> None:
+        client, repo, _, _ = build_client()
+        current_row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            direction="buy",
+            source="single_row",
+            source_row=repo.app_filter_rows["stock"][0],
+        )
+        old_filter_row = dict(repo.app_filter_rows["stock"][0])
+        old_filter_row.update(
+            {
+                "identity_key": "stock:SH:600004",
+                "stock_identity_key": "stock:SH:600004",
+                "display_name": "旧日期个股",
+                "name": "旧日期个股",
+                "display_code": "600004",
+                "code": "600004",
+                "source_display_basis_id": 3001,
+                "source_trade_date": "20260603",
+                "for_trade_date": "20260604",
+                "run_id": "condition_layer_20260603_source_20260603_v1",
+                "source_run_id": "condition_layer_20260603_source_20260603_v1",
+            }
+        )
+        repo.app_filter_rows["stock"].append(old_filter_row)
+        old_row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            direction="buy",
+            source="single_row",
+            source_row=old_filter_row,
+        )
+        other_user_row = repo._new_monitor_row(
+            principal_id=2,
+            principal_type="human_user",
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            direction="buy",
+            source="single_row",
+            source_row=old_filter_row,
+        )
+        repo.app_monitor_rows.extend([current_row, old_row, other_user_row])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/monitor/stocks?monitor_status=all&for_trade_date=20260604")
+        page_response = client.get("/n6/app/my-monitor/stocks?monitor_status=all&for_trade_date=20260604")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["selected_for_trade_date"], "20260604")
+        self.assertEqual(payload["available_for_trade_dates"][:2], ["20260605", "20260604"])
+        items = {
+            item["identity_key"]: item
+            for item in payload["sections"]["stocks"]["items"]
+        }
+        self.assertEqual(set(items), {"stock:SH:600004"})
+        self.assertEqual(items["stock:SH:600004"]["is_invalid_label"], "否")
+        self.assertEqual(items["stock:SH:600004"]["cells"][3]["value"], "旧日期个股")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn('value="20260604" selected', page_response.text)
+        self.assertIn("旧日期个股", page_response.text)
+        self.assertNotIn("浦发银行", page_response.text)
+        self.assertNotIn("principal_id=2", page_response.text)
+
+    def test_b_track_v2_my_stock_monitor_shows_source_parent_and_current_memberships(self) -> None:
+        client, repo, _, _ = build_client()
+        row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            direction="buy",
+            source="board_linked_stock",
+            source_row=repo.app_filter_rows["stock"][0],
+        )
+        row["source_snapshot_json"] = {
+            "parent_asset_kind": "board",
+            "parent_identity_key": "board:TDX:881001",
+            "parent_code": "881001",
+            "parent_name": "银行",
+            "membership_trade_date": "20260604",
+            "membership_source_version": "board_membership_20260604_v1",
+        }
+        repo.app_monitor_rows.append(row)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_response = client.get("/api/n6/app/v2/monitor/stocks")
+        page_response = client.get("/n6/app/my-monitor/stocks")
+
+        self.assertEqual(api_response.status_code, 200)
+        item = api_response.json()["sections"]["stocks"]["items"][0]
+        self.assertEqual(item["source_type_raw"], "board_linked_stock")
+        self.assertEqual(item["source_type"], "board_linked_stock")
+        self.assertEqual(item["source_type_label"], "来源板块")
+        self.assertEqual(item["source_object_kind"], "board")
+        self.assertEqual(item["source_object_identity_key"], "board:TDX:881001")
+        self.assertEqual(item["source_object_code"], "881001")
+        self.assertEqual(item["source_object_name"], "银行")
+        self.assertEqual(item["membership_relation_date"], "20260604")
+        self.assertEqual(item["source_parent"]["title_label"], "来源板块")
+        self.assertEqual(item["source_parent"]["identity_key"], "board:TDX:881001")
+        self.assertEqual(item["source_parent"]["display_name"], "银行")
+        self.assertEqual(item["current_memberships"]["board_count"], 1)
+        self.assertEqual(item["current_memberships"]["index_count"], 1)
+        self.assertEqual(item["current_memberships"]["boards"][0]["display_name"], "银行")
+        self.assertEqual(item["current_memberships"]["indexes"][0]["display_name"], "沪深300")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn("来源对象：", page_response.text)
+        self.assertNotIn("来源板块 ·", page_response.text)
+        self.assertNotIn("<th>当前所属指数</th>", page_response.text)
+        self.assertNotIn("<th>当前所属板块</th>", page_response.text)
+        self.assertIn("所有字段 · 当前所属关系", page_response.text)
+        self.assertNotIn('<details class="monitor-relationship-detail" open', page_response.text)
+        self.assertIn("当前所属指数", page_response.text)
+        self.assertIn("沪深300", page_response.text)
+        self.assertIn("当前所属板块", page_response.text)
+        self.assertIn("关系日期: 20260604", page_response.text)
+        self.assertNotIn("买入到监控", page_response.text)
+        self.assertNotIn("一键下单", page_response.text)
+
+    def test_b_track_v2_my_stock_monitor_maps_index_linked_source_fields(self) -> None:
+        client, repo, _, _ = build_client()
+        row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            direction="buy",
+            source="index_linked_stock",
+            source_row=repo.app_filter_rows["stock"][0],
+        )
+        row["source_snapshot_json"] = {
+            "parent_asset_kind": "index",
+            "parent_identity_key": "index:SH:000300",
+            "parent_code": "000300",
+            "parent_name": "沪深300",
+            "membership_trade_date": "20260604",
+        }
+        repo.app_monitor_rows.append(row)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_response = client.get("/api/n6/app/v2/monitor/stocks")
+        page_response = client.get("/n6/app/my-monitor/stocks")
+
+        self.assertEqual(api_response.status_code, 200)
+        item = api_response.json()["sections"]["stocks"]["items"][0]
+        self.assertEqual(item["source_type_raw"], "index_linked_stock")
+        self.assertEqual(item["source_type"], "index_linked_stock")
+        self.assertEqual(item["source_type_label"], "来源指数")
+        self.assertEqual(item["source_object_kind"], "index")
+        self.assertEqual(item["source_object_identity_key"], "index:SH:000300")
+        self.assertEqual(item["source_object_code"], "000300")
+        self.assertEqual(item["source_object_name"], "沪深300")
+        self.assertEqual(item["membership_relation_date"], "20260604")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn("来源指数 ·", page_response.text)
+        self.assertIn("index:SH:000300", page_response.text)
+        self.assertIn("关系日期: 20260604", page_response.text)
+        self.assertNotIn("single_row", page_response.text)
+
+    def test_b_track_v2_monitor_validity_defaults_to_current_filter_batch(self) -> None:
+        client, repo, _, _ = build_client()
+        current_row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            direction="buy",
+            source="single_row",
+            source_row=repo.app_filter_rows["stock"][0],
+        )
+        old_source_row = dict(repo.app_filter_rows["stock"][0])
+        old_source_row.update(
+            {
+                "identity_key": "stock:SH:600004",
+                "stock_identity_key": "stock:SH:600004",
+                "code": "600004",
+                "display_code": "600004",
+                "name": "旧批次个股",
+                "display_name": "旧批次个股",
+                "source_display_basis_id": 3000,
+                "run_id": "condition_layer_20260603_source_20260603_v1",
+                "source_trade_date": "20260603",
+                "for_trade_date": "20260604",
+                "source_run_id": "condition_layer_20260603_source_20260603_v1",
+            }
+        )
+        old_row = repo._new_monitor_row(
+            principal_id=1,
+            principal_type="admin",
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            direction="buy",
+            source="single_row",
+            source_row=old_source_row,
+        )
+        repo.app_monitor_rows.extend([current_row, old_row])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        active_response = client.get("/api/n6/app/v2/monitor/stocks")
+        expired_response = client.get("/api/n6/app/v2/monitor/stocks?monitor_status=expired")
+        expired_page = client.get("/n6/app/my-monitor/stocks?monitor_status=expired")
+
+        self.assertEqual(active_response.status_code, 200)
+        active_payload = active_response.json()
+        self.assertEqual(active_payload["monitor_status_filter"], "active")
+        self.assertEqual(active_payload["current_filter_batch"]["stock"]["source_trade_date"], "20260604")
+        self.assertEqual(active_payload["current_filter_batch"]["stock"]["for_trade_date"], "20260605")
+        self.assertEqual(active_payload["sections"]["stocks"]["count"], 1)
+        self.assertEqual(active_payload["sections"]["stocks"]["status_counts"]["active"], 1)
+        self.assertEqual(active_payload["sections"]["stocks"]["status_counts"]["expired"], 1)
+        self.assertEqual(active_payload["sections"]["stocks"]["items"][0]["identity_key"], "stock:SH:600000")
+        self.assertEqual(active_payload["sections"]["stocks"]["items"][0]["effective_status"], "active")
+        self.assertTrue(active_payload["sections"]["stocks"]["items"][0]["effective_active"])
+
+        self.assertEqual(expired_response.status_code, 200)
+        expired_payload = expired_response.json()
+        self.assertEqual(expired_payload["monitor_status_filter"], "expired")
+        expired_item = expired_payload["sections"]["stocks"]["items"][0]
+        self.assertEqual(expired_item["identity_key"], "stock:SH:600004")
+        self.assertEqual(expired_item["effective_status"], "expired")
+        self.assertFalse(expired_item["effective_active"])
+        self.assertFalse(expired_item["is_valid"])
+        self.assertEqual(expired_item["invalid_reason"], "for_trade_date_mismatch")
+        self.assertEqual(expired_item["expired_reason"], "filter_batch_changed")
+        self.assertEqual(expired_item["expired_reason_label"], "筛选中心已更新")
+        self.assertEqual(expired_item["validity"]["original_batch"]["source_trade_date"], "20260603")
+        self.assertEqual(expired_item["validity"]["current_batch"]["source_trade_date"], "20260604")
+
+        self.assertEqual(expired_page.status_code, 200)
+        self.assertIn("当前有效批次：source_trade_date=20260604 · for_trade_date=20260605", expired_page.text)
+        self.assertIn("已失效对象不会参与交易时间信号监控", expired_page.text)
+        self.assertIn("旧批次个股", expired_page.text)
+        self.assertNotIn("失效原因：筛选中心已更新", expired_page.text)
+        self.assertNotIn("for_trade_date_mismatch", expired_page.text)
+        self.assertNotIn("原批次：source_trade_date=20260603 · for_trade_date=20260604", expired_page.text)
+        self.assertNotIn("当前批次：source_trade_date=20260604 · for_trade_date=20260605", expired_page.text)
+        self.assertNotIn("重新加入监控", expired_page.text)
+        self.assertIn("归档已失效对象（后续开放）", expired_page.text)
+        self.assertNotIn("买入到监控", expired_page.text)
+        self.assertNotIn("建议买入", expired_page.text)
+
+    def test_b_track_v2_my_monitor_readonly_boundary_forbidden_sources_and_writes(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_monitor_rows.append(
+            repo._new_monitor_row(
+                principal_id=1,
+                principal_type="admin",
+                asset_kind="stock",
+                identity_key="stock:SH:600000",
+                direction="buy",
+                source="single_row",
+                source_row=repo.app_filter_rows["stock"][0],
+            )
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/monitor/stocks")
+
+        self.assertEqual(response.status_code, 200)
+        adapter_source = "\n".join(
+            [
+                inspect.getsource(PostgresN6UserRepository.fetch_app_monitor_items),
+                inspect.getsource(n6_app_v1_module.app_v2_monitor_item),
+                inspect.getsource(n6_app_v1_module.app_v2_monitor_source_parent),
+            ]
+        )
+        self.assertIn(
+            "for_trade_date",
+            inspect.signature(PostgresN6UserRepository.fetch_app_monitor_items).parameters,
+        )
+        for forbidden_source in (
+            "common_event_outbox",
+            "common_action_event",
+            "common_trigger_match",
+            "common_trigger_state",
+            "user_notification_queue",
+            "n6_virtual_account",
+            "n6_virtual_cash_ledger",
+            "n6_virtual_order",
+            "n6_virtual_trade",
+            "n6_virtual_position",
+            "n6_virtual_position_event",
+            "n6_virtual_pnl_snapshot",
+        ):
+            self.assertNotIn(forbidden_source, adapter_source)
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_b_track_v2_monitor_add_bulk_add_and_soft_delete_are_principal_scoped(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        add_response = client.post(
+            "/api/n6/app/v2/monitor/items",
+            json={"asset_kind": "stock", "identity_key": "stock:SH:600000", "direction": "buy"},
+        )
+        duplicate_response = client.post(
+            "/api/n6/app/v2/monitor/items",
+            json={"asset_kind": "stock", "identity_key": "stock:SH:600000", "direction": "buy"},
+        )
+
+        self.assertEqual(add_response.status_code, 200)
+        self.assertEqual(add_response.json()["status"], "added")
+        self.assertEqual(add_response.json()["added_count"], 1)
+        self.assertEqual(repo.app_monitor_rows[0]["valid_source_trade_date"], "20260604")
+        self.assertEqual(repo.app_monitor_rows[0]["valid_for_trade_date"], "20260605")
+        self.assertEqual(repo.app_monitor_rows[0]["valid_source_run_id"], "condition_layer_20260604_source_20260604_v1")
+        self.assertEqual(repo.app_monitor_rows[0]["source_snapshot_json"]["source_display_basis_id"], 3001)
+        self.assertEqual(repo.app_monitor_rows[0]["source_snapshot_json"]["source_trade_date"], "20260604")
+        self.assertEqual(repo.app_monitor_rows[0]["source_snapshot_json"]["for_trade_date"], "20260605")
+        self.assertEqual(duplicate_response.status_code, 200)
+        self.assertEqual(duplicate_response.json()["status"], "already_exists")
+        self.assertEqual(duplicate_response.json()["skipped_count"], 1)
+        self.assertEqual(len(repo.app_monitor_rows), 1)
+
+        second_stock = dict(repo.app_filter_rows["stock"][0])
+        second_stock["identity_key"] = "stock:SH:600004"
+        second_stock["stock_identity_key"] = "stock:SH:600004"
+        second_stock["code"] = "600004"
+        second_stock["display_code"] = "600004"
+        second_stock["name"] = "白云机场"
+        second_stock["display_name"] = "白云机场"
+        repo.app_filter_rows["stock"].append(second_stock)
+        bulk_response = client.post(
+            "/api/n6/app/v2/monitor/bulk-add",
+            json={
+                "asset_kind": "stock",
+                "direction": "buy",
+                "filters": {"year_overheat_level": ["低位"]},
+            },
+        )
+
+        self.assertEqual(bulk_response.status_code, 200)
+        self.assertEqual(bulk_response.json()["filtered_count"], 2)
+        self.assertEqual(bulk_response.json()["added_count"], 1)
+        self.assertEqual(bulk_response.json()["skipped_count"], 1)
+        self.assertEqual(len([row for row in repo.app_monitor_rows if row["status"] != "removed"]), 2)
+
+        second_board = dict(repo.app_filter_rows["board"][0])
+        second_board["identity_key"] = "board:TDX:881002"
+        second_board["board_identity_key"] = "board:TDX:881002"
+        second_board["code"] = "881002"
+        second_board["display_code"] = "881002"
+        second_board["name"] = "煤炭开采"
+        second_board["display_name"] = "煤炭开采"
+        repo.app_filter_rows["board"].append(second_board)
+        selected_response = client.post(
+            "/api/n6/app/v2/monitor/selected-add",
+            json={
+                "asset_kind": "board",
+                "direction": "buy",
+                "identity_keys": ["board:TDX:881001", "board:TDX:881002"],
+            },
+        )
+
+        self.assertEqual(selected_response.status_code, 200)
+        self.assertEqual(selected_response.json()["status"], "completed")
+        self.assertEqual(selected_response.json()["requested_count"], 2)
+        self.assertEqual(selected_response.json()["added_count"], 2)
+        self.assertEqual(selected_response.json()["skipped_count"], 0)
+        self.assertEqual(selected_response.json()["failed_count"], 0)
+        self.assertEqual(
+            [row["identity_key"] for row in repo.app_monitor_rows if row["asset_kind"] == "board"],
+            ["board:TDX:881001", "board:TDX:881002"],
+        )
+
+        monitor_id = int(repo.app_monitor_rows[0]["monitor_id"])
+        delete_response = client.delete(f"/api/n6/app/v2/monitor/items/{monitor_id}")
+
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(delete_response.json()["status"], "removed")
+        self.assertEqual(repo.app_monitor_rows[0]["status"], "removed")
+        self.assertEqual(repo.app_monitor_rows[0]["removed_at"], "2026-06-14T09:30:00+08:00")
+
+        repo.app_monitor_rows.append(
+            {
+                **repo._new_monitor_row(
+                    principal_id=999,
+                    principal_type="human_user",
+                    asset_kind="stock",
+                    identity_key="stock:SH:600000",
+                    direction="buy",
+                    source="single_row",
+                    source_row=repo.app_filter_rows["stock"][0],
+                ),
+                "monitor_id": 999,
+            }
+        )
+        cross_principal_response = client.delete("/api/n6/app/v2/monitor/items/999")
+        self.assertIn(cross_principal_response.status_code, {403, 404})
+        self.assertNotEqual(repo.app_monitor_rows[-1]["status"], "removed")
+        self.assertNotIn("order", json.dumps(repo.app_monitor_writes, ensure_ascii=False).lower())
+
+    def test_b_track_v2_selected_monitor_add_preserves_requested_filter_trade_date(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        historical_index = dict(repo.app_filter_rows["index"][0])
+        historical_index.update(
+            {
+                "for_trade_date": "20260703",
+                "source_trade_date": "20260702",
+                "run_id": "condition_layer_20260702_source_20260702_v1",
+                "source_run_id": "condition_layer_20260702_source_20260702_v1",
+                "projection_run_id": "user_projection_shadow_20260703_v1",
+                "cache_run_id": "n6_display_cache_20260703_v1",
+            }
+        )
+        current_index = dict(historical_index)
+        current_index.update(
+            {
+                "for_trade_date": "20260706",
+                "source_trade_date": "20260703",
+                "run_id": "condition_layer_20260703_source_20260703_v1",
+                "source_run_id": "condition_layer_20260703_source_20260703_v1",
+                "projection_run_id": "user_projection_shadow_20260706_v1",
+                "cache_run_id": "n6_display_cache_20260706_v1",
+            }
+        )
+        repo.app_filter_rows["index"] = [historical_index, current_index]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/filter-center/indexes?for_trade_date=20260703")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn('data-monitor-for-trade-date="20260703"', page_response.text)
+
+        current_response = client.post(
+            "/api/n6/app/v2/monitor/items",
+            json={
+                "asset_kind": "index",
+                "direction": "buy",
+                "identity_key": "index:SH:000300",
+                "for_trade_date": "20260706",
+            },
+        )
+        response = client.post(
+            "/api/n6/app/v2/monitor/selected-add",
+            json={
+                "asset_kind": "index",
+                "direction": "buy",
+                "identity_keys": ["index:SH:000300"],
+                "for_trade_date": "20260703",
+            },
+        )
+
+        self.assertEqual(current_response.status_code, 200)
+        self.assertEqual(current_response.json()["status"], "added")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(response.json()["added_count"], 1)
+        self.assertEqual(response.json()["skipped_count"], 0)
+        self.assertEqual(
+            [row["valid_for_trade_date"] for row in repo.app_monitor_rows],
+            ["20260706", "20260703"],
+        )
+        self.assertEqual(repo.app_monitor_rows[1]["source_snapshot_json"]["for_trade_date"], "20260703")
+
+    def test_b_track_v2_bulk_monitor_add_uses_requested_filter_trade_date(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        historical_index = dict(repo.app_filter_rows["index"][0])
+        historical_index.update(
+            {
+                "for_trade_date": "20260703",
+                "source_trade_date": "20260702",
+                "run_id": "condition_layer_20260702_source_20260702_v1",
+                "source_run_id": "condition_layer_20260702_source_20260702_v1",
+            }
+        )
+        current_index = dict(historical_index)
+        current_index.update(
+            {
+                "for_trade_date": "20260706",
+                "source_trade_date": "20260703",
+                "run_id": "condition_layer_20260703_source_20260703_v1",
+                "source_run_id": "condition_layer_20260703_source_20260703_v1",
+            }
+        )
+        repo.app_filter_rows["index"] = [historical_index, current_index]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/filter-center/indexes?for_trade_date=20260703")
+        response = client.post(
+            "/api/n6/app/v2/monitor/bulk-add",
+            json={
+                "asset_kind": "index",
+                "direction": "buy",
+                "for_trade_date": "20260703",
+                "filters": {},
+            },
+        )
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn('data-monitor-bulk-add', page_response.text)
+        self.assertIn('data-monitor-for-trade-date="20260703"', page_response.text)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["added_count"], 1)
+        self.assertEqual(repo.app_monitor_writes[-1]["filters"]["for_trade_date"], "20260703")
+        self.assertEqual(repo.app_monitor_rows[0]["valid_for_trade_date"], "20260703")
+        self.assertEqual(repo.app_monitor_rows[0]["source_snapshot_json"]["for_trade_date"], "20260703")
+
+    def test_b_track_v2_monitor_mutation_responses_are_json_safe(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        response_time = datetime(2026, 7, 6, 9, 30, tzinfo=timezone.utc)
+
+        def datetime_add_payload(**_: Any) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "status": "added",
+                "added_count": 1,
+                "skipped_count": 0,
+                "item": {"monitor_id": 1, "created_at": response_time},
+            }
+
+        def datetime_bulk_payload(**_: Any) -> dict[str, Any]:
+            return {"ok": True, "status": "completed", "updated_at": response_time}
+
+        def datetime_selected_payload(**_: Any) -> dict[str, Any]:
+            return {"ok": True, "status": "completed", "updated_at": response_time}
+
+        def datetime_remove_payload(**_: Any) -> dict[str, Any]:
+            return {"ok": True, "status": "removed", "monitor_id": 1, "removed_at": response_time}
+
+        repo.add_app_monitor_item = datetime_add_payload  # type: ignore[method-assign]
+        repo.bulk_add_app_monitor_items = datetime_bulk_payload  # type: ignore[method-assign]
+        repo.selected_add_app_monitor_items = datetime_selected_payload  # type: ignore[method-assign]
+        repo.remove_app_monitor_item = datetime_remove_payload  # type: ignore[method-assign]
+
+        add_response = client.post(
+            "/api/n6/app/v2/monitor/items",
+            json={"asset_kind": "index", "identity_key": "index:SH:000300", "direction": "buy"},
+        )
+        bulk_response = client.post(
+            "/api/n6/app/v2/monitor/bulk-add",
+            json={"asset_kind": "index", "direction": "buy", "filters": {"for_trade_date": "20260706"}},
+        )
+        selected_response = client.post(
+            "/api/n6/app/v2/monitor/selected-add",
+            json={
+                "asset_kind": "index",
+                "direction": "buy",
+                "identity_keys": ["index:SH:000300"],
+                "for_trade_date": "20260706",
+            },
+        )
+        remove_response = client.delete("/api/n6/app/v2/monitor/items/1")
+
+        self.assertEqual(add_response.status_code, 200)
+        self.assertEqual(add_response.json()["item"]["created_at"], "2026-07-06T09:30:00+00:00")
+        self.assertEqual(bulk_response.status_code, 200)
+        self.assertEqual(bulk_response.json()["updated_at"], "2026-07-06T09:30:00+00:00")
+        self.assertEqual(selected_response.status_code, 200)
+        self.assertEqual(selected_response.json()["updated_at"], "2026-07-06T09:30:00+00:00")
+        self.assertEqual(remove_response.status_code, 200)
+        self.assertEqual(remove_response.json()["removed_at"], "2026-07-06T09:30:00+00:00")
+
+    def test_b_track_v2_monitor_and_message_sql_use_shared_pool_with_user_scope(self) -> None:
+        signal_where_source = inspect.getsource(PostgresN6UserRepository._app_v1_signal_where)
+        effective_scope_source = inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_select)
+        all_scope_source = inspect.getsource(PostgresN6UserRepository._app_v1_all_monitor_scope_select)
+        add_source = inspect.getsource(PostgresN6UserRepository.add_app_monitor_item)
+        bulk_source = inspect.getsource(PostgresN6UserRepository.bulk_add_app_monitor_items)
+        linked_source = inspect.getsource(PostgresN6UserRepository.add_app_linked_stock_monitor_items)
+        remove_source = inspect.getsource(PostgresN6UserRepository.remove_app_monitor_item)
+
+        self.assertNotIn("p.user_id = %(user_id)s", signal_where_source)
+        self.assertNotIn("owner_user_id = p.user_id", signal_where_source)
+        self.assertIn("_app_v1_effective_monitor_scope_clause", signal_where_source)
+
+        self.assertIn("m.user_id = %(user_id)s", effective_scope_source)
+        self.assertIn("m.user_id = %(user_id)s", all_scope_source)
+        for source in (add_source, bulk_source, linked_source):
+            self.assertNotIn("del user_id", source)
+            self.assertIn("user_id", source)
+            self.assertIn("user_id_columns", source)
+        self.assertNotIn("del user_id", remove_source)
+        self.assertIn("user_id_clause", remove_source)
+
+    def test_b_track_v2_bulk_add_uses_all_filtered_rows_not_default_display_rows(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        base = dict(repo.app_filter_rows["stock"][0])
+        rows = []
+        for index in range(1, 251):
+            row = dict(base)
+            code = f"6{index:05d}"
+            row["identity_key"] = f"stock:SH:{code}"
+            row["stock_identity_key"] = row["identity_key"]
+            row["code"] = code
+            row["display_code"] = code
+            row["name"] = f"测试个股{index}"
+            row["display_name"] = f"测试个股{index}"
+            row["year_overheat_level"] = "volume_up"
+            row["period_grade_y"] = "volume_up"
+            rows.append(row)
+        repo.app_filter_rows["stock"] = rows
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/filter-center/stocks?year_overheat_level=volume_up")
+        bulk_response = client.post(
+            "/api/n6/app/v2/monitor/bulk-add",
+            json={
+                "asset_kind": "stock",
+                "direction": "buy",
+                "filters": {"year_overheat_level": ["volume_up"]},
+            },
+        )
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("当前显示: 100", page_response.text)
+        self.assertEqual(bulk_response.status_code, 200)
+        self.assertEqual(bulk_response.json()["filtered_count"], 250)
+        self.assertEqual(bulk_response.json()["added_count"], 250)
+        self.assertEqual(len(repo.app_monitor_rows), 250)
+
+    def test_b_track_v2_filter_center_renders_monitor_add_controls_without_trade_wording(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        cases = (
+            ("/n6/app/filter-center/indexes", "加入到指数监控", "当前筛选结果到指数监控", "加入指数监控"),
+            (
+                "/n6/app/filter-center/boards",
+                "加入已选到板块监控",
+                "将当前筛选结果加入到板块监控",
+                "加入板块监控",
+            ),
+            (
+                "/n6/app/filter-center/stocks",
+                "加入已选到个股监控",
+                "将当前筛选结果加入到个股监控",
+                "加入个股监控",
+            ),
+        )
+        for path, expected_selected_label, expected_bulk_label, expected_row_label in cases:
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(expected_selected_label, response.text)
+                self.assertIn(expected_bulk_label, response.text)
+                self.assertIn(expected_row_label, response.text)
+                self.assertIn('data-monitor-add', response.text)
+                self.assertIn('data-monitor-bulk-add', response.text)
+                self.assertIn('data-monitor-selected-add', response.text)
+                self.assertIn("/api/n6/app/v2/monitor/selected-add", response.text)
+                self.assertIn("identity_keys", response.text)
+                self.assertIn("当前仅保存监控范围，不代表交易建议", response.text)
+                self.assertNotIn("买入到监控", response.text)
+                self.assertNotIn("建议买入", response.text)
+                self.assertNotIn("一键下单", response.text)
+
+    def test_b_track_v2_filter_center_renders_realtime_scope_add_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for path in (
+            "/n6/app/filter-center/indexes",
+            "/n6/app/filter-center/boards",
+            "/n6/app/filter-center/stocks",
+        ):
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("加入实时监控范围", response.text)
+                self.assertIn("加入已选到实时监控范围", response.text)
+                self.assertIn("将当前筛选结果加入实时监控范围", response.text)
+                self.assertIn('class="filter-action-cell"', response.text)
+                self.assertIn("min-width: 280px", response.text)
+                self.assertIn("data-realtime-scope-add", response.text)
+                self.assertIn("data-realtime-scope-selected-add", response.text)
+                self.assertIn("data-realtime-scope-bulk-add", response.text)
+
+    def test_b_track_v2_routes_limit_mutation_to_user_monitor_preferences(self) -> None:
+        client, _, _, _ = build_client()
+        v2_routes = {
+            getattr(route, "path", ""): getattr(route, "methods", set())
+            for route in client.app.routes
+            if str(getattr(route, "path", "")).startswith("/api/n6/app/v2")
+        }
+
+        self.assertIn("/api/n6/app/v2/filter/stocks", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/boards", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/indexes", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/board-members", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/index-members", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/board-linked-stocks", v2_routes)
+        self.assertIn("/api/n6/app/v2/filter/index-linked-stocks", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/stocks", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/boards", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/indexes", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/items", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/bulk-add", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/selected-add", v2_routes)
+        self.assertIn("/api/n6/app/v2/monitor/items/{monitor_id}", v2_routes)
+        self.assertIn("/api/n6/app/v2/realtime-scope", v2_routes)
+        self.assertIn("/api/n6/app/v2/realtime-scope/items", v2_routes)
+        self.assertIn("/api/n6/app/v2/realtime-scope/selected-add", v2_routes)
+        self.assertIn("/api/n6/app/v2/realtime-scope/bulk-add", v2_routes)
+        self.assertIn("/api/n6/app/v2/realtime-scope/items/{realtime_scope_id}", v2_routes)
+        for path, methods in v2_routes.items():
+            if path.startswith("/api/n6/app/v2/filter/"):
+                self.assertLessEqual(set(methods), {"GET", "HEAD"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/monitor/items"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/monitor/bulk-add"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/monitor/selected-add"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/monitor/items/{monitor_id}"]), {"DELETE"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/realtime-scope"]), {"GET"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/realtime-scope/items"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/realtime-scope/selected-add"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/realtime-scope/bulk-add"]), {"POST"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/realtime-scope/items/{realtime_scope_id}"]), {"DELETE"})
+        self.assertNotIn("/api/n6/app/v2/monitor/write", v2_routes)
+
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        self.assertIn(client.post("/api/n6/app/v2/monitor/write").status_code, {404, 405})
+        self.assertIn(client.patch("/api/n6/app/v2/monitor/write").status_code, {404, 405})
+        self.assertIn(client.delete("/api/n6/app/v2/monitor/write").status_code, {404, 405})
+
+    def test_b_track_v2_message_dashboard_api_is_principal_scoped_and_readonly(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1], principal_id=999, principal_type="human_user")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/message-dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "b_track_monitor_message_dashboard_v2")
+        self.assertEqual(payload["component_label"], "我的监控消息总览")
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["scope_mode"], "effective_monitor")
+        self.assertEqual(payload["current_filter_batch"]["for_trade_date"], "20260605")
+        self.assertEqual(payload["current_filter_batch"]["source_trade_date"], "20260604")
+        self.assertEqual(payload["summary"]["effective_monitor_count"], 2)
+        self.assertEqual(payload["summary"]["expired_monitor_count"], 0)
+        self.assertEqual(payload["summary"]["matched_signal_count"], 2)
+        self.assertEqual(payload["summary"]["today_message_count"], 2)
+        self.assertEqual(payload["summary"]["action_executed_count"], 1)
+        self.assertEqual(payload["summary"]["action_blocked_count"], 1)
+        self.assertEqual(payload["summary"]["action_eligible_count"], 0)
+        self.assertEqual(payload["summary"]["action_skipped_count"], 0)
+        self.assertEqual(payload["summary"]["pending_market_data_count"], 0)
+        self.assertEqual(payload["summary"]["state_changed_count"], 0)
+        self.assertEqual(payload["summary"]["excluded_message_count"], 0)
+        self.assertEqual(len(payload["items_preview"]), 2)
+        self.assertIn("只读模式 · 不下单 · 不更新持仓 · 不构成投资建议 · principal scoped", payload["safety_banner"])
+        self.assertTrue(payload["source_policy"]["principal_scoped"])
+        self.assertTrue(payload["source_policy"]["n6_projection_only"])
+        self.assertFalse(payload["source_policy"]["common_event_outbox_read"])
+        self.assertFalse(payload["source_policy"]["user_notification_queue_read"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_v2_message_dashboard_groups_and_projection_status(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        groups_response = client.get("/api/n6/app/v2/message-dashboard/groups")
+        status_response = client.get("/api/n6/app/v2/message-dashboard/projection-status")
+
+        self.assertEqual(groups_response.status_code, 200)
+        groups_payload = groups_response.json()
+        self.assertEqual(groups_payload["component"], "b_track_monitor_message_groups_v2")
+        groups_by_event = {
+            group["event_type"]: group
+            for group in groups_payload["groups"]
+        }
+        self.assertEqual(groups_by_event["ActionBlocked"]["message_count"], 1)
+        self.assertEqual(groups_by_event["ActionExecuted"]["message_count"], 1)
+        self.assertEqual(groups_by_event["ActionBlocked"]["event_label"], "市场动作未确认 (ActionBlocked)")
+        self.assertEqual(groups_by_event["ActionExecuted"]["event_label"], "市场动作确认成立 (ActionExecuted)")
+        self.assertEqual(groups_by_event["ActionBlocked"]["items_preview"][0]["identity_key"], "stock:SZ:302132")
+
+        self.assertEqual(status_response.status_code, 200)
+        status_payload = status_response.json()
+        self.assertEqual(status_payload["component"], "b_track_monitor_projection_status_v2")
+        self.assertEqual(status_payload["status_reason"], "projection_covers_for_trade_date")
+        self.assertEqual(status_payload["expected_for_trade_date"], "20260605")
+        self.assertEqual(status_payload["projection_count"], 2)
+        self.assertEqual(status_payload["card_count"], 2)
+        self.assertFalse(status_payload["notification_queue_read"])
+        self.assertFalse(status_payload["writes_database"])
+
+    def test_b_track_v2_message_dashboard_empty_state_and_page_render(self) -> None:
+        empty_client, _, _, _ = build_client()
+        empty_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        empty_response = empty_client.get("/api/n6/app/v2/message-dashboard")
+
+        self.assertEqual(empty_response.status_code, 200)
+        self.assertEqual(empty_response.json()["empty_state"]["reason"], "no_effective_monitor")
+        self.assertEqual(
+            empty_response.json()["empty_state"]["message"],
+            "当前没有有效监控对象，请先从筛选中心加入监控",
+        )
+
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/messages")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("我的监控消息总览", page_response.text)
+        self.assertIn("只读模式 · 不下单 · 不更新持仓 · 不构成投资建议 · principal scoped", page_response.text)
+        self.assertIn("当前有效监控交易日", page_response.text)
+        self.assertIn("条件来源日", page_response.text)
+        self.assertIn("projection 状态", page_response.text)
+        self.assertIn("消息分组", page_response.text)
+        self.assertIn("消息卡片", page_response.text)
+        self.assertIn('class="message-card-grid"', page_response.text)
+        self.assertIn('class="message-card"', page_response.text)
+        self.assertIn("user_signal_card_id=201", page_response.text)
+        self.assertIn("user_signal_card_id=202", page_response.text)
+        self.assertNotIn("消息 preview", page_response.text)
+        self.assertIn("查看详情", page_response.text)
+        self.assertIn("市场动作未确认 (ActionBlocked)", page_response.text)
+        self.assertIn("市场动作确认成立 (ActionExecuted)", page_response.text)
+        self.assertNotIn("/api/n6/ui/v1/message-dashboard", page_response.text)
+
+    def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
+        client, repo, _, _ = build_client()
+        historical = next(row for row in repo.ui_v1_signals if int(row["user_signal_card_id"]) == 201)
+        seed_effective_monitor_for_signal(
+            repo,
+            historical,
+            for_trade_date="20260603",
+            source_trade_date="20260602",
+            source_run_id="condition_layer_20260602_to_20260603",
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/messages?trade_date=20260603")
+        api_response = client.get("/api/n6/app/v2/message-dashboard?trade_date=20260603")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("交易日", page_response.text)
+        self.assertIn('name="trade_date"', page_response.text)
+        self.assertIn('value="20260603" selected', page_response.text)
+        self.assertIn('value="20260602"', page_response.text)
+        self.assertIn('class="message-card-grid"', page_response.text)
+        self.assertIn("user_signal_card_id=201", page_response.text)
+        self.assertIn("市场动作未确认 (ActionBlocked)", page_response.text)
+        self.assertNotIn("当前没有有效监控对象", page_response.text)
+
+        self.assertEqual(api_response.status_code, 200)
+        payload = api_response.json()
+        self.assertEqual(payload["scope_mode"], "historical_projection")
+        self.assertEqual(payload["selected_trade_date"], "20260603")
+        self.assertEqual(payload["summary"]["today_message_count"], 1)
+        self.assertEqual(payload["card_items"][0]["user_signal_card_id"], 201)
+        self.assertEqual(repo.app_signal_filter_reads[-1]["trade_date"], "20260603")
+        self.assertTrue(repo.app_signal_filter_reads[-1]["historical_projection_mode"])
+
+    def test_b_track_v2_messages_trading_session_blocks_historical_api_and_page_falls_back_current(self) -> None:
+        client, repo, _, _ = build_client()
+        current = copy.deepcopy(repo.ui_v1_signals[1])
+        current["user_signal_projection_id"] = 9313
+        seed_effective_monitor_for_signal(repo, current)
+        repo.ui_v1_signals = [current, *repo.ui_v1_signals]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+            create=True,
+        ):
+            api_response = client.get("/api/n6/app/v2/message-dashboard?trade_date=20260603")
+            page_response = client.get("/n6/app/messages?trade_date=20260603")
+
+        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("交易时段仅显示当前交易日，历史查询收盘后可用", page_response.text)
+        self.assertIn('value="20260605" selected', page_response.text)
+        self.assertEqual(repo.app_signal_filter_reads[-1]["trade_date"], "20260605")
+        self.assertNotIn("historical_projection_mode", repo.app_signal_filter_reads[-1])
+
+    def test_b_track_signals_and_messages_default_to_stock_asset_kind_tabs(self) -> None:
+        client, repo, _, _ = build_client()
+        stock_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        stock_signal["user_signal_projection_id"] = 9411
+        stock_signal["user_signal_card_id"] = 9511
+        index_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        index_signal.update(
+            {
+                "user_signal_projection_id": 9412,
+                "user_signal_card_id": 9512,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        board_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        board_signal.update(
+            {
+                "user_signal_projection_id": 9413,
+                "user_signal_card_id": 9513,
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "code": "881001",
+                "name": "煤炭开采",
+            }
+        )
+        for signal in (stock_signal, index_signal, board_signal):
+            seed_effective_monitor_for_signal(repo, signal)
+        repo.ui_v1_signals = [stock_signal, index_signal, board_signal]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        signals_response = client.get("/n6/app/signals")
+        messages_response = client.get("/n6/app/messages")
+
+        self.assertEqual(signals_response.status_code, 200)
+        self.assertIn("指数消息", signals_response.text)
+        self.assertIn("板块消息", signals_response.text)
+        self.assertIn("个股消息", signals_response.text)
+        self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=index", signals_response.text)
+        self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=board", signals_response.text)
+        self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=stock", signals_response.text)
+        self.assertIn('name="asset_kind" value="stock"', signals_response.text)
+        self.assertIn("浦发银行", signals_response.text)
+        self.assertNotIn("上证指数", signals_response.text)
+        self.assertNotIn("煤炭开采", signals_response.text)
+        self.assertEqual(repo.app_signal_filter_reads[-2]["asset_kind"], "stock")
+
+        self.assertEqual(messages_response.status_code, 200)
+        self.assertIn("指数卡片", messages_response.text)
+        self.assertIn("板块卡片", messages_response.text)
+        self.assertIn("个股卡片", messages_response.text)
+        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=index", messages_response.text)
+        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=board", messages_response.text)
+        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=stock", messages_response.text)
+        self.assertIn('name="asset_kind" value="stock"', messages_response.text)
+        self.assertIn("user_signal_card_id=9511", messages_response.text)
+        self.assertNotIn("user_signal_card_id=9512", messages_response.text)
+        self.assertNotIn("user_signal_card_id=9513", messages_response.text)
+        self.assertEqual(repo.app_signal_filter_reads[-1]["asset_kind"], "stock")
+
+    def test_b_track_signals_and_messages_asset_kind_filter_reuses_monitor_visibility(self) -> None:
+        client, repo, _, _ = build_client()
+        stock_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        stock_signal["user_signal_projection_id"] = 9421
+        stock_signal["user_signal_card_id"] = 9521
+        index_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        index_signal.update(
+            {
+                "user_signal_projection_id": 9422,
+                "user_signal_card_id": 9522,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        board_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        board_signal.update(
+            {
+                "user_signal_projection_id": 9423,
+                "user_signal_card_id": 9523,
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "code": "881001",
+                "name": "煤炭开采",
+            }
+        )
+        for signal in (stock_signal, index_signal, board_signal):
+            seed_effective_monitor_for_signal(repo, signal)
+        repo.ui_v1_signals = [stock_signal, index_signal, board_signal]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        index_signals = client.get("/api/n6/app/v1/signals?asset_kind=index").json()
+        board_cards = client.get("/api/n6/app/v2/message-dashboard?asset_kind=board").json()
+
+        self.assertEqual(index_signals["selected_asset_kind"], "index")
+        self.assertEqual({item["asset_kind_label"] for item in index_signals["items"]}, {"指数"})
+        self.assertEqual([item["identity_key"] for item in index_signals["items"]], ["index:SH:000001"])
+        self.assertEqual(repo.app_signal_filter_reads[-2]["asset_kind"], "index")
+        self.assertEqual(board_cards["selected_asset_kind"], "board")
+        self.assertEqual([item["user_signal_card_id"] for item in board_cards["card_items"]], [9523])
+        self.assertEqual({item["asset_kind_label"] for item in board_cards["card_items"]}, {"板块"})
+        self.assertEqual(repo.app_signal_filter_reads[-1]["asset_kind"], "board")
+
+    def test_b_track_signals_and_messages_current_pages_have_auto_refresh_contract(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        signals_response = client.get("/n6/app/signals")
+        messages_response = client.get("/n6/app/messages")
+
+        self.assertEqual(signals_response.status_code, 200)
+        self.assertIn('data-n6-auto-refresh="signals"', signals_response.text)
+        self.assertIn('data-refresh-enabled="true"', signals_response.text)
+        self.assertIn('data-refresh-interval-ms="5000"', signals_response.text)
+        self.assertIn('/api/n6/app/v1/signals?trade_date=20260605&amp;asset_kind=stock', signals_response.text)
+        self.assertIn('data-n6-refresh-status', signals_response.text)
+        self.assertIn('data-n6-refresh-now', signals_response.text)
+        self.assertIn('data-n6-signals-body', signals_response.text)
+        self.assertIn('n6AutoRefresh', signals_response.text)
+        self.assertIn('data-refresh-backoff-ms="15000"', signals_response.text)
+        self.assertIn('data-refresh-max-backoff-ms="60000"', signals_response.text)
+
+        self.assertEqual(messages_response.status_code, 200)
+        self.assertIn('data-n6-auto-refresh="messages"', messages_response.text)
+        self.assertIn('data-refresh-enabled="true"', messages_response.text)
+        self.assertIn('data-refresh-interval-ms="5000"', messages_response.text)
+        self.assertIn('data-refresh-backoff-ms="15000"', messages_response.text)
+        self.assertIn('data-refresh-max-backoff-ms="60000"', messages_response.text)
+        self.assertIn('/api/n6/app/v2/message-dashboard?trade_date=20260605&amp;asset_kind=stock', messages_response.text)
+        self.assertIn('data-n6-message-cards', messages_response.text)
+        self.assertIn('data-summary-key="today_message_count"', messages_response.text)
+        auto_refresh_block = signals_response.text.split("const n6AutoRefresh", 1)[1]
+        self.assertIn("refreshInFlight", auto_refresh_block)
+        self.assertIn("refreshErrorCount", auto_refresh_block)
+        self.assertIn("refreshBackoffUntil", auto_refresh_block)
+        self.assertIn("performance.now", auto_refresh_block)
+        self.assertIn("上次耗时", auto_refresh_block)
+        self.assertIn("退避", auto_refresh_block)
+        self.assertIn("payload.empty_state?.message", auto_refresh_block)
+        self.assertNotIn("location.reload", auto_refresh_block)
+
+    def test_b_track_historical_signals_and_messages_disable_auto_refresh(self) -> None:
+        client, _, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        signals_response = client.get("/n6/app/signals?trade_date=20260603")
+        messages_response = client.get("/n6/app/messages?trade_date=20260603")
+
+        self.assertEqual(signals_response.status_code, 200)
+        self.assertIn('data-n6-auto-refresh="signals"', signals_response.text)
+        self.assertIn('data-refresh-enabled="false"', signals_response.text)
+        self.assertIn("历史快照，自动刷新关闭", signals_response.text)
+
+        self.assertEqual(messages_response.status_code, 200)
+        self.assertIn('data-n6-auto-refresh="messages"', messages_response.text)
+        self.assertIn('data-refresh-enabled="false"', messages_response.text)
+        self.assertIn("历史快照，自动刷新关闭", messages_response.text)
+
+    def test_b_track_v2_message_dashboard_routes_are_get_only_and_sources_are_allowlisted(self) -> None:
+        client, _, _, _ = build_client()
+        v2_routes = {
+            getattr(route, "path", ""): getattr(route, "methods", set())
+            for route in client.app.routes
+            if str(getattr(route, "path", "")).startswith("/api/n6/app/v2/message-dashboard")
+        }
+
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/message-dashboard"]), {"GET"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/message-dashboard/groups"]), {"GET"})
+        self.assertEqual(set(v2_routes["/api/n6/app/v2/message-dashboard/projection-status"]), {"GET"})
+        self.assertIn(client.post("/api/n6/app/v2/message-dashboard").status_code, {404, 405})
+        self.assertIn(client.patch("/api/n6/app/v2/message-dashboard").status_code, {404, 405})
+        self.assertIn(client.delete("/api/n6/app/v2/message-dashboard").status_code, {404, 405})
+
+        forbidden_terms = (
+            "common_event_outbox",
+            "condition_basis ",
+            "condition_pool",
+            "minute_target_scope",
+            "user_notification_queue",
+        )
+        for target in (
+            n6_user_app_module.build_app_v2_message_dashboard,
+            n6_user_app_module.build_app_v2_message_groups,
+            n6_user_app_module.build_app_v2_projection_status,
+        ):
+            source = inspect.getsource(target)
+            for term in forbidden_terms:
+                self.assertNotIn(term, source)
+
+    def test_b_track_v2_buy_messages_api_applies_readonly_strategy(self) -> None:
+        client, repo, _, _ = build_client()
+        base = repo.ui_v1_signals[1]
+        index_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9301,
+            asset_kind="index",
+            identity_key="index:SH:000300",
+            code="000300",
+            name="沪深300",
+            action_state="executed",
+        )
+        board_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9302,
+            asset_kind="board",
+            identity_key="board:TDX:881001",
+            code="881001",
+            name="银行",
+            action_state="blocked",
+            blocked_reason="amount_confirmation_failed",
+        )
+        direct_executed = make_b_track_buy_signal(
+            base,
+            projection_id=9303,
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            code="600000",
+            name="浦发银行",
+            action_state="executed",
+        )
+        direct_amount = make_b_track_buy_signal(
+            base,
+            projection_id=9304,
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            code="600004",
+            name="白云机场",
+            action_state="blocked",
+            blocked_reason="amount_confirmation_failed",
+        )
+        blocked_other = make_b_track_buy_signal(
+            base,
+            projection_id=9305,
+            asset_kind="stock",
+            identity_key="stock:SH:600005",
+            code="600005",
+            name="其他原因",
+            action_state="blocked",
+            blocked_reason="price_confirmation_failed",
+        )
+        linked_with_index = make_b_track_buy_signal(
+            base,
+            projection_id=9306,
+            asset_kind="stock",
+            identity_key="stock:SH:601225",
+            code="601225",
+            name="陕西煤业",
+            action_state="executed",
+        )
+        linked_without_source = make_b_track_buy_signal(
+            base,
+            projection_id=9307,
+            asset_kind="stock",
+            identity_key="stock:SH:601226",
+            code="601226",
+            name="无来源确认",
+            action_state="executed",
+        )
+        other_principal = make_b_track_buy_signal(
+            base,
+            projection_id=9308,
+            asset_kind="stock",
+            identity_key="stock:SH:600006",
+            code="600006",
+            name="其他用户",
+            action_state="executed",
+        )
+        repo.ui_v1_signals = [
+            index_signal,
+            board_signal,
+            direct_executed,
+            direct_amount,
+            blocked_other,
+            linked_with_index,
+            linked_without_source,
+            other_principal,
+        ]
+        seed_buy_message_monitor(repo, index_signal, source_type="single_row")
+        seed_buy_message_monitor(repo, board_signal, source_type="single_row")
+        seed_buy_message_monitor(repo, direct_executed, source_type="single_row")
+        seed_buy_message_monitor(repo, direct_amount, source_type="single_row")
+        seed_buy_message_monitor(repo, blocked_other, source_type="single_row")
+        seed_buy_message_monitor(
+            repo,
+            linked_with_index,
+            source_type="index_linked_stock",
+            parent_asset_kind="index",
+            parent_identity_key="index:SH:000300",
+            parent_code="000300",
+            parent_name="沪深300",
+            membership_trade_date="20260604",
+        )
+        seed_buy_message_monitor(
+            repo,
+            linked_without_source,
+            source_type="board_linked_stock",
+            parent_asset_kind="board",
+            parent_identity_key="board:TDX:889999",
+            parent_code="889999",
+            parent_name="不存在来源",
+            membership_trade_date="20260604",
+        )
+        seed_buy_message_monitor(repo, other_principal, source_type="single_row", principal_id=999, principal_type="human_user")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/buy-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "b_track_v2_buy_messages_readonly")
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["summary"]["index_count"], 1)
+        self.assertEqual(payload["summary"]["board_count"], 1)
+        self.assertEqual(payload["summary"]["stock_count"], 3)
+        self.assertEqual(
+            [item["identity_key"] for item in payload["sections"]["index"]["items"]],
+            ["index:SH:000300"],
+        )
+        self.assertEqual(
+            [item["identity_key"] for item in payload["sections"]["board"]["items"]],
+            ["board:TDX:881001"],
+        )
+        stock_items = {item["identity_key"]: item for item in payload["sections"]["stock"]["items"]}
+        self.assertEqual(set(stock_items), {"stock:SH:600000", "stock:SH:600004", "stock:SH:601225"})
+        self.assertEqual(stock_items["stock:SH:600000"]["source_type"], "direct")
+        self.assertEqual(stock_items["stock:SH:600000"]["source_type_label"], "直接加入")
+        self.assertEqual(stock_items["stock:SH:600000"]["buy_message_status_label"], "可进入虚拟买入确认")
+        self.assertEqual(stock_items["stock:SH:600004"]["buy_message_status"], "preparation_hint")
+        self.assertEqual(stock_items["stock:SH:600004"]["buy_message_status_label"], "买入准备提示")
+        self.assertEqual(stock_items["stock:SH:601225"]["source_type"], "index_linked_stock")
+        self.assertEqual(stock_items["stock:SH:601225"]["source_object_identity_key"], "index:SH:000300")
+        self.assertEqual(stock_items["stock:SH:601225"]["membership_relation_date"], "20260604")
+        self.assertTrue(payload["source_policy"]["n6_projection_only"])
+        self.assertFalse(payload["source_policy"]["common_event_outbox_read"])
+        self.assertFalse(payload["source_policy"]["n4_raw_fact_bypass"])
+        self.assertFalse(payload["source_policy"]["n5_raw_fact_bypass"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["position_updated"])
+        self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+
+    def test_b_track_v1_buy_execution_adapter_locks_cash_snapshot_by_account(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.executions: list[tuple[str, Any]] = []
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                self.executions.append((sql, params))
+
+            def fetchone(self) -> dict[str, Any]:
+                return {
+                    "cash_snapshot_id": 201,
+                    "virtual_account_id": 11,
+                    "available_cash": "100000.0000",
+                    "frozen_cash": "0.0000",
+                    "total_cash": "100000.0000",
+                    "source_ledger_max_id": 200,
+                }
+
+        cursor = Cursor()
+        adapter = n6_user_app_module._PostgresVirtualBuyExecutionCursorRepository(cursor)
+
+        adapter.fetch_current_cash_snapshot(11)
+
+        statements = [" ".join(sql.split()) for sql, _ in cursor.executions]
+        joined_sql = "\n".join(statements)
+        self.assertIn("pg_advisory_xact_lock", joined_sql)
+        self.assertNotRegex(joined_sql, r"pg_advisory_lock\s*\(")
+        self.assertLess(
+            next(index for index, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql),
+            next(index for index, sql in enumerate(statements) if "FROM n6_virtual_cash_snapshot" in sql),
+        )
+        self.assertEqual(cursor.executions[0][1], (11,))
+
+    def test_b_track_v1_buy_execution_adapter_updates_cash_snapshot_pointer_after_insert(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.executions: list[tuple[str, Any]] = []
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                self.executions.append((sql, params))
+
+            def fetchone(self) -> dict[str, Any]:
+                sql = self.executions[-1][0]
+                if "FROM n6_virtual_account" in sql:
+                    return {
+                        "virtual_account_id": 11,
+                        "principal_id": 1,
+                        "principal_type": "admin",
+                        "virtual_account_status": "active",
+                    }
+                if "RETURNING cash_snapshot_id" in sql:
+                    return {"cash_snapshot_id": 601}
+                return {}
+
+        cursor = Cursor()
+        adapter = n6_user_app_module._PostgresVirtualBuyExecutionCursorRepository(cursor)
+
+        adapter.fetch_active_virtual_account(1, "admin")
+        adapter.insert_cash_snapshot(
+            {
+                "virtual_account_id": 11,
+                "trade_date": 20260624,
+                "available_cash": "96300.0000",
+                "frozen_cash": "0.0000",
+                "total_cash": "96300.0000",
+                "currency": "CNY",
+                "source_ledger_max_id": 501,
+                "snapshot_status": "active",
+                "run_id": "b_track_v1_virtual_buy_execution",
+                "policy_version": "b_track_v1_virtual_buy_execution_policy_v1",
+                "policy_hash": "b_track_v1_virtual_buy_execution_policy_v1",
+                "rollback_scope": "b_track_v1_virtual_buy_execution",
+                "source_lineage_json": {"test": True},
+                "quality_status": "passed",
+            }
+        )
+
+        statements = [" ".join(sql.split()) for sql, _ in cursor.executions]
+        account_update_index = next(
+            index for index, sql in enumerate(statements) if "UPDATE n6_virtual_account" in sql
+        )
+        insert_snapshot_index = next(
+            index for index, sql in enumerate(statements) if "INSERT INTO n6_virtual_cash_snapshot" in sql
+        )
+        account_update_sql, account_update_params = cursor.executions[account_update_index]
+        normalized_update_sql = " ".join(account_update_sql.split())
+        self.assertLess(insert_snapshot_index, account_update_index)
+        self.assertIn("current_cash_snapshot_id = %(cash_snapshot_id)s", normalized_update_sql)
+        self.assertIn("virtual_account_id = %(virtual_account_id)s", normalized_update_sql)
+        self.assertIn("principal_id = %(principal_id)s", normalized_update_sql)
+        self.assertIn("principal_type = %(principal_type)s", normalized_update_sql)
+        self.assertIn("virtual_account_status = 'active'", normalized_update_sql)
+        self.assertEqual(account_update_params["virtual_account_id"], 11)
+        self.assertEqual(account_update_params["principal_id"], 1)
+        self.assertEqual(account_update_params["principal_type"], "admin")
+        self.assertEqual(account_update_params["cash_snapshot_id"], 601)
+        route_source = inspect.getsource(n6_user_app_module.create_app)
+        route_fragment = route_source.split(
+            '@app.post("/api/n6/app/v2/buy-messages/{user_signal_projection_id}/execute")',
+            1,
+        )[1].split('@app.get("/api/n6/app/v2/filter/stocks")', 1)[0]
+        self.assertNotIn("UPDATE n6_virtual_account", route_fragment)
+        self.assertIn("execute_virtual_buy", route_fragment)
+
+    def test_b_track_v1_buy_execution_adapter_position_conflict_updates_incrementally(self) -> None:
+        class Cursor:
+            def __init__(self) -> None:
+                self.executions: list[tuple[str, Any]] = []
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                self.executions.append((sql, params))
+
+            def fetchone(self) -> dict[str, Any]:
+                return {"virtual_position_id": 701}
+
+        cursor = Cursor()
+        adapter = n6_user_app_module._PostgresVirtualBuyExecutionCursorRepository(cursor)
+
+        adapter.upsert_virtual_position(
+            {
+                "virtual_account_id": 11,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "position_status": "open_virtual",
+                "quantity": "300.0000",
+                "available_quantity": "0.0000",
+                "locked_quantity": "300.0000",
+                "average_cost": "12.340000",
+                "last_virtual_trade_id": 401,
+                "run_id": "b_track_v1_virtual_buy_execution",
+                "policy_version": "b_track_v1_virtual_buy_execution_policy_v1",
+                "policy_hash": "b_track_v1_virtual_buy_execution_policy_v1",
+                "rollback_scope": "b_track_v1_virtual_buy_execution",
+                "source_lineage_json": {"test": True},
+                "quality_status": "passed",
+            }
+        )
+
+        upsert_sql = " ".join(cursor.executions[0][0].split())
+        self.assertIn("quantity = n6_virtual_position.quantity + EXCLUDED.quantity", upsert_sql)
+        self.assertIn("available_quantity = n6_virtual_position.available_quantity", upsert_sql)
+        self.assertIn("locked_quantity = n6_virtual_position.locked_quantity + EXCLUDED.locked_quantity", upsert_sql)
+        self.assertIn("n6_virtual_position.quantity * n6_virtual_position.average_cost", upsert_sql)
+        self.assertIn("EXCLUDED.quantity * EXCLUDED.average_cost", upsert_sql)
+        self.assertNotIn("quantity = EXCLUDED.quantity", upsert_sql)
+        self.assertNotIn("locked_quantity = EXCLUDED.locked_quantity", upsert_sql)
+
+    def test_b_track_v1_buy_message_execute_posts_virtual_buy(self) -> None:
+        buy_repo = FakeVirtualBuyExecutionRepository()
+        client, repo, _, _ = build_client(buy_execution_repository=buy_repo)
+        base = repo.ui_v1_signals[1]
+        stock_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9321,
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            code="600000",
+            name="浦发银行",
+            action_state="executed",
+        )
+        repo.ui_v1_signals = [stock_signal]
+        seed_buy_message_monitor(repo, stock_signal, source_type="single_row")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/app/v2/buy-messages/9321/execute",
+            json={"quantity": 300, "available_date": "2026-06-08"},
+        )
+        get_response = client.get("/api/n6/app/v2/buy-messages")
+        base_post_response = client.post("/api/n6/app/v2/buy-messages")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "executed")
+        self.assertEqual(payload["order_id"], 301)
+        self.assertEqual(payload["trade_id"], 401)
+        self.assertEqual(payload["position_id"], 701)
+        self.assertIsNone(payload["rejected_reason"])
+        self.assertTrue(payload["idempotency_key"].startswith("b_track_v1_buy:1:1:9321:buy:"))
+        self.assertEqual(
+            buy_repo.calls,
+            [
+                "fetch_account",
+                "fetch_cash",
+                "fetch_position",
+                "order",
+                "trade",
+                "cash_ledger",
+                "cash_snapshot",
+                "position",
+                "position_event",
+            ],
+        )
+        self.assertEqual(str(buy_repo.inserted["order"]["requested_quantity"]), "300.0000")
+        self.assertEqual(str(buy_repo.inserted["order"]["requested_price"]), "12.340000")
+        self.assertEqual(buy_repo.inserted["position_event"]["available_quantity_delta"], 0)
+        self.assertEqual(str(buy_repo.inserted["position_event"]["locked_quantity_delta"]), "300.0000")
+        self.assertEqual(get_response.status_code, 200)
+        self.assertTrue(get_response.json()["readonly"])
+        self.assertFalse(get_response.json()["side_effects"]["order_generated"])
+        self.assertIn(base_post_response.status_code, {404, 405})
+
+    def test_b_track_v1_buy_message_execute_rejects_non_stock(self) -> None:
+        buy_repo = FakeVirtualBuyExecutionRepository()
+        client, repo, _, _ = build_client(buy_execution_repository=buy_repo)
+        base = repo.ui_v1_signals[1]
+        index_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9322,
+            asset_kind="index",
+            identity_key="index:SH:000300",
+            code="000300",
+            name="沪深300",
+            action_state="executed",
+        )
+        repo.ui_v1_signals = [index_signal]
+        seed_buy_message_monitor(repo, index_signal, source_type="single_row")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/app/v2/buy-messages/9322/execute",
+            json={"quantity": 300, "available_date": "2026-06-08"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "rejected")
+        self.assertIsNone(payload["order_id"])
+        self.assertIsNone(payload["trade_id"])
+        self.assertIsNone(payload["position_id"])
+        self.assertEqual(payload["rejected_reason"], "asset_kind_not_stock")
+        self.assertNotIn("order", buy_repo.calls)
+        self.assertEqual(buy_repo.inserted, {})
+
+    def test_b_track_v1_buy_message_execute_rejects_non_executed(self) -> None:
+        buy_repo = FakeVirtualBuyExecutionRepository()
+        client, repo, _, _ = build_client(buy_execution_repository=buy_repo)
+        base = repo.ui_v1_signals[1]
+        blocked_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9323,
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            code="600004",
+            name="白云机场",
+            action_state="blocked",
+            blocked_reason="amount_confirmation_failed",
+        )
+        repo.ui_v1_signals = [blocked_signal]
+        seed_buy_message_monitor(repo, blocked_signal, source_type="single_row")
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.post(
+            "/api/n6/app/v2/buy-messages/9323/execute",
+            json={"quantity": 300, "available_date": "2026-06-08"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["rejected_reason"], "action_state_not_executed")
+        self.assertIsNone(payload["idempotency_key"])
+        self.assertNotIn("order", buy_repo.calls)
+        self.assertEqual(buy_repo.inserted, {})
+
+    def test_b_track_v2_buy_messages_asset_filter_page_and_routes_are_readonly(self) -> None:
+        client, repo, _, _ = build_client()
+        base = repo.ui_v1_signals[1]
+        stock_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9311,
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            code="600000",
+            name="浦发银行",
+            action_state="executed",
+        )
+        index_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9312,
+            asset_kind="index",
+            identity_key="index:SH:000300",
+            code="000300",
+            name="沪深300",
+            action_state="executed",
+        )
+        invalid_monitor_signal = make_b_track_buy_signal(
+            base,
+            projection_id=9313,
+            asset_kind="stock",
+            identity_key="stock:SH:600004",
+            code="600004",
+            name="失效监控",
+            action_state="executed",
+        )
+        repo.ui_v1_signals = [stock_signal, index_signal, invalid_monitor_signal]
+        seed_buy_message_monitor(repo, stock_signal, source_type="single_row")
+        seed_buy_message_monitor(repo, index_signal, source_type="single_row")
+        invalid_monitor = seed_buy_message_monitor(repo, invalid_monitor_signal, source_type="single_row")
+        invalid_monitor["valid_for_trade_date"] = "20260604"
+        invalid_monitor["source_snapshot_json"]["for_trade_date"] = "20260604"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        filtered_response = client.get("/api/n6/app/v2/buy-messages?asset_kind=stock")
+        page_response = client.get("/n6/app/buy-messages")
+        route_methods = {
+            getattr(route, "path", ""): getattr(route, "methods", set())
+            for route in client.app.routes
+        }
+
+        self.assertEqual(filtered_response.status_code, 200)
+        filtered_payload = filtered_response.json()
+        self.assertEqual(filtered_payload["filters"], {"asset_kind": "stock"})
+        self.assertEqual(filtered_payload["summary"]["stock_count"], 1)
+        self.assertEqual(filtered_payload["summary"]["index_count"], 0)
+        self.assertEqual(filtered_payload["sections"]["stock"]["items"][0]["identity_key"], "stock:SH:600000")
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("买入消息", page_response.text)
+        self.assertIn("指数买入信号", page_response.text)
+        self.assertIn("板块买入信号", page_response.text)
+        self.assertIn("个股买入信号", page_response.text)
+        self.assertIn("虚拟买入确认入口：后续 gate 开启", page_response.text)
+        self.assertNotIn("买入按钮", page_response.text)
+        self.assertNotIn("真实买入", page_response.text)
+        self.assertEqual(set(route_methods["/api/n6/app/v2/buy-messages"]), {"GET"})
+        self.assertIn(client.post("/api/n6/app/v2/buy-messages").status_code, {404, 405})
+        self.assertIn(client.put("/api/n6/app/v2/buy-messages").status_code, {404, 405})
+        self.assertIn(client.delete("/api/n6/app/v2/buy-messages").status_code, {404, 405})
+
+        model_source = inspect.getsource(n6_app_v1_module.app_v2_buy_messages_model)
+        for forbidden in (
+            "common_event_outbox",
+            "n4_",
+            "n5_",
+            "virtual_order",
+            "virtual_trade",
+            "virtual_position",
+            "virtual_cash",
+            "real_trade",
+            "delivery",
+            "voice",
+            "mobile",
+            "worker",
+        ):
+            self.assertNotIn(forbidden, model_source)
+
+    def test_b_track_v2_message_nav_alignment_visible_copy_only(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        expected_titles = {
+            "/n6/app/messages": "我的监控消息总览",
+            "/n6/app/signals": "我的监控消息列表",
+            "/n6/app/my-monitor": "我的监控对象",
+            "/n6/app/status-monitor": "状态监控",
+        }
+        for path, title in expected_titles.items():
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(title, response.text)
+                self.assertIn('href="/n6/app/messages"', response.text)
+                self.assertIn(">卡片消息<", response.text)
+                self.assertNotIn(">消息总览<", response.text)
+                self.assertIn('href="/n6/app/signals"', response.text)
+                self.assertIn(">消息列表<", response.text)
+                self.assertIn('href="/n6/app/my-monitor"', response.text)
+                self.assertIn(">监控对象<", response.text)
+                nav_start = response.text.index('<nav aria-label="B轨导航">')
+                nav_end = response.text.index("</nav>", nav_start)
+                nav_html = response.text[nav_start:nav_end]
+                self.assertNotIn(">状态监控<", nav_html)
+                self.assertNotIn(">" + "信号" + "<", response.text)
+
+    def test_b_track_app_nav_shows_minimal_ordered_entries_only(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/signals")
+
+        self.assertEqual(response.status_code, 200)
+        nav_start = response.text.index('<nav aria-label="B轨导航">')
+        nav_end = response.text.index("</nav>", nav_start)
+        nav_html = response.text[nav_start:nav_end]
+        expected_labels = (
+            "首页",
+            "关注池",
+            "筛选中心",
+            "监控对象",
+            "消息列表",
+            "卡片消息",
+            "买入消息",
+            "账户",
+            "退出登录",
+        )
+        last_position = -1
+        for label in expected_labels:
+            position = nav_html.index(f">{label}<" if label != "退出登录" else label)
+            self.assertGreater(position, last_position)
+            last_position = position
+        for hidden_label in ("状态监控", "方案", "组合", "收益", "AI助手", "排行榜"):
+            self.assertNotIn(hidden_label, nav_html)
+
+    def test_b_track_v2_dashboard_message_summary_copy_and_links(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("B轨新用户操作说明书", response.text)
+        self.assertIn("消息列表=共享消息池按当前用户范围过滤后的表格消息", response.text)
+        self.assertIn("卡片消息=共享卡片池按当前用户范围过滤后的卡片展示", response.text)
+        self.assertIn("查看卡片消息", response.text)
+        self.assertIn("查看消息列表", response.text)
+        self.assertIn('href="/n6/app/messages"', response.text)
+        self.assertIn('href="/n6/app/signals"', response.text)
+        self.assertNotIn("我的监控消息", response.text)
+        self.assertNotIn("查看消息总览", response.text)
+        self.assertNotIn("信号" + "收件箱", response.text)
+
+    def test_b_track_v2_signal_page_copy_uses_message_terms_but_keeps_internal_fields(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/signals")
+        api_response = client.get("/api/n6/app/v1/signals?action_state=blocked")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn("我的监控消息列表", page_response.text)
+        self.assertIn("消息详情", page_response.text)
+        self.assertNotIn("信号" + "中心", page_response.text)
+        self.assertNotIn(">" + "信号" + "<", page_response.text)
+        self.assertEqual(api_response.status_code, 200)
+        item = api_response.json()["items"][0]
+        for field in (
+            "signal_type",
+            "user_signal_projection_id",
+            "user_signal_card_id",
+            "user_projection_run_id",
+            "action_state",
+            "event_type",
+        ):
+            self.assertIn(field, item)
+
+    def test_b_track_v2_message_nav_alignment_routes_and_apis_are_unchanged(self) -> None:
+        client, _, _, _ = build_client()
+        route_methods = {
+            getattr(route, "path", ""): getattr(route, "methods", set())
+            for route in client.app.routes
+        }
+
+        self.assertEqual(route_methods["/api/n6/app/v1/signals"], {"GET"})
+        self.assertEqual(route_methods["/api/n6/app/v1/signals/{user_signal_projection_id}"], {"GET"})
+        self.assertIn("/n6/app/{page_key}", route_methods)
+        self.assertIn("/n6/app/my-monitor/{monitor_page}", route_methods)
+        self.assertNotIn("/api/n6/app/v1/messages", route_methods)
+        self.assertNotIn("/api/n6/app/v2/signals", route_methods)
+        for method in ("post", "put", "patch", "delete"):
+            with self.subTest(method=method):
+                self.assertIn(getattr(client, method)("/api/n6/app/v1/signals").status_code, {404, 405})
+
+    def test_b_track_v2_principal_scope_unavailable_returns_403(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_principals = []
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v2/filter/stocks")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "principal_scope_unavailable")
+        self.assertEqual(repo.app_filter_reads, [])
+        self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
+
+    def test_b_track_status_monitor_api_is_readonly_from_reviewed_signals(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/status-monitor")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track Status Monitor")
+        self.assertEqual(payload["component_label"], "状态监控")
+        self.assertTrue(payload["readonly"])
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["principal"]["principal_type"], "admin")
+        self.assertEqual(payload["status_summary"]["active"], 2)
+        self.assertIn("pending_market_data", payload["status_summary"])
+        self.assertIn("inactive", payload["status_summary"])
+        self.assertEqual(len(payload["items"]), 2)
+        first = payload["items"][0]
+        self.assertEqual(first["asset_kind"], "stock")
+        self.assertEqual(first["asset_kind_label"], "个股")
+        self.assertEqual(first["identity_key"], "stock:SZ:302132")
+        self.assertEqual(first["current_status"], "active")
+        self.assertEqual(first["current_status_label"], "有效")
+        self.assertEqual(first["n4_event"]["source_run_id"], "trigger_rule_v4_execute_20260603")
+        self.assertEqual(first["n5_relationship"]["event_type"], "ActionBlocked")
+        self.assertEqual(first["n5_relationship"]["event_label"], "市场动作未确认 (ActionBlocked)")
+        self.assertEqual(first["n5_relationship"]["action_state"], "blocked")
+        self.assertEqual(first["n5_relationship"]["action_state_label"], "未确认")
+        self.assertEqual(first["n5_relationship"]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(first["n5_relationship"]["blocked_reason_label"], "价格确认未通过")
+        self.assertIn("N4_trigger", first["evidence_chain"])
+        self.assertIn("N5_action", first["evidence_chain"])
+        self.assertFalse(payload["write_controls"]["projection_write_enabled"])
+        self.assertFalse(payload["write_controls"]["card_write_enabled"])
+        self.assertFalse(payload["write_controls"]["outbox_consume_enabled"])
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+
+    def test_b_track_status_monitor_page_renders_n4_n5_relationship_without_mutation_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/status-monitor")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("状态监控", response.text)
+        self.assertIn("有效", response.text)
+        self.assertIn("等待行情证据", response.text)
+        self.assertIn("已失效", response.text)
+        self.assertIn("N4", response.text)
+        self.assertIn("N5", response.text)
+        self.assertIn("trigger_rule_v4_execute_20260603", response.text)
+        self.assertIn("市场动作未确认 (ActionBlocked)", response.text)
+        self.assertIn("价格确认未通过", response.text)
+        self.assertNotIn("写入投影", response.text)
+        self.assertNotIn("生成卡片", response.text)
+        self.assertNotIn("消费 outbox", response.text)
+        self.assertNotIn("一键下单", response.text)
+        self.assertNotIn("真实收益", response.text)
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
+
+    def test_b_track_ai_users_api_is_readonly_shadow_observer(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/ai-users")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["component"], "B Track AI Users")
+        self.assertEqual(payload["component_label"], "AI助手")
+        self.assertEqual(payload["status"], "readonly_shell")
+        self.assertEqual(payload["mode"], "shadow_observer")
+        self.assertEqual(payload["principal"]["principal_id"], 1)
+        self.assertEqual(payload["principal"]["principal_type"], "admin")
+        self.assertTrue(payload["readonly"])
+        self.assertEqual(payload["observer_policy"]["source"], "reviewed_n6_projection_only")
+        self.assertFalse(payload["observer_policy"]["generated_signal_enabled"])
+        self.assertFalse(payload["observer_policy"]["investment_advice_enabled"])
+        self.assertFalse(payload["observer_policy"]["auto_trade_enabled"])
+        self.assertFalse(payload["observer_policy"]["order_enabled"])
+        self.assertFalse(payload["observer_policy"]["real_trade_enabled"])
+        self.assertEqual(payload["items"][0]["role"], "shadow_observer")
+        self.assertEqual(payload["items"][0]["role_label"], "只读观察员")
+        self.assertFalse(payload["items"][0]["can_generate_signal"])
+        self.assertFalse(payload["items"][0]["can_trade"])
+        self.assertFalse(payload["side_effects"]["order_generated"])
+        self.assertFalse(payload["side_effects"]["trade_generated"])
+        self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.ui_v1_signal_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+
+    def test_b_track_ai_users_page_renders_shadow_observer_without_advice_or_trade_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/ai-users")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI助手", response.text)
+        self.assertIn("只读观察员", response.text)
+        self.assertIn("生成信号: False", response.text)
+        self.assertIn("自动交易: False", response.text)
+        self.assertIn("实盘提交: False", response.text)
+        self.assertNotIn("一键下单", response.text)
+        self.assertNotIn("真实收益", response.text)
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_b_track_locked_future_modules_apis_are_readonly_without_data_reads(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        expected = {
+            "/api/n6/app/v1/proposals": "B Track Proposals",
+            "/api/n6/app/v1/portfolio": "B Track Portfolio",
+            "/api/n6/app/v1/pnl": "B Track PnL",
+            "/api/n6/app/v1/leaderboard": "B Track Leaderboard",
+        }
+        for path, component in expected.items():
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["component"], component)
+                self.assertIn("component_label", payload)
+                self.assertTrue(payload["readonly"])
+                self.assertTrue(payload["locked"])
+                self.assertIn(payload["status"], {"locked_planned", "locked_empty", "locked_readiness_only"})
+                self.assertEqual(payload["items"], [])
+                self.assertFalse(payload["controls"]["entry_enabled"])
+                self.assertFalse(payload["controls"]["proposal_enabled"])
+                self.assertFalse(payload["controls"]["order_enabled"])
+                self.assertFalse(payload["controls"]["trade_enabled"])
+                self.assertFalse(payload["controls"]["position_update_enabled"])
+                self.assertFalse(payload["controls"]["pnl_generation_enabled"])
+                self.assertFalse(payload["controls"]["real_trade_enabled"])
+                self.assertFalse(payload["side_effects"]["proposal_generated"])
+                self.assertFalse(payload["side_effects"]["order_generated"])
+                self.assertFalse(payload["side_effects"]["trade_generated"])
+                self.assertFalse(payload["side_effects"]["position_updated"])
+                self.assertFalse(payload["side_effects"]["pnl_generated"])
+                self.assertFalse(payload["side_effects"]["real_trade_submitted"])
+
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.app_position_reads, [])
+        self.assertEqual(repo.app_pnl_reads, [])
+        self.assertEqual(repo.ui_v1_signal_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_b_track_locked_future_modules_pages_render_locked_state_without_trade_controls(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        paths = (
+            "/n6/app/proposals",
+            "/n6/app/portfolio",
+            "/n6/app/pnl",
+            "/n6/app/leaderboard",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("未开放", response.text)
+                self.assertIn("入口开放: False", response.text)
+                self.assertIn("方案生成: False", response.text)
+                self.assertIn("订单生成: False", response.text)
+                self.assertIn("交易生成: False", response.text)
+                self.assertIn("持仓更新: False", response.text)
+                self.assertIn("收益生成: False", response.text)
+                self.assertIn("实盘提交: False", response.text)
+                self.assertIn("当前不会生成方案、订单、交易或持仓变化", response.text)
+                self.assertNotIn("一键下单", response.text)
+                self.assertNotIn("真实收益", response.text)
+
+        self.assertEqual(repo.app_position_reads, [])
+        self.assertEqual(repo.app_pnl_reads, [])
+        self.assertEqual(repo.forbidden_writes["n6_virtual_order"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
+        self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
+
+    def test_b_track_pages_render_independent_shell_without_a_track_nav(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        paths = (
+            "/n6/app",
+            "/n6/app/dashboard",
+            "/n6/app/account",
+            "/n6/app/watchlist",
+            "/n6/app/messages",
+            "/n6/app/signals",
+            "/n6/app/my-monitor",
+            "/n6/app/status-monitor",
+            "/n6/app/proposals",
+            "/n6/app/portfolio",
+            "/n6/app/pnl",
+            "/n6/app/ai-users",
+            "/n6/app/leaderboard",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("N6 多用户前台", response.text)
+                self.assertIn("只读模式", response.text)
+                self.assertIn("不下单", response.text)
+                self.assertNotIn("监控筛选", response.text)
+                self.assertNotIn("手机播报", response.text)
+                self.assertNotIn("动作消息", response.text)
+                for forbidden_word in ("已下单", "已成交", "真实交易"):
+                    self.assertNotIn(forbidden_word, response.text)
+        self.assertGreaterEqual(repo.app_principal_reads, len(paths))
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_b_track_v1_chinese_localization_keeps_api_fields_and_blocks_forbidden_wording(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        rendered_paths = (
+            "/n6/app",
+            "/n6/app/account",
+            "/n6/app/watchlist",
+            "/n6/app/signals",
+            "/n6/app/status-monitor",
+            "/n6/app/ai-users",
+            "/n6/app/proposals",
+            "/n6/app/portfolio",
+            "/n6/app/pnl",
+            "/n6/app/leaderboard",
+        )
+        required_nav = (
+            "首页",
+            "关注池",
+            "筛选中心",
+            "监控对象",
+            "消息列表",
+            "卡片消息",
+            "买入消息",
+            "账户",
+            "退出登录",
+        )
+        hidden_nav = ("状态监控", "方案", "组合", "收益", "AI助手", "排行榜")
+        forbidden_wording = (
+            "建议买入",
+            "建议卖出",
+            "买入机会",
+            "卖出提醒",
+            "一键下单",
+            "已买入",
+            "已卖出",
+            "已成交",
+            "实盘账户",
+            "可用下单资金",
+            "真实收益",
+            "稳赚",
+            "高胜率",
+            "低风险",
+            "高收益",
+        )
+        for path in rendered_paths:
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("N6 多用户前台", response.text)
+                self.assertIn("只读模式 · 不下单 · 不更新持仓 · 不构成投资建议", response.text)
+                for label in required_nav:
+                    self.assertIn(label, response.text)
+                nav_start = response.text.index('<nav aria-label="B轨导航">')
+                nav_end = response.text.index("</nav>", nav_start)
+                nav_html = response.text[nav_start:nav_end]
+                for label in hidden_nav:
+                    self.assertNotIn(label, nav_html)
+                self.assertNotIn(">" + "信号" + "<", response.text)
+                for forbidden in forbidden_wording:
+                    self.assertNotIn(forbidden, response.text)
+
+        signals_response = client.get("/api/n6/app/v1/signals?action_state=blocked")
+        self.assertEqual(signals_response.status_code, 200)
+        payload = signals_response.json()
+        item = payload["items"][0]
+        self.assertEqual(item["identity_key"], "stock:SZ:302132")
+        self.assertEqual(item["condition_trace"]["condition_key"], "SELL:M,W,D")
+        self.assertEqual(item["projection_run_id"], "user_projection_shadow_20260603_v1")
+        self.assertEqual(item["source_run_id"], "action_consumer_market_action_confirmation_v1_20260603")
+        self.assertEqual(item["quality_status"], "reviewed")
+        self.assertEqual(item["asset_kind"], "stock")
+        self.assertEqual(item["action_state"], "blocked")
+        self.assertEqual(item["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(item["asset_kind_label"], "个股")
+        self.assertEqual(item["direction_label"], "卖向观察")
+        self.assertEqual(item["action_state_label"], "未确认")
+        self.assertEqual(item["blocked_reason_label"], "价格确认未通过")
+        self.assertEqual(item["event_label"], "市场动作未确认 (ActionBlocked)")
+        self.assertEqual(repo.raw_k_reads, 0)
+        self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
+
+    def test_b_track_dashboard_template_tolerates_stale_model_without_blocked_reason_labels(self) -> None:
+        templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+        template = templates.get_template("n6_app_shell.html")
+        html = template.render(
+            {
+                "request": {},
+                "user": {"login_name": "admin"},
+                "page": {
+                    "app_title": "N6 多用户前台",
+                    "page_key": "dashboard",
+                    "page_title": "B轨首页",
+                    "principal": {
+                        "principal_id": 1,
+                        "principal_type": "admin",
+                        "app_scope": "n6_multi_user_app",
+                    },
+                    "safety": ["只读模式 · 不下单 · 不更新持仓 · 不构成投资建议"],
+                    "nav": {"active": "dashboard", "links": []},
+                    "data": {
+                        "today_overview": {
+                            "trade_date": "20260603",
+                            "latest_projection_run_id": "projection_run",
+                            "action_counts": {"ActionExecuted": 1, "ActionBlocked": 1},
+                            "blocked_reason_distribution": {"price_confirmation_failed": 1},
+                            "wording": {
+                                "ActionExecuted": "市场动作确认成立 (ActionExecuted)",
+                                "ActionBlocked": "市场动作未确认 (ActionBlocked)",
+                            },
+                        },
+                        "account_summary": {
+                            "account_name": "Admin Virtual Account",
+                            "available_cash": "1000000.00",
+                            "base_currency": "CNY",
+                        },
+                        "signals_summary": {"total_count": 2},
+                        "watchlist_summary": {
+                            "status": "readonly_shell",
+                            "tracked_count": 2,
+                            "mutation_enabled": False,
+                        },
+                        "ai_users_summary": {
+                            "mode": "shadow_observer",
+                            "generated_signal_enabled": False,
+                            "auto_trade_enabled": False,
+                        },
+                        "future_modules_locked": [],
+                    },
+                    "source_policy": {"allowed_sources": [], "forbidden_sources": []},
+                    "disclaimer": [],
+                },
+            }
+        )
+
+        self.assertIn("B轨新用户操作说明书", html)
+        self.assertNotIn("price_confirmation_failed 1", html)
+        self.assertNotIn("Internal Server Error", html)
+
+    def test_b_track_filter_center_template_tolerates_stale_model_without_date_selector(self) -> None:
+        templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+        template = templates.get_template("n6_app_shell.html")
+        html = template.render(
+            {
+                "request": {},
+                "user": {"login_name": "admin"},
+                "page": {
+                    "app_title": "N6 多用户前台",
+                    "page_key": "filter-center",
+                    "page_title": "筛选中心",
+                    "principal": {
+                        "principal_id": 1,
+                        "principal_type": "admin",
+                        "app_scope": "n6_multi_user_app",
+                    },
+                    "safety": ["只读模式 · 不下单 · 不更新持仓 · 不构成投资建议"],
+                    "nav": {"active": "filter-center", "links": []},
+                    "data": {
+                        "subinterfaces": [],
+                        "sections": {},
+                    },
+                    "source_policy": {"allowed_sources": [], "forbidden_sources": []},
+                    "disclaimer": [],
+                },
+            }
+        )
+
+        self.assertIn("筛选中心", html)
+        self.assertNotIn("Internal Server Error", html)
+
+    def test_b_track_missing_principal_blocks_without_full_data_fallback(self) -> None:
+        repo = FakeN6UserRepository()
+        repo.app_principals = []
+        client, repo, _, _ = build_client(repository=repo)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/account")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "principal_scope_unavailable")
+        self.assertEqual(repo.app_virtual_account_reads, [])
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.ui_v1_virtual_account_reads, 0)
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_b_track_regular_user_without_principal_uses_session_scoped_human_principal(self) -> None:
+        repo = FakeN6UserRepository()
+        repo.users_by_login["hyl666"] = UserAccount(
+            user_id=3,
+            login_name="hyl666",
+            display_name=None,
+            role="user",
+            status="active",
+            password_hash="stored-user-password-hash",
+            password_hash_algo="argon2id",
+        )
+        repo.app_principals = []
+        client, repo, _, _ = build_client(repository=repo)
+        client.post("/api/n6/auth/login", json={"login_name": "hyl666", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/me")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["principal"]["principal_id"], 3)
+        self.assertEqual(payload["principal"]["principal_type"], "human_user")
+        self.assertEqual(payload["principal"]["display_name"], "hyl666")
+        self.assertEqual(payload["principal"]["principal_status"], "active")
+        self.assertFalse(payload["side_effects"]["writes_database"])
+        self.assertEqual(repo.app_principal_reads, 1)
+        self.assertEqual(repo.app_virtual_account_reads, [])
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+
+    def test_b_track_does_not_regress_a_track_routes_or_apis(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        a_page = client.get("/n6/action-events")
+        a_api = client.get("/api/n6/ui/v1/virtual-account")
+
+        self.assertEqual(a_page.status_code, 200)
+        self.assertIn("动作消息", a_page.text)
+        self.assertNotIn("N6 多用户前台", a_page.text)
+        self.assertEqual(a_api.status_code, 200)
+        self.assertEqual(a_api.json()["component"], "Virtual Account Summary")
+        self.assertEqual(repo.ui_v1_virtual_account_reads, 2)
+        self.assertEqual(repo.app_virtual_account_reads, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

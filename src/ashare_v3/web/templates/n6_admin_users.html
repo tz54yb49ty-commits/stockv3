@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N6 用户管理</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7;
+      --ink: #172124;
+      --muted: #607176;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --soft: #f8fafb;
+      --accent: #0f766e;
+      --accent-soft: #e6f3f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .wrap { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; }
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 720; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    a, button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    a.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    main { padding: 18px 0 32px; }
+    .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .surface-head {
+      min-height: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .form-grid {
+      padding: 14px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+      gap: 10px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+    }
+    input, select {
+      min-height: 34px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+      background: #fff;
+      color: var(--ink);
+    }
+    .danger {
+      color: #991b1b;
+    }
+    .message {
+      padding: 0 14px 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      min-width: 860px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+    @media (max-width: 920px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <div>
+        <h1>用户管理</h1>
+        <div class="subtle">{{ user.login_name }} · {{ user.role }}</div>
+      </div>
+      <nav>
+        {% for item in nav.links %}
+        <a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        <a class="active" href="/n6/admin/users">用户管理</a>
+        <button id="logout-button" type="button">退出</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="surface">
+      <div class="surface-head">
+        <h2>用户管理</h2>
+        <span class="subtle">{{ users|length }} rows</span>
+      </div>
+      <form id="create-user-form" class="form-grid">
+        <label>账号<input name="login_name" autocomplete="username" required minlength="3"></label>
+        <label>显示名<input name="display_name" autocomplete="name"></label>
+        <label>角色<select name="role"><option value="user">user</option><option value="admin">admin</option></select></label>
+        <label>初始密码<input name="password" type="password" autocomplete="new-password" required minlength="6"></label>
+        <button type="submit">新增用户</button>
+      </form>
+      <div id="admin-users-message" class="message"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>账号</th>
+              <th>显示名</th>
+              <th>角色</th>
+              <th>状态</th>
+              <th>筛选配置</th>
+              <th>创建时间</th>
+              <th>最后登录</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in users %}
+            <tr>
+              <td>{{ item.user_id }}</td>
+              <td>{{ item.login_name }}</td>
+              <td>{{ item.display_name }}</td>
+              <td>{{ item.role }}</td>
+              <td>{{ item.status }}</td>
+              <td>{{ item.filter_profile_count }}</td>
+              <td>{{ item.created_at }}</td>
+              <td>{{ item.last_login_at }}</td>
+              <td>
+                {% if item.user_id != user.user_id and item.status != 'deleted' %}
+                <button class="danger" type="button" data-delete-user-id="{{ item.user_id }}">删除</button>
+                {% else %}
+                <span class="subtle">—</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    const message = document.getElementById("admin-users-message");
+    document.getElementById("create-user-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const payload = Object.fromEntries(new FormData(form).entries());
+      const response = await fetch("/api/n6/admin/users", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        window.location.reload();
+        return;
+      }
+      const body = await response.json().catch(() => ({}));
+      message.textContent = body.error || "用户创建失败";
+    });
+    document.querySelectorAll("[data-delete-user-id]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const userId = button.getAttribute("data-delete-user-id");
+        const response = await fetch(`/api/n6/admin/users/${userId}/delete`, {method: "POST"});
+        if (response.ok) {
+          window.location.reload();
+          return;
+        }
+        const body = await response.json().catch(() => ({}));
+        message.textContent = body.error || "用户删除失败";
+      });
+    });
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/n6/auth/logout", {method: "POST"});
+      window.location.assign("/n6/login");
+    });
+  </script>
+</body>
+</html>

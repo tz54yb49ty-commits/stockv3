@@ -1,0 +1,1126 @@
+# v3 Execution Protocol (UNIFIED CONTROL SYSTEM)
+
+Before ANY modification in A股监控系统 v3, Codex MUST follow this strict pipeline:
+
+================================================
+STEP 1 — TASK NORMALIZATION
+================================================
+Convert user request into structured intent:
+- intent
+- affected_files
+- layer_role (N1-N6)
+- risk_level
+
+If cannot normalize → STOP
+
+================================================
+STEP 2 — EXECUTION COMPILER
+================================================
+Convert task into execution plan (DAG):
+
+MUST include:
+PLAN → VALIDATE → MODIFY → VERIFY → FINALIZE
+
+Rules:
+- MODIFY must always be preceded by VALIDATE
+- No cycles allowed
+- No cross-layer operations allowed
+
+If DAG invalid → STOP
+
+================================================
+STEP 3 — KERNEL CHECK
+================================================
+Evaluate:
+- Is operation allowed in layer_role?
+- Does it violate N1-N6 boundaries?
+- Is risk acceptable?
+
+Output:
+ACCEPT / REJECT / BLOCK / ESCALATE
+
+If not ACCEPT → STOP
+
+================================================
+STEP 4 — RUNTIME GATE
+================================================
+Final safety enforcement:
+
+- Cross-layer modification → REJECT
+- Runtime execution request → REJECT
+- Missing kernel decision → REJECT
+
+If not ACCEPT → STOP
+
+================================================
+STEP 5 — SANDBOX SIMULATION
+================================================
+Simulate:
+
+- file changes
+- system impact
+- DAG execution
+
+If unsafe → STOP
+
+================================================
+STEP 6 — FINAL EXECUTION
+================================================
+Only if ALL steps passed:
+
+→ Apply changes
+→ Output diff
+→ Log trace
+
+================================================
+HARD RULE
+================================================
+
+NO STEP CAN BE SKIPPED.
+
+If any step is missing → TASK IS INVALID.
+
+## Execution Mode System
+
+### 1. Mode Classifier (MANDATORY)
+
+Before execution, Codex MUST classify task into:
+
+- LIGHT MODE
+- FULL MODE
+
+---
+
+### 2. Classification Rules
+
+LIGHT MODE if:
+
+- single file change
+- no N1–N5 structure change
+- no trigger/action modification
+- no schema change
+- no DAG required
+
+FULL MODE if:
+
+- multi-file change
+- N1–N5 logic modification
+- trigger/action modification
+- schema change
+- risk_level >= medium
+
+---
+
+### 3. LIGHT MODE FLOW
+
+- Kernel Check ONLY
+- Direct modification allowed only after Evidence-Bound Modification Guard passes
+- Minimal Trace
+- NO Compiler
+- NO Sandbox
+
+---
+
+### 4. FULL MODE FLOW
+
+- Execution Compiler (DAG)
+- Kernel Check
+- Runtime Gate
+- Sandbox Simulation
+- Full Trace
+- Execution
+
+---
+
+### 5. HARD RULE
+
+Mode MUST be decided BEFORE execution.
+
+If mode is not determined → STOP
+
+# AGENTS.md
+
+本文件是 A股监控系统 v3 的项目级 Codex 指令。任何 Codex/AI 助手进入本项目后，必须先阅读本文件，再继续任务。
+
+## 1. 项目定位
+
+本项目是 A股监控系统 v3。
+
+项目路径：
+
+- `/Users/chuanfuchen/Documents/A股监控系统v3`
+
+v3 当前目标是重新设计并实现一个分层清晰、可追溯、可回滚的交易监控系统。
+
+`AGENTS.md` 只保留执行硬规则、边界和流程要求，不再承载详细历史进度。当前权威状态、推荐路线和任务看板以以下三份总控文档为准：
+
+```text
+docs/Architecture.md
+docs/Roadmap.md
+docs/Tasks.md
+```
+
+当前状态约束：
+
+```text
+AGENTS.md 不维护具体 live run_id、行数、outbox 数量或当前阶段完成度。
+当前权威状态、推荐路线和任务看板只以 docs/Architecture.md、docs/Roadmap.md、docs/Tasks.md 以及最新 gate artifact 为准。
+历史报告、旧 run_id、旧 execute 摘要只能作为历史证据，不得被当作当前 active lineage 或 rollback/downstream proof。
+如总控状态、lineage、rollback 安全性或 downstream refs 存在差异，必须通过专门 review / registration / supersession gate 登记，不得静默改写历史 run 证据。
+```
+
+RAG-first 状态问答规则：
+
+```text
+对于项目状态、lineage、gate result、rerun_required、rollback SQL、next gate / next step 类问题，
+Codex 必须先查询本地只读 RAG helper 或 8786 RAG artifacts，再回答。
+RAG 证据是 artifact-first、只读证据入口；不得执行命令、不得写数据库、不得启动 worker、
+不得消费/update outbox/inbox/checkpoint，也不得替代 process / service / live DB runtime 问题的实时验证。
+对于代码实现、页面报错、服务进程、live row count、launchd loaded 状态或 execute 请求，
+RAG 只能作为辅助证据，仍必须按当前任务范围做 live/code/process/read-only verification。
+```
+
+当前允许做：
+
+- 原始数据入库层维护
+- 标准事实表维护
+- 数据质量闸门
+- 历史归档设计
+- 入库回滚与审计
+- 条件层维护、dry-run / diagnosis、回滚与审计
+- N3 实时行情层开发文档
+- N3 market_data_subscription dry-run / preflight 设计
+- N3-C2 closed-minute / closed-30m incremental schema readiness 与 additive migration draft
+- N3 / N4 / N5 当前 real lineage 的总控登记、复核、回滚与审计
+- N4 触发层文档 / schema / event contract / current-real run-once 后续 gate 复核
+- N5 动作层文档 / schema / event contract / current-real run-once 后续 gate 复核
+- N6 user projection contract review
+- runtime orchestration / dashboard / pipeline state machine 文档、schema 草案、只读 dashboard
+- 总控架构、路线图、任务看板等文档维护
+
+N4/N5/N6 runtime 触发与动作语义的最新权威规范为：
+
+```text
+docs/V3_TRIGGER_ACTION_RUNTIME_SPEC.md
+docs/N4_TRIGGER_RULE_SPEC_ATOMIC_REVISED.md
+docs/V3_SYMMETRY_TARGET_PRICE_SPEC.md
+docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md
+docs/N5_CANONICAL_ACTION_FLOW_v0.1.md
+```
+
+上述文档是 trigger/action/user runtime canonical spec。`docs/N4_TRIGGER_RULE_SPEC_ATOMIC_REVISED.md` 仅拥有 N4 trigger-side rule definitions 主权；`docs/V3_TRIGGER_ACTION_RUNTIME_SPEC.md` 负责 runtime 边界；`docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md` 负责状态流与跨层边界；`docs/N5_CANONICAL_ACTION_FLOW_v0.1.md` 负责 N5 action flow。若旧设计文档、历史报告、SQL 草案、测试或代码与该规范冲突，后续对齐工作以该规范为准；历史 run 证据不得静默改写，只能通过明确 migration / compatibility / alignment gate 处理。
+
+当前 canonical runtime 语义硬规则：
+
+```text
+N1 -> N2 -> N3 -> N4 -> N5 -> N6 只能单向流动。
+下游不得回写、重算或重新解释上游职责；上游不得混入下游用户策略。
+N2 -> N4 只传买卖信号条件语义和触发阈值，不传 alert-only / display / voice / sim / trade intent。
+N4 只负责触发状态和触发结果，输出 TriggerStateChanged / TriggerMatched / TriggerPendingMarketData。
+TriggerMatched 是 N5 动作确认入口；TriggerPendingMarketData 只能作为 no-op / quality-only / state-gate，不允许 N5 开始动作确认；TriggerStateChanged 只做状态广播和 live/state gate，不写 common_trigger_match，也不作为动作入口。
+pending_market_data 的 trigger_live=false；matched 的 trigger_live=true；inactive 的 trigger_live=false。
+TriggerCleared / TriggerLiveChanged 仅作为旧 run 证据或兼容项，新 runtime 清除统一用 TriggerStateChanged(trigger_live=false, current_status=inactive)。
+N5 只负责动作确认事实和动作事件，不负责用户展示策略。
+TriggerMatched 是 N5 唯一动作确认入口；TriggerPendingMarketData 和 TriggerStateChanged 不得创建动作确认。
+N5 canonical action_state 只能为 eligible / blocked / executed / skipped / expired。
+N5 internal confirmation_status=pending/passed/failed/expired、tracking_until、last_checked_minute_label 不是 canonical action_state。
+ActionExecuted 只表示 N5 动作确认事实成立并发出动作事件，不表示真实下单、sim、N6 展示、语音或交易意图。
+expired 不新增 ActionExpired；用 ActionSkipped(action_state=expired, reason=trigger_live_false/window_expired) 表达。
+N5 final action_mark 只能为 normal / 30m_volume / 30m_shrink，且只有 120m / 30m / 5m / 1m 确认全部通过后才能写 final action_mark。
+BUY_HINT / SELL_HINT 在 N5 只能作为 condition_key / original_condition_key / trace；runtime signal_type 必须是 B_BUY / S_SELL，N5 不输出 HintEvent。
+N5 新 canonical 输出事件只能是 ActionEligible / ActionBlocked / ActionExecuted / ActionSkipped；ActionEvent / HintEvent / RiskEvent / PositionEvent 仅作为历史兼容项。
+N6 才负责 alert-only、展示、通知、语音、mobile、sim 和交易意图呈现。
+stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 index/board 写死为 alert-only。
+```
+
+当前阶段仍然不做：
+
+- 在条件层输出 POS_CLEAR / BUY_FAIL_CLEAR / ADD_BUY_FAIL_REDUCE 等用户层解释类型
+- 未经用户明确确认的行情拉取 execute
+- 未经用户明确确认的追加触发层 execute / worker / 长期服务
+- 未经用户明确确认的追加动作层 execute / worker / 长期服务
+- 未经用户明确确认的 N5 outbox consumption
+- 未经用户明确确认的 N3-C2 execute、closed summary 写入或 MinuteBarClosed outbox
+- 未经用户明确切换到对应 N1-N6 layer_role 的 runtime registry command execute
+- runtime_control 会话内执行 nightly run、rollback SQL、outbox consumption 或任何 worker
+- N6 execute
+- 语音播报
+- mobile projection
+- 模拟账户
+- 前端页面
+- 真实交易
+- 长期 worker 启动；bounded worker smoke 必须另行明确授权
+
+## 2. 必读文档
+
+开始任何任务前必须先读取：
+
+- `AGENTS.md`
+- `docs/V3_RAW_DATA_INGESTION_DESIGN.md`
+- `docs/V3_EXISTING_RAW_TO_INGESTION_MAPPING.md`
+- `docs/V3_LAYERED_SYSTEM_ARCHITECTURE.md`
+- `docs/Architecture.md`
+- `docs/Roadmap.md`
+- `docs/Tasks.md`
+
+如果任务涉及条件层，也必须读取：
+
+- `docs/V3_LAYERED_SYSTEM_ARCHITECTURE.md`
+- `docs/V3_CONDITION_LAYER_DEVELOPMENT_DESIGN.md`
+
+如果任务涉及 N3 实时行情层，也必须读取：
+
+- `docs/V3_N3_MARKET_DATA_LAYER_DEVELOPMENT_DESIGN.md`
+- `docs/N2_FINAL_CONDITION_LAYER_CLOSURE.md`
+- `docs/N2_F_SCOPE_CONSUMPTION_CONTRACT.md`
+
+如果任务涉及 N4 触发层，也必须读取：
+
+- `docs/V3_N4_TRIGGER_LAYER_DEVELOPMENT_DESIGN.md`
+- `docs/V3_N3_MARKET_DATA_LAYER_DEVELOPMENT_DESIGN.md`
+- `docs/N2_F_SCOPE_CONSUMPTION_CONTRACT.md`
+
+如果任务涉及 N5 动作层，也必须读取：
+
+- `docs/V3_N5_ACTION_LAYER_DEVELOPMENT_DESIGN.md`
+- `docs/V3_N4_TRIGGER_LAYER_DEVELOPMENT_DESIGN.md`
+- `docs/V3_N3_MARKET_DATA_LAYER_DEVELOPMENT_DESIGN.md`
+
+如果任务涉及项目规则更新，也必须同步更新：
+
+- `AGENTS.md`
+- 相关 `docs/*.md`
+
+如果任务涉及 runtime orchestration / dashboard，也必须读取：
+
+- `docs/RUNTIME_PIPELINE_CONTROL_V0.md`
+- `docs/RUNTIME_NIGHTLY_SOP.md`
+
+## 3. 与旧系统边界
+
+v3 是新项目，不得默认触碰旧系统。
+
+禁止默认读取、修改或写入：
+
+- `/Users/chuanfuchen/stock_monitor_isolated`
+- `/Users/chenchuanfu/stock_monitor_isolated`
+- 任何旧系统 `monitor.db`
+- 旧系统 LaunchAgent
+- 旧系统 8866 / 8868 / 8869 / 8871 服务
+- 旧系统 action / tts / sim / position 表
+
+如确需只读参考旧系统，必须先说明目的、范围和命令，并获得用户确认。
+
+## 3.1 分层会话边界硬规则
+
+v3 必须按分层会话推进。每个会话在执行前必须确认本次 `layer_role`。如果用户没有明确指定，Codex 可以根据任务内容推断；无法确定时必须停下询问，不能跨层执行。
+
+允许的 `layer_role` 只有：
+
+```text
+runtime_control
+N1_ingestion
+N2_condition
+N3_market_data
+N4_trigger
+N5_action
+N6_user
+```
+
+通用边界：
+
+- 本层可以修改本层代码、schema 草案、脚本、测试、文档和本层数据。
+- 本层只能只读上游正式产物，不得为了绕过问题去修改上游。
+- 本层不得执行下游任务，不得顺手启动下一层。
+- 一个会话不得连续推进多个层；完成本层任务后必须停下，等待用户明确切换层级。
+- 发现问题属于其他层时，必须停止当前执行，输出 `blocked_by_layer=<layer_role>`、证据、建议交接提示词。
+- 只有用户明确说“切换到 runtime_control/N1/N2/N3/N4/N5/N6”或给出等价确认后，才允许改变 `layer_role`。
+
+分层权限如下。
+
+| layer_role | 允许写入/执行 | 允许只读 | 禁止事项 |
+|---|---|---|---|
+| `runtime_control` | runtime pipeline run/stage/command registry/rollback registry/timeline/dashboard 的文档、schema 草案、测试、只读 dashboard 输出 | N1-N6 合同、报告、rollback SQL 路径、run_id lineage、quality gate 摘要 | 执行 registry command、执行 nightly run、执行 rollback SQL、连接数据库写 runtime 表、改 N1-N6 execute contract、消费 outbox、启动 worker、写 N1-N6 事实 |
+| `N1_ingestion` | raw ingest、source_version、quality gate、active source_version、PostgreSQL/Parquet fact、N3 sealed runtime 的归档执行、入库回滚与入库文档 | N2 readiness 缺口报告、N3 archive_request / sealed runtime 分区 | 运行 condition_basis/condition_pool execute、写 `condition_*`、盘中拉分钟 K、触发/动作/用户层、worker |
+| `N2_condition` | `condition_basis`、`condition_pool`、`minute_target_scope`、`condition_display_basis`、条件层质量项、条件层回滚 SQL、条件层文档 | N1 active source_version、N1 ready check、入库 fact | 外拉 Tushare/mootdx/实时行情、修 N1 fact、写 ingest 表、拉 1 分钟 K、进入 N3/N4/N5/N6 |
+| `N3_market_data` | market_data_subscription、market_data_pull_plan、`previous_day_minute_bar_1m`、今日分钟 K、实时日 K/快照、行情质量项、N3 标准行情事件、低频行情展示事件、盘后封账与 archive_request 元数据 | N2 active condition run 和 `minute_target_scope` | 改条件层、重新计算条件、写 trigger/action/user、写用户卡片、播放语音、直接写 Parquet 归档或外接盘、启动交易 worker |
+| `N4_trigger` | trigger event/state、trigger quality item、trigger dry-run/execute 合同 | N2 condition_pool、N3 行情快照/分钟 K | 拉行情、改条件、写 action、写 mobile/voice/sim |
+| `N5_action` | action event、hint/risk/action 归一化事件、position event、动作质量项 | N4 trigger、N3 分钟 K、必要的 N2 条件摘要 | 改 N1/N2/N3/N4、写用户投影、播放语音、写真实交易 |
+| `N6_user` | user projection、voice policy、mobile/card projection、sim shadow、用户偏好表 | N2 条件摘要、N5 输出事件 | 回写 N1-N5、直接改 trigger/action 事实、启动真实交易 |
+
+trigger / action 写入硬规则：
+
+```text
+默认禁止跨层写 trigger/action。
+只有本次会话已明确 layer_role=N4_trigger 或 layer_role=N5_action，
+且用户明确授权 run-once，
+且已有对应 preflight / contract / rollback，
+才允许写入本层 trigger/action 事实或事件。
+仍然禁止长期 worker、真实交易、N6 用户层写入、语音、mobile projection、sim。
+N4 synthetic outbox 默认只允许用于 N5 dry-run / preflight / contract validation；
+不得作为正式 N5 action fact / N5 outbox 写入来源，除非用户另行明确授权 shadow-only run，并提供独立标识、preflight 和 rollback。
+```
+
+runtime_control 写入硬规则：
+
+```text
+runtime_control 是总控控制面，不是 N1-N6 业务层。
+runtime_control 只允许登记 pipeline_run / pipeline_stage / execute command registry / rollback registry / pipeline timeline / dashboard v0 的文档、schema 草案和只读输出。
+runtime_control 不得执行 registry command，不得执行 rollback SQL，不得执行 nightly run，不得连接数据库写 runtime 表，除非用户另行明确授权 runtime_control schema migration 且已有 preflight / rollback。
+runtime_control 不得修改 N1-N6 execute contract，不得消费 outbox，不得启动 worker，不得写 trigger/action/user/sim/voice/mobile/real trade。
+runtime_control 需要推进某个 stage execute 时，必须停下并交接到对应 N1-N6 layer_role。
+```
+
+跨层交接必须使用明确的交接文本，至少包含：
+
+```text
+blocked_by_layer=<目标层>
+source_layer=<当前层>
+证据：...
+建议下一步：...
+禁止本层继续做：...
+```
+
+典型例子：N2 条件层发现 `index_daily` 缺固定 9 指数历史，只能输出 `blocked_by_layer=N1_ingestion`，不得在 N2 内外拉行情或修入库表。
+
+## 4. 当前阶段硬约束
+
+v3 入库层和条件层都必须遵守：
+
+```text
+指数、板块、个股必须物理分表。
+入库时就分开，不允许混表后再靠 asset_kind 过滤。
+identity_key 必须保留，但不能替代物理隔离。
+```
+
+必须优先设计以下表族：
+
+```text
+stock_*
+index_*
+board_*
+common_*
+```
+
+入库层核心表包括：
+
+```text
+common_ingest_batch
+common_trade_calendar
+stock_identity
+index_identity
+board_identity
+stock_daily_bar_fact
+stock_daily_basic
+index_daily_bar_fact
+board_daily_bar_fact
+stock_financial_metrics_fact
+index_membership_fact
+board_membership_fact
+```
+
+条件层表也必须继续物理隔离，优先使用以下表族：
+
+```text
+common_condition_*
+stock_condition_*
+index_condition_*
+board_condition_*
+stock_minute_target_scope
+index_minute_target_scope
+board_minute_target_scope
+stock_condition_display_basis
+index_condition_display_basis
+board_condition_display_basis
+```
+
+N2 条件层输出的 `allowed_signal_types` / `selected_signal_types_json` 只表达 canonical 条件语义，只能使用以下 6 类：
+
+```text
+BUY
+BUY:FULL
+SELL
+SELL:FULL
+BUY_HINT
+SELL_HINT
+```
+
+`condition_key` 不等于 `signal_type`。普通 `BUY:* / SELL:*` 的 N2 condition signal_type 分别是 `BUY / SELL`；`BUY:FULL / SELL:FULL` 保留为独立 N2 condition signal_type；`BUY_HINT / SELL_HINT` 保留为 N2 正式 condition signal_type，但只对指数和板块生效，不包含个股。
+
+N2 不再在 `allowed_signal_types` / `selected_signal_types_json` 输出 `B_BUY_30M_VOL` 或 `S_SELL_30M_SHRINK`。30m / projection 语义不由 N2 表达。`condition_key` 仅用于 trace / audit / analytics，不得被当作 action signal。N4/N5 runtime signal_type 只能收口为 `B_BUY / S_SELL`；N4 只输出 `projection_30m_flag / projection_30m_type / trigger_mark_candidate`，N5 才在分钟边界确认后给出最终 `action_mark`。
+
+最新定稿：`BUY_HINT / SELL_HINT` 名称保留 Hint，但在 N1-N5 的语义是指数/板块买卖信号条件，不是用户层提示类型，且不得对个股生成正式 N4 HINT 触发。`BUY_HINT` 必须先由 N2 证明指数/板块超跌前置结构，再由 N4 基于 N3 标准行情事实或 N3 标准化、可追溯 realtime projection 指标确认 30m 放量上涨，才可生成正式 `TriggerMatched`；`SELL_HINT` 必须先由 N2 证明指数/板块超涨前置结构，再由 N4 确认 30m 缩量下跌，才可生成正式 `TriggerMatched`。动作层 N5 不因名称为 Hint 而改变边界，只按动作确认规则处理；是否显示为提示、alert-only、语音、sim 或交易意图呈现，只能由 N6 user_policy 决定。
+
+方向字段只表达：
+
+```text
+buy
+sell
+```
+
+其中：
+
+```text
+BUY_HINT -> direction=buy
+SELL_HINT -> direction=sell
+```
+
+不得再把 hint 作为独立 direction。是否属于超跌/超涨条件族由 `condition_key`、`allowed_signal_types` 或兼容字段 `is_hint_scope` 表达；该字段不得被解释为“非正式触发”。
+
+条件层必须定义并独立诊断三类必要条件：
+
+```text
+普通 BUY/SELL 条件
+BUY:FULL / SELL:FULL 条件
+BUY_HINT / SELL_HINT 条件
+```
+
+BUY:FULL/SELL:FULL 不得混写成 BUY:D/SELL:D；BUY_HINT/SELL_HINT 不得混入普通 BUY/SELL 周期集合。
+
+条件层 schema 只保留条件层必要字段。禁止把触发/动作/语音/模拟账户执行字段放入条件层正式表：
+
+```text
+trigger_time / trigger_period / action_id / action_status / voice_status / tts_text / sim_trade_id / position_id
+locked_target_price / target_lock_status / user_policy_hint
+```
+
+用户层边界：
+
+```text
+用户层可以只读查询条件层数据。
+用户层不得直接查询 trigger/action 裸表。
+用户层只能被动接收 N5 标准动作事件或经 N5 转发的触发状态投影；历史 ActionEvent / HintEvent / RiskEvent / PositionEvent 只能作为旧 run 证据或兼容输入。
+用户层不得回写 condition_basis / condition_pool。
+```
+
+条件层静态结构字段必须只在条件层计算并定稿，触发层、动作层、用户层不得重算或回写：
+
+```text
+main_up_anchor / up_reference_period / up_amplitude / buy_target_price / up_sell_reference_period
+main_down_anchor / down_reference_period / down_amplitude / sell_target_price / down_buy_reference_period
+clear_sell_ref_period（仅 N5 兼容 alias，必须等于 up_sell_reference_period）
+```
+
+对称性目标价 canonical spec 以 `docs/V3_SYMMETRY_TARGET_PRICE_SPEC.md` 为准。N2 只拥有目标价候选和静态 trace：
+
+```text
+symmetry_anchor
+amplitude_source_period
+A 段识别
+base_price_policy
+reference_target_price
+secondary_target_price
+up_sell_reference_period
+down_buy_reference_period
+```
+
+`locked_target_price / target_lock_status` 只属于 N6/position，不属于 N2。N4/N5 可以透传目标价候选作为不可变 context / audit trace，但不得重算目标价、不得锁价、不得决定清仓策略。N6/position 才能解释持仓目标价、锁定目标价和清仓策略，且不得回写 N2/N4/N5。
+
+N2-R3 定稿后，`up_sell_reference_period / down_buy_reference_period / clear_sell_ref_period` 必须贯通：
+
+```text
+stock/index/board_condition_basis
+stock/index/board_condition_pool
+stock/index/board_minute_target_scope
+```
+
+`clear_sell_ref_period` 只作为 legacy alias，值必须等于 `up_sell_reference_period`。
+
+N2-R4 起，条件层还必须冻结 N4 实时触发所需的周期阈值：
+
+```text
+period_trigger_baseline_json
+```
+
+该字段必须贯通：
+
+```text
+stock/index/board_condition_basis
+stock/index/board_condition_pool
+stock/index/board_minute_target_scope
+```
+
+`period_trigger_baseline_json` 至少包含 Y/Q/M/W/D 可计算周期的 current_open_seed、current_close_seed、current_amount_seed、current_trade_days_seed、previous_open、previous_close、previous_entity_high、previous_entity_low、previous_amount、previous_avg_amount、amount_metric、current_window_start/end、previous_window_start/end。
+
+N4/N5/N6 不得回查 N1 历史 K 或自行重算这些周期阈值；只能读取 N2 冻结字段或 N4 本地化后的副本。
+
+实时行情层边界：
+
+```text
+条件层只输出行情范围，不拉行情。
+minute_target_scope 是条件来源明细表，不等于最终行情拉取任务表。
+minute_target_scope 可以保留 asset_kind + identity_key + direction + condition_key 粒度，用于审计和追溯。
+实时行情层消费 minute_target_scope 时，必须先按 asset_kind + identity_key + required_data_kind + for_trade_date 去重生成 market_data_subscription。
+行情层不得按 minute_target_scope 明细行逐行重复拉取同一对象行情。
+实时行情层统一拉取 realtime_daily_snapshot / minute_bar_1m / previous_day_minute_bar_1m。
+realtime_daily_snapshot execute 只能在 for_trade_date 当天运行；当前日期不等于 for_trade_date，或 common_trade_calendar 缺少该交易日且 is_open=true 时，必须 P0 阻断，不拉行情、不写 snapshot、不写 outbox。
+触发层主要消费 `MarketSnapshotUpdated / realtime_daily_snapshot`。N2 只输出 canonical `BUY / BUY:FULL / SELL / SELL:FULL / BUY_HINT / SELL_HINT`，不输出 30m action mark。N4 可基于 N2 condition signal 和 N3 标准化、可追溯 realtime projection 指标生成 `TriggerMatched`、`TriggerPendingMarketData` 以及 `TriggerStateChanged` 状态广播，并携带 `projection_30m_flag / projection_30m_type / trigger_mark_candidate`。最终 `action_mark=normal/30m_volume/30m_shrink` 由 N5 在动作确认阶段决定。`MinuteBarClosed` / N3 closed 30m summary 是强确认或回放校验入口，不是唯一入口。N4 仍不得直接拉行情，不得自行拼原始分钟，不得使用非 N3 标准指标生成正式触发。
+
+
+闭合分钟 K 动作确认硬规则：
+
+```text
+1 分钟 K 的标签时间 HH:MM 表示该分钟区间，只有到 HH:MM+1 后才视为闭合。
+N3 不得在分钟未闭合前写 MinuteBarClosed。
+N4 不得直接读取 raw 未闭合分钟 K 生成 TriggerMatched，也不得自行拼 raw 1m/5m/30m/120m 指标；但允许消费 N3 标准化、可追溯 realtime virtual metric 生成 TriggerMatched。
+N5 不得使用未闭合分钟 K 确认 ActionExecuted；ActionEligible 可在有效 TriggerMatched 后实时进入动作确认窗口。
+MarketSnapshotUpdated 可以驱动实时触发状态，也可以携带或追溯到 N3 标准化 realtime projection 指标。
+N2 canonical `BUY / SELL / BUY_HINT / SELL_HINT` 不要求 N4 等完整 30m 闭合；N4 可以基于 N3 标准化、可追溯 realtime projection 指标生成正式触发和 trigger_mark_candidate。MinuteBarClosed / closed 30m summary 仍是更强确认和回放校验入口。
+在 N3 projection 指标和 N4 projection matcher 未落地前，N4 real execute 不得把这些 canonical signal_type 或其衍生 trigger_mark_candidate 写成正式 TriggerMatched。
+```
+动作层只读 minute_bar_1m / previous_day_minute_bar_1m，不直接调用外部行情接口。
+用户层只读用户投影和必要行情展示投影。
+```
+
+N3-N6 事件流 / Outbox-Inbox 边界：
+
+```text
+事实和事件同事务产生。
+事件是跨层协议。
+表是本层事实和投影。
+不是先发事件再落事实，也不是下游直接扫上游内部事实表。
+
+N3 行情层：写本层行情事实、quality/status，并在同一事务写 MarketSnapshotUpdated / MinuteBarClosed / MinuteBarCorrected / MarketDataDelayed / MarketDataMissing / MarketDisplaySnapshotUpdated outbox event。
+N4 触发层：只消费 N3 标准事件，写本层 trigger state / trigger outcome 事实，并在同一事务写 TriggerStateChanged / TriggerMatched / TriggerPendingMarketData outbox event。
+N5 动作层：只消费 N4 标准事件，写本层 action confirmation 事实，并在同一事务写标准 action outbox event。历史 ActionEvent / HintEvent / RiskEvent / PositionEvent 只作为旧 run 证据或兼容路径。
+N6 用户层：消费 N5 标准动作事件或经 N5 转发的触发状态投影写 user_card_projection / user_voice_delivery / user_device_ack / sim_projection；消费 N3 MarketDisplaySnapshotUpdated 写 user_market_projection。手机和语音只看用户投影。
+
+禁止下游直接扫上游内部事实表来替代标准事件消费。
+跨层只能消费 event ledger / outbox 投递后的标准事件，或使用文档明确允许的只读摘要接口。
+```
+
+N3-N6 双速链路：
+
+```text
+高实时链路：N3 -> N4 -> N5 -> N6，用于触发、动作、语音、卡片。
+低频展示链路：N3 -> N6，用于 user_market_projection 行情展示字段。
+N3 低频展示事件只能命名为 MarketDisplaySnapshotUpdated，不得使用 User* 事件名。
+N3 事实表名沿用 stock/index/board_realtime_daily_snapshot 与 stock/index/board_minute_bar_1m，不得使用 *_runtime 表名。
+```
+
+N4/N5 最终架构边界：
+
+```text
+N4 触发层启动前必须把 N2 condition context 本地化到 runtime PostgreSQL；盘中不得每个事件访问外接盘 N2。
+N4 只消费 N3 标准事件和本地 context，写 trigger state / trigger outcome fact，并同事务写 TriggerStateChanged / TriggerMatched / TriggerPendingMarketData。
+N4 不拉行情，不写 action/user/sim。
+普通 BUY/SELL/FULL 主要消费 MarketSnapshotUpdated；BUY_HINT / SELL_HINT 可消费 N3 标准化 realtime projection 指标，MinuteBarClosed 或 closed 30m summary 作为强确认和回放校验入口。N4 只输出 30m projection 证据和 trigger_mark_candidate，不定最终 action_mark。
+N5 只消费 N4 标准事件，读取 N3 今日/前日分钟 K 作为动作上下文，写 action confirmation fact，并同事务写标准 action event。
+N5 不拉行情，不重算触发，不写用户投影，不播放语音，不真实交易，不决定 alert-only / voice / mobile / sim / trade-intent policy。
+BUY_HINT / SELL_HINT 是 N1-N5 内部买卖信号条件，不是用户提示类型；是否显示为提示、是否 alert-only、是否进入 sim/真实交易展示，由 N6 user_policy 决定。
+N4/N5 worker 必须先 run-once 与 bounded worker smoke，长期 worker 后置。
+```
+
+标准事件必须包含：
+
+```text
+event_id
+event_type
+asset_kind
+identity_key
+trade_date
+event_time
+source_layer
+source_run_id
+dedup_key
+partition_key
+event_schema_version
+payload_json
+created_at
+```
+
+N3 事件 payload 必须携带追溯字段：
+
+```text
+subscription_id
+pull_plan_id
+run_id
+source_adapter
+data_quality_status
+snapshot_id / minute_bar_id / quality_item_id，按事件类型至少提供一个
+```
+
+事件消费规则：
+
+```text
+event_id 稳定。
+dedup_key 稳定。
+identity_key 用于分区和顺序约束。
+event_schema_version 必填。
+consumer 必须幂等。
+projection 必须可重建。
+ack / watermark 必须明确。
+语音只播 watermark 后的新事件。
+开启语音最多补播 1 条。
+```
+
+condition_basis / condition_pool / minute_target_scope 默认生成规则：
+
+```text
+condition_basis：保留 stock / index / board 全量条件基础，不在 basis 阶段按行情范围收窄。
+
+index_condition_pool：默认只从固定 9 个指数中筛选合格条件：
+000905、399303、000001、000852、399001、399006、000300、000016、000688。
+固定 9 指数必须使用 exchange-qualified identity 筛选，不得只用裸 code：
+index:SH:000905、index:SZ:399303、index:SH:000001、index:SH:000852、index:SZ:399001、index:SZ:399006、index:SH:000300、index:SH:000016、index:SH:000688。
+任一固定指数缺少 condition_basis 来源必须作为 P0 阻断。
+任一固定指数缺少完整周期金额基准，导致 amount_quality_status != passed，也必须作为 P0 阻断。
+
+board_condition_pool：默认只从 `board_type=tdx_industry` 的行业板块中筛选合格条件；概念/地区扩展必须显式通过 policy 选择 `tdx_concept` / `tdx_region`。
+
+stock_condition_pool：默认只包含已经具备普通 BUY/SELL、BUY:FULL/SELL:FULL 条件，
+且通过默认选股策略的个股。默认策略至少要求 total_mv >= 100 亿、非 ST/风险票、official daily 证明存在、
+财务快照基础字段可用、lane/monitor_type 合规。
+
+minute_target_scope：只从对应 stock/index/board condition_pool 生成，可再由 policy 收窄。
+```
+
+说明：
+
+```text
+指数、板块、个股的行情范围都必须来自各自 condition_pool 或等价 dry-run 结果。
+固定 9 个指数、`board_type=tdx_industry` 行业板块、个股 total_mv >= 100 亿是 condition_pool 的默认筛选策略，不是绕过 pool 的 scope 直写规则。
+condition_pool 必须是可解释筛选池，保留 policy_name、policy_hash、selected_reason；被剔除候选必须在 dry-run/report/quality 中保留 excluded_reason 样本和原因分布。
+未来界面可以编辑 condition_pool 筛选策略，但不得直接修改 condition_basis，也不得绕过 condition_pool 直接手写 minute_target_scope。
+前一交易日一分钟 K 预加载由条件层声明 scope 和验收要求，由实时行情层实际拉取；条件层不得直接拉行情。
+行情层实际拉取前必须生成去重订阅；例如 index_minute_target_scope 可以有多条 condition_key 来源明细，但指数行情按去重后的 identity_key / required_data_kind 拉取。
+```
+
+N2-D1 开始允许增加可审计筛选层：
+
+```text
+condition_basis
+-> condition_pool_candidate
+-> condition_pool_selection_policy
+-> condition_pool
+-> minute_scope_candidate
+-> scope_selection_policy
+-> minute_target_scope
+```
+
+要求：
+
+```text
+policy 必须按 index / board / stock 分段筛选。
+默认 condition_pool policy 等价于当前自动范围。
+scope policy 只能继续收窄 condition_pool 候选范围，不能绕过 condition_pool 扩张行情范围。
+未来前端只操作 policy，不直接操作 condition_pool / minute_target_scope 行，也不得直接手写 condition_basis。
+N2-D1 只做 dry-run，不写库、不拉行情、不进入触发/动作/用户层。
+```
+
+## 5. 数据库技术方向
+
+默认技术方向：
+
+```text
+PostgreSQL：运行事实库
+Parquet：历史归档
+DuckDB：离线回放、对账、报表
+```
+
+未经用户确认，不得改成 SQLite / MongoDB / Redis / InfluxDB 作为主事实库。
+
+Redis 只能作为未来缓存，不得作为事实库。
+
+N3 实时行情层运行库必须使用本地硬盘：
+
+```text
+N3 runtime database：本地 SSD PostgreSQL。
+N3 数据不得写入 /Volumes/MacRaid/database。
+N3 数据不得和 N1/N2 外接盘历史事实、归档、Parquet 混放。
+N3 realtime_daily_snapshot / minute_bar_1m / previous_day_minute_bar_1m / market_data_subscription / pull_plan / event ledger / outbox / inbox / quality / checkpoint 都属于本地运行态数据。
+N4/N5/N6 若消费 N3 事件并需要低延迟运行态状态，默认也应使用同一套本地 runtime PostgreSQL 或同机本地 runtime database。
+runtime 是部署和生命周期属性，不写入 N3 行情事实表名；禁止使用 stock_minute_bar_1m_runtime / index_minute_bar_1m_runtime / board_minute_bar_1m_runtime 作为正式表名。
+```
+
+N3 本地 PostgreSQL 建议：
+
+```text
+独立本地 PostgreSQL cluster 或至少独立 database。
+建议 database 名：ashare_v3_runtime 或 ashare_v3_n3_runtime。
+建议数据目录位于本机内置 SSD，不使用外接盘路径。
+事实表按 stock/index/board 物理分表，并按 trade_date 分区或保留可滚动清理策略。
+```
+
+N3 与归档职责边界：
+
+```text
+N1/archive 是 N1_ingestion 内的归档职责名称，不是新的 layer_role。
+N3 负责盘中本地 runtime 写入、同事务事件 outbox、质量项、run/trade_date 封账和 archive_request 元数据。
+N3 不直接写 Parquet，不写 manifest，不写 /Volumes/MacRaid/database。
+N1/archive 负责读取已封账的 N3 runtime 分区，写入 Parquet、manifest、归档审计和 rollback 元数据。
+N1/archive 不参与 N3 盘中行情拉取、事件投递、触发/动作/用户投影。
+只有 N1/archive manifest 校验通过后，N3 才能按本地保留策略清理旧 runtime 分区。
+```
+
+v3 入库层的数据文件根目录：
+
+```text
+/Volumes/MacRaid/database
+```
+
+说明：
+
+- PostgreSQL 仍作为运行事实库，事实表由 PostgreSQL 管理。
+- N1/N2 的 Parquet 归档、manifest、入库审计导出和可删除的数据文件默认写入该目录。
+- N3 实时行情层的运行态 PostgreSQL 数据、事件流、分钟 K、实时快照和质量项不写入该目录。
+- N3 盘后数据如需长期保留，必须先由 N3 封账并生成 archive_request，再由 N1/archive 归档到该目录。
+- N1 阶段只生成 SQL schema 文件，不连接数据库，不创建真实数据库，不写入该数据目录。
+
+## 6. 禁止事项
+
+当前阶段禁止：
+
+- 在条件层重新抓 raw data
+- 在条件层直接拉一分钟 K
+- 在触发层直接拉取外部行情，或绕过 N3 使用未闭合/非标准分钟 K；N4 所用 30m / projection 判断必须来自 N3 标准事实、标准事件、标准化 realtime projection 指标或 N3 明确输出的 closed summary
+- 在动作层绕过实时行情层直接调用外部行情接口
+- 跨层写 trigger/action，或未经明确 `layer_role`、用户 run-once 授权、preflight/contract/rollback 的 trigger/action 写入
+- 写 voice
+- 写 mobile projection
+- 写 sim_trade
+- 写真实交易接口
+- 未经单独授权启动任何 worker
+- 启动长期服务
+- 修改旧系统数据库
+- 修改旧系统服务
+- 修改 LaunchAgent
+- 使用裸 code 作为跨资产 join key
+- 把 stock / index / board 混入同一事实表
+- 在 P0 质量问题下继续定稿
+
+## 7. 数据质量规则
+
+入库层必须设计 quality gate。
+
+至少包含：
+
+```text
+identity_key coverage = 100%
+同码污染 = 0
+stock official daily 缺失 = 0
+index official daily 缺失 = 0
+board official daily 缺失 = 0
+88xxxx stock violation = 0
+财务指标与 stock universe 对齐
+source_batch_id 可追溯
+source_version 可激活/回滚
+```
+
+## Evidence-Bound Modification Guard
+
+Codex is a code executor, not an architecture designer. For every task, Codex MUST follow evidence-bound execution and MUST NOT infer authority, expand scope, or invent new responsibilities.
+
+### 1. No inference rule
+
+Codex MUST NOT use “probably”, “should”, “likely”, “seems”, or experience-based reasoning as the basis for code changes.
+
+Every modification basis MUST come from at least one of:
+
+- AGENTS.md
+- docs/*.md canonical spec
+- existing code evidence
+- existing test evidence
+- artifact / gate report
+- live read-only query explicitly allowed by the task
+- explicit user instruction
+
+If authority cannot be proven from these sources, STOP and output BLOCKED.
+
+### 2. Authority-first rule
+
+Before any modification, Codex MUST identify and output:
+
+- authority: the canonical source of the field / behavior / semantic rule
+- forbidden: fields / tables / layers / paths that MUST NOT be used
+- bug: the exact current code path that violates the authority rule
+- patch: the smallest allowed modification point
+- tests: positive test, negative pollution test, and missing-authority test
+- blocked_if: conditions that require stopping instead of editing
+
+If this summary is missing, modification is forbidden.
+
+### 3. Scope freeze rule
+
+Codex MUST only solve the user-named problem.
+
+Codex MUST NOT:
+
+- add new fields unless explicitly requested
+- add new fallback paths
+- add new runtime run / worker / queue / service path
+- rename unrelated fields
+- refactor unrelated code
+- update snapshots to hide behavior changes
+- modify upstream or downstream layers to make the local fix pass
+
+If the fix appears to require another layer, STOP and output:
+
+blocked_by_layer=<target_layer>
+source_layer=<current_layer>
+evidence:
+handoff_prompt:
+forbidden_to_continue:
+
+### 4. File budget rule
+
+If a task requires modifying more than 3 files, Codex MUST stop before editing and output BLOCKED.
+
+The BLOCKED output must include:
+
+- why more files appear necessary
+- which layer owns the missing authority
+- the minimal handoff prompt for the correct layer
+
+### 5. Test proof rule
+
+Every behavior fix MUST include tests that prove source authority.
+
+Required tests:
+
+1. positive test:
+   - canonical authority source exists
+   - code uses that source
+   - expected behavior occurs
+
+2. negative pollution test:
+   - forbidden field/path contains a tempting but wrong value
+   - canonical authority source contains the correct value
+   - code MUST use the canonical source only
+
+3. missing-authority test:
+   - canonical authority source is missing
+   - code MUST fail closed / skip / block
+   - code MUST NOT fallback to forbidden sources
+
+If any required test cannot be added, Codex MUST explain why and output BLOCKED unless the user explicitly authorizes proceeding without it.
+
+### 6. Runtime prohibition reminder
+
+Unless the user explicitly authorizes it in the current task, Codex MUST NOT execute:
+
+- runtime execute
+- rerun
+- rollback
+- worker
+- queue consume
+- outbox / inbox / checkpoint mutation
+- DB write
+- real trade
+- sim
+- voice
+- mobile projection
+
+Read-only verification is allowed only when the task explicitly permits it and it does not mutate DB, queues, checkpoints, workers, or runtime state.
+
+### 7. LIGHT MODE cannot bypass evidence
+
+LIGHT MODE only reduces compiler/sandbox overhead.
+
+LIGHT MODE does NOT bypass:
+
+- authority proof
+- forbidden path proof
+- layer boundary checks
+- runtime prohibition
+- minimal diff requirement
+- test proof requirement
+- BLOCKED behavior
+
+If LIGHT MODE conflicts with Evidence-Bound Modification Guard, this guard wins.
+
+### 8. Required final output
+
+After completion, Codex MUST output only:
+
+- changed_files
+- authority_used
+- forbidden_sources_not_used
+- tests_added_or_updated
+- tests_run
+- result
+- blocked_items, if any
+
+Do not include speculative next steps unless the task is BLOCKED.
+
+## Execution Compiler + Kernel Enforcement Hook
+
+Before executing ANY task, Codex MUST:
+
+1. Convert natural language task into `execution_plan` DAG through Execution Compiler (`docs/EXECUTION_COMPILER.md`)
+2. Validate DAG structure before creating `kernel_input`
+3. Ensure DAG includes `PLAN -> VALIDATE -> MODIFY -> VERIFY -> FINALIZE`
+4. Ensure every `MODIFY` is preceded by `VALIDATE`
+5. Convert validated `execution_plan` into `kernel_input` schema
+6. Send `kernel_input` to Execution Kernel (`docs/EXECUTION_KERNEL.md`)
+7. Receive decision state (`ACCEPT / REJECT / BLOCK / ESCALATE`)
+8. Proceed ONLY if `ACCEPT`
+9. Otherwise STOP immediately
+
+Required flow:
+
+```text
+User Task
+   ↓
+Execution Compiler
+   ↓
+Kernel Evaluation
+   ↓
+Runtime Gate
+   ↓
+Binding
+   ↓
+Execution
+```
+
+Hard rules:
+
+```text
+No execution without execution_plan.
+Compiler is mandatory before kernel_input.
+DAG must include PLAN -> VALIDATE -> MODIFY -> VERIFY -> FINALIZE.
+MODIFY must always be preceded by VALIDATE.
+If Compiler or Kernel is not evaluated -> task is INVALID.
+```
+
+## 8. 开发流程
+
+每个阶段必须遵守：
+
+1. 先读 `AGENTS.md`
+2. 再读相关 `docs/*.md`
+3. 先输出计划
+4. 再修改文件
+5. 每次只做一个阶段
+6. 修改后运行必要的静态检查或测试
+7. 输出修改文件、验证结果、回滚方式
+8. 完成后停下，等待用户确认
+
+## 9. 文件组织建议
+
+建议目录：
+
+```text
+docs/
+sql/
+scripts/
+src/ashare_v3/
+tests/
+configs/
+data_lake/
+```
+
+说明：
+
+- `docs/`：设计文档
+- `sql/`：PostgreSQL schema / migration 草案
+- `scripts/`：入库 CLI
+- `src/ashare_v3/`：Python 包
+- `tests/`：单元测试
+- `configs/`：数据源配置
+- `data_lake/`：项目内逻辑占位；真实 Parquet 归档大文件默认写入 `/Volumes/MacRaid/database/data_lake/`，不提交到代码库
+
+## 10. 输出要求
+
+每次完成任务后必须说明：
+
+- 是否只在 v3 项目内修改
+- 是否触碰旧系统
+- 是否改数据库
+- 是否启动服务
+- 是否新增脚本
+- 是否新增 schema
+- 验证命令
+- 验证结果
+- 回滚方式
+
+## 11. 回滚要求
+
+任何代码或文档改动必须可回滚。
+
+如果生成数据库 schema：
+
+- 先生成 SQL 文件
+- 不直接连接生产库
+- 不直接执行 migration
+- 不直接创建真实数据库，除非用户明确确认
+
+如果生成数据文件：
+
+- 必须说明路径
+- 必须说明是否可删除
+- 必须说明是否影响旧系统
+
+## 12. 当前阶段总览
+
+当前阶段总控状态以 `docs/Architecture.md`、`docs/Roadmap.md`、`docs/Tasks.md` 和最新 gate artifact 为准。
+
+```text
+AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量、rollback_safe 或 downstream refs。
+任何具体 run_id、行数、消费状态、rollback 安全性和 downstream refs 都必须来自最新 review / post-review / registration artifact 或 fresh readonly proof。
+```
+
+说明：
+
+- `AGENTS.md` 不再记录详细历史进度，只保留执行硬规则。
+- 历史 run 报告只作为历史证据；如果历史报告与当前 DB / gate 证据冲突，必须通过专门 supersession / registration gate 登记。
+- N4/N5 outbox 与 inbox/checkpoint 的当前消费状态必须以 fresh readonly proof 或最新 post-review artifact 为准；不得据旧摘要重复执行或回滚。
+- N5 outbox pending 不等于 N6 execute 授权。
+- 下一步允许的只读 / 文档 review 分支只有：N6 user projection contract review，或 N3-C2 closed-minute / closed-30m schema readiness + additive migration draft。
+- N3-C2 当前只允许登记设计与审查 schema，不允许 execute、拉行情、写 minute delta、写 closed summary、写 outbox 或启动 worker。
+- 仍禁止直接 N6 execute、worker、voice、mobile、sim、position 和真实交易。
+- 长期 worker 始终后置，必须先有 run-once 和 bounded worker smoke 的单独授权。
+
+
+## N2-R2 静态参考周期硬规则
+
+N2 条件层必须输出并保证非空：
+
+```text
+up_sell_reference_period
+down_buy_reference_period
+```
+
+`clear_sell_ref_period` 仅作为兼容 alias，值必须等于 `up_sell_reference_period`。N2 不得再把 `clear_sell_ref_period` 当作 canonical 条件层字段；N5 持仓层后续可读取 `up_sell_reference_period` 初始化真实持仓清仓门槛。
+
+N2 对称性目标价字段冻结：
+
+```text
+symmetry_anchor / amplitude_source_period / base_price_policy 由 N2 计算并冻结。
+reference_target_price 是 N2 主目标价候选。
+secondary_target_price 是 N2 可选次级目标价候选。
+buy_target_price / sell_target_price 是 reference_target_price 的兼容映射。
+locked_target_price / target_lock_status 不得进入 N2。
+```
+
+## N2-Display-0 四表输出硬规则
+
+N2 条件层正式采用四表输出：
+
+```text
+condition_basis          全量审计根
+condition_pool           策略筛选后的条件行
+minute_target_scope      N3/N4/N5 交易链路 scope
+condition_display_basis  N6 展示输入
+```
+
+`condition_display_basis` 必须由 N2 生成，物理分表命名为：
+
+```text
+stock_condition_display_basis
+index_condition_display_basis
+board_condition_display_basis
+```
+
+硬规则：
+
+```text
+condition_display_basis 只给 N6 用户层只读展示使用。
+condition_display_basis 不进入 N3/N4/N5。
+N3/N4/N5 仍只依赖 minute_target_scope / market_data_subscription / 标准事件链路。
+condition_display_basis 不得命名为 user_condition_basis。
+正式写入 condition_display_basis 时，必须生成新的 N2 run_id，并与同一 run_id 的 basis/pool/scope 生命周期一致。
+不得在旧 active run 上补写 display_basis。
+```
+
+`condition_display_basis` 可以聚合 condition_pool / minute_target_scope 的多行条件来源，但输出粒度应面向 N6 展示，默认一对象一行，保留 source_condition_basis_id、source_condition_pool_ids_json、source_minute_target_scope_ids_json、selected_condition_keys_json、selected_signal_types_json 等追溯字段。

@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_stock_realtime_daily_snapshot_trade_date;
+DROP INDEX IF EXISTS idx_index_realtime_daily_snapshot_trade_date;
+DROP INDEX IF EXISTS idx_board_realtime_daily_snapshot_trade_date;

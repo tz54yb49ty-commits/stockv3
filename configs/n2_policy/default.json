@@ -1,0 +1,50 @@
+{
+  "policy_name": "default_adjusted_by_user",
+  "index": {
+    "enabled_identities": [
+      "index:SH:000905",
+      "index:SZ:399303",
+      "index:SH:000001",
+      "index:SH:000852",
+      "index:SZ:399001",
+      "index:SZ:399006",
+      "index:SH:000300",
+      "index:SH:000016",
+      "index:SH:000688"
+    ],
+    "directions": ["buy", "sell"],
+    "condition_keys": ["*"],
+    "require_buy_target_price": false,
+    "require_sell_target_price": false,
+    "require_clear_sell_ref_period": false
+  },
+  "board": {
+    "board_code_prefix": "881",
+    "include_codes": [],
+    "exclude_codes": [],
+    "directions": ["buy", "sell"],
+    "condition_keys": ["*"],
+    "require_buy_target_price": false,
+    "require_sell_target_price": false,
+    "require_clear_sell_ref_period": false
+  },
+  "stock": {
+    "min_total_mv_yi": 100,
+    "exclude_st": true,
+    "require_official_daily_proof": true,
+    "require_financial_quality_passed": false,
+    "directions": ["buy", "sell"],
+    "condition_keys": ["*"],
+    "condition_family": ["ordinary", "full", "hint"],
+    "period_grade": {},
+    "period_transition": {},
+    "require_buy_target_price": false,
+    "require_sell_target_price": false,
+    "require_clear_sell_ref_period": false,
+    "min_score": null,
+    "recommendation_levels": [],
+    "include_codes": [],
+    "exclude_codes": [],
+    "limit": null
+  }
+}

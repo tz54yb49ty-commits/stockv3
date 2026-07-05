@@ -1,0 +1,61 @@
+-- V3 runtime archive local cleanup performance indexes.
+--
+-- These indexes are additive and exist only to make scoped archival cleanup
+-- practical. They do not change business semantics or remove runtime rows.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_common_trigger_match_trigger_state_id
+ON common_trigger_match (trigger_state_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_common_event_delivery_attempt_outbox_id
+ON common_event_delivery_attempt (outbox_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stock_realtime_projection_metric_snapshot_id
+ON stock_realtime_projection_metric (snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_index_realtime_projection_metric_snapshot_id
+ON index_realtime_projection_metric (snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_board_realtime_projection_metric_snapshot_id
+ON board_realtime_projection_metric (snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stock_action_confirmation_metric_source_snapshot_id
+ON stock_action_confirmation_projection_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_index_action_confirmation_metric_source_snapshot_id
+ON index_action_confirmation_projection_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_board_action_confirmation_metric_source_snapshot_id
+ON board_action_confirmation_projection_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stock_projection_enrichment_v4_source_snapshot_id
+ON stock_projection_enrichment_v4_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_index_projection_enrichment_v4_source_snapshot_id
+ON index_projection_enrichment_v4_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_board_projection_enrichment_v4_source_snapshot_id
+ON board_projection_enrichment_v4_metric (source_snapshot_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_common_action_event_source_trigger_run_id
+ON common_action_event (source_trigger_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_common_action_quality_item_source_trigger_run_id
+ON common_action_quality_item (source_trigger_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stock_trigger_replay_audit_source_trigger_context_run_id
+ON stock_trigger_replay_audit (source_trigger_context_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_index_trigger_replay_audit_source_trigger_context_run_id
+ON index_trigger_replay_audit (source_trigger_context_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_board_trigger_replay_audit_source_trigger_context_run_id
+ON board_trigger_replay_audit (source_trigger_context_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stock_trigger_replay_audit_source_n4_projection_run_id
+ON stock_trigger_replay_audit (source_n4_projection_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_index_trigger_replay_audit_source_n4_projection_run_id
+ON index_trigger_replay_audit (source_n4_projection_run_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_board_trigger_replay_audit_source_n4_projection_run_id
+ON board_trigger_replay_audit (source_n4_projection_run_id);
