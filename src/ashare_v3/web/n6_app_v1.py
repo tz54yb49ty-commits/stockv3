@@ -3317,7 +3317,6 @@ def app_v2_monitor_href(base_href: str, *, monitor_status: str, for_trade_date: 
         pairs.append(("for_trade_date", for_trade_date))
     return _filter_href(base_href, pairs)
 
-
 def app_v2_monitor_date_selector(
     *,
     selected_section_key: str,
@@ -3339,7 +3338,6 @@ def app_v2_monitor_date_selector(
             for trade_date in available_for_trade_dates
         ],
     }
-
 
 def _monitor_status_filter(value: Any) -> str:
     text = str(value or "active").strip().lower()

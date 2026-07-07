@@ -77,7 +77,7 @@ class TodayMinuteExecuteTest(unittest.TestCase):
 
         self.assertEqual([row["bar_time"].strftime("%H:%M") for row in filtered], ["09:31", "14:11"])
 
-    def test_mootdx_current_day_raw_1300_remains_physical_c1_label(self) -> None:
+    def test_mootdx_current_day_raw_1300_is_morning_close_and_1301_is_afternoon_open(self) -> None:
         client = FakeMootdxClient(
             rows=[
                 raw_minute_row("2026-06-22 11:29"),
@@ -89,15 +89,37 @@ class TodayMinuteExecuteTest(unittest.TestCase):
 
         rows = adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
 
-        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:29", "13:00", "13:01"])
-        self.assertNotIn("time_label_normalization", rows[1]["raw_payload"])
+        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:28", "11:29", "13:00"])
+        self.assertEqual(rows[1]["raw_source_label"], "13:00")
+        self.assertEqual(rows[1]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[2]["raw_source_label"], "13:01")
+        self.assertEqual(rows[2]["physical_c1_label"], "13:00")
 
-    def test_mootdx_current_day_raw_1130_fails_closed_for_physical_c1(self) -> None:
+    def test_mootdx_current_day_raw_1130_maps_to_physical_1129_for_c1(self) -> None:
         client = FakeMootdxClient(rows=[raw_minute_row("2026-06-22 11:30")])
         adapter = MootdxTodayMinuteAdapter(client=client, intraday_trade_date="20260622")
 
-        with self.assertRaisesRegex(TodayMinuteExecuteError, "BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE"):
-            adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
+        rows = adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
+
+        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:29"])
+        self.assertEqual(rows[0]["raw_source_label"], "11:30")
+        self.assertEqual(rows[0]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[0]["raw_payload"]["time_label_normalization"], "mootdx_intraday_1130_to_physical_1129")
+
+    def test_mootdx_current_day_raw_1300_supplies_physical_1129_during_trading(self) -> None:
+        raw_1129 = raw_minute_row("2026-06-22 11:29")
+        raw_1129["amount"] = 111
+        raw_1300 = raw_minute_row("2026-06-22 13:00")
+        raw_1300["amount"] = 333
+        client = FakeMootdxClient(rows=[raw_1129, raw_1300])
+        adapter = MootdxTodayMinuteAdapter(client=client, intraday_trade_date="20260622")
+
+        rows = adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
+
+        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:28", "11:29"])
+        self.assertEqual(rows[1]["raw_source_label"], "13:00")
+        self.assertEqual(rows[1]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[1]["amount"], 333)
 
     def test_mootdx_historical_1130_is_not_rewritten_or_required_to_have_1300(self) -> None:
         client = FakeMootdxClient(
@@ -114,7 +136,7 @@ class TodayMinuteExecuteTest(unittest.TestCase):
         self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:29", "11:30", "13:01"])
         self.assertNotIn("time_label_normalization", rows[1]["raw_payload"])
 
-    def test_mootdx_current_day_raw_1130_and_1300_fail_closed(self) -> None:
+    def test_mootdx_current_day_raw_1130_and_1300_dedupe_as_same_physical_1129(self) -> None:
         client = FakeMootdxClient(
             rows=[
                 raw_minute_row("2026-06-22 11:30"),
@@ -123,8 +145,11 @@ class TodayMinuteExecuteTest(unittest.TestCase):
         )
         adapter = MootdxTodayMinuteAdapter(client=client, intraday_trade_date="20260622")
 
-        with self.assertRaises(TodayMinuteExecuteError):
-            adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
+        rows = adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
+
+        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:29"])
+        self.assertEqual(rows[0]["raw_source_label"], "11:30")
+        self.assertEqual(rows[0]["physical_c1_label"], "11:29")
 
     def test_mootdx_current_day_without_1130_or_1300_remains_missing(self) -> None:
         client = FakeMootdxClient(
@@ -137,7 +162,7 @@ class TodayMinuteExecuteTest(unittest.TestCase):
 
         rows = adapter.fetch_minute_bars(subscription("stock", "600036"), "20260622")
 
-        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:29", "13:01"])
+        self.assertEqual([row["bar_time"].strftime("%H:%M") for row in rows], ["11:28", "13:00"])
         status, _ = classify_today_minute_object_status(
             actual_count=len(rows),
             expected_count=3,

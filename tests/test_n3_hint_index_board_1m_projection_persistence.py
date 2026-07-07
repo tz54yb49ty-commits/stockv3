@@ -291,14 +291,17 @@ class N3HintIndexBoard1mProjectionPersistenceTest(unittest.TestCase):
         self.assertNotIn("stock_realtime_hint_projection_metric", rollback)
         self.assertNotIn("DELETE FROM common_event_outbox", rollback)
 
-    def test_first_30m_window_not_ready_quality_item_uses_schema_allowed_status(self) -> None:
+    def test_missing_first_30m_previous_trade_date_reference_quality_item_uses_schema_allowed_status(self) -> None:
         invalid_first_window_proof = sample_proof("board", "board:TDX:881442", "SELL_HINT", 1300)
         invalid_first_window_proof.update(
             {
                 "valid": False,
-                "blocked_reasons": ["first_30m_window_no_previous_completed_window"],
-                "previous_completed_window_start": None,
-                "previous_completed_window_end": None,
+                "blocked_reasons": ["missing_previous_trade_date_last_30m_open_close"],
+                "current_window_start": "09:31",
+                "current_window_end": "10:00",
+                "previous_completed_window_start": "14:31",
+                "previous_completed_window_end": "15:00",
+                "previous_completed_window_source": "previous_trade_date_last_30m",
             }
         )
 
@@ -315,34 +318,17 @@ class N3HintIndexBoard1mProjectionPersistenceTest(unittest.TestCase):
             source_context_run_id=SOURCE_CONTEXT_RUN_ID,
         )
 
-        self.assertEqual(plan["metric_rows"], {})
-        self.assertEqual(plan["rows_by_asset"], {})
-        self.assertEqual(plan["metric_fact_exclusion_count"], 1)
-        self.assertEqual(
-            plan["metric_fact_exclusion_reason_counts"],
-            {"first_30m_window_no_previous_completed_window": 1},
-        )
+        self.assertEqual(plan["rows_by_asset"], {"board": 1})
+        self.assertEqual(plan["metric_ready"], {"ready": 0, "not_ready": 1})
+        self.assertEqual(plan["metric_fact_exclusion_count"], 0)
+        self.assertEqual(plan["metric_fact_exclusion_reason_counts"], {})
 
-        not_ready_quality = next(
-            item
-            for item in plan["quality_items"]
-            if item["gate_code"] == "N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT"
-        )
-        self.assertEqual(not_ready_quality["severity"], "P1")
-        self.assertEqual(not_ready_quality["status"], "warning")
-        self.assertIn(not_ready_quality["status"], {"passed", "failed", "warning", "skipped"})
-        self.assertEqual(not_ready_quality["actual_value"], "1")
-        self.assertEqual(
-            not_ready_quality["details"]["exclusion_reason_counts"],
-            {"first_30m_window_no_previous_completed_window": 1},
-        )
-        self.assertEqual(
-            not_ready_quality["details"]["insert_blocker_counts"],
-            {
-                "missing_required_metric_fact_field:previous_completed_window_start": 1,
-                "missing_required_metric_fact_field:previous_completed_window_end": 1,
-            },
-        )
+        board_row = plan["metric_rows"]["board"][0]
+        self.assertFalse(board_row["metric_ready"])
+        self.assertEqual(board_row["blocked_reasons"], ["missing_previous_trade_date_last_30m_open_close"])
+        self.assertEqual(board_row["previous_completed_window_start"], "14:31")
+        self.assertEqual(board_row["previous_completed_window_end"], "15:00")
+        self.assertEqual(board_row["trace_json"]["previous_completed_window_source"], "previous_trade_date_last_30m")
 
 
 def sample_proof(
@@ -375,6 +361,7 @@ def sample_proof(
         "current_window_end": "15:00",
         "previous_completed_window_start": "14:01",
         "previous_completed_window_end": "14:30",
+        "previous_completed_window_source": "current_trade_date_adjacent_previous_30m",
         "current_window_elapsed_count": 30,
         "full_window_count": 30,
         "current_30m_price": 100.0,

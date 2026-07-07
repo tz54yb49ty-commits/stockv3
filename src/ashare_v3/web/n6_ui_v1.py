@@ -650,6 +650,9 @@ def post_close_fastlane_status_model(data: dict[str, Any]) -> dict[str, Any]:
         "n3_a1_summary": post_close_fastlane_n3_a1_summary_model(
             dict(data.get("n3_a1_summary") or {})
         ),
+        "n5_n3t_next_trade_day_readiness": post_close_fastlane_n5_n3t_readiness_model(
+            dict(data.get("n5_n3t_next_trade_day_readiness") or {})
+        ),
         "forbidden_scope_proof": dict(data.get("forbidden_scope_proof") or {}),
         "artifacts": [post_close_fastlane_artifact_model(row) for row in list(data.get("artifacts") or [])],
         "log_paths": [str(path) for path in list(data.get("log_paths") or [])],
@@ -859,6 +862,21 @@ def post_close_fastlane_n3_a1_summary_model(row: dict[str, Any]) -> dict[str, An
         "P0": int(row.get("P0") or 0),
         "P1": int(row.get("P1") or 0),
         "P2": int(row.get("P2") or 0),
+    }
+
+
+def post_close_fastlane_n5_n3t_readiness_model(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "available": bool(row),
+        "source": first_text(row, "source"),
+        "result": first_text(row, "result", default="NO_STATUS"),
+        "next_trade_date": first_text(row, "next_trade_date"),
+        "review_result": first_text(row, "review_result", default="NO_STATUS"),
+        "active_worker_write_enabled_ready": first_text(row, "active_worker_write_enabled_ready", default="False"),
+        "stable_activation_config_path": first_text(row, "stable_activation_config_path"),
+        "active_worker_policy_review_path": first_text(row, "active_worker_policy_review_path"),
+        "readiness_blocker": first_text(row, "readiness_blocker"),
+        "launchd_live_state": first_text(row, "launchd_live_state", default="not_checked_by_status_page"),
     }
 
 

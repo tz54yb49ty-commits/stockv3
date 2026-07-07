@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--include-calendar-repair", action="store_true")
     parser.add_argument("--skip-calendar-repair", action="store_true")
+    parser.add_argument("--skip-n5-n3t-readiness-rollover", action="store_true")
     parser.add_argument("--force-rerun-after-blocked", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--user-confirmed", action="store_true")
@@ -96,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             postgres_commit_enabled=args.postgres_commit_enabled,
             include_calendar_repair=include_calendar_repair,
             force_rerun_after_blocked=args.force_rerun_after_blocked,
+            enable_n5_n3t_readiness_rollover=not args.skip_n5_n3t_readiness_rollover,
             python_executable=args.python_executable,
         )
     except Exception as exc:

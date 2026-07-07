@@ -96,6 +96,19 @@ N3T_BOOLEAN_OUTPUT_FIELDS = (
     "first_5m_amount_default_pass",
 )
 N3T_OUTPUT_FIELDS = N3T_NUMERIC_OUTPUT_FIELDS + N3T_BOOLEAN_OUTPUT_FIELDS
+N3T_BOUNDARY_TRACE_FIELDS = (
+    "is_first_1m_of_day",
+    "is_first_5m_of_day",
+    "is_first_30m_of_day",
+    "is_first_120m_of_day",
+    "first_1m_amount_default_pass",
+    "first_5m_amount_default_pass",
+    "previous_1m_period_source",
+    "previous_5m_period_source",
+    "previous_30m_period_source",
+    "previous_120m_period_source",
+    "boundary_policy_version",
+)
 N3T_WRITER_INSERT_BASE_COLUMNS = (
     "projection_run_id",
     "projection_schema_version",
@@ -133,6 +146,17 @@ N3T_READY_REQUIRED_FIELDS = (
     "current_1m_amount",
     "current_5m_amount",
     "current_30m_closed_elapsed_amount",
+    "is_first_1m_of_day",
+    "is_first_5m_of_day",
+    "is_first_30m_of_day",
+    "is_first_120m_of_day",
+    "first_1m_amount_default_pass",
+    "first_5m_amount_default_pass",
+    "previous_1m_period_source",
+    "previous_5m_period_source",
+    "previous_30m_period_source",
+    "previous_120m_period_source",
+    "boundary_policy_version",
 )
 N3T_SCOPED_C1_REQUIRED_SCOPE_GRAIN = (
     "for_trade_date",
@@ -145,6 +169,7 @@ N3T_SCOPED_C1_REQUIRED_SCOPE_GRAIN = (
     "source_trigger_run_id",
     "scope_status",
 )
+N3T_SCOPED_C1_OPTIONAL_SCOPE_GRAIN = {"source_trigger_run_id"}
 N3T_SCOPED_SIDE_EFFECT_FLAGS = (
     "database_written",
     "market_data_pulled",
@@ -451,6 +476,16 @@ def build_n3t_action_confirmation_metric_row(
     values = dict(metric_values or {})
     closed_refs = list(source_closed_minute_bar_ids or [])
     previous_refs = list(previous_day_minute_refs or [])
+    boundary_trace = {
+        field: values.get(field)
+        for field in N3T_BOUNDARY_TRACE_FIELDS
+        if values.get(field) is not None
+    }
+    previous_period_sources = {
+        period: values.get(f"previous_{period}_period_source")
+        for period in ("1m", "5m", "30m", "120m")
+        if values.get(f"previous_{period}_period_source") is not None
+    }
     blocked_reasons: list[str] = []
     metric_close_time: datetime | None = None
 
@@ -499,11 +534,15 @@ def build_n3t_action_confirmation_metric_row(
             "candidate_trace_authority": "trace_only_not_authoritative",
             "closed_minute_contract": "bar_label_HHMM_is_usable_after_HHMM_plus_1",
             "alias_relationships": dict(N3T_N5_COMPATIBILITY_ALIASES),
+            "boundary_policy": boundary_trace,
+            "previous_period_sources": previous_period_sources,
         },
         "raw_json": {
             "blocked_reasons": blocked_reasons,
             "source_closed_minute_bar_ids": closed_refs,
             "previous_day_minute_refs": previous_refs,
+            "boundary_policy": boundary_trace,
+            "previous_period_sources": previous_period_sources,
         },
     }
     for field in N3T_NUMERIC_OUTPUT_FIELDS:
@@ -662,7 +701,10 @@ def _normalize_scoped_c1_scope_row(row: Any) -> dict[str, str]:
 
 
 def _valid_scoped_c1_scope_row(row: Mapping[str, str], for_trade_date: str) -> bool:
-    if any(not row.get(field) for field in N3T_SCOPED_C1_REQUIRED_SCOPE_GRAIN):
+    required_fields = tuple(
+        field for field in N3T_SCOPED_C1_REQUIRED_SCOPE_GRAIN if field not in N3T_SCOPED_C1_OPTIONAL_SCOPE_GRAIN
+    )
+    if any(not row.get(field) for field in required_fields):
         return False
     if row["for_trade_date"] != for_trade_date:
         return False

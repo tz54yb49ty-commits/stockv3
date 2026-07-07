@@ -976,6 +976,41 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
         self.assertEqual(skipped[("ordinary", ORDINARY_1500_SOURCE)], "already_passed_exact_target")
         self.assertEqual(skipped[("hint", HINT_1454_SOURCE)], "already_passed_exact_target")
 
+    def test_realtime_latest_only_skips_latest_exact_target_with_downstream_refs_as_noop(self) -> None:
+        from scripts.run_n4_intraday_proof_discovery_poll_once import build_proof_discovery_plan
+
+        plan = build_proof_discovery_plan(
+            for_trade_date=FOR_TRADE_DATE,
+            source_trade_date=SOURCE_TRADE_DATE,
+            source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            mode="ordinary",
+            ordinary_candidates=[
+                ordinary_candidate(ORDINARY_1429_SOURCE),
+                ordinary_candidate(ORDINARY_1500_SOURCE),
+            ],
+            hint_candidates=[],
+            existing_targets=[
+                passed_target(ORDINARY_0946_TARGET, source_run_id=ORDINARY_0946_SOURCE),
+                passed_target(
+                    ORDINARY_1500_TARGET,
+                    source_run_id=ORDINARY_1500_SOURCE,
+                    previous_trigger_run_id=ORDINARY_0946_TARGET,
+                    downstream_ref_count=8,
+                ),
+            ],
+            python_executable=sys.executable,
+        )
+
+        self.assertIsNone(plan["selected"]["ordinary"])
+        skipped = {(item["family"], item["source_run_id"]): item for item in plan["skipped_candidates"]}
+        self.assertEqual(
+            skipped[("ordinary", ORDINARY_1500_SOURCE)]["reason"],
+            "already_passed_exact_target_with_downstream_refs",
+        )
+        self.assertEqual(skipped[("ordinary", ORDINARY_1500_SOURCE)]["downstream_ref_count"], "8")
+        self.assertEqual(skipped[("ordinary", ORDINARY_1500_SOURCE)]["downstream_ref_policy"], "ignored_for_realtime_latest")
+
     def test_explicit_catchup_mode_can_select_latest_unprocessed_backlog(self) -> None:
         from scripts.run_n4_intraday_proof_discovery_poll_once import build_proof_discovery_plan
 
@@ -1267,31 +1302,36 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
 
         self.assertIn("run count mismatch", str(raised.exception))
 
-    def test_existing_target_baseline_compat_blocks_downstream_refs(self) -> None:
-        from scripts.run_n4_intraday_proof_discovery_poll_once import ProofDiscoveryBlocked, build_proof_discovery_plan
+    def test_existing_target_baseline_compat_allows_realtime_latest_downstream_refs_noop(self) -> None:
+        from scripts.run_n4_intraday_proof_discovery_poll_once import build_proof_discovery_plan
 
-        with self.assertRaises(ProofDiscoveryBlocked) as raised:
-            build_proof_discovery_plan(
-                for_trade_date=FOR_TRADE_DATE,
-                source_trade_date=SOURCE_TRADE_DATE,
-                source_condition_run_id=SOURCE_CONDITION_RUN_ID,
-                trigger_context_run_id=CONTEXT_RUN_ID,
-                mode="ordinary",
-                ordinary_candidates=[ordinary_candidate(ORDINARY_0946_SOURCE), ordinary_candidate(ORDINARY_1453_SOURCE)],
-                hint_candidates=[],
-                existing_targets=[
-                    passed_target(ORDINARY_0946_TARGET, source_run_id=ORDINARY_0946_SOURCE),
-                    passed_target(
-                        ORDINARY_1453_TARGET,
-                        source_run_id=ORDINARY_1453_SOURCE,
-                        previous_trigger_run_id="",
-                        downstream_ref_count=1,
-                    ),
-                ],
-                python_executable=sys.executable,
-            )
+        plan = build_proof_discovery_plan(
+            for_trade_date=FOR_TRADE_DATE,
+            source_trade_date=SOURCE_TRADE_DATE,
+            source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            mode="ordinary",
+            ordinary_candidates=[ordinary_candidate(ORDINARY_0946_SOURCE), ordinary_candidate(ORDINARY_1453_SOURCE)],
+            hint_candidates=[],
+            existing_targets=[
+                passed_target(ORDINARY_0946_TARGET, source_run_id=ORDINARY_0946_SOURCE),
+                passed_target(
+                    ORDINARY_1453_TARGET,
+                    source_run_id=ORDINARY_1453_SOURCE,
+                    previous_trigger_run_id="",
+                    downstream_ref_count=1,
+                ),
+            ],
+            python_executable=sys.executable,
+        )
 
-        self.assertIn("downstream refs", str(raised.exception))
+        self.assertIsNone(plan["selected"]["ordinary"])
+        skipped = {(item["family"], item["source_run_id"]): item for item in plan["skipped_candidates"]}
+        self.assertEqual(
+            skipped[("ordinary", ORDINARY_1453_SOURCE)]["reason"],
+            "already_passed_exact_target_with_downstream_refs",
+        )
+        self.assertEqual(skipped[("ordinary", ORDINARY_1453_SOURCE)]["downstream_ref_policy"], "ignored_for_realtime_latest")
 
     def test_previous_baseline_selection_is_family_scoped(self) -> None:
         from scripts.run_n4_intraday_proof_discovery_poll_once import build_proof_discovery_plan

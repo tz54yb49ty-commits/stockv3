@@ -14,8 +14,12 @@ ASHARE_CN_1M_CANONICAL_POLICY = "ashare_cn_1m_v1"
 C1_TRADING_MINUTE_LABEL_POLICY = "ashare_c1_start_label_session_v1"
 BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE = "BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE"
 MOOTDX_INTRADAY_1300_TO_1130_POLICY = "mootdx_intraday_1300_to_1130"
+MOOTDX_INTRADAY_1130_TO_PHYSICAL_1129_POLICY = "mootdx_intraday_1130_to_physical_1129"
+MOOTDX_INTRADAY_1300_TO_PHYSICAL_1129_POLICY = "mootdx_intraday_1300_to_physical_1129"
 RAW_LUNCH_CLOSE = (13, 0)
 CANONICAL_LUNCH_CLOSE = (11, 30)
+C1_MORNING_CLOSE_BOUNDARY = (11, 30)
+C1_MORNING_CLOSE_PHYSICAL_LABEL = (11, 29)
 C1_MORNING_FIRST_LABEL = time(9, 30)
 C1_MORNING_LAST_LABEL = time(11, 29)
 C1_AFTERNOON_FIRST_LABEL = time(13, 0)
@@ -82,6 +86,46 @@ def normalize_c1_physical_intraday_1m_labels(
     output = [dict(row) for row in rows]
     if not _is_current_day_mootdx(trade_date=trade_date, intraday_trade_date=intraday_trade_date, source_adapter=source_adapter):
         return sorted(output, key=_sort_key)
+
+    rows_by_identity: dict[str, list[dict[str, Any]]] = {}
+    for row in output:
+        key = str(
+            identity_key
+            or row.get("identity_key")
+            or row.get("stock_identity_key")
+            or row.get("index_identity_key")
+            or row.get("board_identity_key")
+            or row.get("code")
+            or ""
+        )
+        rows_by_identity.setdefault(key, []).append(row)
+
+    row_ids_to_drop: set[int] = set()
+    for key, group in rows_by_identity.items():
+        rows_by_physical: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        for row in group:
+            raw_label = _hhmm_text(row[_time_key(row)])
+            physical_label = _c1_physical_label_for_mootdx_source_close(raw_label)
+            if not physical_label:
+                raise MinuteLabelNormalizationError(f"{BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE}: {raw_label}: {key or 'unknown_identity'}")
+            rows_by_physical.setdefault(physical_label, []).append((raw_label, row))
+        for physical_label, candidates in rows_by_physical.items():
+            selected_raw, selected_row = _select_mootdx_source_close_candidate(
+                physical_label=physical_label,
+                candidates=candidates,
+                identity=key or "unknown_identity",
+            )
+            for _, row in candidates:
+                if row is not selected_row:
+                    row_ids_to_drop.add(id(row))
+            _normalize_source_close_to_physical_start(
+                selected_row,
+                raw_source_label=selected_raw,
+                physical_c1_label=physical_label,
+            )
+
+    if row_ids_to_drop:
+        output = [row for row in output if id(row) not in row_ids_to_drop]
 
     for row in output:
         try:
@@ -208,6 +252,84 @@ def _normalize_1300_to_1130(row: dict[str, Any]) -> None:
         }
     )
     row["raw_payload"] = raw_payload
+
+
+def _select_mootdx_source_close_candidate(
+    *,
+    physical_label: str,
+    candidates: Sequence[tuple[str, dict[str, Any]]],
+    identity: str,
+) -> tuple[str, dict[str, Any]]:
+    if len(candidates) == 1:
+        return candidates[0]
+    if physical_label == "11:29" and {raw for raw, _ in candidates}.issubset({"11:30", "13:00"}):
+        return sorted(candidates, key=lambda item: {"11:30": 0, "13:00": 1}.get(item[0], 9))[0]
+    raw_labels = ",".join(raw for raw, _ in candidates)
+    raise MinuteLabelNormalizationError(
+        f"duplicate-source anomaly: mootdx current-day C1 emitted duplicate physical {physical_label} from raw {raw_labels} for {identity}"
+    )
+
+
+def _normalize_source_close_to_physical_start(
+    row: dict[str, Any],
+    *,
+    raw_source_label: str,
+    physical_c1_label: str,
+) -> None:
+    key = _time_key(row)
+    source_dt = _coerce_shanghai(row[key])
+    physical_hour, physical_minute = (int(part) for part in physical_c1_label.split(":", 1))
+    physical_dt = source_dt.replace(hour=physical_hour, minute=physical_minute, second=0, microsecond=0)
+    normalization_policy = (
+        MOOTDX_INTRADAY_1130_TO_PHYSICAL_1129_POLICY
+        if raw_source_label == "11:30"
+        else MOOTDX_INTRADAY_1300_TO_PHYSICAL_1129_POLICY
+        if raw_source_label == "13:00" and physical_c1_label == "11:29"
+        else "mootdx_intraday_close_label_to_physical_start_v1"
+    )
+    row[key] = _format_like(row[key], physical_dt)
+    raw_payload = dict(row.get("raw_payload") or {})
+    raw_payload.update(
+        {
+            "raw_source_bar_time": source_dt.isoformat(),
+            "source_bar_time": source_dt.isoformat(),
+            "physical_bar_time": physical_dt.isoformat(),
+            "raw_source_label": raw_source_label,
+            "physical_c1_label": physical_c1_label,
+            "source_label_policy": "source_label_to_physical_with_morning_close_boundary_v2",
+            "source_label_semantics": "source_label",
+            "physical_label_semantics": "start_label",
+            "time_label_normalization": normalization_policy,
+            "fake_or_synthetic_row": False,
+        }
+    )
+    row.update(
+        {
+            "raw_source_bar_time": source_dt.isoformat(),
+            "raw_source_label": raw_source_label,
+            "physical_c1_label": physical_c1_label,
+            "source_label_policy": "source_label_to_physical_with_morning_close_boundary_v2",
+            "source_label_semantics": "source_label",
+            "physical_label_semantics": "start_label",
+            "fake_or_synthetic_row": False,
+            "raw_payload": raw_payload,
+        }
+    )
+
+
+def _c1_physical_label_for_mootdx_source_close(raw_label: str) -> str:
+    if raw_label in {"11:30", "13:00"}:
+        return "11:29"
+    if not re.fullmatch(r"\d{2}:\d{2}", raw_label or ""):
+        return ""
+    hour_text, minute_text = raw_label.split(":", 1)
+    hour = int(hour_text)
+    minute = int(minute_text) - 1
+    if minute < 0:
+        hour -= 1
+        minute = 59
+    physical_label = f"{hour:02d}:{minute:02d}"
+    return physical_label if physical_label in _c1_label_index() else ""
 
 
 def _row_matches(row: Mapping[str, Any], hour: int, minute: int) -> bool:

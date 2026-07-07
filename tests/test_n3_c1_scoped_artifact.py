@@ -16,6 +16,7 @@ from ashare_v3.market.c1_scoped_artifact import (
     build_n3_c1_scoped_artifact_plan,
     build_source_close_label_plan_for_target_minute,
     is_c1_minute_closed_for_scoped_artifact,
+    source_close_label_for_physical_start_label,
     source_close_label_to_physical_start_label,
 )
 from ashare_v3.market.minute_label_normalization import BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE
@@ -60,6 +61,26 @@ def active_scope_row(**overrides):
     return row
 
 
+def active_object_scope_row(**overrides):
+    refs = overrides.pop(
+        "active_tracking_refs",
+        [
+            active_scope_row(condition_key="BUY_MAIN", source_trigger_event_id="n4-match-main"),
+            active_scope_row(condition_key="BUY_FULL", source_trigger_event_id="n4-match-full"),
+        ],
+    )
+    row = {
+        "for_trade_date": TRADE_DATE,
+        "asset_kind": "stock",
+        "identity_key": "stock:SZ:300803",
+        "scope_status": "active",
+        "active_tracking_refs": refs,
+        "attention_event_refs": [],
+    }
+    row.update(overrides)
+    return row
+
+
 def metric_context_row(**overrides):
     row = {
         "for_trade_date": TRADE_DATE,
@@ -91,9 +112,69 @@ def metric_context_row(**overrides):
             "previous_day_same_window_amount": 100,
             "is_first_1m_of_day": True,
             "is_first_5m_of_day": True,
+            "is_first_30m_of_day": True,
+            "is_first_120m_of_day": True,
             "first_1m_amount_default_pass": True,
             "first_5m_amount_default_pass": True,
+            "previous_1m_period_source": "previous_trade_date_last_period",
+            "previous_5m_period_source": "previous_trade_date_last_period",
+            "previous_30m_period_source": "previous_trade_date_last_period",
+            "previous_120m_period_source": "previous_trade_date_last_period",
+            "boundary_policy_version": "n3.action_confirmation_boundary.v1",
         },
+    }
+    row.update(overrides)
+    return row
+
+
+def current_day_c1_row(label: str, idx: int, **overrides):
+    row = {
+        **active_scope_row(),
+        "physical_c1_label": label,
+        "raw_source_label": c1_scoped_artifact.source_close_label_for_physical_start_label(TRADE_DATE, label)["raw_source_label"],
+        "open": 10.0 + idx / 100,
+        "high": 10.2 + idx / 100,
+        "low": 9.8 + idx / 100,
+        "close": 10.1 + idx / 100,
+        "amount": 1000.0 + idx,
+        "source_row_ref": f"current:300803:{label.replace(':', '')}",
+        "fake_or_synthetic_row": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def current_day_object_c1_row(label: str, idx: int, **overrides):
+    row = {
+        "for_trade_date": TRADE_DATE,
+        "asset_kind": "stock",
+        "identity_key": "stock:SZ:300803",
+        "scope_status": "active",
+        "physical_c1_label": label,
+        "raw_source_label": c1_scoped_artifact.source_close_label_for_physical_start_label(TRADE_DATE, label)["raw_source_label"],
+        "open": 10.0 + idx / 100,
+        "high": 10.2 + idx / 100,
+        "low": 9.8 + idx / 100,
+        "close": 10.1 + idx / 100,
+        "amount": 1000.0 + idx,
+        "source_row_ref": f"current:300803:{label.replace(':', '')}",
+    }
+    row.update(overrides)
+    return row
+
+
+def previous_day_c1_row(label: str, idx: int, **overrides):
+    row = {
+        "asset_kind": "stock",
+        "identity_key": "stock:SZ:300803",
+        "physical_c1_label": label,
+        "open": 8.0 + idx / 100,
+        "high": 8.2 + idx / 100,
+        "low": 7.8 + idx / 100,
+        "close": 8.1 + idx / 100,
+        "amount": 800.0 + idx,
+        "source_row_ref": f"previous:300803:{label.replace(':', '')}",
+        "fake_or_synthetic_row": False,
     }
     row.update(overrides)
     return row
@@ -141,21 +222,21 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(plan["target_minute_label"], "09:44")
         self.assertEqual(plan["expected_closed_time"], "2026-07-02T09:45:00+08:00")
         self.assertEqual(plan["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
-        self.assertEqual(plan["source_label_semantics"], "close_label")
+        self.assertEqual(plan["source_label_semantics"], "source_label")
         self.assertEqual(plan["physical_label_semantics"], "start_label")
-        self.assertEqual(plan["required_physical_labels"][0], "09:30")
+        self.assertEqual(plan["required_physical_labels"][0], "09:31")
         self.assertEqual(plan["required_physical_labels"][-1], "09:44")
-        self.assertEqual(plan["required_raw_source_labels"][0], "09:31")
+        self.assertEqual(plan["required_raw_source_labels"][0], "09:32")
         self.assertEqual(plan["required_raw_source_labels"][-1], "09:45")
-        self.assertEqual(len(plan["required_physical_labels"]), 15)
-        self.assertEqual(len(plan["required_raw_source_labels"]), 15)
-        self.assertEqual(plan["expected_rows_after_pull"], 900)
+        self.assertEqual(len(plan["required_physical_labels"]), 14)
+        self.assertEqual(len(plan["required_raw_source_labels"]), 14)
+        self.assertEqual(plan["expected_rows_after_pull"], 840)
         self.assertEqual(plan["scope_count"], 60)
         self.assertEqual(len(plan["plan_rows"]), 60)
         self.assertEqual({row["asset_kind"] for row in plan["plan_rows"]}, {"stock", "board"})
         self.assertEqual({row["required_data_kind"] for row in plan["plan_rows"]}, {"minute_bar_1m"})
         self.assertTrue(all(row["source_label_policy"] == SOURCE_CLOSE_LABEL_POLICY for row in plan["plan_rows"]))
-        self.assertTrue(all(row["required_raw_source_labels"][0] == "09:31" for row in plan["plan_rows"]))
+        self.assertTrue(all(row["required_raw_source_labels"][0] == "09:32" for row in plan["plan_rows"]))
         self.assertTrue(all(row["required_raw_source_labels"][-1] == "09:45" for row in plan["plan_rows"]))
         self.assertTrue(all(row["artifact_staging_only"] for row in plan["plan_rows"]))
         self.assertFalse(plan["full_market_fallback_allowed"])
@@ -171,9 +252,169 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertFalse(plan["side_effects"]["updates_n4_outbox"])
         self.assertFalse(plan["side_effects"]["full_market_fallback_used"])
 
-    def test_source_close_label_policy_maps_raw_close_to_physical_start_labels(self):
+    def test_object_granularity_pull_plan_dedupes_active_tracking_refs(self):
+        scope = active_scope_artifact(
+            artifact_schema_version="v2",
+            scope_granularity="object",
+            scope_rows=[active_object_scope_row()],
+            scope_count=1,
+        )
+
+        plan = build_n3_c1_scoped_current_day_pull_plan(
+            scope,
+            target_minute_label="09:31",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+
+        self.assertEqual(plan["plan_status"], "planned")
+        self.assertEqual(plan["scope_count"], 1)
+        self.assertEqual(len(plan["plan_rows"]), 1)
+        row = plan["plan_rows"][0]
+        self.assertEqual(row["asset_kind"], "stock")
+        self.assertEqual(row["identity_key"], "stock:SZ:300803")
+        self.assertEqual(row["scope_status"], "active")
+        self.assertNotIn("condition_key", row)
+        self.assertEqual(
+            {ref["condition_key"] for ref in row["active_tracking_refs"]},
+            {"BUY_MAIN", "BUY_FULL"},
+        )
+        self.assertEqual(plan["expected_rows_after_pull"], 1)
+        self.assertFalse(plan["n3_scans_n5_internals"])
+        self.assertFalse(plan["side_effects"]["full_market_fallback_used"])
+
+    def test_object_granularity_staging_and_metric_context_fan_out_active_tracking_refs(self):
+        labels = c1_scoped_artifact.canonical_ashare_1m_labels(TRADE_DATE)
+        target_index = labels.index("09:31")
+        scope = active_scope_artifact(
+            artifact_schema_version="v2",
+            scope_granularity="object",
+            scope_rows=[active_object_scope_row()],
+            scope_count=1,
+        )
+        plan = build_n3_c1_scoped_current_day_pull_plan(
+            scope,
+            target_minute_label="09:31",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+        current_rows = [
+            current_day_object_c1_row(label, idx)
+            for idx, label in enumerate(plan["required_physical_labels"])
+        ]
+        staging = build_n3_c1_scoped_current_day_staging_artifact(
+            scope,
+            pull_plan_artifact=plan,
+            source_rows_artifact={
+                "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                "for_trade_date": TRADE_DATE,
+                "target_hhmm": "0931",
+                "closed_minute_rows": current_rows,
+                "full_market_fallback_used": False,
+                "database_written": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+            },
+            target_hhmm="0931",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+        previous_day_rows = [previous_day_c1_row(label, idx) for idx, label in enumerate(labels)]
+
+        metric_source = build_n3_c1_n3t_metric_context_source_artifact(
+            scope,
+            staging_artifact=staging,
+            previous_day_minute_rows=previous_day_rows,
+            target_hhmm="0931",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+        artifact = build_n3_c1_scoped_artifact_plan(
+            scope,
+            target_minute_label="09:31",
+            observed_at="2026-07-02T09:32:00+08:00",
+            metric_context_rows=metric_source["metric_context_rows"],
+        )
+
+        self.assertEqual(staging["artifact_status"], "passed")
+        self.assertEqual(staging["scope_count"], 1)
+        self.assertEqual(staging["closed_minute_row_count"], 1)
+        self.assertEqual(metric_source["artifact_status"], "planned")
+        self.assertEqual(metric_source["metric_context_status"], "ready")
+        self.assertEqual(metric_source["scope_count"], 2)
+        self.assertEqual(metric_source["metric_context_count"], 2)
+        self.assertEqual(
+            {row["condition_key"] for row in metric_source["metric_context_rows"]},
+            {"BUY_MAIN", "BUY_FULL"},
+        )
+        self.assertEqual(artifact["artifact_status"], "planned")
+        self.assertEqual(artifact["metric_context_status"], "ready")
+        self.assertEqual(artifact["scope_count"], 2)
+        self.assertEqual(
+            {row["condition_key"] for row in artifact["scope_rows"]},
+            {"BUY_MAIN", "BUY_FULL"},
+        )
+        self.assertFalse(staging["writes_canonical_minute_bar_1m"])
+        self.assertFalse(metric_source["writes_canonical_minute_bar_1m"])
+
+    def test_object_granularity_metric_context_allows_ref_without_source_trigger_run_id(self):
+        labels = c1_scoped_artifact.canonical_ashare_1m_labels(TRADE_DATE)
+        ref = active_scope_row(
+            source_trigger_event_id="n4-match-without-run-id",
+            source_trigger_run_id="",
+        )
+        scope = active_scope_artifact(
+            artifact_schema_version="v2",
+            scope_granularity="object",
+            scope_rows=[active_object_scope_row(active_tracking_refs=[ref])],
+            scope_count=1,
+        )
+        plan = build_n3_c1_scoped_current_day_pull_plan(
+            scope,
+            target_minute_label="09:31",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+        current_rows = [
+            current_day_object_c1_row(label, idx)
+            for idx, label in enumerate(plan["required_physical_labels"])
+        ]
+        staging = build_n3_c1_scoped_current_day_staging_artifact(
+            scope,
+            pull_plan_artifact=plan,
+            source_rows_artifact={
+                "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                "for_trade_date": TRADE_DATE,
+                "target_hhmm": "0931",
+                "closed_minute_rows": current_rows,
+                "full_market_fallback_used": False,
+                "database_written": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+            },
+            target_hhmm="0931",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+        previous_day_rows = [previous_day_c1_row(label, idx) for idx, label in enumerate(labels)]
+
+        metric_source = build_n3_c1_n3t_metric_context_source_artifact(
+            scope,
+            staging_artifact=staging,
+            previous_day_minute_rows=previous_day_rows,
+            target_hhmm="0931",
+            observed_at="2026-07-02T09:32:00+08:00",
+        )
+
+        self.assertEqual(metric_source["artifact_status"], "planned")
+        self.assertEqual(metric_source["metric_context_status"], "ready")
+        self.assertEqual(metric_source["metric_context_count"], 1)
+        context = metric_source["metric_context_rows"][0]
+        self.assertEqual(context["source_trigger_event_id"], "n4-match-without-run-id")
+        self.assertEqual(context["source_trigger_run_id"], "")
+        self.assertFalse(metric_source["writes_canonical_minute_bar_1m"])
+        self.assertFalse(metric_source["writes_n3_outbox"])
+
+    def test_source_label_policy_maps_close_labels_to_physical_start_labels(self):
         first = source_close_label_to_physical_start_label(TRADE_DATE, "09:31")
         target = source_close_label_to_physical_start_label(TRADE_DATE, "09:45")
+        morning_close = source_close_label_for_physical_start_label(TRADE_DATE, "11:29")
+        morning_close_from_mootdx_intraday = source_close_label_to_physical_start_label(TRADE_DATE, "13:00")
+        afternoon_open = source_close_label_to_physical_start_label(TRADE_DATE, "13:01")
 
         self.assertEqual(first["status"], "mapped")
         self.assertEqual(first["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
@@ -182,6 +423,15 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(target["status"], "mapped")
         self.assertEqual(target["raw_source_label"], "09:45")
         self.assertEqual(target["physical_c1_label"], "09:44")
+        self.assertEqual(morning_close["status"], "mapped")
+        self.assertEqual(morning_close["raw_source_label"], "13:00")
+        self.assertEqual(morning_close["physical_c1_label"], "11:29")
+        self.assertEqual(morning_close_from_mootdx_intraday["status"], "mapped")
+        self.assertEqual(morning_close_from_mootdx_intraday["raw_source_label"], "13:00")
+        self.assertEqual(morning_close_from_mootdx_intraday["physical_c1_label"], "11:29")
+        self.assertEqual(afternoon_open["status"], "mapped")
+        self.assertEqual(afternoon_open["raw_source_label"], "13:01")
+        self.assertEqual(afternoon_open["physical_c1_label"], "13:00")
 
     def test_current_day_staging_rejects_source_rows_outside_pull_plan_scope(self):
         scope = active_scope_artifact()
@@ -272,16 +522,16 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(row["raw_payload"]["raw_source_label"], "09:31")
         self.assertEqual(row["raw_payload"]["physical_c1_label"], "09:30")
 
-    def test_source_close_label_policy_does_not_bridge_1300_to_1130(self):
-        blocked = source_close_label_to_physical_start_label(TRADE_DATE, "13:00")
+    def test_source_close_label_policy_maps_mootdx_intraday_1300_to_physical_1129(self):
+        mapped = source_close_label_to_physical_start_label(TRADE_DATE, "13:00")
 
-        self.assertEqual(blocked["status"], "blocked")
-        self.assertEqual(blocked["reason"], BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE)
-        self.assertEqual(blocked["raw_source_label"], "13:00")
-        self.assertIsNone(blocked["physical_c1_label"])
-        self.assertEqual(blocked["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+        self.assertEqual(mapped["status"], "mapped")
+        self.assertIsNone(mapped["reason"])
+        self.assertEqual(mapped["raw_source_label"], "13:00")
+        self.assertEqual(mapped["physical_c1_label"], "11:29")
+        self.assertEqual(mapped["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
 
-    def test_source_close_label_plan_marks_lunch_close_gap_without_bridge_or_fake_row(self):
+    def test_source_label_plan_includes_real_morning_close_without_fake_row(self):
         plan = build_source_close_label_plan_for_target_minute(
             for_trade_date=TRADE_DATE,
             target_minute_label="13:01",
@@ -291,22 +541,41 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(plan["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
         self.assertEqual(plan["source_gap_policy"], "session_boundary_source_gap_excluded_v1")
         self.assertNotIn("11:30", plan["required_raw_source_labels"])
-        self.assertNotIn("13:00", plan["required_raw_source_labels"])
-        self.assertNotIn("11:29", plan["required_physical_labels"])
+        self.assertIn("13:00", plan["required_raw_source_labels"])
+        self.assertIn("13:01", plan["required_raw_source_labels"])
+        self.assertIn("11:29", plan["required_physical_labels"])
         self.assertIn("13:00", plan["required_physical_labels"])
         self.assertIn("13:01", plan["required_physical_labels"])
-        self.assertEqual(
-            plan["source_gap_physical_labels"],
-            [
-                {
-                    "physical_c1_label": "11:29",
-                    "missing_raw_source_label": "11:30",
-                    "reason": "lunch_close_missing_source",
-                    "metric_context_dependency": "session_boundary_previous_raw_c1_context_required",
-                    "fake_or_synthetic_row": False,
-                }
-            ],
-        )
+        self.assertEqual(plan["source_gap_physical_labels"], [])
+
+    def test_source_label_policy_accepts_mootdx_raw_1130_as_physical_1129(self):
+        mapped = source_close_label_to_physical_start_label(TRADE_DATE, "11:30")
+
+        self.assertEqual(mapped["status"], "mapped")
+        self.assertIsNone(mapped["reason"])
+        self.assertEqual(mapped["raw_source_label"], "11:30")
+        self.assertEqual(mapped["physical_c1_label"], "11:29")
+        self.assertEqual(mapped["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+
+    def test_source_close_label_policy_preserves_mootdx_raw_1130_trace_without_fake_row(self):
+        source_row = {
+            "bar_time": "2026-07-02T11:30:00+08:00",
+            "open": 10,
+            "close": 11,
+            "raw_payload": {"provider_row_id": "raw-1130"},
+        }
+
+        row = apply_source_close_label_policy_to_row(source_row, for_trade_date=TRADE_DATE)
+
+        self.assertEqual(row["bar_time"], "2026-07-02T11:29:00+08:00")
+        self.assertEqual(row["raw_source_bar_time"], "2026-07-02T11:30:00+08:00")
+        self.assertEqual(row["raw_source_label"], "11:30")
+        self.assertEqual(row["physical_c1_label"], "11:29")
+        self.assertEqual(row["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+        self.assertFalse(row["fake_or_synthetic_row"])
+        self.assertEqual(row["raw_payload"]["provider_row_id"], "raw-1130")
+        self.assertEqual(row["raw_payload"]["raw_source_label"], "11:30")
+        self.assertEqual(row["raw_payload"]["physical_c1_label"], "11:29")
 
     def test_current_day_pull_plan_maps_close_boundary_1500_to_physical_1459(self):
         plan = build_n3_c1_scoped_current_day_pull_plan(
@@ -323,7 +592,7 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(plan["required_physical_labels"][-1], "14:59")
         self.assertEqual(plan["required_raw_source_labels"][-1], "15:00")
         self.assertNotIn("11:30", plan["required_raw_source_labels"])
-        self.assertNotIn("13:00", plan["required_raw_source_labels"])
+        self.assertIn("13:00", plan["required_raw_source_labels"])
         self.assertFalse(plan["side_effects"]["full_market_fallback_used"])
 
     def test_current_day_pull_plan_empty_scope_returns_noop(self):
@@ -421,70 +690,36 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
 
     def test_metric_context_source_artifact_builds_from_staging_and_previous_day_rows(self):
         scope_row = active_scope_row()
+        labels = c1_scoped_artifact.canonical_ashare_1m_labels(TRADE_DATE)
+        target_index = labels.index("09:52")
+        current_rows = [
+            current_day_c1_row(label, idx)
+            for idx, label in enumerate(labels[: target_index + 1])
+        ]
+        for row in current_rows:
+            if row["physical_c1_label"] == "09:50":
+                row.update(open=10.8, high=11.2, low=10.6, close=11.0, amount=900.0)
+            if row["physical_c1_label"] == "09:51":
+                row.update(open=11.0, high=12.3, low=10.8, close=12.0, amount=1000.0)
+            if row["physical_c1_label"] == "09:52":
+                row.update(open=12.0, high=12.8, low=11.7, close=12.5, amount=1500.0)
+        previous_day_rows = [
+            previous_day_c1_row(label, idx)
+            for idx, label in enumerate(labels)
+        ]
         staging_artifact = {
             "artifact_type": "n3_c1_scoped_current_day_staging_v1",
             "artifact_status": "passed",
             "for_trade_date": TRADE_DATE,
             "scope_count": 1,
-            "closed_minute_row_count": 2,
-            "closed_minute_rows": [
-                {
-                    **scope_row,
-                    "physical_c1_label": "09:51",
-                    "raw_source_label": "09:52",
-                    "open": 11.0,
-                    "high": 12.3,
-                    "low": 10.8,
-                    "close": 12.0,
-                    "amount": 1000.0,
-                    "source_row_ref": "current:300803:0951",
-                    "fake_or_synthetic_row": False,
-                },
-                {
-                    **scope_row,
-                    "physical_c1_label": "09:52",
-                    "raw_source_label": "09:53",
-                    "open": 12.0,
-                    "high": 12.8,
-                    "low": 11.7,
-                    "close": 12.5,
-                    "amount": 1500.0,
-                    "source_row_ref": "current:300803:0952",
-                    "fake_or_synthetic_row": False,
-                },
-            ],
+            "closed_minute_row_count": len(current_rows),
+            "closed_minute_rows": current_rows,
             "database_written": False,
             "market_data_pulled": True,
             "writes_canonical_minute_bar_1m": False,
             "writes_n3_outbox": False,
             "full_market_fallback_used": False,
         }
-        previous_day_rows = [
-            {
-                "asset_kind": "stock",
-                "identity_key": "stock:SZ:300803",
-                "physical_c1_label": "09:51",
-                "open": 10.0,
-                "close": 10.5,
-                "high": 10.6,
-                "low": 9.8,
-                "amount": 800.0,
-                "source_row_ref": "previous:300803:0951",
-                "fake_or_synthetic_row": False,
-            },
-            {
-                "asset_kind": "stock",
-                "identity_key": "stock:SZ:300803",
-                "physical_c1_label": "09:52",
-                "open": 10.5,
-                "close": 10.2,
-                "high": 10.7,
-                "low": 10.1,
-                "amount": 900.0,
-                "source_row_ref": "previous:300803:0952",
-                "fake_or_synthetic_row": False,
-            },
-        ]
 
         artifact = build_n3_c1_n3t_metric_context_source_artifact(
             active_scope_artifact(),
@@ -507,19 +742,77 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertFalse(artifact["writes_n3_outbox"])
         self.assertFalse(artifact["full_market_fallback_used"])
         context = artifact["metric_context_rows"][0]
-        self.assertEqual(context["source_closed_minute_bar_ids"], ["current:300803:0951", "current:300803:0952"])
-        self.assertEqual(context["previous_day_minute_refs"], ["previous:300803:0951", "previous:300803:0952"])
+        self.assertIn("current:300803:0950", context["source_closed_minute_bar_ids"])
+        self.assertIn("current:300803:0951", context["source_closed_minute_bar_ids"])
+        self.assertIn("current:300803:0952", context["source_closed_minute_bar_ids"])
+        self.assertIn("previous:300803:0951", context["previous_day_minute_refs"])
+        self.assertIn("previous:300803:0952", context["previous_day_minute_refs"])
         self.assertEqual(context["metric_values"]["current_price"], 12.5)
         self.assertEqual(context["metric_values"]["current_1m_amount"], 1500.0)
-        self.assertEqual(context["metric_values"]["current_5m_amount"], 2500.0)
-        self.assertEqual(context["metric_values"]["current_30m_closed_elapsed_amount"], 2500.0)
-        self.assertEqual(context["metric_values"]["previous_1m_amount"], 900.0)
-        self.assertEqual(context["metric_values"]["previous_5m_amount"], 1700.0)
-        self.assertEqual(context["metric_values"]["previous_day_same_window_amount"], 1700.0)
+        self.assertIsNotNone(context["metric_values"]["current_5m_amount"])
+        self.assertEqual(context["metric_values"]["current_30m_closed_elapsed_amount"], sum(row["amount"] for row in current_rows))
+        self.assertEqual(context["metric_values"]["previous_1m_amount"], 1000.0)
+        self.assertEqual(context["metric_values"]["previous_1m_period_source"], "same_trade_date_previous_period")
+        self.assertEqual(context["metric_values"]["previous_5m_period_source"], "same_trade_date_previous_period")
+        self.assertEqual(context["metric_values"]["previous_30m_period_source"], "previous_trade_date_last_period")
+        self.assertEqual(context["metric_values"]["previous_120m_period_source"], "previous_trade_date_last_period")
         self.assertEqual(
             context["deterministic_derivation_inputs"]["previous_day_same_window_amount_source"],
             "scoped_previous_day_raw_c1_sum",
         )
+
+    def test_metric_context_uses_same_trade_date_previous_windows_for_non_first_periods(self):
+        labels = c1_scoped_artifact.canonical_ashare_1m_labels(TRADE_DATE)
+        target_label = "10:06"
+        target_index = labels.index(target_label)
+        current_rows = [
+            current_day_c1_row(label, idx)
+            for idx, label in enumerate(labels[: target_index + 1])
+        ]
+        for row in current_rows:
+            if row["physical_c1_label"] == "10:05":
+                row.update(open=41.82, close=41.61, amount=25728862.0)
+            if row["physical_c1_label"] == "10:06":
+                row.update(open=41.62, close=41.82, amount=22228156.0)
+        previous_day_rows = [
+            previous_day_c1_row(label, idx)
+            for idx, label in enumerate(labels)
+        ]
+        staging_artifact = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "artifact_status": "passed",
+            "for_trade_date": TRADE_DATE,
+            "scope_count": 1,
+            "closed_minute_row_count": len(current_rows),
+            "closed_minute_rows": current_rows,
+            "database_written": False,
+            "market_data_pulled": True,
+            "writes_canonical_minute_bar_1m": False,
+            "writes_n3_outbox": False,
+            "full_market_fallback_used": False,
+        }
+
+        artifact = build_n3_c1_n3t_metric_context_source_artifact(
+            active_scope_artifact(),
+            staging_artifact=staging_artifact,
+            previous_day_minute_rows=previous_day_rows,
+            target_hhmm="1006",
+            observed_at="2026-07-02T10:07:00+08:00",
+        )
+
+        self.assertEqual(artifact["artifact_status"], "planned")
+        metric_values = artifact["metric_context_rows"][0]["metric_values"]
+        self.assertEqual(metric_values["current_price"], 41.82)
+        self.assertEqual(metric_values["previous_1m_body_high"], 41.82)
+        self.assertEqual(metric_values["previous_1m_amount"], 25728862.0)
+        self.assertEqual(metric_values["previous_1m_period_source"], "same_trade_date_previous_period")
+        self.assertEqual(metric_values["previous_5m_period_source"], "same_trade_date_previous_period")
+        self.assertEqual(metric_values["previous_30m_period_source"], "same_trade_date_previous_period")
+        self.assertEqual(metric_values["previous_120m_period_source"], "previous_trade_date_last_period")
+        self.assertFalse(metric_values["is_first_1m_of_day"])
+        self.assertFalse(metric_values["is_first_5m_of_day"])
+        self.assertFalse(metric_values["is_first_30m_of_day"])
+        self.assertTrue(metric_values["is_first_120m_of_day"])
 
     def test_empty_scope_returns_explicit_noop_artifact(self):
         artifact = build_n3_c1_scoped_artifact_plan(
@@ -563,11 +856,18 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
             target_minute_label="09:52",
             observed_at="2026-07-02T09:53:00+08:00",
         )
+        missing_source_run = build_n3_c1_scoped_artifact_plan(
+            active_scope_artifact(scope_rows=[active_scope_row(source_trigger_run_id="")]),
+            target_minute_label="09:52",
+            observed_at="2026-07-02T09:53:00+08:00",
+        )
 
         self.assertEqual(stale["artifact_status"], "blocked")
         self.assertEqual(stale["blocked_reason"], BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH)
         self.assertEqual(missing["artifact_status"], "blocked")
         self.assertEqual(missing["blocked_reason"], BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH)
+        self.assertEqual(missing_source_run["artifact_status"], "blocked")
+        self.assertEqual(missing_source_run["blocked_reason"], BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH)
 
     def test_full_market_fallback_flag_fails_closed(self):
         artifact = build_n3_c1_scoped_artifact_plan(

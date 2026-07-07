@@ -74,6 +74,24 @@ def eligible_row(
     }
 
 
+def eligible_row_with_n4_trigger_proof_trace(index: int) -> dict[str, object]:
+    row = eligible_row(index)
+    payload = row["payload_json"]
+    if not isinstance(payload, dict):
+        raise AssertionError("test helper expected dict payload")
+    payload.update(
+        {
+            "source_metric_kind": "realtime_action_confirmation_metric",
+            "metric_role": "trigger_proof",
+            "proof_owner": "N3",
+            "proof_consumer": "N4",
+            "not_n5_final_proof": True,
+            "source_trigger_proof_kind": "n3p_formal_amount_chain",
+        }
+    )
+    return row
+
+
 def confirmation_metric_row(
     index: int,
     *,
@@ -99,8 +117,8 @@ def confirmation_metric_row(
         "signal_type": signal_type,
         "condition_key": condition_key,
         "action_confirmation_metric_id": metric_id if metric_id is not None else 950000 + index,
-            "projection_run_id": metric_run_id,
-            "source_metric_kind": N5_CONFIRMATION_METRIC_V2_KIND,
+        "projection_run_id": metric_run_id,
+        "source_metric_kind": N5_CONFIRMATION_METRIC_V2_KIND,
         "metric_time": metric_time,
         "metric_minute_label": metric_minute_label,
         "metric_time_label": "2026-06-24 10:23",
@@ -235,12 +253,23 @@ class ProvisionalActionExecutedDryRunTest(unittest.TestCase):
         self.assertNotEqual(payload["canonical_action_identity_key"], "eligible-key-1")
         self.assertFalse(report["side_effect_guard"]["db_written"])
 
+    def test_n4_trigger_proof_trace_does_not_block_n5_v2_final_proof(self) -> None:
+        report = build_provisional_action_executed_dry_run_report(
+            actioneligible_rows=[eligible_row_with_n4_trigger_proof_trace(1)],
+            confirmation_metric_rows=[confirmation_metric_row(1)],
+            for_trade_date=FOR_TRADE_DATE,
+            confirmation_metric_run_id=CONFIRMATION_METRIC_RUN_ID,
+            latest_closed_minute="2026-06-24T10:24:00+08:00",
+        )
+
+        self.assertEqual(report["decision_counts"], {ACTION_EXECUTED_PLAN: 1})
+        payload = report["action_executed_plans"][0]["payload"]
+        self.assertEqual(payload["source_metric_kind"], N5_CONFIRMATION_METRIC_V2_KIND)
+        self.assertTrue(payload["trace"]["source_actioneligible_payload"]["not_n5_final_proof"])
+
     def test_n3p_trigger_proof_is_blocked_as_actionexecuted_final_proof(self) -> None:
-        row = eligible_row(1)
-        payload = row["payload_json"]
-        if not isinstance(payload, dict):
-            raise AssertionError("test helper expected dict payload")
-        payload.update(
+        metric = confirmation_metric_row(1)
+        metric.update(
             {
                 "source_metric_kind": "realtime_action_confirmation_metric",
                 "metric_role": "trigger_proof",
@@ -250,8 +279,8 @@ class ProvisionalActionExecutedDryRunTest(unittest.TestCase):
         )
 
         report = build_provisional_action_executed_dry_run_report(
-            actioneligible_rows=[row],
-            confirmation_metric_rows=[confirmation_metric_row(1)],
+            actioneligible_rows=[eligible_row(1)],
+            confirmation_metric_rows=[metric],
             for_trade_date=FOR_TRADE_DATE,
         )
 

@@ -395,6 +395,59 @@
       </div>
     </section>
 
+    {% if status_page.n5_n3t_next_trade_day_readiness.available %}
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2>N5/N3T 次交易日 Readiness</h2>
+          <div class="subtle">只读展示本地 readiness artifact；不执行 launchd live 检查，不改变主 Fast Lane result。</div>
+        </div>
+      </div>
+      <section class="metric-grid" style="padding: 12px 14px;">
+        <div class="metric">
+          <span>readiness_source</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.source }}</strong>
+        </div>
+        <div class="metric">
+          <span>target_trade_date</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.next_trade_date }}</strong>
+        </div>
+        <div class="metric">
+          <span>rollover_result</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.result }}</strong>
+        </div>
+        <div class="metric">
+          <span>policy_review_result</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.review_result }}</strong>
+        </div>
+        <div class="metric">
+          <span>active_worker_write_enabled_ready</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.active_worker_write_enabled_ready }}</strong>
+        </div>
+        <div class="metric">
+          <span>readiness_blocker</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.readiness_blocker }}</strong>
+        </div>
+        <div class="metric">
+          <span>launchd_live_state</span>
+          <strong>{{ status_page.n5_n3t_next_trade_day_readiness.launchd_live_state }}</strong>
+        </div>
+      </section>
+      <div class="artifact-list">
+        <div class="artifact-row">
+          <strong>stable config</strong>
+          <code>{{ status_page.n5_n3t_next_trade_day_readiness.stable_activation_config_path }}</code>
+          <span class="status-pill">read-only</span>
+        </div>
+        <div class="artifact-row">
+          <strong>policy review</strong>
+          <code>{{ status_page.n5_n3t_next_trade_day_readiness.active_worker_policy_review_path }}</code>
+          <span class="status-pill">read-only</span>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
     <section class="surface">
       <div class="surface-head">
         <div>

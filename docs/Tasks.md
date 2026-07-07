@@ -3703,7 +3703,7 @@ local-only disclaimer and safety flags
 - artifact 仅写 `docs/replay/<YYYYMMDD>/<job_id>/`，`job_id` 必须为 `local_replay_*`。
 - `BUY_HINT / SELL_HINT` 可进入 `ActionEligible`。
 - B2/Hint 不得成为 `ActionExecuted` final proof。
-- `ActionExecuted` final proof 只来自 N3P。
+- `ActionExecuted` final proof 只来自 N3T_C1_CLOSED / N3T action-confirmation metric；N3P 只能作为 N4 trigger proof 或 replay trace。
 - 20260626 smoke job=`local_replay_20260626_154127_3a789ce6` preserved as artifact proof。
 - final acceptance job=`local_replay_20260626_155558_035f00b6` preserved as manual-use proof。
 - DB no mutation proof：

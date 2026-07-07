@@ -32,6 +32,10 @@ N3P_SOURCE_TIME_RELABEL_BLOCKER = "BLOCKED_N3P_SOURCE_TIME_RELABEL_RISK"
 N3P_SOURCE_POST_CLOSE_PROOF_MINUTE_BLOCKER = "BLOCKED_N3P_SOURCE_POST_CLOSE_PROOF_MINUTE"
 N3P_SOURCE_CANONICAL_MINUTE_ALIGNMENT_BLOCKER = "BLOCKED_N3P_SOURCE_CANONICAL_MINUTE_ALIGNMENT"
 N3P_SOURCE_MIDDAY_STOCK_TIME_STALE_BLOCKER = "BLOCKED_N3P_SOURCE_MIDDAY_STOCK_TIME_STALE"
+N3P_SOURCE_ALIGNMENT_ALIGNED = "aligned"
+N3P_SOURCE_ALIGNMENT_INDEPENDENT_REALTIME_OK = "independent_realtime_sources_ok"
+N3P_SOURCE_ALIGNMENT_ADJACENT_REALTIME_OK = "adjacent_minute_realtime_ok"
+N3P_SOURCE_ALIGNMENT_BLOCKED = "blocked"
 N3P_SOURCE_ALIGNMENT_ADJACENT_RACE = "adjacent_minute_source_boundary_race"
 N3P_SOURCE_ALIGNMENT_CANONICAL_MISMATCH = "canonical_minute_mismatch"
 N3P_SOURCE_ALIGNMENT_MIDDAY_STOCK_STALE = "midday_stock_quote_time_stale"
@@ -606,10 +610,11 @@ class N3PCurrentSourceFetchProvider:
                 normalization_trace=normalization_trace,
             )
 
-        alignment_blocker = _source_canonical_minute_alignment_blocker(
+        source_minute_alignment = _source_realtime_freshness_trace(
             stock_quote_rows=stock_quote_rows,
             index_board_1m_rows=index_board_1m_rows,
         )
+        alignment_blocker = _source_canonical_minute_alignment_blocker_from_trace(source_minute_alignment)
         if alignment_blocker is not None:
             return alignment_blocker
 
@@ -654,11 +659,13 @@ class N3PCurrentSourceFetchProvider:
             "stock_quote_rows": stock_quote_rows,
             "index_board_1m_rows": index_board_1m_rows,
             "normalization_trace": normalization_trace,
+            "source_minute_alignment": source_minute_alignment,
             "previous_day_minute_rows": [],
             "writes_outbox": False,
             "writes_n3p_metric_rows": False,
             "not_n5_final_proof": True,
         }
+        payload.update(source_minute_alignment)
         validation = validate_n3p_current_source_payload(
             payload,
             for_trade_date=payload["for_trade_date"],
@@ -687,6 +694,7 @@ class N3PCurrentSourceFetchProvider:
             "writes_n3p_metric_rows": False,
             "writes_outbox": False,
             "normalization_trace": normalization_trace,
+            "source_minute_alignment": source_minute_alignment,
         }
         artifact = (
             dict(artifact_writer(args=args, report=report, dependencies=dependencies, payload=payload, fetch_report=fetch_report) or {})
@@ -1542,10 +1550,11 @@ def fetch_n3p_current_market_rows_from_adapter(
             normalization_trace=normalization_trace,
         )
 
-    alignment_blocker = _source_canonical_minute_alignment_blocker(
+    source_minute_alignment = _source_realtime_freshness_trace(
         stock_quote_rows=stock_quote_rows,
         index_board_1m_rows=index_board_1m_rows,
     )
+    alignment_blocker = _source_canonical_minute_alignment_blocker_from_trace(source_minute_alignment)
     if alignment_blocker is not None:
         return alignment_blocker
 
@@ -1608,6 +1617,8 @@ def fetch_n3p_current_market_rows_from_adapter(
         },
         "fetch_errors": [],
         "normalization_trace": normalization_trace,
+        "source_minute_alignment": source_minute_alignment,
+        **source_minute_alignment,
         "market_data_pulled": True,
         "database_written": False,
         "writes_outbox": False,
@@ -2567,6 +2578,30 @@ def _source_canonical_minute_alignment_blocker(
     stock_quote_rows: Sequence[Mapping[str, Any]],
     index_board_1m_rows: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
+    return _source_realtime_freshness_blocker_from_trace(
+        _source_realtime_freshness_trace(
+            stock_quote_rows=stock_quote_rows,
+            index_board_1m_rows=index_board_1m_rows,
+        )
+    )
+
+
+def _source_canonical_minute_alignment_trace(
+    *,
+    stock_quote_rows: Sequence[Mapping[str, Any]],
+    index_board_1m_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return _source_realtime_freshness_trace(
+        stock_quote_rows=stock_quote_rows,
+        index_board_1m_rows=index_board_1m_rows,
+    )
+
+
+def _source_realtime_freshness_trace(
+    *,
+    stock_quote_rows: Sequence[Mapping[str, Any]],
+    index_board_1m_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
     stock_candidates = [
         _parse_dt(str(row.get("canonical_stock_quote_proof_time") or row.get("canonical_proof_time") or ""))
         for row in stock_quote_rows
@@ -2578,27 +2613,54 @@ def _source_canonical_minute_alignment_blocker(
     stock_candidates = [value for value in stock_candidates if value is not None]
     index_board_candidates = [value for value in index_board_candidates if value is not None]
     if not stock_candidates or not index_board_candidates:
-        return None
+        return {}
     stock_proof_time = _format_shanghai_iso(max(stock_candidates))
     index_board_proof_time = _format_shanghai_iso(max(index_board_candidates))
     stock_hhmm = _hhmm_from_time(stock_proof_time)
     index_board_hhmm = _hhmm_from_time(index_board_proof_time)
-    if stock_hhmm == index_board_hhmm:
-        return None
     minute_delta = _hhmm_minute_delta(stock_hhmm, index_board_hhmm)
+    trace: dict[str, Any] = {
+        "stock_canonical_until_hhmm": stock_hhmm,
+        "index_board_until_hhmm": index_board_hhmm,
+        "stock_canonical_hhmm": stock_hhmm,
+        "index_board_hhmm": index_board_hhmm,
+        "minute_delta": minute_delta,
+        "stock_canonical_proof_time": stock_proof_time,
+        "index_board_proof_time": index_board_proof_time,
+    }
+    if stock_hhmm == index_board_hhmm:
+        trace["alignment_status"] = N3P_SOURCE_ALIGNMENT_ALIGNED
+        return trace
     if stock_hhmm == "1130" and index_board_hhmm == "1300" and minute_delta == 90:
+        trace["alignment_status"] = N3P_SOURCE_ALIGNMENT_BLOCKED
+        trace["alignment_failure_class"] = N3P_SOURCE_ALIGNMENT_MIDDAY_STOCK_STALE
+        return trace
+    trace["alignment_status"] = N3P_SOURCE_ALIGNMENT_INDEPENDENT_REALTIME_OK
+    return trace
+
+
+def _source_canonical_minute_alignment_blocker_from_trace(trace: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    return _source_realtime_freshness_blocker_from_trace(trace)
+
+
+def _source_realtime_freshness_blocker_from_trace(trace: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    if not trace:
+        return None
+    alignment_status = str(trace.get("alignment_status") or "")
+    if alignment_status in {
+        N3P_SOURCE_ALIGNMENT_ALIGNED,
+        N3P_SOURCE_ALIGNMENT_ADJACENT_REALTIME_OK,
+        N3P_SOURCE_ALIGNMENT_INDEPENDENT_REALTIME_OK,
+    }:
+        return None
+    stock_hhmm = str(trace.get("stock_canonical_hhmm") or "")
+    index_board_hhmm = str(trace.get("index_board_hhmm") or "")
+    if trace.get("alignment_failure_class") == N3P_SOURCE_ALIGNMENT_MIDDAY_STOCK_STALE:
         return _blocked(
             N3P_SOURCE_MIDDAY_STOCK_TIME_STALE_BLOCKER,
             "stock_quote_servertime_stale_at_midday_wait_for_alignment",
             blocked_reasons=["midday_stock_quote_time_stale_wait_for_alignment"],
-            stock_canonical_until_hhmm=stock_hhmm,
-            index_board_until_hhmm=index_board_hhmm,
-            stock_canonical_hhmm=stock_hhmm,
-            index_board_hhmm=index_board_hhmm,
-            minute_delta=minute_delta,
-            alignment_failure_class=N3P_SOURCE_ALIGNMENT_MIDDAY_STOCK_STALE,
-            stock_canonical_proof_time=stock_proof_time,
-            index_board_proof_time=index_board_proof_time,
+            **dict(trace),
             artifact_written=False,
             source_payload_registered=False,
             database_written=False,
@@ -2606,23 +2668,11 @@ def _source_canonical_minute_alignment_blocker(
             writes_outbox=False,
             writes_n3p_metric_rows=False,
         )
-    alignment_failure_class = (
-        N3P_SOURCE_ALIGNMENT_ADJACENT_RACE
-        if minute_delta == 1
-        else N3P_SOURCE_ALIGNMENT_CANONICAL_MISMATCH
-    )
     return _blocked(
         N3P_SOURCE_CANONICAL_MINUTE_ALIGNMENT_BLOCKER,
         f"mixed_canonical_proof_minute_mismatch:stock={stock_hhmm}:index_board={index_board_hhmm}",
         blocked_reasons=["mixed_canonical_proof_minute_mismatch"],
-        stock_canonical_until_hhmm=stock_hhmm,
-        index_board_until_hhmm=index_board_hhmm,
-        stock_canonical_hhmm=stock_hhmm,
-        index_board_hhmm=index_board_hhmm,
-        minute_delta=minute_delta,
-        alignment_failure_class=alignment_failure_class,
-        stock_canonical_proof_time=stock_proof_time,
-        index_board_proof_time=index_board_proof_time,
+        **dict(trace),
         artifact_written=False,
         source_payload_registered=False,
         database_written=False,

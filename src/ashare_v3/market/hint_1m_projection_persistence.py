@@ -484,6 +484,7 @@ def _materialize_metric_row(
         "midday_bridge_policy": row.get("midday_bridge_policy"),
         "raw_minute_label": row.get("raw_minute_label"),
         "logical_minute_label": row.get("logical_minute_label"),
+        "previous_completed_window_source": row.get("previous_completed_window_source"),
     }
     return {
         "projection_run_id": projection_run_id,

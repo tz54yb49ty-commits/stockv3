@@ -15,6 +15,7 @@ from ashare_v3.runtime_control.n5_n3t_fastlane import (
     write_fastlane_write_enabled_activation_config,
     write_fastlane_active_launchd_plan,
     write_fastlane_launchd_plan,
+    write_fastlane_post_close_readiness_config_rollover,
 )
 
 
@@ -25,8 +26,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-executable", default=DEFAULT_PYTHON_EXECUTABLE)
     parser.add_argument("--activation-guard")
     parser.add_argument("--activation-config")
+    parser.add_argument("--for-trade-date")
+    parser.add_argument("--dsn")
+    parser.add_argument("--current-exchange-time", default="")
     parser.add_argument("--active-plan", action="store_true")
     parser.add_argument("--write-enabled-activation-config", action="store_true")
+    parser.add_argument("--post-close-readiness-config-rollover", action="store_true")
     parser.add_argument("--full-chain-activation-preflight", action="store_true")
     parser.add_argument("--require-full-chain-activation", action="store_true")
     parser.add_argument("--defer-active-worker-policy-review-to-runtime", action="store_true")
@@ -49,8 +54,61 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _fetch_next_trade_date_from_calendar(*, dsn: str, for_trade_date: str) -> tuple[str, bool]:
+    try:
+        import psycopg
+    except ModuleNotFoundError as exc:  # pragma: no cover - surfaced in CLI
+        raise RuntimeError("psycopg is required for post-close readiness rollover") from exc
+    with psycopg.connect(dsn, options="-c default_transaction_read_only=on") as conn:
+        conn.execute("BEGIN READ ONLY")
+        row = conn.execute(
+            """
+            SELECT current_day.next_trade_date, COALESCE(next_day.is_open, false)
+            FROM common_trade_calendar AS current_day
+            LEFT JOIN common_trade_calendar AS next_day
+              ON next_day.trade_date = current_day.next_trade_date
+            WHERE current_day.trade_date = %s
+            """,
+            (str(for_trade_date),),
+        ).fetchone()
+    if not row or not row[0]:
+        raise RuntimeError(f"next_trade_date_not_found:{for_trade_date}")
+    return str(row[0]), bool(row[1])
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
+    if args.post_close_readiness_config_rollover:
+        if not args.for_trade_date:
+            raise SystemExit("--for-trade-date is required with --post-close-readiness-config-rollover")
+        if not args.dsn:
+            raise SystemExit("--dsn is required with --post-close-readiness-config-rollover")
+        if not args.base_activation_config:
+            raise SystemExit("--base-activation-config is required with --post-close-readiness-config-rollover")
+        try:
+            next_trade_date, next_trade_day_is_open = _fetch_next_trade_date_from_calendar(
+                dsn=args.dsn,
+                for_trade_date=args.for_trade_date,
+            )
+            report = write_fastlane_post_close_readiness_config_rollover(
+                base_activation_config_path=Path(args.base_activation_config),
+                output_dir=Path(args.output_dir),
+                for_trade_date=args.for_trade_date,
+                next_trade_date=next_trade_date,
+                trade_calendar_is_open=next_trade_day_is_open,
+                current_exchange_time=args.current_exchange_time,
+            )
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"result={report['result']} "
+                f"next_trade_date={report['next_trade_date']} "
+                f"stable_activation_config_path={report['stable_activation_config_path']}"
+            )
+        return 0
     if args.full_chain_activation_preflight:
         if not args.activation_config:
             raise SystemExit("--activation-config is required with --full-chain-activation-preflight")

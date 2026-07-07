@@ -119,7 +119,32 @@ class N3HintIndexBoard1mProjectionProofTest(unittest.TestCase):
                 self.assertFalse(proof["valid"])
                 self.assertIn(reason, proof["blocked_reasons"])
 
-    def test_first_window_fails_closed(self) -> None:
+    def test_first_window_uses_previous_trade_date_last_30m_entity_reference(self) -> None:
+        proof = build_index_board_1m_hint_projection_proof(
+            asset_kind="index",
+            identity_key="index:SH:000016",
+            for_trade_date="20260629",
+            previous_trade_date="20260626",
+            proof_input_time="2026-06-29T09:45:00+08:00",
+            current_day_1m_rows=rows_for_labels("index", "index:SH:000016", "20260629", labels_between("09:31", "09:45")),
+            previous_day_1m_rows=previous_rows_for_first_window(
+                open_value=98,
+                close_value=102,
+                same_window_amount=10,
+            ),
+        )
+
+        self.assertTrue(proof["valid"], proof["blocked_reasons"])
+        self.assertEqual(proof["previous_completed_window_start"], "14:31")
+        self.assertEqual(proof["previous_completed_window_end"], "15:00")
+        self.assertEqual(proof["previous_completed_window_source"], "previous_trade_date_last_30m")
+        self.assertEqual(proof["previous_day_same_elapsed_30m_amount"], 150.0)
+        self.assertEqual(proof["previous_day_full_30m_amount"], 300.0)
+        self.assertEqual(proof["reference_30m_entity_high"], 102.0)
+        self.assertEqual(proof["reference_30m_entity_low"], 98.0)
+        self.assertNotIn("first_30m_window_no_previous_completed_window", proof["blocked_reasons"])
+
+    def test_first_window_fails_closed_when_previous_trade_date_last_30m_reference_missing(self) -> None:
         proof = build_index_board_1m_hint_projection_proof(
             asset_kind="index",
             identity_key="index:SH:000016",
@@ -132,7 +157,7 @@ class N3HintIndexBoard1mProjectionProofTest(unittest.TestCase):
 
         self.assertFalse(proof["valid"])
         self.assertEqual(proof["projection_30m_type"], "unknown")
-        self.assertIn("first_30m_window_no_previous_completed_window", proof["blocked_reasons"])
+        self.assertIn("missing_previous_trade_date_last_30m_open_close", proof["blocked_reasons"])
 
     def test_buy_hint_volume_up_proof(self) -> None:
         proof = build_index_board_1m_hint_projection_proof(
@@ -337,6 +362,35 @@ def previous_rows_for_1001_window(
         labels_between("10:01", "10:30"),
         amount=amount,
     )
+
+
+def previous_rows_for_first_window(
+    *,
+    asset_kind: str = "index",
+    identity_key: str = "index:SH:000016",
+    same_window_amount: float = 10.0,
+    open_value: float = 100.0,
+    close_value: float = 100.0,
+) -> list[dict[str, object]]:
+    rows = rows_for_labels(
+        asset_kind,
+        identity_key,
+        "20260626",
+        labels_between("09:31", "10:00"),
+        amount=same_window_amount,
+    )
+    rows.extend(
+        rows_for_labels(
+            asset_kind,
+            identity_key,
+            "20260626",
+            labels_between("14:31", "15:00"),
+            open_value=open_value,
+            close_value=close_value,
+            amount=1,
+        )
+    )
+    return rows
 
 
 def current_rows_for_1300_bridge(

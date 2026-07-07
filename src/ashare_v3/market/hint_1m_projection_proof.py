@@ -40,7 +40,12 @@ def index_board_hint_30m_window_for_minute(proof_input_time: Any) -> dict[str, A
     for index, (start, end) in enumerate(CANONICAL_30M_WINDOWS):
         full_labels = _labels_between(start, end)
         if logical_proof_label in full_labels:
-            previous = CANONICAL_30M_WINDOWS[index - 1] if index > 0 else None
+            previous = CANONICAL_30M_WINDOWS[index - 1] if index > 0 else CANONICAL_30M_WINDOWS[-1]
+            previous_source = (
+                "current_trade_date_adjacent_previous_30m"
+                if index > 0
+                else "previous_trade_date_last_30m"
+            )
             elapsed_labels = full_labels[: full_labels.index(logical_proof_label) + 1]
             raw_elapsed_labels = _raw_labels_for_logical_labels(elapsed_labels, bridge_midday=midday_bridge)
             return {
@@ -49,6 +54,7 @@ def index_board_hint_30m_window_for_minute(proof_input_time: Any) -> dict[str, A
                 "current_window_end": end,
                 "previous_completed_window_start": previous[0] if previous else None,
                 "previous_completed_window_end": previous[1] if previous else None,
+                "previous_completed_window_source": previous_source,
                 "elapsed_labels": elapsed_labels,
                 "full_window_labels": full_labels,
                 "closed_status": "projected" if logical_proof_label != end else "closed",
@@ -97,8 +103,7 @@ def build_index_board_1m_hint_projection_proof(
 
     previous_start = window.get("previous_completed_window_start")
     previous_end = window.get("previous_completed_window_end")
-    if not previous_start or not previous_end:
-        return _blocked(base, "first_30m_window_no_previous_completed_window")
+    previous_source = str(window.get("previous_completed_window_source") or "")
 
     current_by_label, current_reasons = _rows_by_label(
         current_day_1m_rows,
@@ -124,8 +129,12 @@ def build_index_board_1m_hint_projection_proof(
     missing_current = [label for label in elapsed_labels if label not in current_by_label]
     if missing_current:
         blocked_reasons.append("missing_current_day_1m_rows")
-    if previous_completed_labels[0] not in current_by_label or previous_completed_labels[-1] not in current_by_label:
-        blocked_reasons.append("missing_previous_completed_30m_open_close")
+    previous_reference_by_label = previous_by_label if previous_source == "previous_trade_date_last_30m" else current_by_label
+    if previous_completed_labels[0] not in previous_reference_by_label or previous_completed_labels[-1] not in previous_reference_by_label:
+        if previous_source == "previous_trade_date_last_30m":
+            blocked_reasons.append("missing_previous_trade_date_last_30m_open_close")
+        else:
+            blocked_reasons.append("missing_previous_completed_30m_open_close")
     missing_previous_elapsed = [label for label in elapsed_labels if label not in previous_by_label]
     if missing_previous_elapsed:
         blocked_reasons.append("missing_previous_day_same_elapsed_rows")
@@ -139,8 +148,8 @@ def build_index_board_1m_hint_projection_proof(
     previous_elapsed_amount, previous_elapsed_missing = _sum_amount(previous_by_label, elapsed_labels)
     previous_full_amount, previous_full_missing = _sum_amount(previous_by_label, full_labels)
     current_price = _decimal_from_row(current_by_label[elapsed_labels[-1]], "close")
-    previous_completed_open = _decimal_from_row(current_by_label[previous_completed_labels[0]], "open")
-    previous_completed_close = _decimal_from_row(current_by_label[previous_completed_labels[-1]], "close")
+    previous_completed_open = _decimal_from_row(previous_reference_by_label[previous_completed_labels[0]], "open")
+    previous_completed_close = _decimal_from_row(previous_reference_by_label[previous_completed_labels[-1]], "close")
 
     if current_amount_missing or current_elapsed_amount is None:
         blocked_reasons.append("missing_current_30m_elapsed_amount")
@@ -153,7 +162,10 @@ def build_index_board_1m_hint_projection_proof(
     if current_price is None:
         blocked_reasons.append("missing_current_30m_price")
     if previous_completed_open is None or previous_completed_close is None:
-        blocked_reasons.append("missing_previous_completed_30m_open_close")
+        if previous_source == "previous_trade_date_last_30m":
+            blocked_reasons.append("missing_previous_trade_date_last_30m_open_close")
+        else:
+            blocked_reasons.append("missing_previous_completed_30m_open_close")
     if blocked_reasons:
         return _blocked(base, *blocked_reasons)
 

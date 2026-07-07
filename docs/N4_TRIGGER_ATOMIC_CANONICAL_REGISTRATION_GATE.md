@@ -92,6 +92,8 @@ Decision:
 
 ```text
 TriggerStateChanged may be consumed by N5 active-monitor v2 as state-gate input
+TriggerStateChanged(trigger_live=true,current_status=matched) may refresh an executable active ref
+TriggerStateChanged(trigger_live=false) may expire/remove a matching active ref
 TriggerStateChanged is not an action confirmation entry
 ```
 
@@ -101,13 +103,14 @@ Allowed N5 uses only:
 update_context
 expire_window
 live/state synchronization
+active_ref_refresh with action_eligible_entry_allowed=false
 ```
 
 Forbidden N5 uses:
 
 ```text
 create ActionEligible
-create ActionExecuted
+directly create ActionExecuted without matching N3T_C1_CLOSED proof
 create action confirmation fact
 act as substitute for TriggerMatched
 ```
@@ -116,8 +119,8 @@ Implementation consequence:
 
 ```text
 N4 may continue to emit TriggerStateChanged
-N5 consumers must gate it into state-only logic
-tests must prove TriggerStateChanged cannot produce ActionEligible or ActionExecuted
+N5 consumers must gate it into state-only / active-ref-refresh logic
+tests must prove TriggerStateChanged cannot create ActionEligible or directly create ActionExecuted
 ```
 
 ## D. Y_NOT_APPLICABLE_EXECUTION_DECISION

@@ -36,10 +36,14 @@ trade date and source trigger run. Each invocation has a separate invocation id.
 The only N4 input events are pending rows from `common_event_outbox`:
 
 - `TriggerMatched`: action entry.
+- `TriggerStateChanged` with `trigger_live=true,current_status=matched`:
+  executable active-ref entry or refresh only.
 - `TriggerStateChanged` with `trigger_live=false`: active tracking exit only.
 
 `TriggerPendingMarketData` is not an action entry for this poller.
-`TriggerStateChanged` never creates action confirmation.
+`TriggerStateChanged(trigger_live=true)` never creates `ActionEligible`, but a
+matched true state change can create or refresh an executable active ref for
+N3T/N5 evaluation.
 
 The poller reads N3T action-confirmation metric rows by explicit
 `source_metric_run_id`. N5 does not pull market data and does not assemble
@@ -88,9 +92,10 @@ source_trigger_run_id
 scope_status=active
 ```
 
-Scope entry can come only from read-only N4 pending `TriggerMatched` intake.
-Scope removal happens when the same grain reaches `ActionExecuted` or when N5
-observes `TriggerStateChanged(trigger_live=false)`.
+Scope entry can come from read-only N4 pending `TriggerMatched` intake or
+matched `TriggerStateChanged(trigger_live=true)` active-ref refresh. Scope
+removal happens when the same grain reaches `ActionExecuted` or when N5 observes
+`TriggerStateChanged(trigger_live=false)`.
 
 Empty scope must produce an explicit no-op artifact with
 `empty_scope_noop=true`. Missing or empty scope must not fall back to full-market
@@ -126,6 +131,11 @@ emits one `ActionEligible`:
 
 If final confirmation passes in the same invocation, the transaction emits
 `ActionEligible` first and `ActionExecuted` second.
+
+On a valid matched `TriggerStateChanged(trigger_live=true)`, N5 creates or
+updates active tracking and active-scope artifact refs only. It emits no
+`ActionEligible`; if later matching N3T proof passes, the eventual
+`ActionExecuted` must reference that latest N4 state-change event.
 
 When a later invocation confirms an active tracking row, N5 emits one
 `ActionExecuted`, writes final `action_mark`, and marks tracking executed.

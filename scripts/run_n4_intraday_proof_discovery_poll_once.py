@@ -1299,7 +1299,7 @@ def _select_family_candidate(
                 _skip_manual_backlog(skipped, family=family, source_run_id=str(backlog["candidate"]["run_id"]))
         exact_target = _existing_target(existing_targets, str(chosen["target_run_id"]))
         if exact_target:
-            _skip_existing_target(
+            _skip_existing_realtime_latest_target(
                 skipped,
                 family=family,
                 candidate=chosen["candidate"],
@@ -1398,6 +1398,35 @@ def _skip_existing_realtime_backlog_target(
                 "reason": "already_passed_exact_backlog_target_with_downstream_refs",
                 "downstream_ref_count": str(downstream_ref_count),
                 "downstream_ref_policy": "ignored_for_realtime_backlog",
+            }
+        )
+    skipped_item.update(compat_metadata)
+    skipped.append(skipped_item)
+
+
+def _skip_existing_realtime_latest_target(
+    skipped: list[dict[str, str]],
+    *,
+    family: str,
+    candidate: Mapping[str, Any],
+    target: Mapping[str, Any],
+    previous_trigger_run_id: str,
+) -> None:
+    compat_metadata = _assert_existing_target_safe(
+        target,
+        source_run_id=str(candidate["run_id"]),
+        previous_trigger_run_id=previous_trigger_run_id,
+        expected_counts=_expected_counts(candidate),
+        allow_downstream_refs=True,
+    )
+    downstream_ref_count = int(target.get("downstream_ref_count") or 0)
+    skipped_item = {"family": family, "source_run_id": str(candidate["run_id"]), "reason": "already_passed_exact_target"}
+    if downstream_ref_count:
+        skipped_item.update(
+            {
+                "reason": "already_passed_exact_target_with_downstream_refs",
+                "downstream_ref_count": str(downstream_ref_count),
+                "downstream_ref_policy": "ignored_for_realtime_latest",
             }
         )
     skipped_item.update(compat_metadata)

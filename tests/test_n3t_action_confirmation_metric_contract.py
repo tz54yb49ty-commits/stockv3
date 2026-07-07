@@ -83,8 +83,15 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
             "previous_day_same_window_amount": 100,
             "is_first_1m_of_day": True,
             "is_first_5m_of_day": True,
+            "is_first_30m_of_day": True,
+            "is_first_120m_of_day": True,
             "first_1m_amount_default_pass": True,
             "first_5m_amount_default_pass": True,
+            "previous_1m_period_source": "previous_trade_date_last_period",
+            "previous_5m_period_source": "previous_trade_date_last_period",
+            "previous_30m_period_source": "previous_trade_date_last_period",
+            "previous_120m_period_source": "previous_trade_date_last_period",
+            "boundary_policy_version": "n3.action_confirmation_boundary.v1",
         }
 
     def test_schema_contract_declares_option_a_tables_and_n5_lineage(self) -> None:
@@ -262,6 +269,19 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
         self.assertTrue(row["is_first_5m_of_day"])
         self.assertTrue(row["first_1m_amount_default_pass"])
         self.assertTrue(row["first_5m_amount_default_pass"])
+        self.assertEqual(
+            row["raw_json"]["boundary_policy"]["boundary_policy_version"],
+            "n3.action_confirmation_boundary.v1",
+        )
+        self.assertEqual(
+            row["raw_json"]["previous_period_sources"],
+            {
+                "1m": "previous_trade_date_last_period",
+                "5m": "previous_trade_date_last_period",
+                "30m": "previous_trade_date_last_period",
+                "120m": "previous_trade_date_last_period",
+            },
+        )
         self.assertEqual(
             row["trace_json"]["alias_relationships"],
             {
@@ -523,6 +543,36 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
         self.assertFalse(plan["side_effects"]["updates_n4_outbox"])
         self.assertFalse(plan["side_effects"]["full_market_fallback_used"])
         self.assertFalse(plan["side_effects"]["runtime_execute"])
+
+    def test_scoped_metric_plan_allows_object_scope_ref_without_source_trigger_run_id(self) -> None:
+        scope_row = {
+            **self._scoped_c1_artifact()["scope_rows"][0],
+            "source_trigger_event_id": "n4-match-without-run-id",
+            "source_trigger_run_id": "",
+        }
+
+        plan = build_n3t_scoped_metric_from_c1_artifact_plan(
+            self._scoped_c1_artifact(
+                scope_rows=[scope_row],
+                metric_context_status="ready",
+                metric_context_rows=[
+                    {
+                        **scope_row,
+                        "source_closed_minute_bar_ids": [101, 102, 103],
+                        "previous_day_minute_refs": [201, 202, 203],
+                        "metric_values": self._complete_metric_values(),
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(plan["plan_status"], "planned")
+        self.assertEqual(len(plan["metric_plan_rows"]), 1)
+        row = plan["metric_plan_rows"][0]
+        self.assertEqual(row["source_trigger_event_id"], "n4-match-without-run-id")
+        self.assertEqual(row["source_trigger_run_id"], "")
+        self.assertEqual(row["source_basis"], "N3T_C1_CLOSED")
+        self.assertEqual(row["proof_consumer"], "N5")
 
     def test_scoped_metric_plan_uses_previous_day_same_window_amount_from_metric_context(self) -> None:
         metric_values = self._complete_metric_values()

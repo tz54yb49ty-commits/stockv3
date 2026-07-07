@@ -599,6 +599,7 @@ def run_post_close_oneshot(
     postgres_commit_enabled: bool,
     include_calendar_repair: bool | None = None,
     force_rerun_after_blocked: bool = False,
+    enable_n5_n3t_readiness_rollover: bool = False,
     python_executable: str = "python3",
     command_runner: Callable[[list[str]], Any] | None = None,
 ) -> dict[str, Any]:
@@ -747,6 +748,15 @@ def run_post_close_oneshot(
 
     report["result"] = "EXECUTE_PASS"
     report["blockers"] = []
+    if enable_n5_n3t_readiness_rollover:
+        attach_n5_n3t_readiness_rollover(
+            report,
+            source_trade_date=source_trade_date,
+            for_trade_date=for_trade_date,
+            dsn=dsn,
+            python_executable=python_executable,
+            runner=runner,
+        )
     _write_reports(report, status_path=status_path, json_report_path=json_report_path, md_report_path=md_report_path)
     _refresh_latest_after_status(Path(docs_root), docs_dir)
     lineage_config_path = write_intraday_worker_lineage_config_after_fastlane_pass(
@@ -786,6 +796,98 @@ def forbidden_scope_proof() -> dict[str, bool]:
 def default_command_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PYTHONPATH": "src:scripts"}
     return subprocess.run(argv, check=False, text=True, capture_output=True, env=env)
+
+
+def attach_n5_n3t_readiness_rollover(
+    report: dict[str, Any],
+    *,
+    source_trade_date: str,
+    for_trade_date: str,
+    dsn: str,
+    python_executable: str,
+    runner: Callable[[list[str]], Any],
+) -> None:
+    output_dir = Path("tmp/N5_N3T_action_confirmation_fastlane_activation_config")
+    rollover_source_trade_date = "".join(ch for ch in str(source_trade_date or "") if ch.isdigit())
+    target_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit())
+    base_activation_config = select_n5_n3t_readiness_rollover_base_activation_config(
+        output_dir=output_dir,
+        source_trade_date=rollover_source_trade_date,
+    )
+    current_exchange_time = (
+        f"{rollover_source_trade_date[:4]}-{rollover_source_trade_date[4:6]}-{rollover_source_trade_date[6:]}T18:00:00+08:00"
+        if len(rollover_source_trade_date) == 8
+        else ""
+    )
+    argv = [
+        python_executable,
+        "scripts/plan_n5_n3t_fastlane_launchd.py",
+        "--post-close-readiness-config-rollover",
+        "--for-trade-date",
+        rollover_source_trade_date or target_trade_date,
+        "--dsn",
+        dsn,
+        "--base-activation-config",
+        str(base_activation_config),
+        "--output-dir",
+        str(output_dir),
+        "--current-exchange-time",
+        current_exchange_time,
+        "--json",
+    ]
+    completed = runner(argv)
+    stdout_text = str(getattr(completed, "stdout", "") or "")
+    stderr_text = str(getattr(completed, "stderr", "") or "")
+    returncode = int(getattr(completed, "returncode", 0) or 0)
+    parsed: dict[str, Any] = {}
+    try:
+        loaded = json.loads(stdout_text)
+        if isinstance(loaded, dict):
+            parsed = loaded
+    except json.JSONDecodeError:
+        parsed = {}
+
+    review_summary = parsed.get("active_worker_policy_review")
+    if not isinstance(review_summary, dict):
+        review_summary = {}
+    readiness = {
+        "step_id": "n5_n3t_next_trade_day_readiness_rollover",
+        "layer_role": "runtime_control",
+        "argv": argv,
+        "returncode": returncode,
+        "stdout_tail": stdout_text[-4000:],
+        "stderr_tail": stderr_text[-4000:],
+        "result": str(parsed.get("result") or ("PASS" if returncode == 0 else "BLOCKED")),
+        "next_trade_date": str(parsed.get("next_trade_date") or ""),
+        "stable_activation_config_path": str(parsed.get("stable_activation_config_path") or ""),
+        "dated_activation_config_path": str(parsed.get("dated_activation_config_path") or ""),
+        "active_worker_policy_review_path": str(parsed.get("active_worker_policy_review_path") or ""),
+        "review_result": str(review_summary.get("result") or ""),
+        "report_path": str(parsed.get("report_path") or ""),
+        "non_blocking_for_post_close_mainline": True,
+    }
+    report["n5_n3t_next_trade_day_readiness"] = readiness
+    if returncode != 0:
+        report["n5_n3t_readiness_blocker"] = "n5_n3t_next_trade_day_readiness_rollover_failed"
+
+
+def select_n5_n3t_readiness_rollover_base_activation_config(
+    *,
+    output_dir: Path,
+    source_trade_date: str,
+) -> Path:
+    safe_source_trade_date = "".join(ch for ch in str(source_trade_date or "") if ch.isdigit())
+    stable_path = output_dir / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+    source_dated_path = output_dir / f"write_enabled_activation_config_{safe_source_trade_date}_runtime_deferred_v1.json"
+    for candidate in (stable_path, source_dated_path):
+        payload = _load_json(candidate)
+        if (
+            payload
+            and payload.get("artifact_type") == "n5_n3t_fastlane_activation_config_v1"
+            and str(payload.get("for_trade_date") or "") == safe_source_trade_date
+        ):
+            return candidate
+    return source_dated_path
 
 
 def build_launchd_plist(

@@ -175,6 +175,13 @@ class N3N4CombinedRunonceOrchestratorTest(unittest.TestCase):
             "scripts.run_n3_hint_index_board_1m_proof_preflight_once",
             "scripts.run_n3_hint_index_board_1m_proof_execute_once",
         ]
+        expected_execute_blockers = {
+            "scripts.run_n3p_current_source_fetch_once": "BLOCKED_N3P_SOURCE_SCOPE_NOT_READY",
+            "scripts.run_n3p_trigger_proof_preflight_once": "BLOCKED_SOURCE_PAYLOAD_CONTRACT",
+            "scripts.run_n3_hint_index_board_1m_source_fetch_once": "BLOCKED_N3_HINT_SOURCE_SCOPE_NOT_READY",
+            "scripts.run_n3_hint_index_board_1m_proof_preflight_once": "BLOCKED_N3_HINT_PROOF_PREFLIGHT",
+            "scripts.run_n3_hint_index_board_1m_proof_execute_once": "BLOCKED_N3_HINT_PROOF_EXECUTE",
+        }
         for module_name in wrapper_modules:
             module = importlib.import_module(module_name)
 
@@ -223,7 +230,7 @@ class N3N4CombinedRunonceOrchestratorTest(unittest.TestCase):
                 execute_blocked_code = module.main(wrapper_argv(execute=True, user_confirmed=True))
             self.assertEqual(execute_blocked_code, 2, module_name)
             execute_blocked = json.loads(stdout.getvalue())
-            self.assertEqual(execute_blocked["result"], "BLOCKED_MISSING_N3_PRODUCTION_ENTRYPOINT", module_name)
+            self.assertEqual(execute_blocked["result"], expected_execute_blockers[module_name], module_name)
             self.assertFalse(execute_blocked["execute_contract_ready"])
             self.assertTrue(execute_blocked["layer_runner_called"])
             self.assertTrue(execute_blocked["real_runner_wired"])

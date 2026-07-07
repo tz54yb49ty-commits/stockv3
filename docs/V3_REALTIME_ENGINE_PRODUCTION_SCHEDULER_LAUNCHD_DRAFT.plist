@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ashare-v3.v3-realtime-engine</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
+		<string>/Users/chuanfuchen/Documents/A股监控系统v3/scripts/run_v3_realtime_engine_once.py</string>
+		<string>--auto-resolve-lineage</string>
+		<string>--docs-root</string>
+		<string>docs</string>
+		<string>--sql-root</string>
+		<string>sql</string>
+		<string>--lock-path</string>
+		<string>tmp/v3_realtime_engine.lock</string>
+		<string>--json-report-path</string>
+		<string>docs/V3_REALTIME_ENGINE_PRODUCTION_RUN_ONCE_REPORT.json</string>
+		<string>--markdown-report-path</string>
+		<string>docs/V3_REALTIME_ENGINE_PRODUCTION_RUN_ONCE_REPORT.md</string>
+		<string>--execute</string>
+		<string>--user-confirmed</string>
+		<string>--allow-overwrite</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/chuanfuchen/Documents/A股监控系统v3</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>src:scripts</string>
+		<key>TZ</key>
+		<string>Asia/Shanghai</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>3</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/chuanfuchen/Documents/A股监控系统v3/logs/v3_realtime_engine.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/chuanfuchen/Documents/A股监控系统v3/logs/v3_realtime_engine.stderr.log</string>
+</dict>
+</plist>

@@ -342,6 +342,39 @@ def _previous_day_rows_for_preflight():
     ]
 
 
+def _previous_day_rows_for_first_window_preflight():
+    rows = []
+    for label in _labels_between("09:31", "10:00"):
+        rows.append(
+            {
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "trade_date": "20260702",
+                "canonical_minute_label": label,
+                "minute_label": label,
+                "open": 8,
+                "close": 8,
+                "amount": 50,
+                "source_marker": "a1_previous_day_cumulative_alias",
+            }
+        )
+    for label in _labels_between("14:31", "15:00"):
+        rows.append(
+            {
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "trade_date": "20260702",
+                "canonical_minute_label": label,
+                "minute_label": label,
+                "open": 7,
+                "close": 9,
+                "amount": 1,
+                "source_marker": "a1_previous_day_cumulative_alias",
+            }
+        )
+    return rows
+
+
 def _sample_execute_proof_row(index, *, projection_30m_type):
     return {
         "asset_kind": "board",
@@ -588,7 +621,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
             self.assertFalse(result["database_written"])
             self.assertFalse(result["writes_outbox"])
 
-    def test_hint_proof_preflight_excludes_first_30m_window_from_metric_facts(self) -> None:
+    def test_hint_proof_preflight_first_30m_uses_previous_trade_date_last_30m_reference(self) -> None:
         from scripts.n3_combined_child_real_runners import N3RealIODependencies
         from scripts.n3_hint_frequency8_source_provider import (
             N3HintProofPreflightBackend,
@@ -653,7 +686,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                 backend=N3HintProofPreflightBackend(
                     config={"database_url": "postgresql://not-used"},
                     scope_loader=ScopeLoader(_scope(index=False, stock_hint_excluded_count=0, for_trade_date="20260703")),
-                    previous_day_rows_loader=PreviousDayRowsLoader([]),
+                    previous_day_rows_loader=PreviousDayRowsLoader(_previous_day_rows_for_first_window_preflight()),
                     target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
@@ -674,24 +707,23 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
 
             self.assertEqual(result["result"], "EXECUTE_READY_REAL_IO_CONTRACT")
             self.assertEqual(result["proof_rows_input_total"], 1)
-            self.assertEqual(result["proof_rows_total"], 0)
-            self.assertEqual(result["rows_by_asset"], {})
-            self.assertEqual(result["metric_ready"], {"ready": 0, "not_ready": 0})
-            self.assertEqual(result["projection_type_distribution"], {})
+            self.assertEqual(result["proof_rows_total"], 1)
+            self.assertEqual(result["rows_by_asset"], {"board": 1})
+            self.assertEqual(result["metric_ready"], {"ready": 1, "not_ready": 0})
+            self.assertEqual(result["projection_type_distribution"], {"volume_up": 1})
 
             contract = json.loads(contract_path.read_text(encoding="utf-8"))
             proof_row = contract["proof_rows"][0]
-            self.assertFalse(proof_row["valid"])
-            self.assertIsNone(proof_row["previous_completed_window_start"])
-            self.assertIn("first_30m_window_no_previous_completed_window", proof_row["blocked_reasons"])
-            self.assertEqual(contract["write_plan"]["metric_rows"], {})
-            self.assertTrue(
-                any(
-                    item["gate_code"] == "N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT"
-                    and item["actual_value"] == "1"
-                    for item in contract["write_plan"]["quality_items"]
-                )
-            )
+            self.assertTrue(proof_row["valid"], proof_row["blocked_reasons"])
+            self.assertEqual(proof_row["previous_completed_window_start"], "14:31")
+            self.assertEqual(proof_row["previous_completed_window_end"], "15:00")
+            self.assertEqual(proof_row["previous_completed_window_source"], "previous_trade_date_last_30m")
+            self.assertEqual(proof_row["reference_30m_entity_high"], 9.0)
+            self.assertEqual(proof_row["reference_30m_entity_low"], 7.0)
+            board_metric = contract["write_plan"]["metric_rows"]["board"][0]
+            self.assertEqual(board_metric["previous_completed_window_start"], "14:31")
+            self.assertEqual(board_metric["previous_completed_window_end"], "15:00")
+            self.assertEqual(board_metric["trace_json"]["previous_completed_window_source"], "previous_trade_date_last_30m")
 
     def test_hint_proof_execute_consumes_materialized_write_plan_and_writes_rollback(self) -> None:
         from scripts.n3_combined_child_real_runners import N3RealIODependencies

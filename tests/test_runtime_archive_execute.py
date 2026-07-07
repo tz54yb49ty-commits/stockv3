@@ -641,6 +641,63 @@ class RuntimeArchiveExecuteTest(unittest.TestCase):
                 self.assertEqual(part["verified_row_count"], 1)
             self.assertEqual(result["table_timings"][0]["status"], "passed")
 
+    def test_execute_runtime_archive_partitioned_refresh_removes_stale_parts(self) -> None:
+        specs = (
+            RuntimeArchiveQuerySpec(
+                layer="n3",
+                table="stock_action_confirmation_projection_metric",
+                sql="select 1",
+                params=(),
+            ),
+        )
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        chunk_sets = [
+            [
+                pd.DataFrame([{"trade_date": "20260612", "seq": 1}]),
+                pd.DataFrame([{"trade_date": "20260612", "seq": 2}]),
+            ],
+            [
+                pd.DataFrame([{"trade_date": "20260612", "seq": 3}]),
+            ],
+        ]
+
+        def chunk_reader(_conn, _spec, _chunksize):
+            return iter(chunk_sets.pop(0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_root = Path(tmp) / "v3_runtime"
+            first = execute_runtime_archive(
+                trade_date="20260612",
+                archive_root=archive_root,
+                connection_factory=lambda _dsn: FakeConnection(),
+                query_specs=specs,
+                chunk_reader=chunk_reader,
+            )
+            second = execute_runtime_archive(
+                trade_date="20260612",
+                archive_root=archive_root,
+                connection_factory=lambda _dsn: FakeConnection(),
+                query_specs=specs,
+                chunk_reader=chunk_reader,
+                force_refresh_archive=True,
+            )
+
+            output_dir = Path(second["files"][0]["path"])
+            self.assertEqual(first["files"][0]["chunk_count"], 2)
+            self.assertEqual(second["files"][0]["chunk_count"], 1)
+            self.assertEqual(
+                [path.name for path in sorted(output_dir.glob("part-*.parquet"))],
+                ["part-00000.parquet"],
+            )
+            self.assertFalse((output_dir / "part-00001.parquet").exists())
+
     def test_execute_runtime_archive_n4_trigger_state_writes_partitioned_parts(self) -> None:
         specs = (
             RuntimeArchiveQuerySpec(

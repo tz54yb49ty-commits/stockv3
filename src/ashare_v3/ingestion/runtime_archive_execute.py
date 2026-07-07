@@ -415,6 +415,8 @@ def write_runtime_archive_partitioned_frame(
         / table
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_part in output_dir.glob("part-*.parquet"):
+        stale_part.unlink()
 
     row_count = 0
     verified_row_count = 0

@@ -103,17 +103,6 @@ def build_provisional_action_executed_dry_run_report(
             )
             continue
 
-        n3p_blocker = n3p_final_proof_blocker(row)
-        if n3p_blocker:
-            decisions.append(
-                {
-                    "decision": BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF,
-                    "source_eligible_event_id": row.get("event_id"),
-                    "reason": n3p_blocker,
-                }
-            )
-            continue
-
         selected_metric_time = source_trigger_time_from_eligible(row)
         selected_minute_label = selected_minute_label_from_payload(row["payload_json"])
         metric = resolve_closed_confirmation_metric(
@@ -129,6 +118,19 @@ def build_provisional_action_executed_dry_run_report(
                     "selected_metric_time": selected_metric_time,
                     "selected_metric_minute_label": selected_minute_label,
                     "reason": "closed_confirmation_metric_not_found",
+                }
+            )
+            continue
+
+        n3p_blocker = n3p_final_proof_blocker(metric)
+        if n3p_blocker:
+            decisions.append(
+                {
+                    "decision": BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF,
+                    "source_eligible_event_id": row.get("event_id"),
+                    "confirmation_metric_id": metric.get("action_confirmation_metric_id") or metric.get("metric_id"),
+                    "confirmation_metric_run_id": metric.get("projection_run_id"),
+                    "reason": n3p_blocker,
                 }
             )
             continue
@@ -283,7 +285,7 @@ def validate_eligible_row(row: Mapping[str, Any]) -> str | None:
 
 
 def n3p_final_proof_blocker(row: Mapping[str, Any]) -> str | None:
-    payload = row.get("payload_json") if isinstance(row.get("payload_json"), Mapping) else {}
+    payload = row.get("payload_json") if isinstance(row.get("payload_json"), Mapping) else row
     if str(payload.get("metric_role") or "") == "trigger_proof":
         return "metric_role=trigger_proof"
     if bool_value(payload.get("not_n5_final_proof")):
@@ -400,8 +402,8 @@ def build_action_executed_plan(
     c1_dependency = c1_dependency_from_payload(source_payload, confirmation_metric)
     is_closed_1m = bool_value(confirmation_metric.get("is_closed_1m"))
     source_metric_kind = str(
-        source_payload.get("source_metric_kind")
-        or confirmation_metric.get("source_metric_kind")
+        confirmation_metric.get("source_metric_kind")
+        or source_payload.get("source_metric_kind")
         or SOURCE_METRIC_KIND
     )
     dedup_key = join_dedup_parts(

@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ashare_v3.action import execute as action_execute
 from ashare_v3.action import live_tracking_poller as poller
@@ -72,16 +73,47 @@ def trigger_state_changed_false(match_row, event_id="n4-state-false-1"):
     }
 
 
-def trigger_state_changed_true(match_row, event_id="n4-state-true-1"):
+def trigger_state_changed_true(match_row, event_id="n4-state-true-1", *, event_time="2026-07-02T10:05:00+08:00"):
     payload = dict(match_row["payload_json"])
     payload["trigger_live"] = True
     payload["current_status"] = "matched"
+    payload.setdefault("trigger_price", 12.34)
+    payload.setdefault("triggered_periods", payload.get("all_trigger_periods") or ["D"])
+    payload.setdefault("projection_30m_flag", False)
+    payload.setdefault("projection_30m_type", "none")
     return {
         **match_row,
         "event_id": event_id,
         "event_type": "TriggerStateChanged",
-        "event_time": "2026-07-02T10:05:00+08:00",
+        "event_time": event_time,
         "dedup_key": f"n4:{event_id}",
+        "payload_json": payload,
+    }
+
+
+def action_executed_event(match_row, *, event_id="n5-executed-1", event_time="2026-07-02T10:01:00+08:00"):
+    payload = dict(match_row["payload_json"])
+    payload.update(
+        {
+            "action_state": "executed",
+            "confirmation_status": "passed",
+            "action_mark": "normal",
+            "source_trigger_event_id": match_row.get("event_id"),
+            "source_trigger_event_type": match_row.get("event_type"),
+            "source_trigger_event_time": match_row.get("event_time"),
+        }
+    )
+    return {
+        "event_id": event_id,
+        "event_type": "ActionExecuted",
+        "trade_date": TRADE_DATE,
+        "asset_kind": match_row.get("asset_kind"),
+        "identity_key": match_row.get("identity_key"),
+        "event_time": event_time,
+        "source_layer": "N5_action",
+        "source_run_id": ACTION_RUN_ID,
+        "dedup_key": f"n5:{event_id}",
+        "partition_key": match_row.get("identity_key"),
         "payload_json": payload,
     }
 
@@ -122,6 +154,16 @@ def passing_buy_metric(
         "previous_1m_amount": 10,
         "current_30m_virtual_amount": current_30m_virtual_amount,
         "previous_day_same_window_amount": previous_day_same_window_amount,
+        "previous_1m_period_source": "same_trade_date_previous_period",
+        "previous_5m_period_source": "same_trade_date_previous_period",
+        "previous_30m_period_source": "same_trade_date_previous_period",
+        "previous_120m_period_source": "same_trade_date_previous_period",
+        "is_first_1m_of_day": False,
+        "is_first_5m_of_day": False,
+        "is_first_30m_of_day": False,
+        "is_first_120m_of_day": False,
+        "first_1m_amount_default_pass": False,
+        "first_5m_amount_default_pass": False,
     }
 
 
@@ -269,15 +311,259 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
             "eligible",
         )
 
-    def test_trigger_state_changed_true_is_ignored_and_not_consumed(self):
-        plan = self.build_plan([trigger_state_changed_true(trigger_matched())])
+    def test_trigger_state_changed_true_enters_active_scope_without_action_eligible(self):
+        plan = self.build_plan(
+            [
+                trigger_state_changed_true(
+                    trigger_matched(event_time="2026-07-02T13:40:00+08:00"),
+                )
+            ]
+        )
 
         self.assertEqual(plan["action_events"], [])
-        self.assertEqual(plan["tracking_updates"], [])
+        self.assertEqual(plan["tracking_updates"][0]["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertIsNone(plan["tracking_updates"][0]["planned_output_event_type"])
+        self.assertEqual(plan["consumed_n4_event_ids"], ["n4-state-true-1"])
+        self.assertEqual([event["event_type"] for event in plan["consumed_n4_events"]], ["TriggerStateChanged"])
+        self.assertEqual(plan["summary"]["input_event_type_counts"], {"TriggerStateChanged": 1})
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        artifact = plan["active_scope_snapshot_artifact"]
+        self.assertEqual(artifact["scope_granularity"], "object")
+        self.assertEqual(artifact["scope_count"], 1)
+        self.assertFalse(artifact["empty_scope_noop"])
+        scope_row = artifact["scope_rows"][0]
+        self.assertEqual(scope_row["asset_kind"], "stock")
+        self.assertEqual(scope_row["identity_key"], "stock:SH:600000")
+        self.assertEqual(scope_row["attention_event_refs"], [])
+        self.assertEqual(scope_row["active_tracking_refs"][0]["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertEqual(scope_row["active_tracking_refs"][0]["trigger_time"], "2026-07-02T10:05:00+08:00")
+        self.assertEqual(
+            scope_row["active_tracking_refs"][0]["source_trigger_event_time"],
+            "2026-07-02T10:05:00+08:00",
+        )
+        self.assertFalse(scope_row["active_tracking_refs"][0]["action_eligible_entry_allowed"])
+        self.assertEqual(scope_row["active_tracking_refs"][0]["source_n4_payload"]["trigger_price"], 12.34)
+
+    def test_latest_trigger_state_changed_true_refreshes_active_ref_time(self):
+        base = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        plan = self.build_plan(
+            [
+                trigger_state_changed_true(base, "n4-state-true-1304", event_time="2026-07-02T13:04:00+08:00"),
+                trigger_state_changed_true(base, "n4-state-true-1352", event_time="2026-07-02T13:52:00+08:00"),
+            ]
+        )
+
+        scope_ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(scope_ref["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(scope_ref["trigger_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(scope_ref["first_confirmation_minute_label"], "13:52")
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        self.assertEqual(plan["action_events"], [])
+
+    def test_active_set_a_plan_accepts_mixed_source_runs_without_source_trigger_filter(self):
+        base = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        early = trigger_state_changed_true(
+            base,
+            "n4-state-true-1304",
+            event_time="2026-07-02T13:04:00+08:00",
+        )
+        early["source_run_id"] = "trigger_state_changed_true_20260702_1304"
+        early["payload_json"] = {
+            **early["payload_json"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+        late = trigger_state_changed_true(
+            base,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        late["source_run_id"] = "trigger_state_changed_true_20260702_1352"
+        late["payload_json"] = {
+            **late["payload_json"],
+            "trigger_price": 119.27,
+            "triggered_periods": ["D"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+
+        plan = poller.build_live_tracking_plan(
+            n4_event_rows=[early, late],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id="n5-active-set-a-run",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+
+        self.assertEqual(plan["summary"]["input_event_type_counts"], {"TriggerStateChanged": 2})
+        self.assertEqual(plan["consumed_n4_event_ids"], ["n4-state-true-1304", "n4-state-true-1352"])
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        scope_ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(scope_ref["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(scope_ref["source_trigger_run_id"], "trigger_state_changed_true_20260702_1352")
+        self.assertEqual(scope_ref["trigger_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(scope_ref["first_confirmation_minute_label"], "13:52")
+        self.assertFalse(scope_ref["action_eligible_entry_allowed"])
+        self.assertEqual(scope_ref["source_n4_payload"]["trigger_price"], 119.27)
+
+    def test_processed_tsc_true_repair_enters_active_scope_without_reconsuming_n4(self):
+        base = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        early = trigger_state_changed_true(
+            base,
+            "n4-state-true-1304",
+            event_time="2026-07-02T13:04:00+08:00",
+        )
+        early["source_run_id"] = "trigger_state_changed_true_20260702_1304"
+        early["payload_json"] = {
+            **early["payload_json"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+        late = trigger_state_changed_true(
+            base,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        late["source_run_id"] = "trigger_state_changed_true_20260702_1352"
+        late["payload_json"] = {
+            **late["payload_json"],
+            "trigger_price": 119.27,
+            "triggered_periods": ["D"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+
+        plan = poller.build_live_tracking_plan(
+            n4_event_rows=[],
+            repair_n4_event_rows=[early, late],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id="n5-active-set-a-run",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+
         self.assertEqual(plan["consumed_n4_event_ids"], [])
         self.assertEqual(plan["consumed_n4_events"], [])
-        self.assertEqual(plan["summary"]["input_event_type_counts"], {"TriggerStateChanged": 1})
-        self.assertTrue(plan["active_scope_snapshot_artifact"]["empty_scope_noop"])
+        self.assertEqual(plan["inbox_checkpoint_intent"]["source_event_ids"], [])
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        self.assertEqual(plan["summary"]["tracking_upsert_count"], 1)
+        update = plan["tracking_updates"][0]
+        self.assertEqual(update["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(update["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertIsNone(update["planned_output_event_type"])
+        self.assertEqual(update["latest_n4_event_time"], "2026-07-02T13:52:00+08:00")
+        scope_ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(scope_ref["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(scope_ref["trigger_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(scope_ref["first_confirmation_minute_label"], "13:52")
+        self.assertFalse(scope_ref["action_eligible_entry_allowed"])
+        self.assertEqual(scope_ref["source_n4_payload"]["trigger_price"], 119.27)
+        self.assertEqual(scope_ref["source_n4_payload"]["condition_key"], "BUY:Y,M,W,D")
+
+    def test_processed_tsc_true_repair_ignores_non_matched_current_status(self):
+        base = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        row = trigger_state_changed_true(
+            base,
+            "n4-state-true-watching",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        row["payload_json"] = {
+            **row["payload_json"],
+            "current_status": "watching",
+        }
+
+        plan = poller.build_live_tracking_plan(
+            n4_event_rows=[],
+            repair_n4_event_rows=[row],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id="n5-active-set-a-run",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+
+        self.assertEqual(plan["summary"]["tracking_upsert_count"], 0)
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["consumed_n4_event_ids"], [])
+        self.assertEqual(plan["consumed_n4_events"], [])
+        self.assertEqual(plan["inbox_checkpoint_intent"]["source_event_ids"], [])
+        self.assertEqual(plan["active_scope_snapshot_artifact"]["scope_count"], 0)
+        self.assertEqual(plan["active_scope_snapshot_artifact"]["scope_rows"], [])
+
+    def test_processed_tsc_true_repair_does_not_duplicate_existing_active_ref(self):
+        base = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        row = trigger_state_changed_true(
+            base,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        first = poller.build_live_tracking_plan(
+            n4_event_rows=[],
+            repair_n4_event_rows=[row],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id="n5-active-set-a-run",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+
+        second = poller.build_live_tracking_plan(
+            n4_event_rows=[],
+            repair_n4_event_rows=[row],
+            active_tracking_rows=first["tracking_updates"],
+            metric_rows=[],
+            action_run_id="n5-active-set-a-run",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+
+        self.assertEqual(second["consumed_n4_event_ids"], [])
+        scope_refs = second["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"]
+        self.assertEqual(len(scope_refs), 1)
+        self.assertEqual(scope_refs[0]["source_trigger_event_id"], "n4-state-true-1352")
+
+    def test_trigger_state_changed_true_can_execute_without_action_eligible_and_traces_latest_n4_event(self):
+        row = trigger_state_changed_true(
+            trigger_matched(event_time="2026-07-02T09:55:00+08:00"),
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        metric = passing_buy_metric(metric_time="2026-07-02T13:53:00+08:00")
+        metric["metric_minute_label"] = "13:53"
+
+        plan = self.build_plan([row], metric_rows=[metric])
+
+        self.assertEqual([event["event_type"] for event in plan["action_events"]], ["ActionExecuted"])
+        payload = plan["action_events"][0]["payload_json"]
+        self.assertEqual(payload["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertEqual(payload["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(payload["source_trigger_event_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(payload["trigger_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(payload["source_n4_payload"]["triggered_periods"], ["D"])
+        self.assertEqual(payload["trace_json"]["source_n4_payload"]["trigger_price"], 12.34)
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        self.assertEqual(plan["summary"]["action_executed_count"], 1)
+
+    def test_trigger_matched_after_attention_ref_still_creates_action_eligible(self):
+        first = self.build_plan([trigger_state_changed_true(trigger_matched())])
+
+        second = self.build_plan(
+            [trigger_matched(event_id="n4-match-after-state", event_time="2026-07-02T10:06:00+08:00")],
+            active_tracking_rows=first["tracking_updates"],
+        )
+
+        self.assertEqual([event["event_type"] for event in second["action_events"]], ["ActionEligible"])
+        self.assertEqual(second["tracking_updates"][0]["source_trigger_event_type"], "TriggerMatched")
+        self.assertEqual(second["tracking_updates"][0]["planned_output_event_type"], "ActionEligible")
 
     def test_same_object_different_condition_key_is_tracked_independently(self):
         rows = [
@@ -293,6 +579,37 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
             {"BUY_MAIN", "BUY_FULL"},
         )
 
+    def test_active_scope_snapshot_collapses_same_object_to_active_tracking_refs(self):
+        rows = [
+            trigger_matched("n4-match-a", condition_key="BUY_MAIN"),
+            trigger_matched("n4-match-b", condition_key="BUY_FULL"),
+        ]
+        plan = self.build_plan(rows)
+
+        artifact = plan["active_scope_snapshot_artifact"]
+        self.assertEqual(artifact["scope_granularity"], "object")
+        self.assertEqual(artifact["scope_count"], 1)
+        self.assertEqual(
+            artifact["active_sets"]["ordinary_active"],
+            [{"for_trade_date": TRADE_DATE, "asset_kind": "stock", "identity_key": "stock:SH:600000"}],
+        )
+        self.assertEqual(artifact["active_sets"]["b2_active"], [])
+        self.assertEqual(len(artifact["scope_rows"]), 1)
+        scope_row = artifact["scope_rows"][0]
+        self.assertEqual(scope_row["for_trade_date"], TRADE_DATE)
+        self.assertEqual(scope_row["asset_kind"], "stock")
+        self.assertEqual(scope_row["identity_key"], "stock:SH:600000")
+        self.assertEqual(scope_row["scope_status"], "active")
+        self.assertEqual(scope_row["active_families"], ["ordinary"])
+        self.assertEqual(
+            {ref["condition_key"] for ref in scope_row["active_tracking_refs"]},
+            {"BUY_MAIN", "BUY_FULL"},
+        )
+        self.assertEqual(
+            {ref["source_trigger_event_id"] for ref in scope_row["active_tracking_refs"]},
+            {"n4-match-a", "n4-match-b"},
+        )
+
     def test_missing_or_unready_metric_keeps_active_tracking_without_n6_event(self):
         first = self.build_plan([trigger_matched()])
         missing = self.build_plan([], active_tracking_rows=first["tracking_updates"])
@@ -302,6 +619,56 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(missing["tracking_updates"][0]["action_state"], "eligible")
         self.assertEqual(unready["action_events"], [])
         self.assertEqual(unready["tracking_updates"][0]["confirmation_status"], "pending")
+
+    def test_metric_before_trigger_time_writes_explicit_evaluation_evidence(self):
+        first = self.build_plan([trigger_matched(event_time="2026-07-02T13:40:00+08:00")])
+        metric = passing_buy_metric(metric_time="2026-07-02T13:39:00+08:00")
+        metric["metric_minute_label"] = "13:39"
+
+        plan = self.build_plan([], active_tracking_rows=first["tracking_updates"], metric_rows=[metric])
+
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["tracking_updates"][0]["confirmation_status"], "pending")
+        self.assertEqual(
+            plan["tracking_updates"][0]["raw_json"]["latest_metric_status"]["reason"],
+            "metric_before_trigger_time",
+        )
+
+    def test_pending_evaluation_advances_active_scope_next_unchecked_minute(self):
+        first = self.build_plan([trigger_matched(event_time="2026-07-02T14:01:00+08:00")])
+        metric = passing_buy_metric(
+            current_30m_virtual_amount=50,
+            previous_day_same_window_amount=100,
+            metric_time="2026-07-02T14:01:00+08:00",
+        )
+        metric["metric_minute_label"] = "14:01"
+        metric["current_price"] = 9
+
+        plan = self.build_plan([], active_tracking_rows=first["tracking_updates"], metric_rows=[metric])
+
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["tracking_updates"][0]["last_checked_minute_label"], "14:01")
+        ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(ref["first_confirmation_minute_label"], "14:01")
+        self.assertEqual(ref["last_checked_minute_label"], "14:01")
+        self.assertEqual(ref["next_unchecked_minute_label"], "14:02")
+
+    def test_pending_evaluation_next_unchecked_minute_uses_canonical_session_labels(self):
+        first = self.build_plan([trigger_matched(event_time="2026-07-02T11:29:00+08:00")])
+        metric = passing_buy_metric(
+            current_30m_virtual_amount=50,
+            previous_day_same_window_amount=100,
+            metric_time="2026-07-02T11:29:00+08:00",
+        )
+        metric["metric_minute_label"] = "11:29"
+        metric["current_price"] = 9
+
+        plan = self.build_plan([], active_tracking_rows=first["tracking_updates"], metric_rows=[metric])
+
+        ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(ref["first_confirmation_minute_label"], "11:29")
+        self.assertEqual(ref["last_checked_minute_label"], "11:29")
+        self.assertEqual(ref["next_unchecked_minute_label"], "13:00")
 
     def test_legacy_n3p_metric_cannot_emit_action_executed(self):
         first = self.build_plan([trigger_matched()])
@@ -317,6 +684,25 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
             legacy["tracking_updates"][0]["raw_json"]["latest_metric_status"]["reason"],
             "BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF",
         )
+
+    def test_repeated_pending_metric_evidence_is_idempotent(self):
+        first = self.build_plan([trigger_matched()])
+        first_pending = self.build_plan(
+            [],
+            active_tracking_rows=first["tracking_updates"],
+            metric_rows=[legacy_n3p_metric()],
+        )
+        second_pending = self.build_plan(
+            [],
+            active_tracking_rows=first_pending["tracking_updates"],
+            metric_rows=[legacy_n3p_metric()],
+        )
+
+        self.assertEqual(first_pending["summary"]["tracking_upsert_count"], 1)
+        self.assertEqual(first_pending["action_events"], [])
+        self.assertEqual(second_pending["tracking_updates"], [])
+        self.assertEqual(second_pending["summary"]["tracking_upsert_count"], 0)
+        self.assertEqual(second_pending["action_events"], [])
 
     def test_legacy_realtime_metric_cannot_emit_action_executed(self):
         first = self.build_plan([trigger_matched()])
@@ -350,6 +736,54 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(executed["payload_json"]["action_mark"], "30m_volume")
         self.assertEqual(executed["payload_json"]["confirmation_status"], "passed")
 
+    def test_metric_with_missing_boundary_source_cannot_emit_action_executed(self):
+        first = self.build_plan([trigger_matched()])
+        metric = passing_buy_metric()
+        metric["previous_30m_period_source"] = "not_available"
+
+        plan = self.build_plan(
+            [],
+            active_tracking_rows=first["tracking_updates"],
+            metric_rows=[metric],
+        )
+
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["tracking_updates"][0]["confirmation_status"], "pending")
+        self.assertEqual(
+            plan["tracking_updates"][0]["raw_json"]["latest_metric_status"]["reason"],
+            "missing_previous_session_reference",
+        )
+
+    def test_same_day_previous_1m_must_break_before_action_executed(self):
+        first = self.build_plan([trigger_matched()])
+        metric = passing_buy_metric(
+            current_30m_virtual_amount=Decimal("487826921"),
+            previous_day_same_window_amount=Decimal("465168546"),
+        )
+        metric.update(
+            {
+                "metric_time": "2026-07-06T10:07:00+08:00",
+                "metric_minute_label": "10:06",
+                "current_price": Decimal("41.82"),
+                "previous_1m_body_high": Decimal("41.82"),
+                "current_1m_amount": Decimal("22228156"),
+                "previous_1m_amount": Decimal("25728862"),
+            }
+        )
+
+        plan = self.build_plan(
+            [],
+            active_tracking_rows=first["tracking_updates"],
+            metric_rows=[metric],
+        )
+
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["tracking_updates"][0]["confirmation_status"], "pending")
+        self.assertEqual(
+            plan["tracking_updates"][0]["raw_json"]["latest_metric_status"]["reason"],
+            "price_confirmation_failed",
+        )
+
     def test_metric_without_n3t_source_basis_keeps_tracking_active(self):
         first = self.build_plan([trigger_matched()])
         metric = passing_buy_metric()
@@ -379,7 +813,7 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         )
 
     def test_active_scope_snapshot_artifact_contains_only_n5_owned_active_scope(self):
-        plan = self.build_plan([trigger_matched()])
+        plan = self.build_plan([trigger_matched(event_time="2026-07-02T13:40:00+08:00")])
 
         artifact = plan["active_scope_snapshot_artifact"]
         self.assertEqual(artifact["artifact_type"], "n5_active_scope_snapshot_v1")
@@ -391,23 +825,35 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertFalse(artifact["n3_scans_n5_internals"])
         self.assertFalse(artifact["db_write_allowed"])
         self.assertFalse(artifact["n4_outbox_status_update_allowed"])
+        self.assertEqual(artifact["artifact_schema_version"], "v2")
+        self.assertEqual(artifact["scope_granularity"], "object")
         self.assertEqual(artifact["scope_count"], 1)
+        scope_row = artifact["scope_rows"][0]
+        self.assertEqual(scope_row["for_trade_date"], TRADE_DATE)
+        self.assertEqual(scope_row["asset_kind"], "stock")
+        self.assertEqual(scope_row["identity_key"], "stock:SH:600000")
+        self.assertEqual(scope_row["scope_status"], "active")
+        self.assertEqual(scope_row["attention_event_refs"], [])
+        self.assertEqual(len(scope_row["active_tracking_refs"]), 1)
+        active_ref = scope_row["active_tracking_refs"][0]
+        self.assertEqual(active_ref["condition_key"], "BUY_MAIN")
+        self.assertEqual(active_ref["source_trigger_event_id"], "n4-match-1")
+        self.assertEqual(active_ref["source_trigger_run_id"], SOURCE_TRIGGER_RUN_ID)
         self.assertEqual(
-            artifact["scope_rows"],
-            [
-                {
-                    "for_trade_date": TRADE_DATE,
-                    "asset_kind": "stock",
-                    "identity_key": "stock:SH:600000",
-                    "direction": "buy",
-                    "signal_type": "B_BUY",
-                    "condition_key": "BUY_MAIN",
-                    "source_trigger_event_id": "n4-match-1",
-                    "source_trigger_run_id": SOURCE_TRIGGER_RUN_ID,
-                    "scope_status": "active",
-                }
-            ],
+            active_ref["state_key"],
+            "N5_action_tracking_state_v1|trade_date|20260702|asset_kind|stock|identity_key|stock:SH:600000|direction|buy|signal_type|B_BUY|condition_key|BUY_MAIN",
         )
+        self.assertEqual(active_ref["trigger_time"], "2026-07-02T13:40:00+08:00")
+        self.assertEqual(active_ref["source_trigger_event_time"], "2026-07-02T13:40:00+08:00")
+        self.assertEqual(active_ref["latest_n4_event_time"], "2026-07-02T13:40:00+08:00")
+        self.assertEqual(active_ref["first_confirmation_minute_label"], "13:40")
+        self.assertIsNone(active_ref["last_checked_minute_label"])
+        self.assertIn("latest_metric_status", active_ref)
+        self.assertEqual(active_ref["metric_evaluation_key"], "")
+        self.assertEqual(active_ref["last_seen_metric_key"], "")
+        self.assertEqual(active_ref["action_state"], "eligible")
+        self.assertEqual(active_ref["confirmation_status"], "pending")
+        self.assertEqual(active_ref["tracking_status"], "tracking")
 
     def test_active_scope_snapshot_artifact_is_noop_when_scope_empty(self):
         plan = self.build_plan([])
@@ -438,6 +884,90 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
             expired["active_scope_snapshot_artifact"]["removed_scope_rows"][0]["scope_exit_reason"],
             "TriggerStateChanged(trigger_live=false)",
         )
+
+    def test_rebuild_active_set_a_from_day_events_replays_tsc_true_after_executed(self):
+        match = trigger_matched(
+            "n4-match-0955",
+            identity_key="stock:SZ:301269",
+            condition_key="BUY:Y,M,W,D",
+            event_time="2026-07-02T09:55:00+08:00",
+        )
+        early_true = trigger_state_changed_true(
+            match,
+            "n4-state-true-1304",
+            event_time="2026-07-02T13:04:00+08:00",
+        )
+        latest_true = trigger_state_changed_true(
+            match,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        latest_true["payload_json"] = {
+            **latest_true["payload_json"],
+            "trigger_price": 119.27,
+            "triggered_periods": ["D"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+
+        rebuilt = poller.build_active_set_a_rebuild_from_n4_day_events(
+            n4_event_rows=[match, early_true, latest_true],
+            action_executed_event_rows=[
+                action_executed_event(match, event_time="2026-07-02T09:56:00+08:00")
+            ],
+            for_trade_date=TRADE_DATE,
+            action_run_id="n5_live_tracking_20260702__active_set_a__fastlane_v1",
+            consumer_name=CONSUMER_NAME,
+            current_exchange_time="2026-07-02T15:00:00+08:00",
+        )
+
+        artifact = rebuilt["active_scope_snapshot_artifact"]
+        self.assertEqual(artifact["artifact_type"], "n5_active_scope_snapshot_v1")
+        self.assertEqual(artifact["rebuild_mode"], "post_close_final_a_rebuild_from_n4_day_events")
+        self.assertEqual(artifact["scope_granularity"], "object")
+        self.assertEqual(artifact["scope_count"], 1)
+        self.assertEqual(artifact["active_tracking_ref_count"], 1)
+        ref = artifact["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(ref["identity_key"], "stock:SZ:301269")
+        self.assertEqual(ref["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(ref["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertEqual(ref["trigger_time"], "2026-07-02T13:52:00+08:00")
+        self.assertEqual(ref["first_confirmation_minute_label"], "13:52")
+        self.assertFalse(ref["action_eligible_entry_allowed"])
+        self.assertIsNone(ref["planned_output_event_type"])
+        self.assertEqual(ref["source_n4_payload"]["trigger_price"], 119.27)
+        self.assertEqual(ref["source_n4_payload"]["triggered_periods"], ["D"])
+        self.assertFalse(artifact["boundary"]["n4_outbox_updated"])
+        self.assertFalse(artifact["boundary"]["inbox_checkpoint_written"])
+        self.assertFalse(artifact["boundary"]["db_written"])
+        self.assertFalse(artifact["boundary"]["n6_touched"])
+        self.assertEqual(rebuilt["summary"]["action_executed_removed_ref_count"], 1)
+        self.assertEqual(rebuilt["summary"]["active_ref_count"], 1)
+        self.assertEqual(rebuilt["consumed_n4_event_ids"], [])
+        self.assertEqual(rebuilt["inbox_checkpoint_intent"]["source_event_ids"], [])
+
+    def test_rebuild_active_set_a_removes_tsc_false_and_isolates_trade_date(self):
+        match = trigger_matched("n4-match-0955", condition_key="BUY:Y,M,W,D")
+        latest_true = trigger_state_changed_true(match, "n4-state-true-1352", event_time="2026-07-02T13:52:00+08:00")
+        false_row = trigger_state_changed_false(match, "n4-state-false-1400")
+        false_row["event_time"] = "2026-07-02T14:00:00+08:00"
+        other_date = trigger_state_changed_true(match, "n4-state-true-other-date", event_time="2026-07-03T13:52:00+08:00")
+        other_date["trade_date"] = "20260703"
+        other_date["payload_json"] = {**other_date["payload_json"], "trade_date": "20260703"}
+
+        rebuilt = poller.build_active_set_a_rebuild_from_n4_day_events(
+            n4_event_rows=[match, latest_true, false_row, other_date],
+            action_executed_event_rows=[],
+            for_trade_date=TRADE_DATE,
+            action_run_id="n5_live_tracking_20260702__active_set_a__fastlane_v1",
+            consumer_name=CONSUMER_NAME,
+            current_exchange_time="2026-07-02T15:00:00+08:00",
+        )
+
+        artifact = rebuilt["active_scope_snapshot_artifact"]
+        self.assertEqual(artifact["scope_count"], 0)
+        self.assertEqual(artifact["scope_rows"], [])
+        self.assertEqual(rebuilt["summary"]["removed_by_tsc_false_count"], 1)
+        self.assertEqual(rebuilt["summary"]["ignored_other_trade_date_count"], 1)
 
     def test_non_pending_trigger_matched_cannot_enter_active_scope_snapshot(self):
         plan = self.build_plan([trigger_matched(status="delivered")])
@@ -557,6 +1087,58 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
         self.assertFalse(manifest["writes_enabled"])
         self.assertEqual(calls["provider"], 1)
 
+    def test_fastlane_intake_active_set_a_does_not_require_single_source_trigger_run(self):
+        calls = {"provider": 0}
+
+        def provider(args):
+            calls["provider"] += 1
+            self.assertEqual(args.fastlane_phase, "intake")
+            self.assertEqual(args.n5_intake_event_kind, "active_set_a")
+            self.assertEqual(args.source_trigger_run_id, "")
+            row = trigger_state_changed_true(
+                trigger_matched(event_time="2026-07-02T13:40:00+08:00"),
+                "n4-state-true-active-set",
+                event_time="2026-07-02T13:52:00+08:00",
+            )
+            row["source_run_id"] = "trigger_state_changed_true_20260702_1352"
+            return poller.build_live_tracking_plan(
+                n4_event_rows=[row],
+                active_tracking_rows=[],
+                metric_rows=[],
+                action_run_id=args.action_run_id,
+                source_trigger_run_id=args.source_trigger_run_id,
+                source_metric_run_id=args.source_metric_run_id,
+                consumer_name=args.consumer_name,
+                for_trade_date=args.for_trade_date,
+            )
+
+        manifest = poller_script.run_n5_live_tracking_poller_once(
+            [
+                "--for-trade-date",
+                TRADE_DATE,
+                "--action-run-id",
+                "n5-active-set-a-run",
+                "--consumer-name",
+                CONSUMER_NAME,
+                "--max-events",
+                "10",
+                "--max-runtime-seconds",
+                "30",
+                "--fastlane-phase",
+                "intake",
+                "--n5-intake-event-kind",
+                "active_set_a",
+            ],
+            plan_provider=provider,
+        )
+
+        self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
+        self.assertEqual(manifest["source_trigger_run_id"], "")
+        self.assertEqual(calls["provider"], 1)
+        ref = manifest["plan"]["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(ref["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertEqual(ref["source_trigger_event_time"], "2026-07-02T13:52:00+08:00")
+
     def test_active_scope_artifact_path_writes_n5_scope_file(self):
         def provider(args):
             return poller.build_live_tracking_plan(
@@ -590,6 +1172,103 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             self.assertEqual(payload["scope_count"], 1)
             self.assertFalse(payload["full_market_fallback_allowed"])
             self.assertEqual(manifest["active_scope_artifact_write_result"]["path"], str(artifact_path))
+
+    def test_rebuild_from_n4_day_events_runner_writes_local_final_a_artifact(self):
+        match = trigger_matched(
+            "n4-match-0955",
+            identity_key="stock:SZ:301269",
+            condition_key="BUY:Y,M,W,D",
+            event_time="2026-07-02T09:55:00+08:00",
+        )
+        latest_true = trigger_state_changed_true(
+            match,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        latest_true["payload_json"] = {
+            **latest_true["payload_json"],
+            "trigger_price": 119.27,
+            "triggered_periods": ["D"],
+            "condition_key": "BUY:Y,M,W,D",
+        }
+        executed = action_executed_event(match, event_time="2026-07-02T09:56:00+08:00")
+
+        class FakeCursor:
+            def __init__(self):
+                self.rows = []
+                self.queries = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, sql, params):
+                self.queries.append((sql, params))
+                if "source_layer = 'N4_trigger'" in sql:
+                    self.rows = [match, latest_true]
+                elif "source_layer = 'N5_action'" in sql:
+                    self.rows = [executed]
+                else:
+                    self.rows = []
+
+            def fetchall(self):
+                return list(self.rows)
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def cursor(self):
+                return self.cursor_obj
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "n5_active_scope_snapshot_v1_20260702_1500_final_a.json"
+            fake_conn = FakeConnection()
+            with patch.object(poller_script.psycopg, "connect", return_value=fake_conn) as connect_mock:
+                manifest = poller_script.run_n5_live_tracking_poller_once(
+                    [
+                        "--for-trade-date",
+                        TRADE_DATE,
+                        "--current-exchange-time",
+                        "2026-07-02T15:00:00+08:00",
+                        "--post-close-final-a-rebuild-from-n4-day-events",
+                        "--output-artifact-path",
+                        str(artifact_path),
+                        "--dsn",
+                        "postgresql:///unused",
+                        "--user-confirmed",
+                    ]
+                )
+
+            self.assertEqual(
+                manifest["verdict"],
+                "N5_ACTIVE_SET_A_REBUILD_FROM_N4_DAY_EVENTS_PASS",
+            )
+            self.assertTrue(artifact_path.exists())
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(artifact["artifact_type"], "n5_active_scope_snapshot_v1")
+            self.assertEqual(artifact["scope_count"], 1)
+            ref = artifact["scope_rows"][0]["active_tracking_refs"][0]
+            self.assertEqual(ref["identity_key"], "stock:SZ:301269")
+            self.assertEqual(ref["source_trigger_event_id"], "n4-state-true-1352")
+            self.assertEqual(ref["trigger_time"], "2026-07-02T13:52:00+08:00")
+            self.assertFalse(ref["action_eligible_entry_allowed"])
+            self.assertEqual(manifest["write_result"]["executed"], True)
+            self.assertEqual(manifest["write_result"]["artifact_type"], "n5_active_scope_snapshot_v1")
+            self.assertFalse(manifest["boundary"]["n4_outbox_updated"])
+            self.assertFalse(manifest["boundary"]["db_written"])
+            self.assertIn("default_transaction_read_only=on", connect_mock.call_args.kwargs["options"])
+            queries = "\n".join(sql for sql, _params in fake_conn.cursor_obj.queries)
+            self.assertIn("source_layer = 'N4_trigger'", queries)
+            self.assertIn("source_layer = 'N5_action'", queries)
 
     def test_execute_without_explicit_artifact_flag_does_not_write_active_scope_file(self):
         def provider(args):
@@ -631,6 +1310,66 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
                     "artifact_writes_enabled": False,
                 },
             )
+
+    def test_executed_phase_evidence_only_manifest_is_not_actionexecuted_pass(self):
+        plan = {
+            "action_run_id": ACTION_RUN_ID,
+            "source_trigger_run_id": SOURCE_TRIGGER_RUN_ID,
+            "source_metric_run_id": SOURCE_METRIC_RUN_ID,
+            "consumer_name": CONSUMER_NAME,
+            "tracking_updates": [
+                {
+                    "run_id": ACTION_RUN_ID,
+                    "state_key": "stock|stock:SH:600000|buy|B_BUY|BUY_MAIN",
+                    "action_state": "eligible",
+                    "confirmation_status": "pending",
+                    "tracking_status": "tracking",
+                    "raw_json": {
+                        "latest_metric_status": {
+                            "projection_run_id": SOURCE_METRIC_RUN_ID,
+                            "reason": "missing_previous_session_reference",
+                        }
+                    },
+                }
+            ],
+            "action_events": [],
+            "consumed_n4_events": [],
+            "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+            "active_scope_snapshot_artifact": {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "scope_count": 1,
+                "empty_scope_noop": False,
+            },
+            "summary": {
+                "tracking_upsert_count": 1,
+                "action_executed_count": 0,
+                "action_eligible_count": 0,
+            },
+        }
+
+        def provider(_args):
+            return plan
+
+        def writer(_args, _plan):
+            return {
+                "executed": True,
+                "common_action_tracking_state": 1,
+                "common_event_outbox": 0,
+                "common_event_inbox": 0,
+                "common_event_consumer_checkpoint": 0,
+                "n4_outbox_status_updated": False,
+            }
+
+        manifest = poller_script.run_n5_live_tracking_poller_once(
+            self.base_args("--fastlane-phase", "executed", "--execute", "--user-confirmed"),
+            plan_provider=provider,
+            writer=writer,
+        )
+
+        self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_EVALUATION_PASS_NO_ACTIONEXECUTED")
+        self.assertTrue(manifest["writes_enabled"])
+        self.assertEqual(manifest["write_result"]["common_action_tracking_state"], 1)
+        self.assertEqual(manifest["write_result"]["common_event_outbox"], 0)
 
     def test_tracking_values_include_schema_required_monitor_window_trigger_type_and_triggered_periods(self):
         plan = poller.build_live_tracking_plan(

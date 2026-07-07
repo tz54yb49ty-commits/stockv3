@@ -741,10 +741,16 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         self.assertEqual(payload["stock_quote_rows"][0]["raw_source_time"], "2026-06-30T15:45:00+08:00")
         self.assertFalse(payload.get("post_close_proof_minute_blocked", False))
 
-    def test_source_fetch_blocks_mixed_stock_and_index_board_canonical_minutes(self) -> None:
-        from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceFetchBackend, N3PCurrentSourceFetchProvider
+    def test_source_fetch_allows_adjacent_mixed_stock_and_index_board_canonical_minutes(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentSourceFetchBackend,
+            N3PCurrentSourceFetchProvider,
+            compute_n3p_current_source_payload_hash,
+        )
 
         calls: list[str] = []
+        written_payloads: list[dict] = []
+        written_reports: list[dict] = []
 
         class ScopeLoader:
             def load_n3p_current_source_scope(self, *, args, report, dependencies, config):
@@ -796,9 +802,13 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
                 }
 
         class ArtifactWriter:
-            def write_n3p_current_source_artifacts(self, **_kwargs):
+            def write_n3p_current_source_artifacts(self, **kwargs):
                 calls.append("artifact")
-                raise AssertionError("mixed canonical minute must not reach artifact writer")
+                payload = dict(kwargs["payload"])
+                fetch_report = dict(kwargs["fetch_report"])
+                written_payloads.append(payload)
+                written_reports.append(fetch_report)
+                return {"payload_hash": compute_n3p_current_source_payload_hash(payload)}
 
         backend = N3PCurrentSourceFetchBackend(
             env={"DATABASE_URL": "postgresql://unit-test"},
@@ -814,17 +824,116 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
             dependencies=SimpleNamespace(),
         )
 
-        self.assertEqual(payload["result"], "BLOCKED_N3P_SOURCE_CANONICAL_MINUTE_ALIGNMENT")
-        self.assertIn("mixed_canonical_proof_minute_mismatch", payload["blocked_reasons"])
+        self.assertEqual(payload["result"], "EXECUTE_READY_REAL_IO_CONTRACT")
+        self.assertEqual(payload["actual_until_hhmm"], "1453")
         self.assertEqual(payload["stock_canonical_until_hhmm"], "1453")
         self.assertEqual(payload["index_board_until_hhmm"], "1452")
         self.assertEqual(payload["stock_canonical_hhmm"], "1453")
         self.assertEqual(payload["index_board_hhmm"], "1452")
         self.assertEqual(payload["minute_delta"], 1)
-        self.assertEqual(payload["alignment_failure_class"], "adjacent_minute_source_boundary_race")
-        self.assertEqual(calls, [])
+        self.assertEqual(payload["alignment_status"], "independent_realtime_sources_ok")
+        self.assertEqual(payload["source_minute_alignment"]["stock_canonical_hhmm"], "1453")
+        self.assertEqual(payload["source_minute_alignment"]["index_board_hhmm"], "1452")
+        self.assertEqual(payload["source_minute_alignment"]["minute_delta"], 1)
+        self.assertEqual(payload["source_minute_alignment"]["alignment_status"], "independent_realtime_sources_ok")
+        self.assertEqual(calls, ["artifact"])
+        self.assertEqual(written_payloads[0]["stock_canonical_hhmm"], "1453")
+        self.assertEqual(written_payloads[0]["index_board_hhmm"], "1452")
+        self.assertEqual(written_payloads[0]["alignment_status"], "independent_realtime_sources_ok")
+        self.assertEqual(written_reports[0]["source_minute_alignment"]["alignment_status"], "independent_realtime_sources_ok")
 
-    def test_source_fetch_classifies_non_adjacent_mixed_canonical_minutes(self) -> None:
+    def test_source_fetch_allows_non_adjacent_mixed_stock_and_index_board_canonical_minutes(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentSourceFetchBackend,
+            N3PCurrentSourceFetchProvider,
+            compute_n3p_current_source_payload_hash,
+        )
+
+        written_payloads: list[dict] = []
+
+        class ScopeLoader:
+            def load_n3p_current_source_scope(self, *, args, report, dependencies, config):
+                return {
+                    "for_trade_date": args.for_trade_date,
+                    "n4_context_status": "passed",
+                    "subscription_status": "passed",
+                    "a1_cumulative_status": "passed",
+                    "stock_quote_objects": [
+                        {"asset_kind": "stock", "identity_key": "stock:SH:600000", "exchange": "SH", "code": "600000"},
+                    ],
+                    "index_1m_objects": [
+                        {"asset_kind": "index", "identity_key": "index:SH:000001", "exchange": "SH", "code": "000001"},
+                    ],
+                    "board_1m_objects": [],
+                    "stock_object_count": 1,
+                    "index_object_count": 1,
+                    "board_object_count": 0,
+                    "stock_minute_bar_scope_count": 0,
+                }
+
+        class Fetcher:
+            def fetch_n3p_current_market_rows(self, *, args, report, dependencies, scope, config):
+                return {
+                    "stock_quote_rows": [
+                        {
+                            "asset_kind": "stock",
+                            "identity_key": "stock:SH:600000",
+                            "code": "600000",
+                            "price": 10.5,
+                            "amount": 123456.0,
+                            "source_time": "2026-06-30T09:31:04.662+08:00",
+                            "source_marker": "mootdx_quotes",
+                        }
+                    ],
+                    "index_board_1m_rows": [
+                        {
+                            "asset_kind": "index",
+                            "identity_key": "index:SH:000001",
+                            "bar_time": "2026-06-30T09:37:00+08:00",
+                            "open": 1,
+                            "high": 2,
+                            "low": 1,
+                            "close": 2,
+                            "amount": 100.0,
+                            "source_marker": "mootdx_index_frequency_8",
+                        }
+                    ],
+                }
+
+        class ArtifactWriter:
+            def write_n3p_current_source_artifacts(self, **kwargs):
+                payload = dict(kwargs["payload"])
+                written_payloads.append(payload)
+                return {"payload_hash": compute_n3p_current_source_payload_hash(payload)}
+
+        provider = N3PCurrentSourceFetchProvider(
+            backend=N3PCurrentSourceFetchBackend(
+                env={"DATABASE_URL": "postgresql://unit-test"},
+                scope_loader=ScopeLoader(),
+                market_fetcher=Fetcher(),
+                artifact_writer=ArtifactWriter(),
+            )
+        )
+
+        payload = provider.fetch_n3p_current_source_payload(
+            args=_args(target_run_id="n3p_mixed_realtime_source_payload_20260630_until_0937_v1", requested_until_hhmm="0937"),
+            report=_report(),
+            dependencies=SimpleNamespace(),
+        )
+
+        self.assertEqual(payload["result"], "EXECUTE_READY_REAL_IO_CONTRACT")
+        self.assertEqual(payload["actual_until_hhmm"], "0937")
+        self.assertEqual(payload["stock_canonical_hhmm"], "0932")
+        self.assertEqual(payload["index_board_hhmm"], "0937")
+        self.assertEqual(payload["minute_delta"], 5)
+        self.assertEqual(payload["alignment_status"], "independent_realtime_sources_ok")
+        self.assertEqual(payload["source_minute_alignment"]["stock_canonical_hhmm"], "0932")
+        self.assertEqual(payload["source_minute_alignment"]["index_board_hhmm"], "0937")
+        self.assertEqual(payload["source_minute_alignment"]["minute_delta"], 5)
+        self.assertEqual(written_payloads[0]["stock_canonical_hhmm"], "0932")
+        self.assertEqual(written_payloads[0]["index_board_hhmm"], "0937")
+
+    def test_source_fetch_traces_non_adjacent_mixed_canonical_minutes_without_blocking(self) -> None:
         from scripts.n3p_current_source_fetch_provider import _source_canonical_minute_alignment_blocker
 
         payload = _source_canonical_minute_alignment_blocker(
@@ -844,13 +953,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
             ],
         )
 
-        self.assertIsNotNone(payload)
-        assert payload is not None
-        self.assertEqual(payload["result"], "BLOCKED_N3P_SOURCE_CANONICAL_MINUTE_ALIGNMENT")
-        self.assertEqual(payload["stock_canonical_hhmm"], "1455")
-        self.assertEqual(payload["index_board_hhmm"], "1452")
-        self.assertEqual(payload["minute_delta"], 3)
-        self.assertEqual(payload["alignment_failure_class"], "canonical_minute_mismatch")
+        self.assertIsNone(payload)
 
     def test_source_fetch_classifies_midday_stock_time_stale_without_artifact_registration(self) -> None:
         from scripts.n3p_current_source_fetch_provider import _source_canonical_minute_alignment_blocker

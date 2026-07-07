@@ -9,6 +9,13 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from ashare_v3.market.c1_scoped_artifact import (
+    SOURCE_CLOSE_LABEL_POLICY,
+    build_n3_c1_scoped_current_day_pull_plan,
+    canonical_ashare_1m_labels,
+    source_close_label_for_physical_start_label,
+)
+
 
 WORKING_DIRECTORY = "/Users/chuanfuchen/Documents/A股监控系统v3"
 
@@ -29,6 +36,76 @@ def _plist_placeholders(value: object) -> list[str]:
 
     walk(value)
     return placeholders
+
+
+def _n3t_boundary_metric_fields() -> dict[str, object]:
+    return {
+        "is_first_1m_of_day": False,
+        "is_first_5m_of_day": False,
+        "is_first_30m_of_day": False,
+        "is_first_120m_of_day": True,
+        "first_1m_amount_default_pass": False,
+        "first_5m_amount_default_pass": False,
+        "previous_1m_period_source": "same_trade_date_previous_period",
+        "previous_5m_period_source": "same_trade_date_previous_period",
+        "previous_30m_period_source": "same_trade_date_previous_period",
+        "previous_120m_period_source": "previous_trade_date_last_period",
+        "boundary_policy_version": "n3.action_confirmation_boundary.v1",
+    }
+
+
+def _previous_day_c1_rows_for_fixture(
+    *,
+    trade_date: str = "20260703",
+    asset_kind: str = "stock",
+    identity_key: str = "stock:SZ:300803",
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    identity_suffix = identity_key.split(":")[-1]
+    for index, label in enumerate(canonical_ashare_1m_labels(trade_date), start=1):
+        rows.append(
+            {
+                "asset_kind": asset_kind,
+                "identity_key": identity_key,
+                "physical_c1_label": label,
+                "open": 10 + index / 10,
+                "high": 10.8 + index / 10,
+                "low": 9.9,
+                "close": 10.3 + index / 10,
+                "amount": 900 + index,
+                "source_row_ref": f"previous:{identity_suffix}:{label}",
+                "fake_or_synthetic_row": False,
+            }
+        )
+    return rows
+
+
+def _current_day_c1_rows_for_fixture(
+    *,
+    trade_date: str,
+    scope_row: dict[str, object],
+    through_label: str,
+) -> list[dict[str, object]]:
+    labels = canonical_ashare_1m_labels(trade_date)
+    target_index = labels.index(through_label)
+    rows: list[dict[str, object]] = []
+    identity_suffix = str(scope_row["identity_key"]).split(":")[-1]
+    for index, label in enumerate((item for item in labels[: target_index + 1] if item != "09:30"), start=1):
+        rows.append(
+            {
+                **scope_row,
+                "physical_c1_label": label,
+                "raw_source_label": source_close_label_for_physical_start_label(trade_date, label)["raw_source_label"],
+                "open": 12 + index / 10,
+                "high": 12.8 + index / 10,
+                "low": 11.9,
+                "close": 12.2 + index / 10,
+                "amount": 1000 + index,
+                "source_row_ref": f"current:{identity_suffix}:{label}",
+                "fake_or_synthetic_row": False,
+            }
+        )
+    return rows
 
 
 class N5N3TFastlaneContractTest(unittest.TestCase):
@@ -392,6 +469,72 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertIn("waiting_for_n3t_metric_exact_cover", review["waiting_reasons"])
         self.assertEqual(review["blockers"], [])
 
+    def test_trading_day_monitor_bootstraps_n5_intake_when_n4_exists_but_n5_has_not_started(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LABELS,
+            build_fastlane_active_worker_policy_review,
+            build_fastlane_trading_day_monitor_review,
+        )
+
+        monitor_review = build_fastlane_trading_day_monitor_review(
+            for_trade_date="20260707",
+            current_exchange_time="2026-07-07T09:46:22+08:00",
+            launchd_states={
+                label: {"loaded": True, "pid": None, "runs": 100, "last_exit_code": 0}
+                for label in FASTLANE_LABELS.values()
+            },
+            plist_summaries={
+                label: {
+                    "label": label,
+                    "start_interval": 5 if key == "n3_c1_n3t" else 3,
+                    "run_at_load": False,
+                    "keep_alive": False,
+                    "uses_activation_config": True,
+                    "has_placeholder": False,
+                    "has_secret_literal": False,
+                    "has_old_runner_ref": False,
+                }
+                for key, label in FASTLANE_LABELS.items()
+            },
+            recent_log_manifests={label: [] for label in FASTLANE_LABELS.values()},
+            chain_evidence={
+                "session_phase": "trading",
+                "n4_triggermatched": 247,
+                "n5_actioneligible": 0,
+                "n5_active_tracking": 0,
+                "n5_active_scope_artifacts": 0,
+                "n3_scoped_c1_artifacts": 0,
+                "n3t_c1_closed_metric_rows": 0,
+                "n5_actionexecuted": 0,
+                "closed_minute_available": True,
+                "n4_outbox_status_unchanged": True,
+                "n4_outbox_updated": False,
+                "n5_output_event_types": [],
+                "n3_consumed_only_explicit_active_scope_artifact": True,
+                "n3_scanned_n5_db": False,
+                "n3_full_market_fallback": False,
+                "n3t_lineage_ok": False,
+                "legacy_metric_used": False,
+                "old_n3_n4_labels_unchanged": True,
+                "n6_touched": False,
+            },
+        )
+        policy_review = build_fastlane_active_worker_policy_review(
+            for_trade_date="20260707",
+            monitor_review=monitor_review,
+        )
+
+        self.assertEqual(monitor_review["result"], "WAITING")
+        self.assertEqual(
+            monitor_review["final_verdict"],
+            "FASTLANE_TRADING_DAY_MONITOR_WAITING_FOR_EXACT_COVER",
+        )
+        self.assertEqual(monitor_review["blockers"], [])
+        self.assertIn("waiting_for_n5_intake_exact_cover", monitor_review["waiting_reasons"])
+        self.assertEqual(policy_review["result"], "PASS")
+        self.assertTrue(policy_review["active_worker_write_enabled_ready"])
+        self.assertEqual(policy_review["activation_scope"], "exact_cover_backlog_bootstrap")
+
     def test_active_worker_policy_review_allows_idle_open_scheduler_without_n4_yet(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
             build_fastlane_active_worker_policy_review,
@@ -479,7 +622,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             chain_evidence={
                 "session_phase": "trading",
                 "n4_triggermatched": 12,
-                "n5_actioneligible": 0,
+                "n5_actioneligible": 12,
                 "n5_active_tracking": 0,
                 "n5_active_scope_artifacts": 0,
                 "n3_scoped_c1_artifacts": 0,
@@ -501,7 +644,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         self.assertEqual(review["result"], "BLOCKED")
         self.assertFalse(review["automatic_chain_verified"])
-        self.assertIn("n5_actioneligible_not_advancing", review["blockers"])
+        self.assertIn("n5_active_tracking_not_advancing", review["blockers"])
+        self.assertIn("n5_active_scope_artifact_not_advancing", review["blockers"])
         self.assertIn("n3t_c1_closed_metric_missing_after_closed_minute", review["blockers"])
         self.assertIn("n5_actionexecuted_not_advancing", review["blockers"])
 
@@ -620,7 +764,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertFalse(policy["n3_boundary"]["scans_common_action_tracking_state"])
         self.assertEqual(policy["n3_boundary"]["input_artifact_type"], "n5_active_scope_snapshot_v1")
         self.assertEqual(policy["lunch_break"]["source_gap_policy"], "session_boundary_source_gap_excluded_v1")
+        self.assertEqual(policy["post_close"]["drain_mode"], "post_close_final_a_pass_once")
         self.assertEqual(policy["post_close"]["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+        self.assertTrue(policy["post_close"]["post_close_final_a_pass_once"])
+        self.assertEqual(policy["post_close"]["target_close_boundary"], "session_close")
 
         before_0925 = classify_fastlane_session_phase(
             for_trade_date="20260703",
@@ -674,8 +821,13 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             trade_calendar_is_open=True,
         )
         self.assertEqual(post_close["phase"], "post_close")
-        self.assertTrue(post_close["post_close_drain"]["enabled"])
+        self.assertFalse(post_close["n5_intake"]["action_eligible_write_allowed"])
+        self.assertFalse(post_close["post_close_drain"]["enabled"])
+        self.assertEqual(post_close["post_close_drain"]["superseded_by"], "post_close_final_a_pass")
         self.assertEqual(post_close["post_close_drain"]["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+        self.assertTrue(post_close["post_close_final_a_pass"]["enabled"])
+        self.assertFalse(post_close["post_close_final_a_pass"]["repeated_microbatch_allowed"])
+        self.assertEqual(post_close["post_close_final_a_pass"]["target_close_boundary"], "session_close")
 
         closed_day = classify_fastlane_session_phase(
             for_trade_date="20260704",
@@ -711,7 +863,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
         self.assertEqual(before_0925["worker_mode"], "read_only_discovery")
         self.assertFalse(before_0925["writes_enabled_allowed"])
-        self.assertEqual(before_0925["blocked_reason"], "pre_open_before_0925_no_write")
+        self.assertEqual(before_0925["blocked_reason"], "waiting_for_0925_or_n4_triggermatched")
 
         after_0925 = resolve_fastlane_active_worker_decision(
             lane_key="n5_action_intake",
@@ -736,6 +888,21 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertTrue(inactive_cleanup["writes_enabled_allowed"])
         self.assertEqual(inactive_cleanup["required_proof"], "inactive_TriggerStateChanged_false")
         self.assertFalse(inactive_cleanup["action_eligible_entry_allowed"])
+
+        active_attention = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="trading",
+            formal_trigger_matched_available=False,
+            inactive_trigger_state_changed_available=False,
+            active_trigger_state_changed_available=True,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+        )
+        self.assertEqual(active_attention["worker_mode"], "write_enabled_bounded")
+        self.assertTrue(active_attention["writes_enabled_allowed"])
+        self.assertEqual(active_attention["required_proof"], "active_TriggerStateChanged_true_attention")
+        self.assertFalse(active_attention["action_eligible_entry_allowed"])
+        self.assertTrue(active_attention["trigger_live_true_attention_allowed"])
 
         preopen_n3 = resolve_fastlane_active_worker_decision(
             lane_key="n3_c1_n3t_action_confirmation",
@@ -777,8 +944,11 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             closed_minute_available=True,
             matching_n3t_metric_available=False,
         )
-        self.assertEqual(post_close["worker_mode"], "time_ordered_drain")
-        self.assertEqual(post_close["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+        self.assertEqual(post_close["worker_mode"], "post_close_final_a_scope_snapshot")
+        self.assertFalse(post_close["writes_enabled_allowed"])
+        self.assertTrue(post_close["artifact_writes_enabled_allowed"])
+        self.assertFalse(post_close["action_eligible_entry_allowed"])
+        self.assertTrue(post_close["scope_snapshot_only"])
 
         post_close_executed_waiting = resolve_fastlane_active_worker_decision(
             lane_key="n5_action_executed",
@@ -787,9 +957,11 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             closed_minute_available=True,
             matching_n3t_metric_available=False,
         )
-        self.assertEqual(post_close_executed_waiting["worker_mode"], "wait_matching_n3t_metric")
+        self.assertEqual(
+            post_close_executed_waiting["worker_mode"], "post_close_final_a_wait_matching_n3t_metric"
+        )
         self.assertFalse(post_close_executed_waiting["writes_enabled_allowed"])
-        self.assertEqual(post_close_executed_waiting["blocked_reason"], "matching_n3t_metric_missing")
+        self.assertEqual(post_close_executed_waiting["blocked_reason"], "waiting_for_n3t_c1_closed_metric")
 
         post_close_executed_ready = resolve_fastlane_active_worker_decision(
             lane_key="n5_action_executed",
@@ -798,9 +970,57 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             closed_minute_available=True,
             matching_n3t_metric_available=True,
         )
-        self.assertEqual(post_close_executed_ready["worker_mode"], "time_ordered_metric_drain")
+        self.assertEqual(post_close_executed_ready["worker_mode"], "post_close_final_a_execute")
         self.assertTrue(post_close_executed_ready["writes_enabled_allowed"])
-        self.assertEqual(post_close_executed_ready["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+
+        post_close_final_n3 = resolve_fastlane_active_worker_decision(
+            lane_key="n3_c1_n3t_action_confirmation",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            for_trade_date_is_current_date=True,
+            trade_calendar_is_open=True,
+            post_close_final_a_pass_available=True,
+            post_close_final_a_pass_done=False,
+        )
+        self.assertEqual(post_close_final_n3["worker_mode"], "post_close_final_a_pass")
+        self.assertTrue(post_close_final_n3["writes_enabled_allowed"])
+        self.assertTrue(post_close_final_n3["artifact_writes_enabled_allowed"])
+        self.assertTrue(post_close_final_n3["post_close_final_a_pass_allowed"])
+        self.assertFalse(post_close_final_n3["repeated_microbatch_allowed"])
+        self.assertEqual(post_close_final_n3["target_close_boundary"], "session_close")
+
+        post_close_final_done = resolve_fastlane_active_worker_decision(
+            lane_key="n3_c1_n3t_action_confirmation",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            for_trade_date_is_current_date=True,
+            trade_calendar_is_open=True,
+            post_close_final_a_pass_available=True,
+            post_close_final_a_pass_done=True,
+        )
+        self.assertEqual(post_close_final_done["worker_mode"], "post_close_final_a_pass_noop")
+        self.assertFalse(post_close_final_done["writes_enabled_allowed"])
+        self.assertFalse(post_close_final_done["artifact_writes_enabled_allowed"])
+        self.assertEqual(post_close_final_done["blocked_reason"], "post_close_final_a_pass_done")
+
+        post_close_wrong_date = resolve_fastlane_active_worker_decision(
+            lane_key="n3_c1_n3t_action_confirmation",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            for_trade_date_is_current_date=False,
+            trade_calendar_is_open=True,
+            post_close_final_a_pass_available=True,
+            post_close_final_a_pass_done=False,
+        )
+        self.assertEqual(post_close_wrong_date["worker_mode"], "post_close_final_a_pass_noop")
+        self.assertFalse(post_close_wrong_date["writes_enabled_allowed"])
+        self.assertEqual(post_close_wrong_date["blocked_reason"], "post_close_final_a_pass_not_allowed_for_session")
 
         non_trading = resolve_fastlane_active_worker_decision(
             lane_key="n5_action_executed",
@@ -811,6 +1031,96 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
         self.assertEqual(non_trading["worker_mode"], "fail_closed")
         self.assertFalse(non_trading["writes_enabled_allowed"])
+
+    def test_post_close_final_a_done_marker_resolves_to_noop(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            resolve_fastlane_active_worker_decision,
+            resolve_fastlane_runtime_session_context,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "done.json"
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                        "for_trade_date": "20260706",
+                        "status": "done",
+                        "completion_mode": "n5_executed_all_refs_evaluated",
+                        "active_scope_artifact_path": "scope.json",
+                        "active_scope_artifact_sha256": "hash",
+                        "evaluated_ref_count": 3,
+                        "action_executed_count": 1,
+                        "evaluation_only_count": 2,
+                        "unprocessed_ref_count": 0,
+                        "boundary": {
+                            "n4_outbox_updated": False,
+                            "n6_touched": False,
+                            "canonical_minute_bar_1m_written": False,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            context = resolve_fastlane_runtime_session_context(
+                {
+                    "for_trade_date": "20260706",
+                    "session_context_policy": {
+                        "policy_type": "fastlane_runtime_clock_session_context_v1",
+                        "trade_calendar_is_open": True,
+                        "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                    },
+                }
+            )
+
+        self.assertTrue(context["post_close_final_a_pass_done"])
+        self.assertEqual(context["post_close_final_a_pass_done_marker_path"], str(marker_path))
+        decision = resolve_fastlane_active_worker_decision(
+            lane_key="n3_c1_n3t_action_confirmation",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            for_trade_date_is_current_date=True,
+            trade_calendar_is_open=True,
+            post_close_final_a_pass_available=True,
+            post_close_final_a_pass_done=bool(context["post_close_final_a_pass_done"]),
+        )
+        self.assertEqual(decision["worker_mode"], "post_close_final_a_pass_noop")
+        self.assertEqual(decision["blocked_reason"], "post_close_final_a_pass_done")
+
+    def test_post_close_final_a_done_marker_invalid_fails_closed(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import resolve_fastlane_runtime_session_context
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "done.json"
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                        "for_trade_date": "20260705",
+                        "status": "done",
+                        "completion_mode": "empty_a_noop",
+                        "unprocessed_ref_count": 0,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "post_close_final_a_pass_done_marker_invalid"):
+                resolve_fastlane_runtime_session_context(
+                    {
+                        "for_trade_date": "20260706",
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                            "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        },
+                    }
+                )
 
     def test_contract_locks_new_labels_and_layer_boundaries(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_contract
@@ -1107,7 +1417,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         self.assertEqual(manifest["verdict"], "BLOCKED_N5_LIVE_TRACKING_POLLER")
-        self.assertEqual(manifest["blocked_reason"], "fastlane_worker_pre_open_before_0925_no_write")
+        self.assertEqual(manifest["blocked_reason"], "fastlane_worker_waiting_for_0925_or_n4_triggermatched")
         self.assertFalse(manifest["writes_enabled"])
         self.assertFalse(manifest["artifact_writes_enabled"])
 
@@ -1210,6 +1520,143 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(output.getvalue(), "")
 
+    def test_n5_runner_scheduler_quiet_outputs_compact_summary_for_large_manifest(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        import run_n5_live_tracking_poller_once as runner
+
+        manifest = {
+            "verdict": "N5_LIVE_TRACKING_EXECUTE_PASS",
+            "for_trade_date": "20260707",
+            "writes_enabled": True,
+            "artifact_writes_enabled": True,
+            "fastlane": {"phase": "intake", "session_phase": "continuous_trading"},
+            "write_result": {
+                "executed": True,
+                "common_action_tracking_state": 11,
+                "common_event_outbox": 0,
+            },
+            "plan": {
+                "active_scope_artifact": {
+                    "scope_count": 135,
+                    "active_tracking_ref_count": 238,
+                },
+                "tracking_updates": [
+                    {
+                        "state_key": "state-1",
+                        "source_n4_payload": {"large": "x" * 10000},
+                    }
+                ],
+            },
+            "rollback_contract": {"large": "y" * 10000},
+        }
+
+        output = StringIO()
+        with patch.object(runner, "run_n5_live_tracking_poller_once", return_value=manifest):
+            with redirect_stdout(output):
+                exit_code = runner.main(["--scheduler-quiet", "--json"])
+
+        stdout_text = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertLess(len(stdout_text), 4000)
+        self.assertNotIn("source_n4_payload", stdout_text)
+        self.assertNotIn("tracking_updates", stdout_text)
+        self.assertNotIn("rollback_contract", stdout_text)
+        payload = json.loads(stdout_text)
+        self.assertEqual(payload["verdict"], "N5_LIVE_TRACKING_EXECUTE_PASS")
+        self.assertEqual(payload["for_trade_date"], "20260707")
+        self.assertEqual(payload["session_phase"], "continuous_trading")
+        self.assertEqual(payload["counts"]["scope_count"], 135)
+        self.assertEqual(payload["counts"]["active_tracking_ref_count"], 238)
+        self.assertEqual(payload["write_result"]["common_action_tracking_state"], 11)
+
+    def test_n3_runner_scheduler_quiet_outputs_compact_summary_for_large_blocker(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        manifest = {
+            "verdict": "BLOCKED_N3_C1_N3T_FASTLANE_EXECUTE",
+            "blocked_reason": "scoped_pull_plan_candidate_chunk_incomplete",
+            "for_trade_date": "20260707",
+            "writes_enabled": False,
+            "fastlane": {"session_phase": "continuous_trading"},
+            "active_scope_artifact_count": 238,
+            "active_scope_artifacts": [
+                {
+                    "source_n4_payload": {"large": "x" * 10000},
+                    "scope_rows": [{"identity_key": "stock:SZ:301363"}],
+                }
+            ],
+            "lane_results": {
+                "c1_lane": {
+                    "selected_candidate_count": 12,
+                    "processed_candidate_count": 3,
+                    "skipped_candidate_count": 1,
+                    "remaining_candidate_count": 8,
+                    "reason": "c1_lane_chunk_incomplete",
+                    "hard_blocker_count": 0,
+                    "candidates": [{"large": "y" * 10000}],
+                },
+                "n3t_lane": {
+                    "selected_candidate_count": 4,
+                    "processed_candidate_count": 4,
+                    "remaining_candidate_count": 0,
+                    "reason": "n3t_lane_progressed",
+                },
+            },
+            "scoped_executor_plan": {"artifacts": [{"large": "z" * 10000}]},
+            "boundary": {"writes_db": False, "writes_outbox": False},
+        }
+
+        output = StringIO()
+        with patch.object(runner, "run_n3_c1_n3t_action_confirmation_fastlane_once", return_value=manifest):
+            with redirect_stdout(output):
+                exit_code = runner.main(["--scheduler-quiet", "--json"])
+
+        stdout_text = output.getvalue()
+        self.assertEqual(exit_code, 2)
+        self.assertLess(len(stdout_text), 4000)
+        self.assertNotIn("source_n4_payload", stdout_text)
+        self.assertNotIn("active_scope_artifacts", stdout_text)
+        self.assertNotIn("scoped_executor_plan", stdout_text)
+        self.assertNotIn("candidates", stdout_text)
+        payload = json.loads(stdout_text)
+        self.assertEqual(payload["verdict"], "BLOCKED_N3_C1_N3T_FASTLANE_EXECUTE")
+        self.assertEqual(payload["active_scope_artifact_count"], 238)
+        self.assertEqual(payload["lane_results"]["c1_lane"]["processed_candidate_count"], 3)
+        self.assertEqual(payload["lane_results"]["n3t_lane"]["processed_candidate_count"], 4)
+
+    def test_scheduler_quiet_does_not_change_manual_json_full_manifest_output(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        import run_n5_live_tracking_poller_once as runner
+
+        manifest = {
+            "verdict": "N5_LIVE_TRACKING_EXECUTE_PASS",
+            "writes_enabled": True,
+            "plan": {
+                "tracking_updates": [
+                    {
+                        "source_n4_payload": {"large": "x" * 10000},
+                    }
+                ]
+            },
+        }
+
+        output = StringIO()
+        with patch.object(runner, "run_n5_live_tracking_poller_once", return_value=manifest):
+            with redirect_stdout(output):
+                exit_code = runner.main(["--json"])
+
+        stdout_text = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("source_n4_payload", stdout_text)
+        self.assertIn("tracking_updates", stdout_text)
+
     def test_n5_runner_runtime_clock_session_policy_derives_trading_phase(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
 
@@ -1262,6 +1709,319 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
         self.assertEqual(manifest["fastlane"]["session_phase"], "trading")
         self.assertFalse(manifest["writes_enabled"])
+
+    def test_n5_post_close_empty_a_writes_final_done_marker_from_intake(self) -> None:
+        from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "activation_config.json"
+            scope_dir = root / "scope"
+            marker_path = root / "n5_c1_n3t_post_close_final_a_pass_done_v1.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(scope_dir),
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        "runtime_inputs": {
+                            "n5_action_intake": {
+                                "source_trigger_run_id": "post_close_final_a_scope_snapshot_20260706",
+                                "action_run_id": "n5_live_tracking_20260706__post_close_final_a__fastlane_v1",
+                                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                            }
+                        },
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        },
+                        "execute_policy": {
+                            "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
+                            "user_confirmed": True,
+                            "n5_action_intake": {"execute": False, "write_active_scope_artifact": True},
+                            "n3_c1_n3t_action_confirmation": {"execute": False},
+                            "n5_action_executed": {"execute": False},
+                        },
+                        "active_worker_policy_review_ref": {
+                            "result": "PASS",
+                            "for_trade_date": "20260706",
+                            "active_worker_write_enabled_ready": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            def plan_provider(_args):
+                return {
+                    "action_events": [],
+                    "tracking_updates": [],
+                    "consumed_n4_events": [],
+                    "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+                    "active_scope_snapshot_artifact": {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "artifact_schema_version": "v2",
+                        "for_trade_date": "20260706",
+                        "scope_granularity": "object",
+                        "scope_status": "empty",
+                        "empty_scope_noop": True,
+                        "scope_count": 0,
+                        "active_tracking_ref_count": 0,
+                        "scope_rows": [],
+                    },
+                }
+
+            manifest = run_n5_live_tracking_poller_once(
+                [
+                    "--activation-config",
+                    str(config_path),
+                    "--fastlane-phase",
+                    "intake",
+                    "--write-active-scope-artifact",
+                    "--user-confirmed",
+                ],
+                plan_provider=plan_provider,
+            )
+
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
+        self.assertTrue(manifest["post_close_final_a_pass_done_marker_write_result"]["executed"])
+        self.assertEqual(marker["artifact_type"], "n5_c1_n3t_post_close_final_a_pass_done_v1")
+        self.assertEqual(marker["completion_mode"], "empty_a_noop")
+        self.assertEqual(marker["unprocessed_ref_count"], 0)
+
+    def test_n5_post_close_executed_all_refs_evaluated_writes_done_marker(self) -> None:
+        from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "activation_config.json"
+            marker_path = root / "n5_c1_n3t_post_close_final_a_pass_done_v1.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        "runtime_inputs": {
+                            "n5_action_executed": {
+                                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407",
+                                "source_metric_run_id": "n3t_action_confirmation_metric_20260706_until_1407__fastlane_sr_abc123abc123_raw_prevday_c1_amount_v1",
+                                "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                            }
+                        },
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        },
+                        "execute_policy": {
+                            "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
+                            "user_confirmed": True,
+                            "n5_action_intake": {"execute": False, "write_active_scope_artifact": False},
+                            "n3_c1_n3t_action_confirmation": {"execute": False},
+                            "n5_action_executed": {"execute": True},
+                        },
+                        "active_worker_policy_review_ref": {
+                            "result": "PASS",
+                            "for_trade_date": "20260706",
+                            "active_worker_write_enabled_ready": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            active_row = {
+                "state_key": "stock|SZ|301363|BUY:D",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+                "confirmation_status": "pending",
+                "raw_json": {},
+            }
+
+            def plan_provider(_args):
+                return {
+                    "active_tracking_rows": [active_row],
+                    "action_events": [],
+                    "tracking_updates": [
+                        {
+                            **active_row,
+                            "raw_json": {
+                                "latest_metric_status": "failed",
+                                "metric_evaluation_key": "metric|failed|missing_previous_session_reference",
+                            },
+                        }
+                    ],
+                    "consumed_n4_events": [],
+                    "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+                    "active_scope_snapshot_artifact": {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "scope_count": 1,
+                    },
+                }
+
+            manifest = run_n5_live_tracking_poller_once(
+                [
+                    "--activation-config",
+                    str(config_path),
+                    "--fastlane-phase",
+                    "executed",
+                    "--execute",
+                    "--user-confirmed",
+                ],
+                plan_provider=plan_provider,
+                writer=lambda _args, _plan: {
+                    "executed": True,
+                    "common_action_tracking_state": 1,
+                    "common_event_outbox": 0,
+                    "common_event_inbox": 0,
+                    "common_event_consumer_checkpoint": 0,
+                    "n4_outbox_status_updated": False,
+                },
+            )
+
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_EVALUATION_PASS_NO_ACTIONEXECUTED")
+        self.assertTrue(manifest["post_close_final_a_pass_done_marker_write_result"]["executed"])
+        self.assertEqual(marker["completion_mode"], "n5_executed_all_refs_evaluated")
+        self.assertEqual(marker["evaluated_ref_count"], 1)
+        self.assertEqual(marker["evaluation_only_count"], 1)
+        self.assertEqual(marker["unprocessed_ref_count"], 0)
+
+    def test_n5_post_close_done_marker_uses_full_active_scope_refs(self) -> None:
+        from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "activation_config.json"
+            marker_path = root / "n5_c1_n3t_post_close_final_a_pass_done_v1.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        "runtime_inputs": {
+                            "n5_action_executed": {
+                                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407",
+                                "source_metric_run_id": "n3t_action_confirmation_metric_20260706_until_1407__fastlane_sr_abc123abc123_raw_prevday_c1_amount_v1",
+                                "action_run_id": "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+                                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                            }
+                        },
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        },
+                        "execute_policy": {
+                            "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
+                            "user_confirmed": True,
+                            "n5_action_intake": {"execute": False, "write_active_scope_artifact": False},
+                            "n3_c1_n3t_action_confirmation": {"execute": False},
+                            "n5_action_executed": {"execute": True},
+                        },
+                        "active_worker_policy_review_ref": {
+                            "result": "PASS",
+                            "for_trade_date": "20260706",
+                            "active_worker_write_enabled_ready": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            evaluated_row = {
+                "state_key": "stock|SZ|301363|BUY:D",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+                "confirmation_status": "pending",
+                "raw_json": {},
+            }
+            unevaluated_row = {
+                "state_key": "stock|SZ|301269|BUY:D",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+                "confirmation_status": "pending",
+                "raw_json": {},
+            }
+
+            def plan_provider(_args):
+                return {
+                    "active_tracking_rows": [evaluated_row],
+                    "action_events": [],
+                    "tracking_updates": [
+                        {
+                            **evaluated_row,
+                            "raw_json": {
+                                "latest_metric_status": "failed",
+                                "metric_evaluation_key": "metric|failed|missing_previous_session_reference",
+                            },
+                        }
+                    ],
+                    "consumed_n4_events": [],
+                    "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+                    "active_scope_snapshot_artifact": {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "scope_granularity": "object",
+                        "scope_count": 2,
+                        "active_tracking_ref_count": 2,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260706",
+                                "asset_kind": evaluated_row["asset_kind"],
+                                "identity_key": evaluated_row["identity_key"],
+                                "active_tracking_refs": [evaluated_row],
+                            },
+                            {
+                                "for_trade_date": "20260706",
+                                "asset_kind": unevaluated_row["asset_kind"],
+                                "identity_key": unevaluated_row["identity_key"],
+                                "active_tracking_refs": [unevaluated_row],
+                            },
+                        ],
+                    },
+                }
+
+            manifest = run_n5_live_tracking_poller_once(
+                [
+                    "--activation-config",
+                    str(config_path),
+                    "--fastlane-phase",
+                    "executed",
+                    "--execute",
+                    "--user-confirmed",
+                ],
+                plan_provider=plan_provider,
+                writer=lambda _args, _plan: {
+                    "executed": True,
+                    "common_action_tracking_state": 1,
+                    "common_event_outbox": 0,
+                    "common_event_inbox": 0,
+                    "common_event_consumer_checkpoint": 0,
+                    "n4_outbox_status_updated": False,
+                },
+            )
+
+        marker_result = manifest["post_close_final_a_pass_done_marker_write_result"]
+        self.assertFalse(marker_path.exists())
+        self.assertFalse(marker_result["executed"])
+        self.assertEqual(marker_result["reason"], "active_refs_not_all_evaluated")
+        self.assertEqual(marker_result["evaluated_ref_count"], 1)
+        self.assertEqual(marker_result["unprocessed_ref_count"], 1)
 
     def test_n5_intake_discovery_trigger_time_must_match_trade_date(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
@@ -1784,6 +2544,29 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(n5_executed_stdout.getvalue(), "")
         self.assertEqual(n3_stdout.getvalue(), "")
 
+    def test_scheduler_quiet_treats_waiting_policy_review_reason_as_clean_noop(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _is_scheduler_phase_noop as n3_is_scheduler_phase_noop,
+        )
+        from run_n5_live_tracking_poller_once import (
+            _is_scheduler_phase_noop as n5_is_scheduler_phase_noop,
+        )
+
+        n5_manifest = {
+            "verdict": "BLOCKED_N5_LIVE_TRACKING_POLLER",
+            "blocked_reason": "fastlane active_worker_policy_review_ref_not_ready:waiting_for_0925_or_n4_triggermatched",
+            "writes_enabled": False,
+            "artifact_writes_enabled": False,
+        }
+        n3_manifest = {
+            "verdict": "BLOCKED_N3_C1_N3T_FASTLANE_EXECUTE",
+            "blocked_reason": "fastlane active_worker_policy_review_ref_not_ready:waiting_for_0925_or_n4_triggermatched",
+            "writes_enabled": False,
+        }
+
+        self.assertTrue(n5_is_scheduler_phase_noop(n5_manifest))
+        self.assertTrue(n3_is_scheduler_phase_noop(n3_manifest))
+
     def test_n5_intake_activation_config_uses_read_only_discovery_for_missing_runtime_ids(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
 
@@ -2034,6 +2817,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             patch.object(runner.psycopg, "connect", return_value=FakeConnection()),
             patch.object(runner, "_fetch_pending_n4_rows", return_value=[{"event_type": "TriggerMatched"}]),
             patch.object(runner, "_fetch_active_tracking_rows", return_value=[{"state_key": "active"}]),
+            patch.object(runner, "_fetch_active_scope_tracking_rows", return_value=[{"state_key": "scope-active"}]),
             patch.object(runner, "_fetch_metric_rows", return_value=[{"projection_run_id": args.source_metric_run_id}]),
             patch.object(runner, "_fetch_existing_action_event_keys", return_value={"existing"}),
             patch.object(runner, "build_live_tracking_plan", side_effect=fake_build_live_tracking_plan),
@@ -2043,7 +2827,177 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(plan["summary"]["action_executed_count"], 0)
         self.assertEqual(captured["n4_event_rows"], [])
         self.assertEqual(captured["active_tracking_rows"], [{"state_key": "active"}])
+        self.assertEqual(captured["active_scope_tracking_rows"], [{"state_key": "scope-active"}])
         self.assertEqual(captured["metric_rows"], [{"projection_run_id": args.source_metric_run_id}])
+
+    def test_n5_executed_candidate_plan_passes_full_active_scope_tracking_rows(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        args = argparse.Namespace(
+            for_trade_date="20260707",
+            consumer_name="n5_live_tracking_poller_v2_fastlane",
+            max_events=300,
+        )
+        candidate = {
+            "run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+            "source_trigger_run_id": "",
+            "state_key": "stock|SZ|301363|buy|B_BUY|BUY:D",
+        }
+        source_metric_run_id = (
+            "n3t_action_confirmation_metric_20260707_until_1454"
+            "__fastlane_sr_abc123abc123_raw_prevday_c1_amount_v1"
+        )
+        captured = {}
+
+        def fake_build_live_tracking_plan(**kwargs):
+            captured.update(kwargs)
+            return {
+                "action_events": [],
+                "tracking_updates": [],
+                "consumed_n4_events": [],
+                "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+                "active_scope_snapshot_artifact": {
+                    "artifact_type": "n5_active_scope_snapshot_v1",
+                    "scope_count": 2,
+                },
+                "summary": {"tracking_upsert_count": 0, "action_executed_count": 0},
+            }
+
+        with (
+            patch.object(runner, "_fetch_active_tracking_rows", return_value=[{"state_key": candidate["state_key"]}]),
+            patch.object(
+                runner,
+                "_fetch_active_scope_tracking_rows",
+                return_value=[
+                    {"state_key": candidate["state_key"]},
+                    {"state_key": "stock|SZ|301269|buy|B_BUY|BUY:D"},
+                ],
+            ),
+            patch.object(runner, "_fetch_metric_rows", return_value=[{"projection_run_id": source_metric_run_id}]),
+            patch.object(runner, "_fetch_existing_action_event_keys", return_value=set()),
+            patch.object(runner, "build_live_tracking_plan", side_effect=fake_build_live_tracking_plan),
+        ):
+            plan = runner._build_executed_candidate_plan(object(), args, candidate, source_metric_run_id)
+
+        self.assertEqual(plan["summary"]["tracking_upsert_count"], 0)
+        self.assertEqual(captured["active_tracking_rows"], [{"state_key": candidate["state_key"]}])
+        self.assertEqual(
+            captured["active_scope_tracking_rows"],
+            [
+                {"state_key": candidate["state_key"]},
+                {"state_key": "stock|SZ|301269|buy|B_BUY|BUY:D"},
+            ],
+        )
+        self.assertEqual(captured["source_metric_run_id"], source_metric_run_id)
+
+    def test_n5_intake_discovery_repairs_processed_tsc_true_candidates(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        class FakeCursor:
+            def __init__(self):
+                self.queries: list[tuple[str, object]] = []
+                self.rows = [
+                    {
+                        "first_trigger_time": None,
+                        "latest_trigger_time": None,
+                        "has_trigger_matched": False,
+                        "has_inactive_state_changed": False,
+                        "has_active_state_changed": False,
+                    },
+                    {
+                        "first_trigger_time": "2026-07-06 13:52:00+08",
+                        "latest_trigger_time": "2026-07-06 13:52:00+08",
+                        "has_active_state_changed": True,
+                    },
+                ]
+
+            def execute(self, query, params):
+                self.queries.append((query, params))
+
+            def fetchone(self):
+                return self.rows.pop(0)
+
+        args = argparse.Namespace(for_trade_date="20260706", consumer_name="n5_live_tracking_poller_v2_fastlane")
+        cur = FakeCursor()
+
+        discovered = runner._discover_intake_runtime_inputs(cur, args)
+
+        self.assertEqual(discovered["n5_intake_event_kind"], "active_set_a")
+        self.assertEqual(discovered["action_run_id"], "n5_live_tracking_20260706__active_set_a__fastlane_v1")
+        self.assertEqual(discovered["trigger_time"], "2026-07-06 13:52:00+08")
+        self.assertEqual(len(cur.queries), 2)
+        repair_query = cur.queries[1][0]
+        self.assertIn("common_event_inbox", repair_query)
+        self.assertIn("i.status = 'processed'", repair_query)
+        self.assertIn("TriggerStateChanged", repair_query)
+
+    def test_n5_active_set_default_provider_passes_processed_tsc_true_repair_rows(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def cursor(self):
+                return FakeCursor()
+
+        args = argparse.Namespace(
+            dsn="postgresql:///unused",
+            fastlane_phase="intake",
+            n5_intake_event_kind="active_set_a",
+            for_trade_date="20260706",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            action_run_id="n5_live_tracking_20260706__active_set_a__fastlane_v1",
+            consumer_name="n5_live_tracking_poller_v2_fastlane",
+            max_events=300,
+        )
+        repair_row = {
+            "event_id": "evt-tsc-1352",
+            "event_type": "TriggerStateChanged",
+            "event_time": "2026-07-06T13:52:00+08:00",
+            "payload_json": {"trigger_live": True, "current_status": "matched"},
+        }
+        captured = {}
+
+        def fake_build_live_tracking_plan(**kwargs):
+            captured.update(kwargs)
+            return {
+                "action_events": [],
+                "tracking_updates": [],
+                "consumed_n4_events": [],
+                "inbox_checkpoint_intent": {"source_event_ids": [], "updates_n4_outbox": False},
+                "active_scope_snapshot_artifact": {
+                    "artifact_type": "n5_active_scope_snapshot_v1",
+                    "scope_count": 1,
+                },
+                "summary": {"action_executed_count": 0},
+            }
+
+        with (
+            patch.object(runner.psycopg, "connect", return_value=FakeConnection()),
+            patch.object(runner, "_fetch_pending_n4_rows", return_value=[]),
+            patch.object(runner, "_fetch_processed_tsc_true_repair_rows", return_value=[repair_row]),
+            patch.object(runner, "_fetch_active_tracking_rows", return_value=[]),
+            patch.object(runner, "_fetch_active_scope_tracking_rows", return_value=[]),
+            patch.object(runner, "_fetch_metric_rows", return_value=[]),
+            patch.object(runner, "_fetch_existing_action_event_keys", return_value=set()),
+            patch.object(runner, "build_live_tracking_plan", side_effect=fake_build_live_tracking_plan),
+        ):
+            runner._default_plan_provider(args)
+
+        self.assertEqual(captured["n4_event_rows"], [])
+        self.assertEqual(captured["repair_n4_event_rows"], [repair_row])
 
     def test_n5_executed_phase_writer_does_not_write_inbox_or_checkpoint(self) -> None:
         import run_n5_live_tracking_poller_once as runner
@@ -2143,138 +3097,707 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertTrue(rollback["requires_tracking_restore"])
 
     def test_n5_executed_default_discovery_matches_source_trigger_minute(self) -> None:
-        from run_n5_live_tracking_poller_once import _discover_executed_runtime_inputs
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_action_run_id,
+            build_fastlane_n3t_metric_run_id,
+            build_fastlane_source_run_namespace,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        source_run_id = "trigger_provisional_ordinary_20260703_until_0934__fastlane_v1"
+        action_run_id = build_fastlane_action_run_id(for_trade_date="20260703", source_trigger_run_id=source_run_id)
+        namespace = build_fastlane_source_run_namespace(
+            for_trade_date="20260703",
+            source_trigger_run_id=source_run_id,
+            action_run_id=action_run_id,
+        )
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260703",
+            target_hhmm="0934",
+            source_run_hash=namespace["source_run_hash"],
+        )
 
         class FakeCursor:
             def __init__(self):
-                self.calls = 0
+                self.sql = ""
                 self.params = []
 
-            def execute(self, _sql, params):
-                self.calls += 1
+            def execute(self, sql, params):
+                self.sql = str(sql)
                 self.params.append(params)
 
             def fetchone(self):
-                if self.calls == 1:
-                    return {
-                        "run_id": "n5_live_tracking_20260703__trigger_provisional_ordinary_20260703_until_0934__fastlane_v1",
-                        "source_trigger_run_id": "trigger_provisional_ordinary_20260703_until_0934__fastlane_v1",
-                        "trigger_time": "2026-07-03T09:34:00+08:00",
-                    }
-                if self.calls == 2:
-                    return {
-                        "projection_run_id": "n3t_action_confirmation_metric_20260703_until_0934__fastlane_v1",
-                        "latest_metric_time": "2026-07-03T09:35:00+08:00",
-                    }
-                return None
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    return [
+                        {
+                            "run_id": action_run_id,
+                            "source_trigger_run_id": source_run_id,
+                            "trigger_time": "2026-07-03T09:34:00+08:00",
+                        }
+                    ]
+                if "n3t_action_confirmation_metric" in sql:
+                    return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-03T09:35:00+08:00"}]
+                return []
 
         args = argparse.Namespace(for_trade_date="20260703")
         cursor = FakeCursor()
-        output = _discover_executed_runtime_inputs(cursor, args)
+        with patch.object(
+            runner,
+            "_build_executed_candidate_plan",
+            return_value={"summary": {"action_executed_count": 1}},
+        ):
+            output = runner._discover_executed_runtime_inputs(cursor, args)
 
-        self.assertEqual(output["source_metric_run_id"], "n3t_action_confirmation_metric_20260703_until_0934__fastlane_v1")
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
         self.assertEqual(output["trigger_time"], "2026-07-03T09:34:00+08:00")
         self.assertIn(
-            ("20260703", "%until_0934%", "^n3t_action_confirmation_metric_20260703_until_0934__fastlane.*$"),
+            (
+                "20260703",
+                f"%until_0934__fastlane_sr_{namespace['source_run_hash']}%",
+                (
+                    "^n3t_action_confirmation_metric_20260703_until_0934"
+                    f"__fastlane_sr_{namespace['source_run_hash']}_raw_prevday_c1_amount_v1$"
+                ),
+            ),
             cursor.params,
         )
 
-    def test_n5_executed_default_discovery_rejects_non_fastlane_n3t_metric_run(self) -> None:
-        from run_n5_live_tracking_poller_once import _discover_executed_runtime_inputs
+    def test_n5_executed_default_discovery_matches_empty_source_trigger_run_id_by_ref_hash(self) -> None:
+        import hashlib
+
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_n3t_metric_run_id,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        action_run_id = "n5_live_tracking_20260707__active_set_a__fastlane_v1"
+        state_key = (
+            "N5_action_tracking_state_v1|trade_date|20260707|asset_kind|stock|"
+            "identity_key|stock:SH:603009|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,D"
+        )
+        source_trigger_event_id = "evt_603009_0933"
+        source_run_hash = hashlib.sha256(source_trigger_event_id.encode("utf-8")).hexdigest()[:12]
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260707",
+            target_hhmm="0933",
+            source_run_hash=source_run_hash,
+        )
 
         class FakeCursor:
             def __init__(self):
-                self.calls = 0
+                self.sql = ""
+                self.params = []
+
+            def execute(self, sql, params):
+                self.sql = str(sql)
+                self.params.append(params)
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    return [
+                        {
+                            "run_id": action_run_id,
+                            "source_trigger_run_id": "",
+                            "source_trigger_event_id": source_trigger_event_id,
+                            "state_key": state_key,
+                            "trigger_time": "2026-07-07 09:33:00+08",
+                            "latest_n4_event_time": "2026-07-07 09:33:00+08",
+                            "active_tracking_count": 1,
+                            "raw_json": {
+                                "source_trigger_run_id": "legacy_raw_json_source_trigger_run_id_must_not_override_ref_hash"
+                            },
+                        }
+                    ]
+                if "n3t_action_confirmation_metric" in sql:
+                    return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-07T09:34:00+08:00"}]
+                return []
+
+        planned_candidates = []
+
+        def fake_candidate_plan(_cur, _args, candidate, source_metric_run_id):
+            planned_candidates.append(
+                {
+                    "source_trigger_run_id": candidate.get("source_trigger_run_id"),
+                    "state_key": candidate.get("state_key"),
+                    "source_run_hash": candidate.get("source_run_hash"),
+                    "target_minute_label": candidate.get("target_minute_label"),
+                    "metric_run_id": source_metric_run_id,
+                }
+            )
+            return {"summary": {"tracking_upsert_count": 1}}
+
+        args = argparse.Namespace(for_trade_date="20260707")
+        cursor = FakeCursor()
+        with patch.object(runner, "_build_executed_candidate_plan", side_effect=fake_candidate_plan):
+            output = runner._discover_executed_runtime_inputs(cursor, args)
+
+        self.assertEqual(output["action_run_id"], action_run_id)
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
+        self.assertEqual(output["trigger_time"], "2026-07-07 09:33:00+08")
+        self.assertEqual(output["state_key"], state_key)
+        self.assertNotIn("source_trigger_run_id", output)
+        self.assertEqual(
+            planned_candidates,
+            [
+                {
+                    "source_trigger_run_id": "",
+                    "state_key": state_key,
+                    "source_run_hash": source_run_hash,
+                    "target_minute_label": "0933",
+                    "metric_run_id": metric_run_id,
+                }
+            ],
+        )
+        self.assertIn(
+            (
+                "20260707",
+                f"%until_0933__fastlane_sr_{source_run_hash}%",
+                (
+                    "^n3t_action_confirmation_metric_20260707_until_0933"
+                    f"__fastlane_sr_{source_run_hash}_raw_prevday_c1_amount_v1$"
+                ),
+            ),
+            cursor.params,
+        )
+
+    def test_n5_executed_ref_scoped_discovery_uses_next_unchecked_minute_label(self) -> None:
+        import hashlib
+
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_n3t_metric_run_id,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        action_run_id = "n5_live_tracking_20260707__active_set_a__fastlane_v1"
+        state_key = (
+            "N5_action_tracking_state_v1|trade_date|20260707|asset_kind|stock|"
+            "identity_key|stock:SH:603009|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,D"
+        )
+        source_trigger_event_id = "evt_603009_0933"
+        source_run_hash = hashlib.sha256(source_trigger_event_id.encode("utf-8")).hexdigest()[:12]
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260707",
+            target_hhmm="0934",
+            source_run_hash=source_run_hash,
+        )
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = []
+
+            def execute(self, sql, params):
+                self.sql = str(sql)
+                self.params.append(params)
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    return [
+                        {
+                            "run_id": action_run_id,
+                            "source_trigger_run_id": "",
+                            "source_trigger_event_id": source_trigger_event_id,
+                            "state_key": state_key,
+                            "trigger_time": "2026-07-07 09:33:00+08",
+                            "latest_n4_event_time": "2026-07-07 09:33:00+08",
+                            "last_checked_minute_label": "09:33",
+                            "active_tracking_count": 1,
+                            "raw_json": {},
+                        }
+                    ]
+                if "n3t_action_confirmation_metric" in sql:
+                    if any("until_0934" in str(param) for param in self.params[-1]):
+                        return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-07T09:34:00+08:00"}]
+                    return []
+                return []
+
+        planned_candidates = []
+
+        def fake_candidate_plan(_cur, _args, candidate, source_metric_run_id):
+            planned_candidates.append(
+                {
+                    "source_trigger_run_id": candidate.get("source_trigger_run_id"),
+                    "state_key": candidate.get("state_key"),
+                    "source_run_hash": candidate.get("source_run_hash"),
+                    "target_minute_label": candidate.get("target_minute_label"),
+                    "metric_run_id": source_metric_run_id,
+                }
+            )
+            return {"summary": {"tracking_upsert_count": 1}}
+
+        args = argparse.Namespace(for_trade_date="20260707")
+        cursor = FakeCursor()
+        with patch.object(runner, "_build_executed_candidate_plan", side_effect=fake_candidate_plan):
+            output = runner._discover_executed_runtime_inputs(cursor, args)
+
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
+        self.assertEqual(
+            planned_candidates,
+            [
+                {
+                    "source_trigger_run_id": "",
+                    "state_key": state_key,
+                    "source_run_hash": source_run_hash,
+                    "target_minute_label": "0934",
+                    "metric_run_id": metric_run_id,
+                }
+            ],
+        )
+
+    def test_n5_executed_candidate_plan_passes_ref_state_key_for_empty_source_trigger_run_id(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        state_key = (
+            "N5_action_tracking_state_v1|trade_date|20260707|asset_kind|stock|"
+            "identity_key|stock:SH:603009|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,D"
+        )
+        args = argparse.Namespace(
+            for_trade_date="20260707",
+            fastlane_phase="executed",
+            consumer_name="",
+            max_events=100,
+        )
+        candidate = {
+            "run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+            "source_trigger_run_id": "",
+            "state_key": state_key,
+        }
+
+        with patch.object(runner, "_fetch_active_tracking_rows", return_value=[]) as fetch_active, patch.object(
+            runner, "_fetch_active_scope_tracking_rows", return_value=[]
+        ), patch.object(runner, "_fetch_metric_rows", return_value=[]), patch.object(
+            runner, "_fetch_existing_action_event_keys", return_value=set()
+        ), patch.object(runner, "build_live_tracking_plan", return_value={"summary": {"tracking_upsert_count": 0}}):
+            runner._build_executed_candidate_plan(None, args, candidate, "n3t_action_confirmation_metric_run")
+
+        fetch_args = fetch_active.call_args.args[1]
+        self.assertEqual(fetch_args.fastlane_ref_state_key, state_key)
+        self.assertEqual(fetch_args.source_trigger_run_id, "")
+
+    def test_n5_executed_activation_discovery_wires_ref_state_key_for_empty_source_trigger_run_id(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        state_key = (
+            "N5_action_tracking_state_v1|trade_date|20260707|asset_kind|stock|"
+            "identity_key|stock:SH:603009|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,D"
+        )
+        args = argparse.Namespace(
+            activation_config="/tmp/activation.json",
+            execute=False,
+            write_active_scope_artifact=False,
+            fastlane_phase="executed",
+            fastlane_lane_id="",
+            for_trade_date="",
+            fastlane_trigger_time="",
+            source_trigger_run_id="",
+            source_metric_run_id="",
+            action_run_id="",
+            consumer_name="",
+            n5_intake_event_kind="",
+            active_scope_artifact_path="",
+            post_close_final_a_pass_done_marker_path="",
+            max_events=0,
+            max_runtime_seconds=0.0,
+        )
+        config = {
+            "for_trade_date": "20260707",
+            "runtime_inputs": {"n5_action_executed": {}},
+            "activation_config_policy": {"dsn_env_policy": "runtime_env_required_no_secret_in_artifact"},
+            "session_context": {
+                "trigger_time": "2026-07-07T09:33:00+08:00",
+                "current_exchange_time": "2026-07-07T09:35:00+08:00",
+                "trade_calendar_is_open": True,
+                "closed_minute_available": True,
+                "formal_trigger_matched_available": True,
+            },
+        }
+
+        with patch.object(runner, "load_fastlane_activation_config", return_value=config), patch.object(
+            runner,
+            "validate_fastlane_write_enabled_activation_authorization",
+            return_value=None,
+        ), patch.object(
+            runner,
+            "_apply_fastlane_worker_phase_gate",
+            return_value=None,
+        ):
+            runner._apply_activation_config(
+                args,
+                activation_discovery_provider=lambda _args, _config: {
+                    "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                    "source_metric_run_id": "n3t_action_confirmation_metric_20260707_until_0933__fastlane_sr_hash",
+                    "state_key": state_key,
+                    "trigger_time": "2026-07-07 09:33:00+08",
+                },
+            )
+
+        self.assertEqual(args.fastlane_ref_state_key, state_key)
+        self.assertEqual(args.source_trigger_run_id, "")
+        self.assertEqual(args.source_metric_run_id, "n3t_action_confirmation_metric_20260707_until_0933__fastlane_sr_hash")
+
+    def test_n5_executed_validate_args_accepts_ref_scoped_metric_without_source_trigger_run_id(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        args = argparse.Namespace(
+            for_trade_date="20260707",
+            fastlane_phase="executed",
+            action_run_id="n5_live_tracking_20260707__active_set_a__fastlane_v1",
+            consumer_name="n5_live_tracking_poller_v2_fastlane",
+            source_trigger_run_id="",
+            source_metric_run_id="n3t_action_confirmation_metric_20260707_until_0933__fastlane_sr_hash",
+            fastlane_ref_state_key="state-key",
+            n5_intake_event_kind="",
+            max_events=100,
+            max_runtime_seconds=10.0,
+        )
+
+        runner._validate_args(args)
+
+    def test_n5_executed_default_discovery_rejects_non_fastlane_n3t_metric_run(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_action_run_id,
+            build_fastlane_n3t_metric_run_id,
+            build_fastlane_source_run_namespace,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        source_run_id = "trigger_provisional_ordinary_20260703_until_0938__fastlane_v1"
+        action_run_id = build_fastlane_action_run_id(for_trade_date="20260703", source_trigger_run_id=source_run_id)
+        namespace = build_fastlane_source_run_namespace(
+            for_trade_date="20260703",
+            source_trigger_run_id=source_run_id,
+            action_run_id=action_run_id,
+        )
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260703",
+            target_hhmm="0938",
+            source_run_hash=namespace["source_run_hash"],
+        )
+
+        class FakeCursor:
+            def __init__(self):
                 self.sql_by_call = []
                 self.params = []
 
             def execute(self, sql, params):
-                self.calls += 1
                 self.sql_by_call.append(str(sql))
                 self.params.append(params)
 
             def fetchone(self):
-                if self.calls == 1:
-                    return {
-                        "run_id": "n5_live_tracking_20260703__trigger_provisional_ordinary_20260703_until_0938__fastlane_v1",
-                        "source_trigger_run_id": "trigger_provisional_ordinary_20260703_until_0938__fastlane_v1",
-                    }
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                if "from common_action_tracking_state" in self.sql_by_call[-1].lower():
+                    return [{"run_id": action_run_id, "source_trigger_run_id": source_run_id}]
                 metric_sql = self.sql_by_call[-1].lower()
                 metric_params = self.params[-1]
-                if "projection_run_id ~" not in metric_sql or len(metric_params) < 3:
-                    return {
-                        "projection_run_id": (
-                            "n3t_action_confirmation_metric_20260703_until_0938"
-                            "__time_ordered_backlog_raw_prevday_c1_amount_v1"
-                        ),
-                        "latest_metric_time": "2026-07-03T09:39:00+08:00",
-                    }
-                return {
-                    "projection_run_id": (
-                        "n3t_action_confirmation_metric_20260703_until_0938"
-                        "__fastlane_raw_prevday_c1_amount_v1"
-                    ),
-                    "latest_metric_time": "2026-07-03T09:39:00+08:00",
-                }
+                if "projection_run_id ~" not in metric_sql or namespace["source_run_hash"] not in str(metric_params[-1]):
+                    return []
+                return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-03T09:39:00+08:00"}]
 
         args = argparse.Namespace(for_trade_date="20260703")
         cursor = FakeCursor()
-        output = _discover_executed_runtime_inputs(cursor, args)
+        with patch.object(
+            runner,
+            "_build_executed_candidate_plan",
+            return_value={"summary": {"action_executed_count": 1}},
+        ):
+            output = runner._discover_executed_runtime_inputs(cursor, args)
 
-        self.assertEqual(
-            output["source_metric_run_id"],
-            "n3t_action_confirmation_metric_20260703_until_0938__fastlane_raw_prevday_c1_amount_v1",
-        )
-        metric_params = [params for params in cursor.params if len(params) >= 3]
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
+        metric_params = [params for params in cursor.params if len(params) >= 3 and isinstance(params[2], str)]
         self.assertTrue(metric_params)
         self.assertIn(
-            "^n3t_action_confirmation_metric_20260703_until_0938__fastlane",
+            f"__fastlane_sr_{namespace['source_run_hash']}_raw_prevday_c1_amount_v1$",
             metric_params[0][2],
         )
 
     def test_n5_executed_default_discovery_scopes_to_fastlane_tracking_run_family(self) -> None:
-        from run_n5_live_tracking_poller_once import _discover_executed_runtime_inputs
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_action_run_id,
+            build_fastlane_n3t_metric_run_id,
+            build_fastlane_source_run_namespace,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        source_run_id = "trigger_provisional_ordinary_20260703_until_0933__fastlane_v1"
+        action_run_id = build_fastlane_action_run_id(for_trade_date="20260703", source_trigger_run_id=source_run_id)
+        namespace = build_fastlane_source_run_namespace(
+            for_trade_date="20260703",
+            source_trigger_run_id=source_run_id,
+            action_run_id=action_run_id,
+        )
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260703",
+            target_hhmm="0933",
+            source_run_hash=namespace["source_run_hash"],
+        )
 
         class FakeCursor:
             def __init__(self):
-                self.calls = 0
                 self.sql_by_call = []
                 self.params = []
 
             def execute(self, sql, params):
-                self.calls += 1
                 self.sql_by_call.append(str(sql))
                 self.params.append(params)
 
             def fetchone(self):
-                if self.calls == 1:
-                    sql = self.sql_by_call[-1].lower()
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql_by_call[-1].lower()
+                if "from common_action_tracking_state" in sql:
                     if "run_id ~" not in sql:
-                        return {
-                            "run_id": "n5_live_tracking_20260703__legacy_consumer",
-                            "source_trigger_run_id": "trigger_provisional_ordinary_20260703_until_0931__legacy",
-                        }
-                    return {
-                        "run_id": "n5_live_tracking_20260703__trigger_provisional_ordinary_20260703_until_0933__fastlane_v1",
-                        "source_trigger_run_id": "trigger_provisional_ordinary_20260703_until_0933__fastlane_v1",
-                    }
-                if self.calls == 2:
-                    return {
-                        "projection_run_id": "n3t_action_confirmation_metric_20260703_until_0933__fastlane_v1",
-                        "latest_metric_time": "2026-07-03T09:34:00+08:00",
-                    }
-                return None
+                        return [
+                            {
+                                "run_id": "n5_live_tracking_20260703__legacy_consumer",
+                                "source_trigger_run_id": "trigger_provisional_ordinary_20260703_until_0931__legacy",
+                            }
+                        ]
+                    return [{"run_id": action_run_id, "source_trigger_run_id": source_run_id}]
+                if "n3t_action_confirmation_metric" in sql:
+                    return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-03T09:34:00+08:00"}]
+                return []
 
         args = argparse.Namespace(for_trade_date="20260703")
         cursor = FakeCursor()
-        output = _discover_executed_runtime_inputs(cursor, args)
+        with patch.object(
+            runner,
+            "_build_executed_candidate_plan",
+            return_value={"summary": {"action_executed_count": 1}},
+        ):
+            output = runner._discover_executed_runtime_inputs(cursor, args)
 
-        self.assertEqual(
-            output["action_run_id"],
-            "n5_live_tracking_20260703__trigger_provisional_ordinary_20260703_until_0933__fastlane_v1",
-        )
-        self.assertEqual(output["source_metric_run_id"], "n3t_action_confirmation_metric_20260703_until_0933__fastlane_v1")
+        self.assertEqual(output["action_run_id"], action_run_id)
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
         self.assertIn(r"^n5_live_tracking_.*__fastlane_v1$", cursor.params[0])
+
+    def test_n5_executed_discovery_skips_ready_source_run_without_actionexecuted_candidates(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_action_run_id,
+            build_fastlane_n3t_metric_run_id,
+            build_fastlane_source_run_namespace,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        source_0931 = (
+            "trigger_provisional_ordinary_20260706_until_0931"
+            "__realtime_action_confirmation_metric_20260706_until_0931__asset_all"
+        )
+        action_0931 = build_fastlane_action_run_id(for_trade_date="20260706", source_trigger_run_id=source_0931)
+        ns_0931 = build_fastlane_source_run_namespace(
+            for_trade_date="20260706",
+            source_trigger_run_id=source_0931,
+            action_run_id=action_0931,
+        )
+        metric_0931 = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260706",
+            target_hhmm="0931",
+            source_run_hash=ns_0931["source_run_hash"],
+        )
+        source_0955 = (
+            "trigger_provisional_ordinary_20260706_until_0955"
+            "__realtime_action_confirmation_metric_20260706_until_0955__asset_all"
+        )
+        action_0955 = build_fastlane_action_run_id(for_trade_date="20260706", source_trigger_run_id=source_0955)
+        ns_0955 = build_fastlane_source_run_namespace(
+            for_trade_date="20260706",
+            source_trigger_run_id=source_0955,
+            action_run_id=action_0955,
+        )
+        metric_0955 = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260706",
+            target_hhmm="0955",
+            source_run_hash=ns_0955["source_run_hash"],
+        )
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = ()
+
+            def execute(self, sql, params):
+                self.sql = str(sql)
+                self.params = params
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    return [
+                        {
+                            "run_id": action_0931,
+                            "source_trigger_run_id": source_0931,
+                            "trigger_time": "2026-07-06T09:31:00+08:00",
+                        },
+                        {
+                            "run_id": action_0955,
+                            "source_trigger_run_id": source_0955,
+                            "trigger_time": "2026-07-06T09:55:00+08:00",
+                        },
+                    ]
+                if "n3t_action_confirmation_metric" in sql:
+                    regex = str(self.params[2])
+                    if ns_0931["source_run_hash"] in regex:
+                        return [{"projection_run_id": metric_0931, "latest_metric_time": "2026-07-06T09:32:00+08:00"}]
+                    if ns_0955["source_run_hash"] in regex:
+                        return [{"projection_run_id": metric_0955, "latest_metric_time": "2026-07-06T09:56:00+08:00"}]
+                return []
+
+        planned_candidates = []
+
+        def fake_candidate_plan(_cur, _args, candidate, source_metric_run_id):
+            planned_candidates.append((candidate["source_trigger_run_id"], source_metric_run_id))
+            if source_metric_run_id == metric_0931:
+                return {"summary": {"action_executed_count": 0}}
+            return {"summary": {"action_executed_count": 3}}
+
+        args = argparse.Namespace(for_trade_date="20260706")
+        with patch.object(runner, "_build_executed_candidate_plan", side_effect=fake_candidate_plan):
+            output = runner._discover_executed_runtime_inputs(FakeCursor(), args)
+
+        self.assertEqual(output["action_run_id"], action_0955)
+        self.assertEqual(output["source_trigger_run_id"], source_0955)
+        self.assertEqual(output["source_metric_run_id"], metric_0955)
+        self.assertEqual(
+            planned_candidates,
+            [(source_0931, metric_0931), (source_0955, metric_0955)],
+        )
+
+    def test_n5_executed_discovery_selects_candidate_with_new_pending_evidence(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_action_run_id,
+            build_fastlane_n3t_metric_run_id,
+            build_fastlane_source_run_namespace,
+        )
+        import run_n5_live_tracking_poller_once as runner
+
+        source_run_id = (
+            "trigger_provisional_b2_20260706_until_1354"
+            "__realtime_action_confirmation_metric_20260706_until_1354__asset_all"
+        )
+        action_run_id = build_fastlane_action_run_id(for_trade_date="20260706", source_trigger_run_id=source_run_id)
+        namespace = build_fastlane_source_run_namespace(
+            for_trade_date="20260706",
+            source_trigger_run_id=source_run_id,
+            action_run_id=action_run_id,
+        )
+        metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260706",
+            target_hhmm="1354",
+            source_run_hash=namespace["source_run_hash"],
+        )
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = ()
+
+            def execute(self, sql, params):
+                self.sql = str(sql)
+                self.params = params
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    return [
+                        {
+                            "run_id": action_run_id,
+                            "source_trigger_run_id": source_run_id,
+                            "trigger_time": "2026-07-06T13:54:00+08:00",
+                        }
+                    ]
+                if "n3t_action_confirmation_metric" in sql:
+                    return [{"projection_run_id": metric_run_id, "latest_metric_time": "2026-07-06T13:55:00+08:00"}]
+                return []
+
+        with patch.object(
+            runner,
+            "_build_executed_candidate_plan",
+            return_value={
+                "summary": {"action_executed_count": 0, "tracking_upsert_count": 1},
+                "tracking_updates": [
+                    {
+                        "action_state": "eligible",
+                        "confirmation_status": "pending",
+                        "raw_json": {
+                            "latest_metric_status": {
+                                "projection_run_id": metric_run_id,
+                                "reason": "missing_previous_session_reference",
+                            }
+                        },
+                    }
+                ],
+                "action_events": [],
+            },
+        ):
+            output = runner._discover_executed_runtime_inputs(FakeCursor(), argparse.Namespace(for_trade_date="20260706"))
+
+        self.assertEqual(output["action_run_id"], action_run_id)
+        self.assertEqual(output["source_trigger_run_id"], source_run_id)
+        self.assertEqual(output["source_metric_run_id"], metric_run_id)
+
+    def test_n5_executed_discovery_waits_cleanly_when_matching_n3t_metric_missing(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_action_run_id
+        import run_n5_live_tracking_poller_once as runner
+
+        source_run_id = (
+            "trigger_provisional_b2_20260706_until_1354"
+            "__realtime_action_confirmation_metric_20260706_until_1354__asset_all"
+        )
+        action_run_id = build_fastlane_action_run_id(for_trade_date="20260706", source_trigger_run_id=source_run_id)
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+
+            def execute(self, sql, _params):
+                self.sql = str(sql)
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                if "from common_action_tracking_state" in self.sql.lower():
+                    return [
+                        {
+                            "run_id": action_run_id,
+                            "source_trigger_run_id": source_run_id,
+                            "trigger_time": "2026-07-06T13:54:00+08:00",
+                        }
+                    ]
+                return []
+
+        with self.assertRaises(runner.N5LiveTrackingBlocked) as ctx:
+            runner._discover_executed_runtime_inputs(FakeCursor(), argparse.Namespace(for_trade_date="20260706"))
+
+        self.assertEqual(str(ctx.exception), "fastlane_worker_waiting_for_n3t_c1_closed_metric")
 
     def test_n5_intake_default_discovery_includes_inactive_state_change_runs(self) -> None:
         from run_n5_live_tracking_poller_once import _discover_intake_runtime_inputs
@@ -2292,8 +3815,11 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 sql = self.sql.lower()
                 if "triggerstatechanged" in sql and "trigger_live" in sql and "false" in sql:
                     return {
-                        "source_run_id": "trigger_provisional_ordinary_20260703_until_0943__fastlane_false_only",
-                        "trigger_time": "2026-07-03T09:43:00+08:00",
+                        "first_trigger_time": "2026-07-03T09:43:00+08:00",
+                        "latest_trigger_time": "2026-07-03T09:43:00+08:00",
+                        "has_trigger_matched": False,
+                        "has_inactive_state_changed": True,
+                        "has_active_state_changed": False,
                     }
                 return None
 
@@ -2301,12 +3827,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         cursor = FakeCursor()
         output = _discover_intake_runtime_inputs(cursor, args)
 
-        self.assertEqual(
-            output["source_trigger_run_id"],
-            "trigger_provisional_ordinary_20260703_until_0943__fastlane_false_only",
-        )
+        self.assertNotIn("source_trigger_run_id", output)
         self.assertEqual(output["trigger_time"], "2026-07-03T09:43:00+08:00")
-        self.assertEqual(output["n5_intake_event_kind"], "inactive_TriggerStateChanged_false")
+        self.assertEqual(output["n5_intake_event_kind"], "active_set_a")
+        self.assertEqual(output["action_run_id"], "n5_live_tracking_20260703__active_set_a__fastlane_v1")
         self.assertEqual(output["consumer_name"], "n5_live_tracking_poller_v2_fastlane")
         self.assertEqual(cursor.params, ("20260703", "n5_live_tracking_poller_v2_fastlane"))
 
@@ -2326,25 +3850,28 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 sql = self.sql.lower()
                 if "common_event_inbox" not in sql:
                     return {
-                        "source_run_id": "trigger_provisional_ordinary_20260703_until_0931__already_consumed",
+                        "first_trigger_time": "2026-07-03T09:31:00+08:00",
+                        "latest_trigger_time": "2026-07-03T09:31:00+08:00",
                         "has_trigger_matched": True,
-                        "trigger_time": "2026-07-03T09:31:00+08:00",
+                        "has_inactive_state_changed": False,
+                        "has_active_state_changed": False,
                     }
                 return {
-                    "source_run_id": "trigger_provisional_ordinary_20260703_until_0933__next",
+                    "first_trigger_time": "2026-07-03T09:33:00+08:00",
+                    "latest_trigger_time": "2026-07-03T09:33:00+08:00",
                     "has_trigger_matched": True,
-                    "trigger_time": "2026-07-03T09:33:00+08:00",
+                    "has_inactive_state_changed": False,
+                    "has_active_state_changed": False,
                 }
 
         args = argparse.Namespace(for_trade_date="20260703")
         cursor = FakeCursor()
         output = _discover_intake_runtime_inputs(cursor, args)
 
-        self.assertEqual(
-            output["source_trigger_run_id"],
-            "trigger_provisional_ordinary_20260703_until_0933__next",
-        )
+        self.assertNotIn("source_trigger_run_id", output)
         self.assertEqual(output["trigger_time"], "2026-07-03T09:33:00+08:00")
+        self.assertEqual(output["n5_intake_event_kind"], "active_set_a")
+        self.assertEqual(output["action_run_id"], "n5_live_tracking_20260703__active_set_a__fastlane_v1")
         self.assertIn("common_event_inbox", cursor.sql)
         self.assertIn("consumer_name", cursor.sql)
         self.assertEqual(cursor.params, ("20260703", "n5_live_tracking_poller_v2_fastlane"))
@@ -2807,6 +4334,106 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, joined)
 
+    def test_post_close_readiness_rollover_writes_next_day_waiting_config_and_stable_pointer(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_active_launchd_plan,
+            write_fastlane_post_close_readiness_config_rollover,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_path = root / "write_enabled_activation_config_20260706_runtime_deferred_v1.json"
+            output_dir = root / "activation"
+            base_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_intake_interval_seconds": 3,
+                        "n3_c1_n3t_interval_seconds": 5,
+                        "n5_executed_interval_seconds": 3,
+                        "n5_intake_max_events": 300,
+                        "n5_active_scope_artifact_dir": "docs/runtime/20260706/n5_fastlane_active_scope",
+                        "n3_c1_n3t_artifact_dir": "docs/runtime/20260706/n3_c1_n3t_fastlane",
+                        "n3_c1_n3t_current_day_source_artifact_dir": "docs/runtime/20260706/n3_c1_n3t_fastlane/current_day_source",
+                        "n3_c1_n3t_current_day_source_provider": "mootdx_today_minute_adapter_v1",
+                        "n3_c1_n3t_metric_context_source_artifact_dir": "docs/runtime/20260706/n3_c1_n3t_fastlane/metric_context_source",
+                        "n3_c1_n3t_previous_day_context_artifact_dir": "docs/runtime/20260706/n3_c1_n3t_fastlane/previous_day_context",
+                        "n3_c1_n3t_previous_day_context_provider": "postgres_previous_day_raw_c1_context_v1",
+                        "n3_c1_n3t_n3t_writer_adapter": "postgres_n3t_action_confirmation_metric_writer_v1",
+                        "dsn_env_policy": "runtime_env_required_no_secret_in_artifact",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            report = write_fastlane_post_close_readiness_config_rollover(
+                base_activation_config_path=base_path,
+                output_dir=output_dir,
+                for_trade_date="20260706",
+                next_trade_date="20260707",
+                trade_calendar_is_open=True,
+                current_exchange_time="2026-07-06T18:00:00+08:00",
+                active_worker_policy_review_path=root
+                / "policy_review"
+                / "20260707"
+                / "active_worker_policy_review_current_latest.json",
+            )
+            dated_config = json.loads(Path(report["dated_activation_config_path"]).read_text(encoding="utf-8"))
+            stable_config = json.loads(Path(report["stable_activation_config_path"]).read_text(encoding="utf-8"))
+            review = json.loads(Path(report["active_worker_policy_review_path"]).read_text(encoding="utf-8"))
+            plan = build_fastlane_active_launchd_plan(
+                working_directory=WORKING_DIRECTORY,
+                activation_config_path=report["stable_activation_config_path"],
+            )
+
+        self.assertEqual(report["result"], "PASS")
+        self.assertEqual(report["next_trade_date"], "20260707")
+        self.assertEqual(dated_config["for_trade_date"], "20260707")
+        self.assertEqual(stable_config["for_trade_date"], "20260707")
+        self.assertEqual(review["result"], "WAITING")
+        self.assertFalse(review["active_worker_write_enabled_ready"])
+        self.assertEqual(report["active_worker_policy_review"]["result"], "WAITING")
+        self.assertTrue(report["stable_atomic_write"]["os_replace_used"])
+        self.assertFalse(report["boundary"]["db_written"])
+        self.assertFalse(report["boundary"]["runtime_executed"])
+        self.assertFalse(report["boundary"]["n4_outbox_updated"])
+        self.assertFalse(report["boundary"]["inbox_checkpoint_written"])
+        self.assertEqual(plan["activation_config_path"], report["stable_activation_config_path"])
+        for key in plan["launchd_plist_keys"]:
+            self.assertIn(report["stable_activation_config_path"], plan[key]["plist"]["ProgramArguments"])
+
+    def test_stable_activation_config_atomic_write_rejects_invalid_config_without_replacement(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import write_fastlane_stable_activation_config_atomic
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stable_path = Path(tmpdir) / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+            stable_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            before = stable_path.read_text(encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                write_fastlane_stable_activation_config_atomic(
+                    stable_activation_config_path=stable_path,
+                    config={
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260708",
+                    },
+                    expected_for_trade_date="20260707",
+                )
+
+            self.assertEqual(stable_path.read_text(encoding="utf-8"), before)
+            self.assertFalse(stable_path.with_name(stable_path.name + ".tmp").exists())
+
     def test_write_enabled_activation_config_builder_adds_session_and_execute_policy(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
             build_fastlane_active_launchd_plan,
@@ -2870,6 +4497,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(config["artifact_type"], "n5_n3t_fastlane_activation_config_v1")
         self.assertEqual(config["session_context_policy"]["policy_type"], "fastlane_runtime_clock_session_context_v1")
         self.assertTrue(config["session_context_policy"]["trade_calendar_is_open"])
+        self.assertTrue(config["session_context_policy"]["post_close_final_a_pass_available"])
         self.assertEqual(config["execute_policy"]["policy_type"], "n5_n3t_fastlane_write_enabled_execute_policy_v1")
         self.assertTrue(config["execute_policy"]["user_confirmed"])
         self.assertTrue(config["execute_policy"]["n5_action_intake"]["execute"])
@@ -2915,6 +4543,58 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertIn("--write-active-scope-artifact", plan["n5_intake"]["plist"]["ProgramArguments"])
         self.assertIn("--execute", plan["n3_c1_n3t"]["plist"]["ProgramArguments"])
         self.assertIn("--execute", plan["n5_executed"]["plist"]["ProgramArguments"])
+
+    def test_write_enabled_activation_config_builder_derives_metric_context_source_dir(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_write_enabled_activation_config
+
+        base_config = {
+            "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+            "for_trade_date": "20260706",
+            "n5_intake_interval_seconds": 3,
+            "n3_c1_n3t_interval_seconds": 5,
+            "n5_executed_interval_seconds": 3,
+            "n5_intake_max_events": 300,
+            "n5_active_scope_artifact_dir": "docs/runtime/20260706/n5_fastlane_active_scope",
+            "n3_c1_n3t_artifact_dir": "docs/runtime/20260706/n3_c1_n3t_fastlane",
+            "lock_dir": "tmp/fastlane_locks",
+            "log_dir": "tmp/fastlane_logs",
+            "dsn_env_policy": "runtime_env_required_no_secret_in_artifact",
+        }
+        active_worker_policy_review = {
+            "result": "PASS",
+            "final_verdict": "RUNTIME_CONTROL_FASTLANE_ACTIVE_WORKER_POLICY_PASS_READY_FOR_WRITE_ENABLED_ACTIVATION_CONFIG_GATE",
+            "for_trade_date": "20260706",
+            "active_worker_write_enabled_ready": True,
+            "automatic_chain_verified": True,
+            "manual_gate_required": False,
+            "chain_backlog": {
+                "n5_intake_remaining": 0,
+                "n3t_metric_remaining": 0,
+            },
+            "waiting_reasons": [],
+            "blockers": [],
+        }
+
+        config = build_fastlane_write_enabled_activation_config(
+            base_config,
+            trade_calendar_is_open=True,
+            active_worker_policy_review=active_worker_policy_review,
+            enable_n3_c1_n3t=True,
+            n3_c1_n3t_current_day_source_artifact_dir=(
+                "docs/runtime/20260706/n3_c1_n3t_fastlane/current_day_source"
+            ),
+            n3_c1_n3t_current_day_source_provider="mootdx_today_minute_adapter_v1",
+            n3_c1_n3t_previous_day_context_artifact_dir=(
+                "docs/runtime/20260706/n3_c1_n3t_fastlane/previous_day_context"
+            ),
+            n3_c1_n3t_previous_day_context_provider="postgres_previous_day_raw_c1_context_v1",
+            n3_c1_n3t_n3t_writer_adapter="postgres_n3t_action_confirmation_metric_writer_v1",
+        )
+
+        self.assertEqual(
+            config["n3_c1_n3t_metric_context_source_artifact_dir"],
+            "docs/runtime/20260706/n3_c1_n3t_fastlane/metric_context_source",
+        )
 
     def test_write_enabled_activation_config_builder_requires_active_worker_policy_review(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_write_enabled_activation_config
@@ -5672,15 +7352,14 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 encoding="utf-8",
             )
             current_rows = []
-            previous_rows = []
-            labels = tuple(f"09:{minute:02d}" for minute in range(30, 44))
+            labels = tuple(f"09:{minute:02d}" for minute in range(31, 44))
             for index, label in enumerate(labels, start=1):
-                current_rows.append(
-                    {
-                        **scope_row,
-                        "physical_c1_label": label,
-                        "raw_source_label": f"09:{30 + index:02d}",
-                        "open": 12 + index / 10,
+	                current_rows.append(
+	                    {
+	                        **scope_row,
+	                        "physical_c1_label": label,
+	                        "raw_source_label": source_close_label_for_physical_start_label("20260703", label)["raw_source_label"],
+	                        "open": 12 + index / 10,
                         "high": 12.8 + index / 10,
                         "low": 11.9,
                         "close": 12.2 + index / 10,
@@ -5689,20 +7368,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "fake_or_synthetic_row": False,
                     }
                 )
-                previous_rows.append(
-                    {
-                        "asset_kind": "stock",
-                        "identity_key": "stock:SZ:300803",
-                        "physical_c1_label": label,
-                        "open": 10 + index / 10,
-                        "high": 10.8 + index / 10,
-                        "low": 9.9,
-                        "close": 10.3 + index / 10,
-                        "amount": 900 + index,
-                        "source_row_ref": f"previous:300803:{label}",
-                        "fake_or_synthetic_row": False,
-                    }
-                )
+            previous_rows = _previous_day_c1_rows_for_fixture()
             (current_source_dir / "n3_c1_scoped_current_day_source_rows_v1_20260703_0943_abee3680ddd4.json").write_text(
                 json.dumps(
                     {
@@ -5778,7 +7444,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(staging["artifact_type"], "n3_c1_scoped_current_day_staging_v1")
         self.assertEqual(staging["artifact_status"], "passed")
         self.assertEqual(staging["scope_count"], 1)
-        self.assertEqual(staging["closed_minute_row_count"], 14)
+        self.assertEqual(staging["closed_minute_row_count"], 13)
         self.assertFalse(staging["database_written"])
         self.assertFalse(staging["writes_canonical_minute_bar_1m"])
         self.assertFalse(staging["writes_n3_outbox"])
@@ -5834,22 +7500,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            previous_rows = []
-            for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(30, 44)), start=1):
-                previous_rows.append(
-                    {
-                        "asset_kind": "stock",
-                        "identity_key": "stock:SZ:300803",
-                        "physical_c1_label": label,
-                        "open": 10 + index / 10,
-                        "high": 10.8 + index / 10,
-                        "low": 9.9,
-                        "close": 10.3 + index / 10,
-                        "amount": 900 + index,
-                        "source_row_ref": f"previous:300803:{label}",
-                        "fake_or_synthetic_row": False,
-                    }
-                )
+            previous_rows = _previous_day_c1_rows_for_fixture()
             (previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260703_0943.json").write_text(
                 json.dumps(
                     {
@@ -5890,13 +7541,13 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 captured["planned_count"] = len(planned_artifacts)
                 planned = planned_artifacts[0]
                 source_rows = []
-                for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(30, 44)), start=1):
-                    source_rows.append(
-                        {
-                            **scope_row,
-                            "physical_c1_label": label,
-                            "raw_source_label": f"09:{30 + index:02d}",
-                            "open": 12 + index / 10,
+                for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(31, 44)), start=1):
+	                    source_rows.append(
+	                        {
+	                            **scope_row,
+	                            "physical_c1_label": label,
+	                            "raw_source_label": source_close_label_for_physical_start_label("20260703", label)["raw_source_label"],
+	                            "open": 12 + index / 10,
                             "high": 12.8 + index / 10,
                             "low": 11.9,
                             "close": 12.2 + index / 10,
@@ -5990,12 +7641,12 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             def fetch_minute_bars(self, subscription, trade_date):
                 self.calls.append({"subscription": dict(subscription), "trade_date": trade_date})
                 rows = []
-                for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(30, 44)), start=1):
-                    rows.append(
-                        {
-                            "physical_c1_label": label,
-                            "raw_source_label": f"09:{30 + index:02d}",
-                            "open": 12 + index / 10,
+                for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(31, 44)), start=1):
+	                    rows.append(
+	                        {
+	                            "physical_c1_label": label,
+	                            "raw_source_label": source_close_label_for_physical_start_label("20260703", label)["raw_source_label"],
+	                            "open": 12 + index / 10,
                             "high": 12.8 + index / 10,
                             "low": 11.9,
                             "close": 12.2 + index / 10,
@@ -6046,22 +7697,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            previous_rows = []
-            for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(30, 44)), start=1):
-                previous_rows.append(
-                    {
-                        "asset_kind": "stock",
-                        "identity_key": "stock:SZ:300803",
-                        "physical_c1_label": label,
-                        "open": 10 + index / 10,
-                        "high": 10.8 + index / 10,
-                        "low": 9.9,
-                        "close": 10.3 + index / 10,
-                        "amount": 900 + index,
-                        "source_row_ref": f"previous:300803:{label}",
-                        "fake_or_synthetic_row": False,
-                    }
-                )
+            previous_rows = _previous_day_c1_rows_for_fixture()
             (previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260703_0943.json").write_text(
                 json.dumps(
                     {
@@ -6111,11 +7747,1369 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(fake_adapter.calls[0]["subscription"]["identity_key"], "stock:SZ:300803")
         self.assertEqual(fake_adapter.calls[0]["subscription"]["code"], "300803")
         self.assertEqual(source_payload["artifact_type"], "n3_c1_scoped_current_day_source_rows_v1")
-        self.assertEqual(source_payload["closed_minute_row_count"], 14)
+        self.assertEqual(source_payload["closed_minute_row_count"], 13)
         self.assertTrue(source_payload["market_data_pulled"])
         self.assertFalse(source_payload["database_written"])
         self.assertFalse(source_payload["writes_canonical_minute_bar_1m"])
         self.assertFalse(source_payload["writes_n3_outbox"])
+
+    def test_current_day_source_provider_maps_raw_1301_as_physical_afternoon_open(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260706",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:300803",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY_MAIN",
+            "source_trigger_event_id": "n4-match-300803",
+            "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1301__fastlane_v1",
+            "scope_status": "active",
+            "required_physical_labels": ["13:00"],
+        }
+        provider_rows = [
+            {
+                "bar_time": "2026-07-06T13:00:00+08:00",
+                "open": 10,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.1,
+                "amount": 1000,
+            },
+            {
+                "bar_time": "2026-07-06T13:01:00+08:00",
+                "open": 11,
+                "high": 11.5,
+                "low": 10.8,
+                "close": 11.1,
+                "amount": 2000,
+            },
+        ]
+
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=provider_rows,
+            plan_row=plan_row,
+            for_trade_date="20260706",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "13:00")
+        self.assertEqual(rows[0]["raw_source_label"], "13:01")
+        self.assertFalse(rows[0]["fake_or_synthetic_row"])
+
+    def test_current_day_source_provider_maps_mootdx_raw_1300_as_physical_morning_close(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260706",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:301363",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY_MAIN",
+            "source_trigger_event_id": "n4-match-301363",
+            "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+            "scope_status": "active",
+            "required_physical_labels": ["11:29"],
+        }
+        provider_rows = [
+            {
+                "bar_time": "2026-07-06T13:00:00+08:00",
+                "open": 21.24,
+                "high": 21.28,
+                "low": 21.23,
+                "close": 21.25,
+                "amount": 1720740,
+            }
+        ]
+
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=provider_rows,
+            plan_row=plan_row,
+            for_trade_date="20260706",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[0]["raw_source_label"], "13:00")
+        self.assertFalse(rows[0]["fake_or_synthetic_row"])
+
+    def test_current_day_source_provider_accepts_mootdx_raw_1130_as_physical_1129(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260707",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:301363",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY_MAIN",
+            "source_trigger_event_id": "n4-match-301363",
+            "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_1407__fastlane_v1",
+            "scope_status": "active",
+            "required_physical_labels": ["11:29"],
+            "required_raw_source_labels": ["11:29"],
+        }
+        provider_rows = [
+            {
+                "bar_time": "2026-07-07T11:30:00+08:00",
+                "open": 21.24,
+                "high": 21.28,
+                "low": 21.23,
+                "close": 21.25,
+                "amount": 1720740,
+            }
+        ]
+
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=provider_rows,
+            plan_row=plan_row,
+            for_trade_date="20260707",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[0]["raw_source_label"], "11:30")
+        self.assertFalse(rows[0]["fake_or_synthetic_row"])
+
+    def test_current_day_source_provider_dedupes_raw_1130_and_1300_to_physical_1129(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260707",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:301363",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY_MAIN",
+            "source_trigger_event_id": "n4-match-301363",
+            "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_1407__fastlane_v1",
+            "scope_status": "active",
+            "required_physical_labels": ["11:29"],
+            "required_raw_source_labels": ["11:29"],
+        }
+        provider_rows = [
+            {
+                "bar_time": "2026-07-07T11:30:00+08:00",
+                "open": 21.24,
+                "high": 21.28,
+                "low": 21.23,
+                "close": 21.25,
+                "amount": 222,
+            },
+            {
+                "bar_time": "2026-07-07T13:00:00+08:00",
+                "open": 20.24,
+                "high": 20.28,
+                "low": 20.23,
+                "close": 20.25,
+                "amount": 111,
+            },
+        ]
+
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=provider_rows,
+            plan_row=plan_row,
+            for_trade_date="20260707",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "11:29")
+        self.assertEqual(rows[0]["raw_source_label"], "11:30")
+        self.assertEqual(rows[0]["amount"], 222)
+        self.assertFalse(rows[0]["fake_or_synthetic_row"])
+
+    def test_n3_runner_detects_stale_morning_close_boundary_artifacts(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _has_stale_morning_close_boundary_gap,
+        )
+
+        stale_payload = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "source_gap_physical_labels": [
+                {
+                    "physical_c1_label": "11:29",
+                    "missing_raw_source_label": "11:30",
+                    "reason": "lunch_close_missing_source",
+                }
+            ],
+        }
+        stale_row_payload = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "closed_minute_rows": [
+                {
+                    "physical_c1_label": "13:00",
+                    "raw_source_label": "13:00",
+                }
+            ],
+        }
+        fresh_payload = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "source_gap_physical_labels": [],
+            "required_raw_source_labels": ["11:29", "13:00"],
+        }
+
+        self.assertTrue(_has_stale_morning_close_boundary_gap(stale_payload))
+        self.assertTrue(_has_stale_morning_close_boundary_gap(stale_row_payload))
+        self.assertFalse(_has_stale_morning_close_boundary_gap(fresh_payload))
+
+    def test_n3_runner_rebuilds_stale_staging_from_fresh_boundary_v2_source_rows(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            current_source_dir = root / "current_day_source"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-301363",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                "scope_status": "active",
+            }
+            namespace_token = "20260706_1407_34b654ca2800"
+            active_scope = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260706",
+                "scope_count": 1,
+                "scope_rows": [scope_row],
+                "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                "action_run_id": (
+                    "n5_live_tracking_20260706__"
+                    "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1"
+                ),
+                "source_run_hash": "34b654ca2800",
+                "source_run_namespace": namespace_token,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+            }
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace_token}.json").write_text(
+                json.dumps(active_scope, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260706",
+                scope_row=scope_row,
+                through_label="14:07",
+            )
+            (current_source_dir / f"n3_c1_scoped_current_day_source_rows_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": namespace_token,
+                        "source_label_policy": SOURCE_CLOSE_LABEL_POLICY,
+                        "closed_minute_rows": current_rows,
+                        "closed_minute_row_count": len(current_rows),
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                        "touches_n4_n5_n6_outbox": False,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stale_staging_path = (
+                output_dir
+                / "current_day_staging"
+                / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+            )
+            stale_staging_path.parent.mkdir(parents=True)
+            stale_staging_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "scope_count": 1,
+                        "source_run_hash": "34b654ca2800",
+                        "source_label_policy": "source_close_label_to_physical_start_label_v1",
+                        "source_gap_physical_labels": [
+                            {
+                                "physical_c1_label": "11:29",
+                                "missing_raw_source_label": "11:30",
+                                "reason": "lunch_close_missing_source",
+                            }
+                        ],
+                        "closed_minute_row_count": 1,
+                        "closed_minute_rows": [
+                            {
+                                **scope_row,
+                                "physical_c1_label": "13:00",
+                                "raw_source_label": "13:01",
+                                "open": 21.25,
+                                "high": 21.33,
+                                "low": 21.25,
+                                "close": 21.31,
+                                "amount": 2980842,
+                                "source_row_ref": "stale:301363:13:01",
+                                "fake_or_synthetic_row": False,
+                            }
+                        ],
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": namespace_token,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260706",
+                            identity_key="stock:SZ:301363",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T14:07:00+08:00",
+                            "current_exchange_time": "2026-07-06T14:09:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
+            )
+            rebuilt_staging = json.loads(stale_staging_path.read_text(encoding="utf-8"))
+            metric_path = (
+                output_dir
+                / "metric_context"
+                / f"n3_c1_scoped_closed_1m_artifact_v1_{namespace_token}_fastlane_raw_prevday_c1_amount_v1.json"
+            )
+            metric_exists = metric_path.exists()
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(rebuilt_staging["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+        self.assertNotIn(
+            {"physical_c1_label": "11:29", "missing_raw_source_label": "11:30"},
+            [
+                {
+                    "physical_c1_label": row.get("physical_c1_label"),
+                    "missing_raw_source_label": row.get("missing_raw_source_label"),
+                }
+                for row in rebuilt_staging.get("source_gap_physical_labels", [])
+            ],
+        )
+        row_by_label = {
+            row["physical_c1_label"]: row
+            for row in rebuilt_staging["closed_minute_rows"]
+            if row["identity_key"] == "stock:SZ:301363"
+        }
+        self.assertEqual(row_by_label["11:29"]["raw_source_label"], "13:00")
+        self.assertEqual(row_by_label["13:00"]["raw_source_label"], "13:01")
+        self.assertTrue(metric_exists)
+
+    def test_n3_runner_source_provider_rebuilds_when_stale_staging_has_missing_source_rows(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            current_source_dir = root / "current_day_source"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-301363",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                "scope_status": "active",
+            }
+            namespace_token = "20260706_1407_34b654ca2800"
+            active_scope = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260706",
+                "scope_count": 1,
+                "scope_rows": [scope_row],
+                "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                "action_run_id": (
+                    "n5_live_tracking_20260706__"
+                    "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1"
+                ),
+                "source_run_hash": "34b654ca2800",
+                "source_run_namespace": namespace_token,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+            }
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace_token}.json").write_text(
+                json.dumps(active_scope, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            stale_staging_path = (
+                output_dir
+                / "current_day_staging"
+                / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+            )
+            stale_staging_path.parent.mkdir(parents=True)
+            stale_staging_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "source_label_policy": "source_close_label_to_physical_start_label_v1",
+                        "source_gap_physical_labels": [
+                            {
+                                "physical_c1_label": "11:29",
+                                "missing_raw_source_label": "11:30",
+                            }
+                        ],
+                        "scope_count": 1,
+                        "closed_minute_rows": [],
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260706",
+                            identity_key="stock:SZ:301363",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T14:07:00+08:00",
+                            "current_exchange_time": "2026-07-06T14:09:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {}
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["planned_count"] = len(planned_artifacts)
+                captured["source_run_hash"] = planned_artifacts[0]["source_run_hash"]
+                rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260706",
+                    scope_row=scope_row,
+                    through_label="14:07",
+                )
+                output_path = Path(args.current_day_source_artifact_dir) / (
+                    f"n3_c1_scoped_current_day_source_rows_v1_{planned_artifacts[0]['namespace_token']}.json"
+                )
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260706",
+                            "target_hhmm": "1407",
+                            "source_run_hash": "34b654ca2800",
+                            "source_run_namespace": namespace_token,
+                            "source_label_policy": SOURCE_CLOSE_LABEL_POLICY,
+                            "closed_minute_rows": rows,
+                            "closed_minute_row_count": len(rows),
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            rebuilt_staging = json.loads(stale_staging_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(captured["planned_count"], 1)
+        self.assertEqual(captured["source_run_hash"], "34b654ca2800")
+        self.assertEqual(rebuilt_staging["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+        row_by_label = {
+            row["physical_c1_label"]: row
+            for row in rebuilt_staging["closed_minute_rows"]
+            if row["identity_key"] == "stock:SZ:301363"
+        }
+        self.assertEqual(row_by_label["11:29"]["raw_source_label"], "13:00")
+        self.assertEqual(row_by_label["13:00"]["raw_source_label"], "13:01")
+
+    def test_n3_runner_prioritizes_existing_v2_source_staging_rebuild_before_source_provider(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            current_source_dir = root / "current_day_source"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-301363",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                "scope_status": "active",
+            }
+            namespace_token = "20260706_1407_34b654ca2800"
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [scope_row],
+                        "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                        "action_run_id": (
+                            "n5_live_tracking_20260706__"
+                            "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1"
+                        ),
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": namespace_token,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260706",
+                scope_row=scope_row,
+                through_label="14:07",
+            )
+            (current_source_dir / f"n3_c1_scoped_current_day_source_rows_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": namespace_token,
+                        "source_label_policy": SOURCE_CLOSE_LABEL_POLICY,
+                        "closed_minute_rows": rows,
+                        "closed_minute_row_count": len(rows),
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                        "touches_n4_n5_n6_outbox": False,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stale_staging_path = (
+                output_dir
+                / "current_day_staging"
+                / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+            )
+            stale_staging_path.parent.mkdir(parents=True)
+            stale_staging_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "scope_count": 1,
+                        "source_run_hash": "34b654ca2800",
+                        "source_label_policy": "source_close_label_to_physical_start_label_v1",
+                        "source_gap_physical_labels": [
+                            {
+                                "physical_c1_label": "11:29",
+                                "missing_raw_source_label": "11:30",
+                            }
+                        ],
+                        "closed_minute_rows": [
+                            {
+                                **scope_row,
+                                "physical_c1_label": "13:00",
+                                "raw_source_label": "13:01",
+                                "source_label_policy": "source_close_label_to_physical_start_label_v1",
+                                "open": 21.25,
+                                "high": 21.33,
+                                "low": 21.25,
+                                "close": 21.31,
+                                "amount": 2980842,
+                                "source_row_ref": "stale:301363:13:01",
+                                "fake_or_synthetic_row": False,
+                            }
+                        ],
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{namespace_token}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": namespace_token,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260706",
+                            identity_key="stock:SZ:301363",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T14:07:00+08:00",
+                            "current_exchange_time": "2026-07-06T14:09:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            provider_called = False
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                nonlocal provider_called
+                provider_called = True
+                raise AssertionError("existing v2 source should rebuild stale staging before provider scan")
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            rebuilt_staging = json.loads(stale_staging_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(provider_called)
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(rebuilt_staging["source_label_policy"], SOURCE_CLOSE_LABEL_POLICY)
+        row_by_label = {
+            row["physical_c1_label"]: row
+            for row in rebuilt_staging["closed_minute_rows"]
+            if row["identity_key"] == "stock:SZ:301363"
+        }
+        self.assertEqual(row_by_label["11:29"]["raw_source_label"], "13:00")
+        self.assertEqual(row_by_label["13:00"]["raw_source_label"], "13:01")
+
+    def test_n3_runner_selects_existing_v2_source_stale_staging_priority_batch(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _select_existing_v2_source_stale_staging_rebuild_artifacts,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "n3"
+            current_source_dir = root / "current_day_source"
+            current_source_dir.mkdir()
+            target_artifact = {
+                "path": str(root / "scope" / "n5_active_scope_snapshot_v1_20260706_1407_34b654ca2800.json"),
+                "for_trade_date": "20260706",
+                "scope_count": 1,
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                "action_run_id": (
+                    "n5_live_tracking_20260706__"
+                    "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1"
+                ),
+                "source_run_hash": "34b654ca2800",
+                "source_run_namespace": "20260706_1407_34b654ca2800",
+            }
+            non_priority_artifact = {
+                "path": str(root / "scope" / "n5_active_scope_snapshot_v1_20260706_1406_111111111111.json"),
+                "for_trade_date": "20260706",
+                "scope_count": 1,
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1406__fastlane_v1",
+                "action_run_id": (
+                    "n5_live_tracking_20260706__"
+                    "trigger_provisional_ordinary_20260706_until_1406__fastlane_v1"
+                ),
+                "source_run_hash": "111111111111",
+                "source_run_namespace": "20260706_1406_111111111111",
+            }
+            (current_source_dir / "n3_c1_scoped_current_day_source_rows_v1_20260706_1407_34b654ca2800.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": "20260706_1407_34b654ca2800",
+                        "source_label_policy": SOURCE_CLOSE_LABEL_POLICY,
+                        "closed_minute_rows": [],
+                        "closed_minute_row_count": 0,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            staging_path = (
+                output_dir
+                / "current_day_staging"
+                / "n3_c1_scoped_current_day_staging_v1_20260706_1407_34b654ca2800_fastlane.json"
+            )
+            staging_path.parent.mkdir(parents=True)
+            staging_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "1407",
+                        "source_run_hash": "34b654ca2800",
+                        "source_label_policy": "source_close_label_to_physical_start_label_v1",
+                        "source_gap_physical_labels": [
+                            {
+                                "physical_c1_label": "11:29",
+                                "missing_raw_source_label": "11:30",
+                            }
+                        ],
+                        "closed_minute_rows": [
+                            {
+                                "identity_key": "stock:SZ:301363",
+                                "physical_c1_label": "13:00",
+                                "raw_source_label": "13:01",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            selected = _select_existing_v2_source_stale_staging_rebuild_artifacts(
+                active_scope_artifacts=[non_priority_artifact, target_artifact],
+                output_dir=output_dir,
+                source_dir=current_source_dir,
+            )
+
+        self.assertEqual([item["source_run_hash"] for item in selected], ["34b654ca2800"])
+
+    def test_n3_runner_execute_respects_max_runtime_seconds(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301363",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-301363",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1",
+                "scope_status": "active",
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_1407_34b654ca2800.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [scope_row],
+                        "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                        "action_run_id": (
+                            "n5_live_tracking_20260706__"
+                            "trigger_provisional_ordinary_20260706_until_1407__fastlane_v1"
+                        ),
+                        "source_run_hash": "34b654ca2800",
+                        "source_run_namespace": "20260706_1407_34b654ca2800",
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "max_runtime_seconds_by_lane": {"n3_c1_n3t_action_confirmation": 1},
+                        "session_context": {
+                            "trigger_time": "2026-07-06T14:07:00+08:00",
+                            "current_exchange_time": "2026-07-06T14:09:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            ticks = iter([0.0, 2.0, 2.0])
+
+            def now_monotonic() -> float:
+                return next(ticks, 2.0)
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                now_monotonic=now_monotonic,
+            )
+
+        self.assertEqual(manifest["verdict"], "BLOCKED_N3_C1_N3T_FASTLANE_EXECUTE")
+        self.assertIn("max_runtime_seconds_exceeded", manifest["blocked_reason"])
+        self.assertFalse(manifest["writes_enabled"])
+
+    def test_n3_runner_post_close_final_a_pass_chunks_unprocessed_refs_before_scan(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _select_post_close_final_a_pass_candidate_chunk,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            artifact_dir.mkdir()
+
+            def write_scope(target_hhmm: str, source_run_hash: str, *, evaluated: bool, scope_count: int = 1) -> dict:
+                payload = {
+                    "artifact_type": "n5_active_scope_snapshot_v1",
+                    "for_trade_date": "20260706",
+                    "scope_count": scope_count,
+                    "scope_granularity": "object",
+                    "source_trigger_run_id": f"trigger_provisional_ordinary_20260706_until_{target_hhmm}__fastlane_v1",
+                    "action_run_id": (
+                        "n5_live_tracking_20260706__"
+                        f"trigger_provisional_ordinary_20260706_until_{target_hhmm}__fastlane_v1"
+                    ),
+                    "source_run_hash": source_run_hash,
+                    "source_run_namespace": f"20260706_{target_hhmm}_{source_run_hash}",
+                    "scope_rows": [],
+                    "full_market_fallback_allowed": False,
+                    "n3_scans_n5_internals": False,
+                }
+                if scope_count > 0:
+                    ref = {
+                        "state_key": f"state:{source_run_hash}",
+                        "asset_kind": "stock",
+                        "identity_key": f"stock:SZ:{source_run_hash[:6]}",
+                    }
+                    if evaluated:
+                        ref["metric_evaluation_key"] = f"metric:{source_run_hash}:failed"
+                        ref["latest_metric_status"] = {"status": "failed"}
+                    payload["scope_rows"] = [
+                        {
+                            "asset_kind": "stock",
+                            "identity_key": ref["identity_key"],
+                            "active_tracking_refs": [ref],
+                        }
+                    ]
+                path = artifact_dir / f"n5_active_scope_snapshot_v1_20260706_{target_hhmm}_{source_run_hash}.json"
+                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return {
+                    "path": str(path),
+                    "artifact_type": "n5_active_scope_snapshot_v1",
+                    "for_trade_date": "20260706",
+                    "scope_count": scope_count,
+                    "source_trigger_run_id": payload["source_trigger_run_id"],
+                    "action_run_id": payload["action_run_id"],
+                    "source_run_hash": source_run_hash,
+                    "source_run_namespace": payload["source_run_namespace"],
+                }
+
+            evaluated_early = write_scope("1401", "aaaaaaaaaaaa", evaluated=True)
+            unprocessed_later = write_scope("1416", "bbbbbbbbbbbb", evaluated=False)
+            unprocessed_latest = write_scope("1454", "cccccccccccc", evaluated=False)
+            noop = write_scope("1455", "dddddddddddd", evaluated=False, scope_count=0)
+
+            selected, summary = _select_post_close_final_a_pass_candidate_chunk(
+                active_scope_artifacts=[evaluated_early, unprocessed_later, unprocessed_latest, noop],
+                output_dir=output_dir,
+                max_candidates=2,
+            )
+
+        self.assertEqual([item["source_run_hash"] for item in selected], ["bbbbbbbbbbbb", "cccccccccccc"])
+        self.assertEqual(summary["processed_candidate_count"], 2)
+        self.assertEqual(summary["skipped_candidate_count"], 2)
+        self.assertEqual(summary["remaining_candidate_count"], 1)
+        self.assertEqual(summary["reason"], "post_close_final_a_pass_chunk_incomplete")
+
+    def test_n3_runner_post_close_final_a_pass_sorts_by_ref_trigger_time(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _active_scope_event_sort_key,
+        )
+
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "for_trade_date": "20260706",
+            "scope_count": 1,
+            "scope_granularity": "object",
+            "scope_rows": [
+                {
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:301363",
+                    "active_tracking_refs": [
+                        {
+                            "state_key": "state:301363",
+                            "trigger_time": "2026-07-06T14:07:00+08:00",
+                            "first_confirmation_minute_label": "14:07",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        self.assertEqual(
+            _active_scope_event_sort_key(
+                payload,
+                context={"for_trade_date": "20260706", "target_hhmm": "0931"},
+            ),
+            "2026-07-06T14:07:00+08:00",
+        )
+
+    def test_n3_runner_post_close_final_a_pass_deadline_returns_bounded_progress(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            for target_hhmm, source_run_hash in [
+                ("1411", "111111111111"),
+                ("1416", "222222222222"),
+                ("1454", "333333333333"),
+            ]:
+                scope_row = {
+                    "for_trade_date": "20260706",
+                    "asset_kind": "stock",
+                    "identity_key": f"stock:SZ:{source_run_hash[:6]}",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "source_trigger_event_id": f"n4-match-{source_run_hash}",
+                    "source_trigger_run_id": f"trigger_provisional_ordinary_20260706_until_{target_hhmm}__fastlane_v1",
+                    "scope_status": "active",
+                    "active_tracking_refs": [
+                        {
+                            "state_key": f"state:{source_run_hash}",
+                            "asset_kind": "stock",
+                            "identity_key": f"stock:SZ:{source_run_hash[:6]}",
+                        }
+                    ],
+                }
+                (artifact_dir / f"n5_active_scope_snapshot_v1_20260706_{target_hhmm}_{source_run_hash}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n5_active_scope_snapshot_v1",
+                            "for_trade_date": "20260706",
+                            "scope_count": 1,
+                            "scope_granularity": "object",
+                            "scope_rows": [scope_row],
+                            "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                            "action_run_id": (
+                                "n5_live_tracking_20260706__"
+                                f"trigger_provisional_ordinary_20260706_until_{target_hhmm}__fastlane_v1"
+                            ),
+                            "source_run_hash": source_run_hash,
+                            "source_run_namespace": f"20260706_{target_hhmm}_{source_run_hash}",
+                            "full_market_fallback_allowed": False,
+                            "n3_scans_n5_internals": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_post_close_final_a_pass_max_candidates_per_invocation": 2,
+                        "max_runtime_seconds_by_lane": {"n3_c1_n3t_action_confirmation": 1},
+                        "session_context": {
+                            "trigger_time": "2026-07-06T15:00:00+08:00",
+                            "current_exchange_time": "2026-07-06T15:05:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "for_trade_date_is_current_date": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                            "post_close_final_a_pass_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            ticks = iter([0.0, 0.0, 0.0, 0.0, 2.0])
+
+            def now_monotonic() -> float:
+                return next(ticks, 2.0)
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                now_monotonic=now_monotonic,
+            )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING", manifest)
+        self.assertEqual(manifest["reason"], "post_close_final_a_pass_chunk_incomplete")
+        self.assertFalse(manifest["writes_enabled"])
+        self.assertEqual(manifest["post_close_final_a_pass_chunk"]["processed_candidate_count"], 2)
+        self.assertEqual(manifest["post_close_final_a_pass_chunk"]["remaining_candidate_count"], 1)
+
+    def test_n3_runner_treats_zero_scope_noop_pull_plan_as_clean_skip(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_1015_88590106357d.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 0,
+                        "scope_rows": [],
+                        "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1015__fastlane_v1",
+                        "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_1015__fastlane_v1",
+                        "source_run_hash": "88590106357d",
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T10:15:00+08:00",
+                            "current_exchange_time": "2026-07-06T10:17:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
+            )
+
+        planned = manifest["scoped_executor_plan"]["planned_artifacts"][0]
+        readiness = planned["component_readiness"]
+        self.assertEqual(readiness["status"], "clean_noop_skipped")
+        self.assertEqual(readiness["violations"], [])
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING", manifest)
+        self.assertEqual(manifest["reason"], "waiting_for_valid_c1_n3t_candidate")
+        self.assertFalse(manifest["writes_enabled"])
+
+    def test_n3_runner_skips_noop_candidate_and_processes_valid_source_run(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = output_dir / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            noop_scope = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260706",
+                "scope_count": 0,
+                "scope_rows": [],
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1015__fastlane_v1",
+                "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_1015__fastlane_v1",
+                "source_run_hash": "88590106357d",
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+            }
+            valid_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300803",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-300803",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_1016__fastlane_v1",
+                "scope_status": "active",
+            }
+            valid_scope = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260706",
+                "scope_count": 1,
+                "scope_rows": [valid_row],
+                "source_trigger_run_id": valid_row["source_trigger_run_id"],
+                "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_1016__fastlane_v1",
+                "source_run_hash": "123456789abc",
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_1015_88590106357d.json").write_text(
+                json.dumps(noop_scope, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_1016_123456789abc.json").write_text(
+                json.dumps(valid_scope, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T10:16:00+08:00",
+                            "current_exchange_time": "2026-07-06T10:18:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {}
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["planned_count"] = len(planned_artifacts)
+                captured["target_hhmm"] = planned_artifacts[0]["target_hhmm"]
+                captured["source_run_hash"] = planned_artifacts[0]["source_run_hash"]
+                planned = planned_artifacts[0]
+                output_path = Path(args.current_day_source_artifact_dir) / (
+                    f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260706",
+                            "target_hhmm": planned["target_hhmm"],
+                            "source_run_hash": planned["source_run_hash"],
+                            "source_run_namespace": planned["namespace_token"],
+                            "closed_minute_rows": [
+                                {
+                                    **valid_row,
+                                    "physical_c1_label": "10:16",
+                                    "raw_source_label": "10:17",
+                                    "open": 12.0,
+                                    "high": 12.3,
+                                    "low": 11.9,
+                                    "close": 12.2,
+                                    "amount": 1000,
+                                    "source_row_ref": "provider:300803:10:16",
+                                    "fake_or_synthetic_row": False,
+                                }
+                            ],
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+
+        self.assertEqual(captured["planned_count"], 1)
+        self.assertEqual(captured["target_hhmm"], "1016")
+        self.assertEqual(captured["source_run_hash"], "123456789abc")
+        readiness_by_hash = {
+            planned["source_run_hash"]: planned["component_readiness"]["status"]
+            for planned in manifest["scoped_executor_plan"]["planned_artifacts"]
+        }
+        self.assertEqual(readiness_by_hash["88590106357d"], "clean_noop_skipped")
+        self.assertIn(
+            readiness_by_hash["123456789abc"],
+            {
+                "waiting_for_scoped_pull_staging",
+                "waiting_for_metric_context_artifact",
+                "metric_context_ready_for_n3t_execute_gate",
+            },
+        )
 
     def test_n3_runner_execute_uses_metric_context_builder_adapter_after_staging_ready(self) -> None:
         from ashare_v3.market.c1_scoped_artifact import build_n3_c1_scoped_artifact_plan
@@ -6223,6 +9217,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                             "closed_minute_rows": [{"source_row_ref": "staging:row:101"}],
                             "previous_day_minute_refs": ["previous:row:201"],
                             "metric_values": {
+                                **_n3t_boundary_metric_fields(),
                                 "current_price": 12,
                                 "previous_120m_body_high": 11,
                                 "previous_120m_body_low": 9,
@@ -6370,6 +9365,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                                 "closed_minute_rows": [{"source_row_ref": "staging:row:101"}],
                                 "previous_day_minute_refs": ["previous:row:201"],
                                 "metric_values": {
+                                    **_n3t_boundary_metric_fields(),
                                     "current_price": 12,
                                     "previous_120m_body_high": 11,
                                     "previous_120m_body_low": 9,
@@ -6502,6 +9498,11 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260703",
+                scope_row=scope_row,
+                through_label="09:43",
+            )
             (staging_dir / "n3_c1_scoped_current_day_staging_v1_20260703_0943_abee3680ddd4_fastlane.json").write_text(
                 json.dumps(
                     {
@@ -6509,21 +9510,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "artifact_status": "passed",
                         "for_trade_date": "20260703",
                         "scope_count": 1,
-                        "closed_minute_row_count": 1,
-                        "closed_minute_rows": [
-                            {
-                                **scope_row,
-                                "physical_c1_label": "09:43",
-                                "raw_source_label": "09:44",
-                                "open": 12,
-                                "high": 12.6,
-                                "low": 11.8,
-                                "close": 12.5,
-                                "amount": 1000,
-                                "source_row_ref": "current:300803:0943",
-                                "fake_or_synthetic_row": False,
-                            }
-                        ],
+                        "closed_minute_row_count": len(current_rows),
+                        "closed_minute_rows": current_rows,
                         "full_market_fallback_used": False,
                         "database_written": False,
                         "market_data_pulled": True,
@@ -6540,20 +9528,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "artifact_type": "n3_c1_n3t_previous_day_context_v1",
                         "for_trade_date": "20260703",
                         "target_hhmm": "0943",
-                        "previous_day_minute_rows": [
-                            {
-                                "asset_kind": "stock",
-                                "identity_key": "stock:SZ:300803",
-                                "physical_c1_label": "09:43",
-                                "open": 10,
-                                "high": 10.8,
-                                "low": 9.9,
-                                "close": 10.4,
-                                "amount": 900,
-                                "source_row_ref": "previous:300803:0943",
-                                "fake_or_synthetic_row": False,
-                            }
-                        ],
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(),
                     },
                     ensure_ascii=False,
                 ),
@@ -6594,6 +9569,1309 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
         self.assertFalse(manifest["metric_context_builder_result"]["database_written"])
         self.assertFalse(manifest["metric_context_builder_result"]["market_data_pulled"])
+
+    def test_n3_runner_prioritizes_staging_ready_metric_context_before_source_provider(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            current_source_dir = root / "current_day_source"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            current_source_dir.mkdir()
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            ready_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688807",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": "evt_688807_0933",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_0933__fastlane_ready",
+                "scope_status": "active",
+            }
+            waiting_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": "evt_301269_0934",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_0934__fastlane_waiting",
+                "scope_status": "active",
+            }
+            ready_hash = "ready0933aaa"
+            waiting_hash = "wait0934bbbb"
+            ready_namespace = f"20260707_0933_{ready_hash}"
+            waiting_namespace = f"20260707_0934_{waiting_hash}"
+            for namespace, target_hhmm, row, source_hash in (
+                (ready_namespace, "0933", ready_row, ready_hash),
+                (waiting_namespace, "0934", waiting_row, waiting_hash),
+            ):
+                (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n5_active_scope_snapshot_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_hash,
+                            "source_run_namespace": namespace,
+                            "scope_count": 1,
+                            "scope_rows": [row],
+                            "source_trigger_run_id": row["source_trigger_run_id"],
+                            "action_run_id": f"n5_live_tracking_20260707__{row['source_trigger_run_id']}",
+                            "full_market_fallback_allowed": False,
+                            "n3_scans_n5_internals": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            ready_current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=ready_row,
+                through_label="09:33",
+            )
+            (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260707",
+                        "scope_count": 1,
+                        "closed_minute_row_count": len(ready_current_rows),
+                        "closed_minute_rows": ready_current_rows,
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{ready_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": ready_hash,
+                        "source_run_namespace": ready_namespace,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260707",
+                            identity_key="stock:SH:688807",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            waiting_source_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=waiting_row,
+                through_label="09:34",
+            )
+            for suffix in ("", "_duplicate"):
+                (current_source_dir / f"n3_c1_scoped_current_day_source_rows_v1_{waiting_namespace}{suffix}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": "0934",
+                            "source_run_hash": waiting_hash,
+                            "source_run_namespace": waiting_namespace,
+                            "scope_count": 1,
+                            "closed_minute_rows": waiting_source_rows,
+                            "source_label_policy": "source_label_to_physical_with_morning_close_boundary_v2",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:33:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:35:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured = {"provider_called": False}
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                raise AssertionError("metric-context-ready staging must run before source provider backlog")
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            metric_path = (
+                output_dir
+                / "metric_context"
+                / f"n3_c1_scoped_closed_1m_artifact_v1_{ready_namespace}_fastlane_raw_prevday_c1_amount_v1.json"
+            )
+            metric_exists = metric_path.exists()
+            metric_source_artifacts = sorted(metric_source_dir.glob(f"*{ready_hash}*.json"))
+
+        self.assertFalse(captured["provider_called"])
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(manifest["active_scope_artifact_count"], 1)
+        self.assertEqual(
+            manifest["current_day_source_provider_result"]["skip_reason"],
+            "existing_staging_metric_context_interleave_prioritized",
+        )
+        self.assertTrue(metric_exists, manifest)
+        self.assertEqual(len(metric_source_artifacts), 1)
+        self.assertEqual(manifest["metric_context_builder_result"]["artifact_count"], 1)
+        planned = manifest["scoped_executor_plan"]["planned_artifacts"][0]
+        self.assertEqual(planned["source_run_hash"], ready_hash)
+        self.assertEqual(
+            planned["component_readiness"]["status"],
+            "metric_context_ready_for_n3t_execute_gate",
+        )
+
+    def test_n3_runner_prioritizes_staging_prevctx_metric_context_before_broad_pull_plan_scan(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            ready_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688807",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": "evt_688807_0933",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_0933__fastlane_ready",
+                "scope_status": "active",
+            }
+            backlog_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": "evt_301269_0934",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_0934__fastlane_backlog",
+                "scope_status": "active",
+            }
+            ready_hash = "ready0933aaa"
+            backlog_hash = "wait0934bbbb"
+            ready_namespace = f"20260707_0933_{ready_hash}"
+            backlog_namespace = f"20260707_0934_{backlog_hash}"
+            for namespace, target_hhmm, row, source_hash in (
+                (ready_namespace, "0933", ready_row, ready_hash),
+                (backlog_namespace, "0934", backlog_row, backlog_hash),
+            ):
+                (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n5_active_scope_snapshot_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_hash,
+                            "source_run_namespace": namespace,
+                            "scope_count": 1,
+                            "scope_rows": [row],
+                            "source_trigger_run_id": row["source_trigger_run_id"],
+                            "action_run_id": f"n5_live_tracking_20260707__{row['source_trigger_run_id']}",
+                            "full_market_fallback_allowed": False,
+                            "n3_scans_n5_internals": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            ready_current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=ready_row,
+                through_label="09:33",
+            )
+            (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "scope_count": 1,
+                        "closed_minute_row_count": len(ready_current_rows),
+                        "closed_minute_rows": ready_current_rows,
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{ready_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": ready_hash,
+                        "source_run_namespace": ready_namespace,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260707",
+                            identity_key="stock:SH:688807",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:33:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:35:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            def now_monotonic() -> float:
+                return 0.0
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                raise AssertionError("existing staging + previous context must run before source provider")
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+                now_monotonic=now_monotonic,
+            )
+            metric_path = (
+                output_dir
+                / "metric_context"
+                / f"n3_c1_scoped_closed_1m_artifact_v1_{ready_namespace}_fastlane_raw_prevday_c1_amount_v1.json"
+            )
+            metric_exists = metric_path.exists()
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(manifest["active_scope_artifact_count"], 1)
+        self.assertTrue(metric_exists, manifest)
+        self.assertEqual(
+            manifest["current_day_source_provider_result"]["skip_reason"],
+            "existing_staging_metric_context_interleave_prioritized",
+        )
+        self.assertEqual(manifest["metric_context_builder_result"]["artifact_count"], 1)
+
+    def test_n3_runner_prevctx_metric_context_deadline_returns_bounded_progress(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            source_hashes = ["ready0933aaa", "ready0934bbb"]
+            for index, (target_hhmm, physical_label, source_hash) in enumerate(
+                [
+                    ("0933", "09:33", source_hashes[0]),
+                    ("0934", "09:34", source_hashes[1]),
+                ],
+                start=3,
+            ):
+                namespace = f"20260707_{target_hhmm}_{source_hash}"
+                row = {
+                    "for_trade_date": "20260707",
+                    "asset_kind": "stock",
+                    "identity_key": f"stock:SH:68880{index}",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,M,W,D",
+                    "source_trigger_event_id": f"evt_68880{index}_{target_hhmm}",
+                    "source_trigger_run_id": f"trigger_provisional_ordinary_20260707_until_{target_hhmm}__fastlane",
+                    "scope_status": "active",
+                }
+                (artifact_dir / f"n5_active_scope_snapshot_v1_{namespace}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n5_active_scope_snapshot_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_hash,
+                            "source_run_namespace": namespace,
+                            "scope_count": 1,
+                            "scope_rows": [row],
+                            "source_trigger_run_id": row["source_trigger_run_id"],
+                            "action_run_id": f"n5_live_tracking_20260707__{row['source_trigger_run_id']}",
+                            "full_market_fallback_allowed": False,
+                            "n3_scans_n5_internals": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{namespace}_fastlane.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                            "plan_status": "planned",
+                            "scope_count": 1,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260707",
+                    scope_row=row,
+                    through_label=physical_label,
+                )
+                (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{namespace}_fastlane.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                            "artifact_status": "passed",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": target_hhmm,
+                            "scope_count": 1,
+                            "closed_minute_row_count": len(rows),
+                            "closed_minute_rows": rows,
+                            "full_market_fallback_used": False,
+                            "database_written": False,
+                            "market_data_pulled": True,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{namespace}.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_hash,
+                            "source_run_namespace": namespace,
+                            "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                                trade_date="20260707",
+                                identity_key=row["identity_key"],
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "n3_c1_n3t_existing_staging_metric_context_max_candidates_per_invocation": 1,
+                        "max_runtime_seconds_by_lane": {"n3_c1_n3t_action_confirmation": 1},
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:33:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:35:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            ticks = iter([0.0] * 10 + [2.0])
+
+            def now_monotonic() -> float:
+                return next(ticks, 2.0)
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                now_monotonic=now_monotonic,
+            )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING", manifest)
+        self.assertEqual(manifest["reason"], "prevctx_to_metric_context_chunk_incomplete")
+        chunk = manifest["prevctx_to_metric_context_chunk"]
+        self.assertEqual(chunk["priority_candidate_count"], 2)
+        self.assertEqual(chunk["processed_candidate_count"], 1)
+        self.assertEqual(chunk["remaining_candidate_count"], 1)
+        self.assertGreaterEqual(chunk["skipped_candidate_count"], 1)
+        self.assertFalse(manifest["writes_enabled"])
+
+    def test_n3_runner_n3t_lane_consumes_ready_persisted_fanout_before_c1_provider(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            fanout_dir = output_dir / "active_scope_ref_fanout"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            for directory in (
+                artifact_dir,
+                fanout_dir,
+                staging_dir,
+                metric_source_dir,
+                previous_context_dir,
+                current_source_dir,
+            ):
+                directory.mkdir(parents=True)
+
+            stale_namespace = "20260707_0933_stale0933aa"
+            stale_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688809",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,W,D",
+                "source_trigger_event_id": "evt_688809_0933",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "stale0933aa",
+                "first_confirmation_minute_label": "09:33",
+                "scope_status": "active",
+            }
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{stale_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": "stale0933aa",
+                        "source_run_namespace": stale_namespace,
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SH:688809",
+                                "scope_status": "active",
+                                "active_tracking_refs": [stale_row],
+                                "attention_event_refs": [],
+                            }
+                        ],
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{stale_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": "stale0933aa",
+                        "source_run_namespace": stale_namespace,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            ready_namespace = "20260707_1454_ready1454bb"
+            ready_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:002174",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M",
+                "source_trigger_event_id": "evt_002174_1454",
+                "source_trigger_event_type": "TriggerStateChanged",
+                "source_run_hash": "ready1454bb",
+                "first_confirmation_minute_label": "14:54",
+                "source_trigger_event_time": "2026-07-07T14:54:00+08:00",
+                "scope_status": "active",
+            }
+            (fanout_dir / f"n5_active_scope_snapshot_v1_{ready_namespace}_ref_fanout.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "1454",
+                        "target_minute_label": "14:54",
+                        "source_run_hash": "ready1454bb",
+                        "source_run_namespace": ready_namespace,
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "object_scope_ref_fanout": True,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:002174",
+                                "scope_status": "active",
+                                "active_tracking_refs": [ready_row],
+                                "attention_event_refs": [],
+                            }
+                        ],
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "1454",
+                        "source_run_hash": "ready1454bb",
+                        "source_run_namespace": ready_namespace,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=ready_row,
+                through_label="14:54",
+            )
+            (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{ready_namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "1454",
+                        "source_run_hash": "ready1454bb",
+                        "source_run_namespace": ready_namespace,
+                        "scope_count": 1,
+                        "closed_minute_row_count": len(current_rows),
+                        "closed_minute_rows": current_rows,
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{ready_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "1454",
+                        "source_run_hash": "ready1454bb",
+                        "source_run_namespace": ready_namespace,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260707",
+                            identity_key="stock:SZ:002174",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_current_day_source_provider": "mootdx_today_minute_adapter_v1",
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T14:54:00+08:00",
+                            "current_exchange_time": "2026-07-07T14:56:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {"provider_called": False, "writer_inputs": []}
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                raise AssertionError("N3T lane must consume ready staging before C1 source provider")
+
+            def n3t_writer_adapter(*, args, n3t_writer_inputs):
+                captured["writer_inputs"] = list(n3t_writer_inputs)
+                return {
+                    "adapter_type": "n3t_action_confirmation_metric_writer_adapter_v1",
+                    "write_executed": True,
+                    "source_basis": "N3T_C1_CLOSED",
+                    "metric_role": "action_confirmation",
+                    "proof_consumer": "N5",
+                    "not_n5_final_proof": False,
+                    "inserted_rows": len(n3t_writer_inputs),
+                    "target_table_counts": {"stock_n3t_action_confirmation_metric": len(n3t_writer_inputs)},
+                    "writes_common_event_outbox": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "full_market_fallback_used": False,
+                }
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+                n3t_writer_adapter=n3t_writer_adapter,
+            )
+
+        self.assertFalse(captured["provider_called"])
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["selected_candidate_count"], 1)
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["processed_candidate_count"], 1)
+        self.assertEqual(manifest["lane_results"]["c1_lane"]["selected_candidate_count"], 0)
+        self.assertEqual(captured["writer_inputs"][0]["n3t_metric_run_id"], "n3t_action_confirmation_metric_20260707_until_1454__fastlane_sr_ready1454bb_raw_prevday_c1_amount_v1")
+
+    def test_n3_runner_selects_incomplete_prevctx_for_metric_context_rebuild_priority(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _select_existing_staging_metric_context_artifacts,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            previous_context_dir = root / "previous_day_context"
+            metric_source_dir = root / "metric_source"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            previous_context_dir.mkdir()
+            metric_source_dir.mkdir()
+            source_hash = "ready0933aaa"
+            namespace = f"20260707_0933_{source_hash}"
+            row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688807",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": "evt_688807_0933",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260707_until_0933__fastlane_ready",
+                "scope_status": "active",
+            }
+            active_scope_path = artifact_dir / f"n5_active_scope_snapshot_v1_{namespace}.json"
+            active_scope_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": source_hash,
+                        "source_run_namespace": namespace,
+                        "scope_count": 1,
+                        "scope_rows": [row],
+                        "source_trigger_run_id": row["source_trigger_run_id"],
+                        "action_run_id": f"n5_live_tracking_20260707__{row['source_trigger_run_id']}",
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=row,
+                through_label="09:33",
+            )
+            (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{namespace}_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "scope_count": 1,
+                        "closed_minute_row_count": len(current_rows),
+                        "closed_minute_rows": current_rows,
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": source_hash,
+                        "source_run_namespace": namespace,
+                        "previous_day_minute_rows": [
+                            {
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SH:688807",
+                                "physical_c1_label": label,
+                                "raw_source_label": label,
+                                "source_row_ref": f"previous:688807:{label}",
+                                "fake_or_synthetic_row": False,
+                            }
+                            for label in ("09:31", "09:32", "09:33")
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            selected = _select_existing_staging_metric_context_artifacts(
+                active_scope_artifacts=[
+                    {
+                        "path": str(active_scope_path),
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": source_hash,
+                        "source_run_namespace": namespace,
+                        "scope_count": 1,
+                    }
+                ],
+                output_dir=output_dir,
+                metric_context_source_dir=metric_source_dir,
+                previous_context_dir=previous_context_dir,
+                max_candidates=1,
+            )
+
+        self.assertEqual([item["source_run_hash"] for item in selected], [source_hash])
+
+    def test_n3_runner_metric_context_builder_candidate_blocker_does_not_stop_valid_source_run(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            bad_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300803",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-300803",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0931__fastlane_bad",
+                "scope_status": "active",
+            }
+            good_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300750",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-300750",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0932__fastlane_good",
+                "scope_status": "active",
+            }
+            bad_hash = "badbadbad001"
+            good_hash = "goodgood002"
+            bad_namespace = f"20260706_0931_{bad_hash}"
+            good_namespace = f"20260706_0932_{good_hash}"
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{bad_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [bad_row],
+                        "source_trigger_run_id": bad_row["source_trigger_run_id"],
+                        "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_0931__fastlane_bad",
+                        "source_run_hash": bad_hash,
+                        "source_run_namespace": bad_namespace,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / f"n5_active_scope_snapshot_v1_{good_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [good_row],
+                        "source_trigger_run_id": good_row["source_trigger_run_id"],
+                        "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_0932__fastlane_good",
+                        "source_run_hash": good_hash,
+                        "source_run_namespace": good_namespace,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            for namespace, row, through_label in (
+                (bad_namespace, bad_row, "09:30"),
+                (good_namespace, good_row, "09:31"),
+            ):
+                current_rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260706",
+                    scope_row=row,
+                    through_label=through_label,
+                )
+                (staging_dir / f"n3_c1_scoped_current_day_staging_v1_{namespace}_fastlane.json").write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                            "artifact_status": "passed",
+                            "for_trade_date": "20260706",
+                            "scope_count": 1,
+                            "closed_minute_row_count": len(current_rows),
+                            "closed_minute_rows": current_rows,
+                            "full_market_fallback_used": False,
+                            "database_written": False,
+                            "market_data_pulled": True,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            (previous_context_dir / f"n3_c1_n3t_previous_day_context_v1_{good_namespace}.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "0932",
+                        "source_run_hash": good_hash,
+                        "source_run_namespace": good_namespace,
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260706",
+                            identity_key="stock:SZ:300750",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T09:32:00+08:00",
+                            "current_exchange_time": "2026-07-06T09:33:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
+            )
+            good_metric_path = (
+                output_dir
+                / "metric_context"
+                / f"n3_c1_scoped_closed_1m_artifact_v1_{good_namespace}_fastlane_raw_prevday_c1_amount_v1.json"
+            )
+            good_metric_exists = good_metric_path.exists()
+            good_source_artifacts = sorted(metric_source_dir.glob(f"*{good_hash}*.json"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertTrue(good_metric_exists)
+        self.assertEqual(len(good_source_artifacts), 1)
+        builder_result = manifest["metric_context_builder_result"]
+        self.assertEqual(builder_result["artifact_count"], 1)
+        self.assertEqual(builder_result["candidate_blockers"], [])
+        readiness_by_hash = {
+            planned["source_run_hash"]: planned["component_readiness"]["status"]
+            for planned in manifest["scoped_executor_plan"]["planned_artifacts"]
+        }
+        self.assertNotIn(bad_hash, readiness_by_hash)
+        self.assertEqual(readiness_by_hash[good_hash], "metric_context_ready_for_n3t_execute_gate")
+
+    def test_n3_runner_execute_derives_and_creates_metric_context_source_dir(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = output_dir / "metric_context_source"
+            previous_context_dir = output_dir / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            previous_context_dir.mkdir(parents=True)
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300803",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-300803",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                "scope_status": "active",
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_0931.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [scope_row],
+                        "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                        "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (
+                staging_dir / "n3_c1_scoped_current_day_staging_v1_20260706_0931_98a646ba5053_fastlane.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "closed_minute_row_count": 1,
+                        "closed_minute_rows": _current_day_c1_rows_for_fixture(
+                            trade_date="20260706",
+                            scope_row=scope_row,
+                            through_label="09:31",
+                        ),
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260706_0931.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "0931",
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(trade_date="20260706"),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T09:31:00+08:00",
+                            "current_exchange_time": "2026-07-06T09:32:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
+            )
+            source_artifacts = sorted(metric_source_dir.glob("*.json"))
+            metric_path = (
+                output_dir
+                / "metric_context"
+                / "n3_c1_scoped_closed_1m_artifact_v1_20260706_0931_98a646ba5053_fastlane_raw_prevday_c1_amount_v1.json"
+            )
+            metric_source_dir_exists = metric_source_dir.is_dir()
+            metric_path_exists = metric_path.exists()
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertTrue(metric_source_dir_exists)
+        self.assertEqual(len(source_artifacts), 1)
+        self.assertTrue(metric_path_exists)
+        self.assertEqual(
+            manifest["metric_context_builder_result"]["source_artifacts"][0]["artifact_type"],
+            "n3_c1_n3t_metric_context_source_v1",
+        )
+        self.assertFalse(manifest["metric_context_builder_result"]["database_written"])
+        self.assertFalse(manifest["metric_context_builder_result"]["market_data_pulled"])
+
+    def test_n3_runner_execute_missing_previous_day_context_fails_closed_after_deriving_source_dir(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            scope_row = {
+                "for_trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300803",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_MAIN",
+                "source_trigger_event_id": "n4-match-300803",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                "scope_status": "active",
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_0931.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "scope_rows": [scope_row],
+                        "source_trigger_run_id": scope_row["source_trigger_run_id"],
+                        "action_run_id": "n5_live_tracking_20260706__trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (
+                staging_dir / "n3_c1_scoped_current_day_staging_v1_20260706_0931_98a646ba5053_fastlane.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "scope_count": 1,
+                        "closed_minute_row_count": 1,
+                        "closed_minute_rows": [
+                            {
+                                **scope_row,
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "open": 12,
+                                "high": 12.6,
+                                "low": 11.8,
+                                "close": 12.5,
+                                "amount": 1000,
+                                "source_row_ref": "current:300803:0930",
+                                "fake_or_synthetic_row": False,
+                            }
+                        ],
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-06T09:31:00+08:00",
+                            "current_exchange_time": "2026-07-06T09:32:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
+            )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(manifest["reason"], "waiting_for_valid_c1_n3t_candidate")
+        self.assertEqual(
+            manifest["metric_context_builder_result"]["candidate_blockers"][0]["blocked_reason"],
+            "previous_day_context_missing",
+        )
+        self.assertFalse(manifest["writes_enabled"])
+        self.assertFalse(manifest["boundary"]["writes_db"])
+        self.assertFalse(manifest["boundary"]["writes_canonical_minute_bar_1m"])
+        self.assertFalse(manifest["boundary"]["touches_n4_n5_n6_outbox"])
 
     def test_n3_runner_execute_can_prewarm_previous_day_context_from_configured_provider(self) -> None:
         from run_n3_c1_n3t_action_confirmation_fastlane_once import (
@@ -6704,21 +10982,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                             "artifact_type": "n3_c1_n3t_previous_day_context_v1",
                             "for_trade_date": "20260706",
                             "target_hhmm": target_hhmm,
-                            "previous_day_minute_rows": [
-                                {
-                                    "asset_kind": "stock",
-                                    "identity_key": "stock:SZ:300803",
-                                    "physical_c1_label": "09:30",
-                                    "raw_source_label": "09:31",
-                                    "open": 10,
-                                    "high": 10.8,
-                                    "low": 9.9,
-                                    "close": 10.4,
-                                    "amount": 900,
-                                    "source_row_ref": "previous:300803:0930",
-                                    "fake_or_synthetic_row": False,
-                                }
-                            ],
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(trade_date="20260706"),
                         },
                         ensure_ascii=False,
                     ),
@@ -6755,6 +11019,514 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             ],
             "n3_c1_n3t_previous_day_context_provider_adapter_v1",
         )
+
+    def test_n3_runner_does_not_reuse_incomplete_hhmm_previous_day_context(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "n3"
+            staging_dir = output_dir / "current_day_staging"
+            metric_source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            staging_dir.mkdir(parents=True)
+            metric_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            source_trigger_run_id = "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1"
+            action_run_id = (
+                "n5_live_tracking_20260706__"
+                "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1"
+            )
+            source_run_hash = "98a646ba5053"
+            scope_rows = [
+                {
+                    "for_trade_date": "20260706",
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881044",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "source_trigger_event_id": "n4-match-881044",
+                    "source_trigger_run_id": source_trigger_run_id,
+                    "scope_status": "active",
+                },
+                {
+                    "for_trade_date": "20260706",
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881261",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "source_trigger_event_id": "n4-match-881261",
+                    "source_trigger_run_id": source_trigger_run_id,
+                    "scope_status": "active",
+                },
+            ]
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260706_0931.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 2,
+                        "scope_rows": scope_rows,
+                        "source_trigger_run_id": source_trigger_run_id,
+                        "action_run_id": action_run_id,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (
+                staging_dir
+                / f"n3_c1_scoped_current_day_staging_v1_20260706_0931_{source_run_hash}_fastlane.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "scope_count": 2,
+                        "closed_minute_row_count": 2,
+                        "closed_minute_rows": [
+                            {
+                                **scope_rows[0],
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "open": 12,
+                                "high": 12.6,
+                                "low": 11.8,
+                                "close": 12.5,
+                                "amount": 1000,
+                                "source_row_ref": "current:881044:0930",
+                                "fake_or_synthetic_row": False,
+                            },
+                            {
+                                **scope_rows[1],
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "open": 22,
+                                "high": 22.6,
+                                "low": 21.8,
+                                "close": 22.5,
+                                "amount": 2000,
+                                "source_row_ref": "current:881261:0930",
+                                "fake_or_synthetic_row": False,
+                            },
+                        ],
+                        "full_market_fallback_used": False,
+                        "database_written": False,
+                        "market_data_pulled": True,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            legacy_path = previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260706_0931.json"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "0931",
+                        "previous_day_minute_rows": [
+                            {
+                                "asset_kind": "board",
+                                "identity_key": "board:TDX:881044",
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "open": 10,
+                                "high": 10.8,
+                                "low": 9.9,
+                                "close": 10.4,
+                                "amount": 900,
+                                "source_row_ref": "previous:881044:0930",
+                                "fake_or_synthetic_row": False,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260706",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_metric_context_source_artifact_dir": str(metric_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "n3_c1_n3t_previous_day_context_provider": "postgres_previous_day_raw_c1_context_v1",
+                        "session_context": {
+                            "trigger_time": "2026-07-06T09:31:00+08:00",
+                            "current_exchange_time": "2026-07-06T09:32:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            provider_called = {"value": False}
+
+            def previous_day_context_provider_adapter(*, args, planned_artifact, target_hhmm, previous_context_dir):
+                provider_called["value"] = True
+                path = (
+                    Path(previous_context_dir)
+                    / f"n3_c1_n3t_previous_day_context_v1_20260706_0931_{source_run_hash}.json"
+                )
+                path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                            "for_trade_date": "20260706",
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": planned_artifact["source_run_hash"],
+                            "source_run_namespace": planned_artifact["namespace_token"],
+                            "previous_day_minute_rows": [
+                                previous_row
+                                for row in scope_rows
+                                for previous_row in _previous_day_c1_rows_for_fixture(
+                                    trade_date="20260706",
+                                    asset_kind=str(row["asset_kind"]),
+                                    identity_key=str(row["identity_key"]),
+                                )
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_n3t_previous_day_context_provider_adapter_v1",
+                    "provider_name": "postgres_previous_day_raw_c1_context_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "previous_day_context_artifacts": [
+                        {
+                            "path": str(path),
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": planned_artifact["source_run_hash"],
+                        }
+                    ],
+                    "database_written": False,
+                    "market_data_pulled": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "writes_common_event_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                previous_day_context_provider_adapter=previous_day_context_provider_adapter,
+            )
+            scoped_context_path = (
+                previous_context_dir
+                / f"n3_c1_n3t_previous_day_context_v1_20260706_0931_{source_run_hash}.json"
+            )
+            scoped_context_payload = json.loads(scoped_context_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(provider_called["value"])
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
+        self.assertEqual(scoped_context_payload["source_run_hash"], source_run_hash)
+        self.assertIn(source_run_hash, str(scoped_context_path))
+        self.assertFalse(manifest["metric_context_builder_result"]["database_written"])
+        self.assertFalse(manifest["metric_context_builder_result"]["touches_n4_n5_n6_outbox"])
+
+    def test_n3_runner_incomplete_hhmm_previous_day_context_without_provider_fails_closed(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            FastlaneShellBlocked,
+            _materialize_metric_context_source_artifact_from_previous_day_context,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            active_scope_path = root / "scope.json"
+            staging_path = root / "staging.json"
+            source_dir = root / "metric_source"
+            previous_context_dir = root / "previous_day_context"
+            previous_context_dir.mkdir()
+            rows = [
+                {
+                    "for_trade_date": "20260706",
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881044",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "source_trigger_event_id": "n4-match-881044",
+                    "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                    "scope_status": "active",
+                },
+                {
+                    "for_trade_date": "20260706",
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881261",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "source_trigger_event_id": "n4-match-881261",
+                    "source_trigger_run_id": "trigger_provisional_ordinary_20260706_until_0931__fastlane_v1",
+                    "scope_status": "active",
+                },
+            ]
+            active_scope_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260706",
+                        "scope_count": 2,
+                        "scope_rows": rows,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            staging_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+                        "artifact_status": "passed",
+                        "for_trade_date": "20260706",
+                        "scope_count": 2,
+                        "closed_minute_rows": [
+                            {
+                                **rows[0],
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "source_row_ref": "current:881044:0930",
+                                "fake_or_synthetic_row": False,
+                            },
+                            {
+                                **rows[1],
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "source_row_ref": "current:881261:0930",
+                                "fake_or_synthetic_row": False,
+                            },
+                        ],
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260706_0931.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260706",
+                        "target_hhmm": "0931",
+                        "previous_day_minute_rows": [
+                            {
+                                "asset_kind": "board",
+                                "identity_key": "board:TDX:881044",
+                                "physical_c1_label": "09:30",
+                                "raw_source_label": "09:31",
+                                "source_row_ref": "previous:881044:0930",
+                                "fake_or_synthetic_row": False,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                previous_day_context_artifact_dir=str(previous_context_dir),
+            )
+            planned_artifact = {
+                "input_active_scope_artifact_path": str(active_scope_path),
+                "staging_artifact_path": str(staging_path),
+                "source_run_hash": "98a646ba5053",
+                "namespace_token": "20260706_0931_98a646ba5053",
+            }
+
+            with self.assertRaisesRegex(
+                FastlaneShellBlocked,
+                "previous_day_context_source_run_coverage_mismatch",
+            ):
+                _materialize_metric_context_source_artifact_from_previous_day_context(
+                    args=args,
+                    planned_artifact=planned_artifact,
+                    source_dir=source_dir,
+                    target_hhmm="0931",
+                )
+
+    def test_previous_day_context_coverage_requires_metric_period_labels_not_only_staging(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _expected_previous_day_context_keys,
+            _previous_day_context_covers_staging,
+        )
+
+        rows = [
+            {
+                "for_trade_date": "20260707",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881347",
+                "direction": "sell",
+                "signal_type": "S_SELL",
+                "condition_key": "SELL:Y,D",
+                "source_trigger_event_id": "n4-match-881347",
+                "source_trigger_run_id": "",
+                "scope_status": "active",
+            }
+        ]
+        staging = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "artifact_status": "passed",
+            "for_trade_date": "20260707",
+            "scope_count": 1,
+            "closed_minute_rows": [
+                {
+                    **rows[0],
+                    "physical_c1_label": label,
+                    "raw_source_label": label,
+                    "open": 12,
+                    "high": 13,
+                    "low": 11,
+                    "close": 12.5,
+                    "amount": 1000,
+                    "source_row_ref": f"current:881347:{label}",
+                    "fake_or_synthetic_row": False,
+                }
+                for label in ("09:31", "09:32", "09:33")
+            ],
+        }
+        short_previous_context = {
+            "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+            "for_trade_date": "20260707",
+            "target_hhmm": "0933",
+            "previous_day_minute_rows": [
+                {
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881347",
+                    "physical_c1_label": label,
+                    "raw_source_label": label,
+                    "source_row_ref": f"previous:881347:{label}",
+                    "fake_or_synthetic_row": False,
+                }
+                for label in ("09:31", "09:32", "09:33")
+            ],
+        }
+
+        expected = _expected_previous_day_context_keys(staging, for_trade_date="20260707")
+
+        self.assertIn(("board:TDX:881347", "09:34"), expected["board"])
+        self.assertIn("09:35", expected["board"][("board:TDX:881347", "09:34")])
+        self.assertIn(("board:TDX:881347", "14:59"), expected["board"])
+        self.assertIn(("board:TDX:881347", "14:30"), expected["board"])
+        self.assertIn(("board:TDX:881347", "13:00"), expected["board"])
+        self.assertFalse(_previous_day_context_covers_staging(short_previous_context, staging))
+
+    def test_previous_day_context_uses_preload_close_labels_for_afternoon_boundary(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _expected_previous_day_context_keys,
+        )
+
+        scope_row = {
+            "for_trade_date": "20260707",
+            "asset_kind": "board",
+            "identity_key": "board:TDX:881347",
+            "direction": "sell",
+            "signal_type": "S_SELL",
+            "condition_key": "SELL:Y,D",
+            "source_trigger_event_id": "n4-match-881347",
+            "source_trigger_run_id": "",
+            "scope_status": "active",
+        }
+        staging = {
+            "artifact_type": "n3_c1_scoped_current_day_staging_v1",
+            "artifact_status": "passed",
+            "for_trade_date": "20260707",
+            "scope_count": 1,
+            "closed_minute_rows": [
+                {
+                    **scope_row,
+                    "physical_c1_label": label,
+                    "raw_source_label": label,
+                    "open": 12,
+                    "high": 13,
+                    "low": 11,
+                    "close": 12.5,
+                    "amount": 1000,
+                    "source_row_ref": f"current:881347:{label}",
+                    "fake_or_synthetic_row": False,
+                }
+                for label in ("09:31", "09:32", "09:33")
+            ],
+        }
+
+        expected = _expected_previous_day_context_keys(staging, for_trade_date="20260707")
+        all_raw_labels = {label for labels in expected["board"].values() for label in labels}
+
+        self.assertEqual(expected["board"][("board:TDX:881347", "13:00")], {"13:01"})
+        self.assertEqual(expected["board"][("board:TDX:881347", "14:59")], {"15:00"})
+        self.assertNotIn("13:00", all_raw_labels)
+
+    def test_open_boundary_previous_day_same_window_does_not_require_fake_0930(self) -> None:
+        from ashare_v3.market.c1_scoped_artifact import (
+            REQUIRED_METRIC_CONTEXT_FIELDS,
+            _derive_metric_values,
+        )
+
+        scope_row = {
+            "for_trade_date": "20260707",
+            "asset_kind": "board",
+            "identity_key": "board:TDX:881347",
+            "direction": "sell",
+            "signal_type": "S_SELL",
+            "condition_key": "SELL:Y,D",
+            "source_trigger_event_id": "n4-match-881347",
+            "source_trigger_run_id": "",
+            "scope_status": "active",
+        }
+        current_rows = [
+            row
+            for row in _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=scope_row,
+                through_label="09:33",
+            )
+            if row["physical_c1_label"] != "09:30"
+        ]
+        previous_rows = [
+            row
+            for row in _previous_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                asset_kind="board",
+                identity_key="board:TDX:881347",
+            )
+            if row["physical_c1_label"] != "09:30"
+        ]
+
+        metric_values = _derive_metric_values(current_rows=current_rows, previous_rows=previous_rows)
+
+        self.assertNotIn(
+            "current_5m_amount",
+            [field for field in REQUIRED_METRIC_CONTEXT_FIELDS if metric_values.get(field) is None],
+        )
+        self.assertIsNotNone(metric_values["current_30m_virtual_amount"])
 
     def test_n3_runner_scoped_executor_plan_reports_local_component_readiness(self) -> None:
         from run_n3_c1_n3t_action_confirmation_fastlane_once import (
@@ -6836,6 +11608,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 "scope_status": "active",
             }
             metric_values = {
+                **_n3t_boundary_metric_fields(),
                 "current_price": 12,
                 "previous_120m_body_high": 11,
                 "previous_120m_body_low": 9,
@@ -7092,6 +11865,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 "scope_status": "active",
             }
             metric_values = {
+                **_n3t_boundary_metric_fields(),
                 "current_price": 12,
                 "previous_120m_body_high": 11,
                 "previous_120m_body_low": 9,
@@ -7263,6 +12037,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 "scope_status": "active",
             }
             metric_values = {
+                **_n3t_boundary_metric_fields(),
                 "current_price": 12,
                 "previous_120m_body_high": 11,
                 "previous_120m_body_low": 9,
@@ -7716,6 +12491,1476 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_SHELL_READY")
         self.assertEqual(manifest["active_scope_artifact_count"], 1)
         self.assertEqual(manifest["active_scope_artifacts"][0]["path"], str(target_path))
+
+    def test_n3_runner_fans_out_object_scope_ref_minute_before_closed_filter(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        captured: dict[str, object] = {}
+
+        def executor(*, args, active_scope_artifacts):
+            captured["artifact_count"] = len(active_scope_artifacts)
+            captured["artifact"] = dict(active_scope_artifacts[0])
+            return {
+                "executed": True,
+                "artifact_count": len(active_scope_artifacts),
+                "writes_db": False,
+                "writes_n3_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown_da4fe7e9999a.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                        "source_trigger_run_id": "",
+                        "source_run_hash": "da4fe7e9999a",
+                        "source_run_namespace": "20260707_unknown_da4fe7e9999a",
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:301269",
+                                "scope_status": "active",
+                                "active_tracking_refs": [
+                                    {
+                                        "for_trade_date": "20260707",
+                                        "asset_kind": "stock",
+                                        "identity_key": "stock:SZ:301269",
+                                        "direction": "buy",
+                                        "signal_type": "B_BUY",
+                                        "condition_key": "BUY:Y,M,W,D",
+                                        "scope_status": "active",
+                                        "source_trigger_event_id": "evt_301269_0937",
+                                        "source_trigger_event_type": "TriggerMatched",
+                                        "source_trigger_run_id": "",
+                                        "source_run_hash": "refhash0937",
+                                        "first_confirmation_minute_label": "09:37",
+                                        "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+                                    }
+                                ],
+                                "attention_event_refs": [],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:39:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                scoped_executor=executor,
+            )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(captured["artifact_count"], 1)
+        artifact = captured["artifact"]
+        self.assertEqual(artifact["target_hhmm"], "0937")
+        self.assertEqual(artifact["source_run_hash"], "refhash0937")
+        self.assertEqual(artifact["source_run_namespace"], "20260707_0937_refhash0937")
+
+    def test_n3_runner_fanout_materializes_ref_scoped_pull_plan_payload(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            run_n3_c1_n3t_action_confirmation_fastlane_once,
+        )
+
+        def executor(*, args, active_scope_artifacts):
+            return {
+                "executed": True,
+                "artifact_count": len(active_scope_artifacts),
+                "writes_db": False,
+                "writes_n3_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            ref_scope = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_301269_0937",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_trigger_run_id": "",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260707",
+                "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                "source_trigger_run_id": "",
+                "source_run_hash": "da4fe7e9999a",
+                "source_run_namespace": "20260707_unknown_da4fe7e9999a",
+                "scope_granularity": "object",
+                "scope_count": 2,
+                "active_tracking_ref_count": 2,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:301269",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:301269",
+                                "direction": "buy",
+                                "signal_type": "B_BUY",
+                                "condition_key": "BUY:Y,M,W,D",
+                                "scope_status": "active",
+                                "source_trigger_event_id": "evt_301269_0937",
+                                "source_trigger_event_type": "TriggerMatched",
+                                "source_trigger_run_id": "",
+                                "source_run_hash": "refhash0937",
+                                "first_confirmation_minute_label": "09:37",
+                                "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    },
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:301270",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:301270",
+                                "direction": "buy",
+                                "signal_type": "B_BUY",
+                                "condition_key": "BUY:Y,M,W,D",
+                                "scope_status": "active",
+                                "source_trigger_event_id": "evt_301270_0941",
+                                "source_trigger_event_type": "TriggerMatched",
+                                "source_trigger_run_id": "",
+                                "source_run_hash": "refhash0941",
+                                "first_confirmation_minute_label": "09:41",
+                                "source_trigger_event_time": "2026-07-07T09:41:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    },
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown_da4fe7e9999a.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_rows = []
+            for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(31, 38)), start=1):
+                current_rows.append(
+                    {
+                        **ref_scope,
+                        "physical_c1_label": label,
+                        "raw_source_label": source_close_label_for_physical_start_label("20260707", label)[
+                            "raw_source_label"
+                        ],
+                        "open": 120 + index / 10,
+                        "high": 121 + index / 10,
+                        "low": 119,
+                        "close": 120.5 + index / 10,
+                        "amount": 10000 + index,
+                        "source_row_ref": f"current:301269:{label}",
+                        "fake_or_synthetic_row": False,
+                    }
+                )
+            (
+                current_source_dir
+                / "n3_c1_scoped_current_day_source_rows_v1_20260707_0937_refhash0937.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0937",
+                        "target_minute_label": "09:37",
+                        "source_run_hash": "refhash0937",
+                        "source_run_namespace": "20260707_0937_refhash0937",
+                        "closed_minute_rows": current_rows,
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                        "touches_n4_n5_n6_outbox": False,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stale_pull_plan = build_n3_c1_scoped_current_day_pull_plan(
+                scope_payload,
+                target_minute_label="09:37",
+                observed_at="2026-07-07T09:43:00+08:00",
+                source_artifact_path=str(artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json"),
+                source_artifact_hash="stale_scope_hash",
+            )
+            stale_pull_plan_path = (
+                output_dir / "n3_c1_scoped_current_day_pull_plan_v1_20260707_0937_refhash0937_fastlane.json"
+            )
+            stale_pull_plan_path.parent.mkdir(parents=True)
+            stale_pull_plan_path.write_text(
+                json.dumps(stale_pull_plan, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:39:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                scoped_executor=executor,
+            )
+            pull_plan_path = (
+                output_dir
+                / "n3_c1_scoped_current_day_pull_plan_v1_20260707_0937_refhash0937_fastlane.json"
+            )
+            pull_plan = json.loads(pull_plan_path.read_text(encoding="utf-8"))
+            staging_path = (
+                output_dir
+                / "current_day_staging"
+                / "n3_c1_scoped_current_day_staging_v1_20260707_0937_refhash0937_fastlane.json"
+            )
+            self.assertTrue(staging_path.exists(), manifest)
+            pull_plan = json.loads(stale_pull_plan_path.read_text(encoding="utf-8"))
+            staging = json.loads(staging_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(pull_plan["scope_count"], 1)
+        self.assertEqual(len(pull_plan["plan_rows"]), 1)
+        self.assertEqual(pull_plan["plan_rows"][0]["identity_key"], "stock:SZ:301269")
+        self.assertEqual(staging["artifact_status"], "passed")
+        self.assertEqual(staging["scope_count"], 1)
+        self.assertEqual(staging["closed_minute_row_count"], 7)
+
+    def test_n3_runner_fanout_source_provider_runs_before_staging_scan(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            previous_context_dir = root / "previous_day_context"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            previous_context_dir.mkdir()
+            ref_scope_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_301269_0937",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash0937",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260707",
+                "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                "scope_granularity": "object",
+                "scope_count": 1,
+                "active_tracking_ref_count": 1,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:301269",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                **ref_scope_row,
+                                "first_confirmation_minute_label": "09:37",
+                                "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    }
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (previous_context_dir / "n3_c1_n3t_previous_day_context_v1_20260707_0937_refhash0937.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_n3t_previous_day_context_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0937",
+                        "source_run_hash": "refhash0937",
+                        "source_run_namespace": "20260707_0937_refhash0937",
+                        "previous_day_minute_rows": _previous_day_c1_rows_for_fixture(
+                            trade_date="20260707",
+                            identity_key="stock:SZ:301269",
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_previous_day_context_artifact_dir": str(previous_context_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:39:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {"provider_called": False}
+
+            def deadline_factory(*, args, started, now_monotonic):
+                def check(phase: str) -> None:
+                    if phase == "current_day_staging_candidate" and not captured["provider_called"]:
+                        raise runner.FastlaneShellBlocked("source_provider_starved_before_current_day_staging")
+
+                return check
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                self.assertEqual(len(planned_artifacts), 1)
+                planned = planned_artifacts[0]
+                self.assertEqual(planned["target_hhmm"], "0937")
+                self.assertEqual(planned["source_run_hash"], "refhash0937")
+                current_rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260707",
+                    scope_row=ref_scope_row,
+                    through_label="09:37",
+                )
+                output_path = Path(args.current_day_source_artifact_dir) / (
+                    f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                )
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": planned["target_hhmm"],
+                            "target_minute_label": "09:37",
+                            "source_run_hash": planned["source_run_hash"],
+                            "source_run_namespace": planned["namespace_token"],
+                            "closed_minute_rows": current_rows,
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "source_row_count": len(current_rows),
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            with patch.object(runner, "_make_runtime_deadline_check", deadline_factory):
+                manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                    ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                )
+
+            staging_path = (
+                output_dir
+                / "current_day_staging"
+                / "n3_c1_scoped_current_day_staging_v1_20260707_0937_refhash0937_fastlane.json"
+            )
+            staging_exists = staging_path.exists()
+
+        self.assertTrue(captured["provider_called"])
+        self.assertTrue(staging_exists)
+        self.assertEqual(manifest["current_day_source_provider_result"]["artifact_count"], 1)
+        self.assertIn(
+            manifest["scoped_executor_plan"]["planned_artifacts"][0]["component_readiness"]["status"],
+            {
+                "waiting_for_metric_context_artifact",
+                "metric_context_ready_for_n3t_execute_gate",
+            },
+        )
+
+    def test_n3_runner_prioritizes_existing_source_missing_staging_before_provider(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            ref_0937 = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_301269_0937",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash0937",
+            }
+            ref_0941 = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301270",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_301270_0941",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash0941",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260707",
+                "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                "scope_granularity": "object",
+                "scope_count": 2,
+                "active_tracking_ref_count": 2,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:301269",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                **ref_0937,
+                                "first_confirmation_minute_label": "09:37",
+                                "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    },
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:301270",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                **ref_0941,
+                                "first_confirmation_minute_label": "09:41",
+                                "source_trigger_event_time": "2026-07-07T09:41:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    },
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_rows = _current_day_c1_rows_for_fixture(
+                trade_date="20260707",
+                scope_row=ref_0937,
+                through_label="09:37",
+            )
+            current_rows.extend(
+                _current_day_c1_rows_for_fixture(
+                    trade_date="20260707",
+                    scope_row=ref_0941,
+                    through_label="09:37",
+                )
+            )
+            (
+                current_source_dir
+                / "n3_c1_scoped_current_day_source_rows_v1_20260707_0937_refhash0937.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0937",
+                        "target_minute_label": "09:37",
+                        "source_run_hash": "refhash0937",
+                        "source_run_namespace": "20260707_0937_refhash0937",
+                        "scope_count": 2,
+                        "closed_minute_rows": current_rows,
+                        "closed_minute_row_count": len(current_rows),
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                        "touches_n4_n5_n6_outbox": False,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:43:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {"provider_called": False, "executor_artifact_count": 0}
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                raise AssertionError("existing source with missing staging must be staged before provider scan")
+
+            def executor(*, args, active_scope_artifacts):
+                captured["executor_artifact_count"] = len(active_scope_artifacts)
+                return {
+                    "executed": True,
+                    "artifact_count": len(active_scope_artifacts),
+                    "writes_db": False,
+                    "writes_n3_outbox": False,
+                    "full_market_fallback_used": False,
+                }
+
+            manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+                scoped_executor=executor,
+            )
+
+            staging_path = (
+                output_dir
+                / "current_day_staging"
+                / "n3_c1_scoped_current_day_staging_v1_20260707_0937_refhash0937_fastlane.json"
+            )
+            self.assertTrue(staging_path.exists(), manifest)
+            staging = json.loads(staging_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(captured["provider_called"])
+        self.assertEqual(captured["executor_artifact_count"], 1)
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(
+            manifest["current_day_source_provider_result"]["skip_reason"],
+            "existing_source_missing_staging_interleave_prioritized",
+        )
+        self.assertEqual(staging["artifact_status"], "passed")
+        self.assertEqual(staging["scope_count"], 1)
+        self.assertEqual(staging["closed_minute_row_count"], 7)
+        self.assertEqual(
+            {row["identity_key"] for row in staging["closed_minute_rows"]},
+            {"stock:SZ:301269"},
+        )
+
+    def test_n3_runner_stages_rebuilt_pull_plan_when_open_boundary_source_starts_at_0931(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            ref_0933 = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:688807",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_688807_0933",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash0933",
+            }
+            ref_other = {
+                **ref_0933,
+                "identity_key": "board:TDX:881347",
+                "asset_kind": "board",
+                "source_trigger_event_id": "evt_881347_0933",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260707",
+                "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                "scope_granularity": "object",
+                "scope_count": 1,
+                "active_tracking_ref_count": 1,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SH:688807",
+                        "scope_status": "active",
+                        "active_tracking_refs": [
+                            {
+                                **ref_0933,
+                                "first_confirmation_minute_label": "09:33",
+                                "source_trigger_event_time": "2026-07-07T09:33:00+08:00",
+                            }
+                        ],
+                        "attention_event_refs": [],
+                    }
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_rows: list[dict[str, object]] = []
+            for index, label in enumerate(("09:31", "09:32", "09:33"), start=1):
+                current_rows.append(
+                    {
+                        **ref_0933,
+                        "physical_c1_label": label,
+                        "raw_source_label": source_close_label_for_physical_start_label("20260707", label)[
+                            "raw_source_label"
+                        ],
+                        "open": 120 + index / 10,
+                        "high": 121 + index / 10,
+                        "low": 119,
+                        "close": 120.5 + index / 10,
+                        "amount": 10000 + index,
+                        "source_row_ref": f"current:688807:{label}",
+                        "fake_or_synthetic_row": False,
+                    }
+                )
+                current_rows.append(
+                    {
+                        **ref_other,
+                        "physical_c1_label": label,
+                        "raw_source_label": source_close_label_for_physical_start_label("20260707", label)[
+                            "raw_source_label"
+                        ],
+                        "open": 20 + index / 10,
+                        "high": 21 + index / 10,
+                        "low": 19,
+                        "close": 20.5 + index / 10,
+                        "amount": 20000 + index,
+                        "source_row_ref": f"current:881347:{label}",
+                        "fake_or_synthetic_row": False,
+                    }
+                )
+            (
+                current_source_dir
+                / "n3_c1_scoped_current_day_source_rows_v1_20260707_0933_refhash0933.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "target_minute_label": "09:33",
+                        "source_run_hash": "refhash0933",
+                        "source_run_namespace": "20260707_0933_refhash0933",
+                        "scope_count": 2,
+                        "closed_minute_rows": current_rows,
+                        "closed_minute_row_count": len(current_rows),
+                        "database_written": False,
+                        "writes_canonical_minute_bar_1m": False,
+                        "writes_n3_outbox": False,
+                        "touches_n4_n5_n6_outbox": False,
+                        "full_market_fallback_used": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:33:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:35:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            pull_plan_path = output_dir / "n3_c1_scoped_current_day_pull_plan_v1_20260707_0933_refhash0933_fastlane.json"
+            stale_pull_plan = build_n3_c1_scoped_current_day_pull_plan(
+                scope_payload,
+                target_minute_label="09:33",
+                observed_at="2026-07-07T09:35:00+08:00",
+                source_artifact_path=str(artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json"),
+                source_artifact_hash="stale_scope_hash",
+            )
+            stale_pull_plan["required_physical_labels"] = ["09:30", "09:31", "09:32", "09:33"]
+            stale_pull_plan["required_raw_source_labels"] = ["09:30", "09:31", "09:32", "09:33"]
+            stale_pull_plan["source_gap_physical_labels"] = []
+            stale_pull_plan["metric_context_dependencies"] = []
+            for row in stale_pull_plan["plan_rows"]:
+                row["required_physical_labels"] = list(stale_pull_plan["required_physical_labels"])
+                row["required_raw_source_labels"] = list(stale_pull_plan["required_raw_source_labels"])
+                row["source_gap_physical_labels"] = []
+                row["metric_context_dependencies"] = []
+            pull_plan_path.parent.mkdir(parents=True, exist_ok=True)
+            pull_plan_path.write_text(
+                json.dumps(stale_pull_plan, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+            )
+            staging_path = (
+                output_dir
+                / "current_day_staging"
+                / "n3_c1_scoped_current_day_staging_v1_20260707_0933_refhash0933_fastlane.json"
+            )
+            pull_plan = json.loads(pull_plan_path.read_text(encoding="utf-8"))
+            staging = json.loads(staging_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(pull_plan["required_physical_labels"], ["09:31", "09:32", "09:33"])
+        self.assertEqual(pull_plan["required_raw_source_labels"], ["09:32", "09:33", "09:34"])
+        self.assertEqual(pull_plan.get("source_gap_physical_labels"), [])
+        self.assertEqual(staging["artifact_status"], "passed")
+        self.assertEqual(staging["closed_minute_row_count"], 3)
+        self.assertEqual([row["physical_c1_label"] for row in staging["closed_minute_rows"]], ["09:31", "09:32", "09:33"])
+        self.assertEqual({row["identity_key"] for row in staging["closed_minute_rows"]}, {"stock:SH:688807"})
+
+    def test_n3_runner_source_provider_candidate_scan_is_bounded_before_deadline(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            scope_rows: list[dict[str, object]] = []
+            for index in range(8):
+                identity_key = f"stock:SZ:30{1269 + index:04d}"
+                ref = {
+                    "for_trade_date": "20260707",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,M,W,D",
+                    "scope_status": "active",
+                    "source_trigger_event_id": f"evt_{index}_0937",
+                    "source_trigger_event_type": "TriggerMatched",
+                    "source_run_hash": f"refhash{index:04d}",
+                    "first_confirmation_minute_label": "09:37",
+                    "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+                }
+                scope_rows.append(
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": identity_key,
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                )
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                        "scope_granularity": "object",
+                        "scope_count": len(scope_rows),
+                        "active_tracking_ref_count": len(scope_rows),
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": scope_rows,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_current_day_source_provider_max_candidates_per_invocation": 2,
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:39:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {"provider_called": False}
+
+            def deadline_factory(*, args, started, now_monotonic):
+                def check(phase: str) -> None:
+                    if phase == "current_day_source_candidate_scan":
+                        raise runner.FastlaneShellBlocked("source_provider_candidate_scan_should_be_bounded")
+
+                return check
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                captured["planned_count"] = len(planned_artifacts)
+                for planned in planned_artifacts:
+                    active_scope = json.loads(
+                        Path(planned["input_active_scope_artifact_path"]).read_text(encoding="utf-8")
+                    )
+                    scope_row = dict(active_scope["scope_rows"][0]["active_tracking_refs"][0])
+                    rows = _current_day_c1_rows_for_fixture(
+                        trade_date="20260707",
+                        scope_row=scope_row,
+                        through_label="09:37",
+                    )
+                    output_path = Path(args.current_day_source_artifact_dir) / (
+                        f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                    )
+                    output_path.write_text(
+                        json.dumps(
+                            {
+                                "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                                "for_trade_date": "20260707",
+                                "target_hhmm": planned["target_hhmm"],
+                                "target_minute_label": "09:37",
+                                "source_run_hash": planned["source_run_hash"],
+                                "source_run_namespace": planned["namespace_token"],
+                                "closed_minute_rows": rows,
+                                "database_written": False,
+                                "writes_canonical_minute_bar_1m": False,
+                                "writes_n3_outbox": False,
+                                "touches_n4_n5_n6_outbox": False,
+                                "full_market_fallback_used": False,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": len(planned_artifacts),
+                    "source_row_count": 8 * len(planned_artifacts),
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            with patch.object(runner, "_make_runtime_deadline_check", deadline_factory):
+                manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                    ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                )
+            source_artifact_count = len(list(current_source_dir.glob("*.json")))
+
+        self.assertTrue(captured["provider_called"])
+        self.assertEqual(captured["planned_count"], 2)
+        self.assertEqual(source_artifact_count, 2)
+        self.assertEqual(manifest["current_day_source_provider_result"]["artifact_count"], 2)
+        self.assertTrue(manifest["current_day_source_provider_result"]["candidate_scan_bounded"])
+        self.assertEqual(manifest["current_day_source_provider_result"]["candidate_scan_limit"], 2)
+        self.assertGreater(manifest["current_day_source_provider_result"]["remaining_candidate_count"], 0)
+
+    def test_n3_runner_scoped_pull_plan_candidate_scan_is_bounded_before_source_provider(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            scope_rows: list[dict[str, object]] = []
+            for index in range(7):
+                identity_key = f"stock:SZ:30{2000 + index:04d}"
+                ref = {
+                    "for_trade_date": "20260707",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,M,W,D",
+                    "scope_status": "active",
+                    "source_trigger_event_id": f"evt_pull_plan_{index}_1421",
+                    "source_trigger_event_type": "TriggerMatched",
+                    "source_run_hash": f"pullhash{index:03d}",
+                    "first_confirmation_minute_label": "14:21",
+                    "source_trigger_event_time": "2026-07-07T14:21:00+08:00",
+                }
+                scope_rows.append(
+                    {
+                        "for_trade_date": "20260707",
+                        "asset_kind": "stock",
+                        "identity_key": identity_key,
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                )
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_active_set_a.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                        "scope_granularity": "object",
+                        "scope_count": len(scope_rows),
+                        "active_tracking_ref_count": len(scope_rows),
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": scope_rows,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "n3_c1_n3t_current_day_source_provider_max_candidates_per_invocation": 1,
+                        "n3_c1_n3t_scoped_pull_plan_max_candidates_per_invocation": 3,
+                        "session_context": {
+                            "trigger_time": "2026-07-07T14:21:00+08:00",
+                            "current_exchange_time": "2026-07-07T14:23:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            captured: dict[str, object] = {"provider_called": False}
+
+            deadline_seen = {"scoped_pull_plan_candidate": 0}
+
+            def deadline_factory(*, args, started, now_monotonic):
+                def check(phase: str) -> None:
+                    if phase == "scoped_pull_plan_candidate":
+                        deadline_seen["scoped_pull_plan_candidate"] += 1
+                        if deadline_seen["scoped_pull_plan_candidate"] > 3:
+                            raise runner.FastlaneShellBlocked(
+                                "scoped_pull_plan_candidate_scan_should_be_bounded"
+                            )
+
+                return check
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                captured["provider_called"] = True
+                captured["planned_count"] = len(planned_artifacts)
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": False,
+                    "artifact_count": 0,
+                    "source_row_count": 0,
+                    "market_data_pulled": False,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            with patch.object(runner, "_make_runtime_deadline_check", deadline_factory):
+                manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                    ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                )
+            pull_plan_count = len(list(output_dir.glob("n3_c1_scoped_current_day_pull_plan_v1_*_fastlane.json")))
+
+        self.assertTrue(captured["provider_called"])
+        self.assertEqual(captured["planned_count"], 1)
+        self.assertEqual(pull_plan_count, 3)
+        chunk = manifest["scoped_pull_plan_chunk"]
+        self.assertEqual(chunk["reason"], "scoped_pull_plan_candidate_chunk_incomplete")
+        self.assertEqual(chunk["candidate_scan_limit"], 3)
+        self.assertEqual(chunk["processed_candidate_count"], 3)
+        self.assertEqual(chunk["remaining_candidate_count"], 4)
+        self.assertEqual(manifest["active_scope_artifact_count"], 3)
+
+    def test_n3_runner_scoped_pull_plan_selection_reads_latest_persisted_fanout(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            fanout_dir = output_dir / "active_scope_ref_fanout"
+            fanout_dir.mkdir(parents=True)
+            old_scope = root / "n5_active_scope_snapshot_v1_20260707_0933_oldhash.json"
+            old_scope.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": "oldhash0933",
+                        "source_run_namespace": "20260707_0933_oldhash0933",
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:300001",
+                                "active_tracking_refs": [],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "n3_c1_scoped_current_day_pull_plan_v1_20260707_0933_oldhash0933_fastlane.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": "oldhash0933",
+                        "source_run_namespace": "20260707_0933_oldhash0933",
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "plan_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:300001",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            latest_fanout = fanout_dir / "n5_active_scope_snapshot_v1_20260707_1442_newhash1442_ref_fanout.json"
+            latest_fanout.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "1442",
+                        "target_minute_label": "14:42",
+                        "source_run_hash": "newhash1442",
+                        "source_run_namespace": "20260707_1442_newhash1442",
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "object_scope_ref_fanout": True,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:300002",
+                                "active_tracking_refs": [
+                                    {
+                                        "for_trade_date": "20260707",
+                                        "asset_kind": "stock",
+                                        "identity_key": "stock:SZ:300002",
+                                        "source_run_hash": "newhash1442",
+                                        "first_confirmation_minute_label": "14:42",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            selected, summary = runner._select_scoped_pull_plan_candidate_chunk(
+                active_scope_artifacts=[
+                    {
+                        "path": str(old_scope),
+                        "for_trade_date": "20260707",
+                        "target_hhmm": "0933",
+                        "source_run_hash": "oldhash0933",
+                        "source_run_namespace": "20260707_0933_oldhash0933",
+                        "scope_count": 1,
+                    }
+                ],
+                output_dir=output_dir,
+                max_candidates=3,
+            )
+
+        self.assertEqual([item["source_run_namespace"] for item in selected], ["20260707_1442_newhash1442"])
+        self.assertEqual(summary["processed_candidate_count"], 1)
+        self.assertEqual(summary["selected_source_runs"][0]["target_hhmm"], "1442")
+
+    def test_n3_runner_source_provider_progress_timeout_returns_clean_waiting(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            scope_row = {
+                "for_trade_date": "20260707",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:301269",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_301269_0937",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash0937",
+                "first_confirmation_minute_label": "09:37",
+                "source_trigger_event_time": "2026-07-07T09:37:00+08:00",
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260707_unknown.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260707",
+                        "action_run_id": "n5_live_tracking_20260707__active_set_a__fastlane_v1",
+                        "scope_granularity": "object",
+                        "scope_count": 1,
+                        "active_tracking_ref_count": 1,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": [
+                            {
+                                "for_trade_date": "20260707",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SZ:301269",
+                                "scope_status": "active",
+                                "active_tracking_refs": [scope_row],
+                                "attention_event_refs": [],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260707",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "trigger_time": "2026-07-07T09:37:00+08:00",
+                            "current_exchange_time": "2026-07-07T09:39:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            def deadline_factory(*, args, started, now_monotonic):
+                def check(phase: str) -> None:
+                    if phase == "current_day_source_provider":
+                        raise runner.FastlaneShellBlocked(
+                            "max_runtime_seconds_exceeded:current_day_source_provider"
+                        )
+
+                return check
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                planned = planned_artifacts[0]
+                rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260707",
+                    scope_row=scope_row,
+                    through_label="09:37",
+                )
+                output_path = Path(args.current_day_source_artifact_dir) / (
+                    f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                )
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260707",
+                            "target_hhmm": planned["target_hhmm"],
+                            "target_minute_label": "09:37",
+                            "source_run_hash": planned["source_run_hash"],
+                            "source_run_namespace": planned["namespace_token"],
+                            "closed_minute_rows": rows,
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "source_row_count": len(rows),
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            with patch.object(runner, "_make_runtime_deadline_check", deadline_factory):
+                manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                    ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(manifest["reason"], "current_day_source_provider_chunk_incomplete")
+        self.assertEqual(manifest["current_day_source_provider_result"]["artifact_count"], 1)
+        self.assertFalse(manifest["current_day_source_provider_result"]["database_written"])
+        self.assertFalse(manifest["current_day_source_provider_result"]["writes_n3_outbox"])
+        self.assertFalse(manifest["current_day_source_provider_result"]["updates_n4_outbox"])
+
+    def test_n3_runner_ref_fanout_uses_next_unchecked_minute_cursor(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "for_trade_date": "20260707",
+            "scope_granularity": "object",
+            "scope_count": 1,
+            "active_tracking_ref_count": 1,
+            "full_market_fallback_allowed": False,
+            "n3_scans_n5_internals": False,
+            "scope_rows": [
+                {
+                    "for_trade_date": "20260707",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:301269",
+                    "scope_status": "active",
+                    "active_tracking_refs": [
+                        {
+                            "for_trade_date": "20260707",
+                            "asset_kind": "stock",
+                            "identity_key": "stock:SZ:301269",
+                            "direction": "buy",
+                            "signal_type": "B_BUY",
+                            "condition_key": "BUY:Y,M,W,D",
+                            "scope_status": "active",
+                            "source_trigger_event_id": "evt_301269_1401",
+                            "source_trigger_event_type": "TriggerStateChanged",
+                            "source_run_hash": "cursor1402aa",
+                            "first_confirmation_minute_label": "14:01",
+                            "last_checked_minute_label": "14:01",
+                            "next_unchecked_minute_label": "14:02",
+                            "source_trigger_event_time": "2026-07-07T14:01:00+08:00",
+                        }
+                    ],
+                    "attention_event_refs": [],
+                }
+            ],
+        }
+
+        candidates = runner._active_scope_artifact_candidates(Path("scope.json"), payload)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_hhmm"], "1402")
+        self.assertEqual(candidates[0]["source_run_namespace"], "20260707_1402_cursor1402aa")
+        narrowed = candidates[0]["_object_scope_ref_fanout_payload"]
+        self.assertEqual(narrowed["target_minute_label"], "14:02")
+
+    def test_n3_runner_ref_fanout_does_not_use_cursor_before_trigger_time(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "for_trade_date": "20260707",
+            "scope_granularity": "object",
+            "scope_count": 1,
+            "active_tracking_ref_count": 1,
+            "full_market_fallback_allowed": False,
+            "n3_scans_n5_internals": False,
+            "scope_rows": [
+                {
+                    "for_trade_date": "20260707",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:301269",
+                    "scope_status": "active",
+                    "active_tracking_refs": [
+                        {
+                            "for_trade_date": "20260707",
+                            "asset_kind": "stock",
+                            "identity_key": "stock:SZ:301269",
+                            "direction": "buy",
+                            "signal_type": "B_BUY",
+                            "condition_key": "BUY:Y,M,W,D",
+                            "scope_status": "active",
+                            "source_trigger_event_id": "evt_301269_1401",
+                            "source_trigger_event_type": "TriggerStateChanged",
+                            "source_run_hash": "cursor1401aa",
+                            "first_confirmation_minute_label": "14:01",
+                            "last_checked_minute_label": "",
+                            "next_unchecked_minute_label": "14:00",
+                            "source_trigger_event_time": "2026-07-07T14:01:00+08:00",
+                        }
+                    ],
+                    "attention_event_refs": [],
+                }
+            ],
+        }
+
+        candidates = runner._active_scope_artifact_candidates(Path("scope.json"), payload)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_hhmm"], "1401")
 
 
 if __name__ == "__main__":

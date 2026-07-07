@@ -7,6 +7,7 @@ workers, connects to DB, pulls market data, or mutates N1-N6 facts.
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import re
 import hashlib
@@ -29,6 +30,14 @@ FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_DEFERRED_AUTHORIZATION_TIMING = "runtime_de
 FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_DEFERRED_BOOTSTRAP_MODE = "runtime_review_path_deferred"
 FASTLANE_RUNTIME_SESSION_CONTEXT_POLICY_TYPE = "fastlane_runtime_clock_session_context_v1"
 FASTLANE_SOURCE_RUN_SCOPED_DRAIN_PLAN_TYPE = "n5_n3t_fastlane_source_run_scoped_bounded_drain_plan_v1"
+FASTLANE_POST_CLOSE_READINESS_CONFIG_ROLLOVER_ARTIFACT_TYPE = (
+    "n5_n3t_post_close_readiness_config_rollover_v1"
+)
+POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE = "n5_c1_n3t_post_close_final_a_pass_done_v1"
+POST_CLOSE_FINAL_A_PASS_DONE_COMPLETION_MODES = (
+    "empty_a_noop",
+    "n5_executed_all_refs_evaluated",
+)
 
 FASTLANE_LABELS = {
     "n5_intake": "com.ashare-v3.n5.action-intake-poller",
@@ -67,6 +76,58 @@ N3T_METRIC_LINEAGE = {
     "metric_ready": True,
     "metric_quality_status": "passed",
 }
+
+FASTLANE_ACTIVATION_CONFIG_DIR = Path("tmp/N5_N3T_action_confirmation_fastlane_activation_config")
+FASTLANE_POLICY_REVIEW_DIR = Path("tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck")
+
+
+def default_post_close_final_a_pass_done_marker_path(*, for_trade_date: str) -> str:
+    safe_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit()) or "unknown_trade_date"
+    return str(Path("docs/runtime") / safe_trade_date / f"{POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE}.json")
+
+
+def default_fastlane_dated_activation_config_path(*, for_trade_date: str) -> str:
+    safe_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit()) or "unknown_trade_date"
+    return str(FASTLANE_ACTIVATION_CONFIG_DIR / f"write_enabled_activation_config_{safe_trade_date}_runtime_deferred_v1.json")
+
+
+def default_fastlane_stable_activation_config_path() -> str:
+    return str(FASTLANE_ACTIVATION_CONFIG_DIR / "write_enabled_activation_config_current_runtime_deferred_v1.json")
+
+
+def default_fastlane_active_worker_policy_review_path(*, for_trade_date: str) -> str:
+    safe_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit()) or "unknown_trade_date"
+    return str(FASTLANE_POLICY_REVIEW_DIR / safe_trade_date / "active_worker_policy_review_current_latest.json")
+
+
+def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
+    marker_path = Path(path)
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid") from exc
+    if not isinstance(marker, dict):
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if marker.get("artifact_type") != POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if str(marker.get("for_trade_date") or "") != str(for_trade_date or ""):
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if marker.get("status") != "done":
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if str(marker.get("completion_mode") or "") not in POST_CLOSE_FINAL_A_PASS_DONE_COMPLETION_MODES:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if int(marker.get("unprocessed_ref_count") or 0) != 0:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    boundary = marker.get("boundary") or {}
+    if not isinstance(boundary, Mapping):
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if boundary.get("n4_outbox_updated") is not False:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if boundary.get("n6_touched") is not False:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    if boundary.get("canonical_minute_bar_1m_written") is not False:
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    return marker
 
 
 def build_fastlane_source_run_namespace(
@@ -542,6 +603,7 @@ def build_fastlane_session_phase_policy() -> dict[str, Any]:
         },
         "pre_open_before_0925": {
             "n5_intake": "read_only_discovery_or_plan_only",
+            "waiting_reason": "waiting_for_0925_or_n4_triggermatched",
             "action_eligible_write_allowed": False,
             "n3_c1_n3t": "blocked_no_closed_current_day_minute",
             "action_executed": "blocked_until_n3t_c1_closed_metric",
@@ -566,9 +628,14 @@ def build_fastlane_session_phase_policy() -> dict[str, Any]:
             "allows_1300_to_1130_bridge": False,
         },
         "post_close": {
-            "drain_mode": True,
+            "drain_mode": "post_close_final_a_pass_once",
             "backlog_order": ["event_time ASC", "source_run_id ASC"],
-            "n3_c1_n3t_mode": "one_scoped_c1_n3t_pass_per_source_run",
+            "n3_c1_n3t_mode": "one_final_a_pass",
+            "post_close_final_a_pass_once": True,
+            "requires_for_trade_date_current_date": True,
+            "requires_trade_calendar_open": True,
+            "target_close_boundary": "session_close",
+            "repeated_microbatch_allowed": False,
         },
         "closed_day_or_non_trading": {
             "read_only_discovery_allowed": True,
@@ -628,9 +695,9 @@ def build_fastlane_active_worker_policy() -> dict[str, Any]:
                 "n5_action_executed": "write_enabled_bounded_if_matching_n3t_metric",
             },
             "post_close": {
-                "n5_action_intake": "time_ordered_drain",
-                "n3_c1_n3t_action_confirmation": "time_ordered_scoped_drain",
-                "n5_action_executed": "time_ordered_metric_drain",
+                "n5_action_intake": "post_close_final_a_scope_snapshot_once",
+                "n3_c1_n3t_action_confirmation": "post_close_final_a_pass_once",
+                "n5_action_executed": "post_close_final_a_execute_once",
             },
             "closed_day_or_non_trading": {
                 "n5_action_intake": "fail_closed",
@@ -648,12 +715,21 @@ def resolve_fastlane_runtime_session_context(
     current_exchange_time: str = "",
     formal_trigger_matched_available: bool = False,
     inactive_trigger_state_changed_available: bool = False,
+    active_trigger_state_changed_available: bool = False,
     closed_minute_available: bool | None = None,
     matching_n3t_metric_available: bool = False,
 ) -> dict[str, Any]:
     configured_context = config.get("session_context") or {}
     if isinstance(configured_context, Mapping) and configured_context:
-        return dict(configured_context)
+        context = dict(configured_context)
+        marker_context = _resolve_post_close_final_a_pass_done_marker(
+            config,
+            policy=config.get("session_context_policy") or {},
+        )
+        context.update(marker_context)
+        if marker_context.get("post_close_final_a_pass_done"):
+            context["post_close_final_a_pass_done"] = True
+        return context
 
     policy = config.get("session_context_policy") or {}
     if not isinstance(policy, Mapping) or not policy:
@@ -671,22 +747,69 @@ def resolve_fastlane_runtime_session_context(
     resolved_trigger_time = str(policy.get("trigger_time_override") or trigger_time or resolved_current_exchange_time)
     if closed_minute_available is None:
         closed_minute_available = _first_closed_minute_available(resolved_current_exchange_time)
+    marker_context = _resolve_post_close_final_a_pass_done_marker(config, policy=policy)
 
     return {
         "policy_type": FASTLANE_RUNTIME_SESSION_CONTEXT_POLICY_TYPE,
         "trigger_time": resolved_trigger_time,
         "current_exchange_time": resolved_current_exchange_time,
         "trade_calendar_is_open": bool(policy.get("trade_calendar_is_open")),
+        "for_trade_date_is_current_date": bool(policy.get("for_trade_date_is_current_date"))
+        if "for_trade_date_is_current_date" in policy
+        else (
+            _yyyymmdd(resolved_current_exchange_time)
+            == str(config.get("for_trade_date") or policy.get("for_trade_date") or "")
+        ),
         "formal_trigger_matched_available": bool(policy.get("formal_trigger_matched_available"))
         or bool(formal_trigger_matched_available),
         "inactive_trigger_state_changed_available": bool(policy.get("inactive_trigger_state_changed_available"))
         or bool(inactive_trigger_state_changed_available),
+        "active_trigger_state_changed_available": bool(policy.get("active_trigger_state_changed_available"))
+        or bool(active_trigger_state_changed_available),
         "closed_minute_available": bool(policy.get("closed_minute_available"))
         if "closed_minute_available" in policy
         else bool(closed_minute_available),
         "matching_n3t_metric_available": bool(policy.get("matching_n3t_metric_available"))
         or bool(matching_n3t_metric_available),
+        "post_close_final_a_pass_available": bool(policy.get("post_close_final_a_pass_available", True)),
+        "post_close_final_a_pass_done": bool(policy.get("post_close_final_a_pass_done"))
+        or bool(marker_context.get("post_close_final_a_pass_done")),
+        **marker_context,
     }
+
+
+def _resolve_post_close_final_a_pass_done_marker(
+    config: Mapping[str, Any],
+    *,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    for_trade_date = str(config.get("for_trade_date") or policy.get("for_trade_date") or "")
+    marker_path_text = str(
+        policy.get("post_close_final_a_pass_done_marker_path")
+        or config.get("post_close_final_a_pass_done_marker_path")
+        or default_post_close_final_a_pass_done_marker_path(for_trade_date=for_trade_date)
+    )
+    marker_context: dict[str, Any] = {
+        "post_close_final_a_pass_done_marker_path": marker_path_text,
+        "post_close_final_a_pass_done_marker": {},
+    }
+    if not marker_path_text:
+        return marker_context
+    marker_path = Path(marker_path_text)
+    if not marker_path.exists():
+        return marker_context
+    marker = load_post_close_final_a_pass_done_marker(marker_path, for_trade_date=for_trade_date)
+    marker_context["post_close_final_a_pass_done"] = True
+    marker_context["post_close_final_a_pass_done_marker"] = {
+        "artifact_type": marker.get("artifact_type"),
+        "status": marker.get("status"),
+        "completion_mode": marker.get("completion_mode"),
+        "evaluated_ref_count": int(marker.get("evaluated_ref_count") or 0),
+        "action_executed_count": int(marker.get("action_executed_count") or 0),
+        "evaluation_only_count": int(marker.get("evaluation_only_count") or 0),
+        "unprocessed_ref_count": int(marker.get("unprocessed_ref_count") or 0),
+    }
+    return marker_context
 
 
 def resolve_fastlane_active_worker_decision(
@@ -695,8 +818,13 @@ def resolve_fastlane_active_worker_decision(
     session_phase: str,
     formal_trigger_matched_available: bool,
     inactive_trigger_state_changed_available: bool = False,
+    active_trigger_state_changed_available: bool = False,
     closed_minute_available: bool,
     matching_n3t_metric_available: bool,
+    for_trade_date_is_current_date: bool = True,
+    trade_calendar_is_open: bool = True,
+    post_close_final_a_pass_available: bool = True,
+    post_close_final_a_pass_done: bool = False,
 ) -> dict[str, Any]:
     if lane_key not in FASTLANE_ACTIVE_WORKER_LANES:
         raise ValueError(f"unknown fastlane active worker lane: {lane_key}")
@@ -719,7 +847,7 @@ def resolve_fastlane_active_worker_decision(
 
     if session_phase == "pre_open_before_0925":
         decision["worker_mode"] = "read_only_discovery" if lane_key == "n5_action_intake" else "disabled"
-        decision["blocked_reason"] = "pre_open_before_0925_no_write"
+        decision["blocked_reason"] = "waiting_for_0925_or_n4_triggermatched"
         return decision
 
     if session_phase == "pre_open_call_auction_after_0925":
@@ -735,6 +863,13 @@ def resolve_fastlane_active_worker_decision(
                 decision["required_proof"] = "inactive_TriggerStateChanged_false"
                 decision["action_eligible_entry_allowed"] = False
                 decision["trigger_live_false_cleanup_allowed"] = True
+                decision["worker_mode"] = "write_enabled_bounded"
+                decision["writes_enabled_allowed"] = True
+                decision["artifact_writes_enabled_allowed"] = True
+            elif active_trigger_state_changed_available:
+                decision["required_proof"] = "active_TriggerStateChanged_true_attention"
+                decision["action_eligible_entry_allowed"] = False
+                decision["trigger_live_true_attention_allowed"] = True
                 decision["worker_mode"] = "write_enabled_bounded"
                 decision["writes_enabled_allowed"] = True
                 decision["artifact_writes_enabled_allowed"] = True
@@ -766,6 +901,11 @@ def resolve_fastlane_active_worker_decision(
                 decision["action_eligible_entry_allowed"] = False
                 decision["trigger_live_false_cleanup_allowed"] = True
                 return _active_worker_write_enabled(decision)
+            if active_trigger_state_changed_available:
+                decision["required_proof"] = "active_TriggerStateChanged_true_attention"
+                decision["action_eligible_entry_allowed"] = False
+                decision["trigger_live_true_attention_allowed"] = True
+                return _active_worker_write_enabled(decision)
             decision["worker_mode"] = "read_only_discovery"
             decision["blocked_reason"] = "waiting_for_n4_triggermatched"
             return decision
@@ -786,6 +926,38 @@ def resolve_fastlane_active_worker_decision(
         return decision
 
     if session_phase == "post_close":
+        if post_close_final_a_pass_available:
+            decision["post_close_final_a_pass_available"] = True
+            decision["repeated_microbatch_allowed"] = False
+            decision["target_close_boundary"] = "session_close"
+            if not for_trade_date_is_current_date or not trade_calendar_is_open:
+                decision["worker_mode"] = "post_close_final_a_pass_noop"
+                decision["blocked_reason"] = "post_close_final_a_pass_not_allowed_for_session"
+                return decision
+            if post_close_final_a_pass_done:
+                decision["worker_mode"] = "post_close_final_a_pass_noop"
+                decision["blocked_reason"] = "post_close_final_a_pass_done"
+                return decision
+            decision["post_close_final_a_pass_allowed"] = True
+            if lane_key == "n5_action_intake":
+                decision["worker_mode"] = "post_close_final_a_scope_snapshot"
+                decision["artifact_writes_enabled_allowed"] = True
+                decision["action_eligible_entry_allowed"] = False
+                decision["scope_snapshot_only"] = True
+                return decision
+            if lane_key == "n3_c1_n3t_action_confirmation":
+                decision["worker_mode"] = "post_close_final_a_pass"
+                decision["writes_enabled_allowed"] = True
+                decision["artifact_writes_enabled_allowed"] = True
+                decision["external_c1_pull_allowed_once"] = True
+                return decision
+            if matching_n3t_metric_available:
+                decision["worker_mode"] = "post_close_final_a_execute"
+                decision["writes_enabled_allowed"] = True
+                return decision
+            decision["worker_mode"] = "post_close_final_a_wait_matching_n3t_metric"
+            decision["blocked_reason"] = "waiting_for_n3t_c1_closed_metric"
+            return decision
         if lane_key == "n5_action_intake":
             decision["worker_mode"] = "time_ordered_drain"
             decision["writes_enabled_allowed"] = True
@@ -861,6 +1033,11 @@ def classify_fastlane_session_phase(
             "enabled": False,
             "backlog_order": ["event_time ASC", "source_run_id ASC"],
         },
+        "post_close_final_a_pass": {
+            "enabled": False,
+            "target_close_boundary": "session_close",
+            "repeated_microbatch_allowed": False,
+        },
     }
     if phase == "pre_open_call_auction_after_0925":
         output["n5_intake"]["action_eligible_write_allowed"] = True
@@ -883,12 +1060,16 @@ def classify_fastlane_session_phase(
         output["n3_c1_n3t"]["metric_generation_allowed"] = True
         output["n3_c1_n3t"]["requires_closed_minute"] = True
     elif phase == "post_close":
-        output["n5_intake"]["action_eligible_write_allowed"] = True
-        output["n5_intake"]["active_tracking_write_allowed"] = True
+        output["n5_intake"]["action_eligible_write_allowed"] = False
+        output["n5_intake"]["active_tracking_write_allowed"] = False
         output["n5_intake"]["active_scope_artifact_allowed"] = True
         output["n3_c1_n3t"]["metric_generation_allowed"] = True
         output["n3_c1_n3t"]["requires_closed_minute"] = True
-        output["post_close_drain"]["enabled"] = True
+        output["post_close_drain"]["enabled"] = False
+        output["post_close_drain"]["superseded_by"] = "post_close_final_a_pass"
+        output["post_close_final_a_pass"]["enabled"] = True
+        output["post_close_final_a_pass"]["requires_for_trade_date_current_date"] = True
+        output["post_close_final_a_pass"]["requires_trade_calendar_open"] = True
     return output
 
 
@@ -1183,15 +1364,15 @@ def build_fastlane_trading_day_monitor_review(
     if n4_triggermatched <= 0:
         waiting_reasons.append("waiting_for_n4_triggermatched")
     else:
-        if n5_actioneligible <= 0:
-            blockers.append("n5_actioneligible_not_advancing")
-        if n5_active_tracking <= 0:
+        if n5_actioneligible > 0 and n5_active_tracking <= 0:
             blockers.append("n5_active_tracking_not_advancing")
         if n5_actioneligible > 0 and n5_active_scope_artifacts <= 0:
             blockers.append("n5_active_scope_artifact_not_advancing")
         if n5_intake_remaining > 0:
             waiting_reasons.append("waiting_for_n5_intake_exact_cover")
-        if not closed_minute_available:
+        if n5_actioneligible <= 0:
+            pass
+        elif not closed_minute_available:
             waiting_reasons.append("waiting_for_closed_minute")
         else:
             if n5_active_scope_artifacts > 0 and n3_scoped_c1_artifacts <= 0:
@@ -1690,6 +1871,13 @@ def build_fastlane_write_enabled_activation_config(
         "current_exchange_time_source": "runtime_clock",
         "trade_calendar_source": "explicit_activation_config",
         "trade_calendar_is_open": bool(trade_calendar_is_open),
+        "post_close_final_a_pass_available": True,
+        "post_close_final_a_pass_done_marker_path": str(
+            config.get("post_close_final_a_pass_done_marker_path")
+            or default_post_close_final_a_pass_done_marker_path(
+                for_trade_date=str(config.get("for_trade_date") or "")
+            )
+        ),
         "no_secret_embedded": True,
     }
     config["execute_policy"] = {
@@ -1713,6 +1901,10 @@ def build_fastlane_write_enabled_activation_config(
     if current_day_source_provider:
         config["n3_c1_n3t_current_day_source_provider"] = current_day_source_provider
     metric_context_source_dir = str(n3_c1_n3t_metric_context_source_artifact_dir or "").strip()
+    if not metric_context_source_dir and enable_n3_c1_n3t:
+        n3_artifact_dir = str(config.get("n3_c1_n3t_artifact_dir") or "").strip()
+        if n3_artifact_dir:
+            metric_context_source_dir = str(Path(n3_artifact_dir) / "metric_context_source")
     if metric_context_source_dir:
         config["n3_c1_n3t_metric_context_source_artifact_dir"] = metric_context_source_dir
     previous_day_context_dir = str(n3_c1_n3t_previous_day_context_artifact_dir or "").strip()
@@ -1825,6 +2017,212 @@ def write_fastlane_write_enabled_activation_config(
         "active_worker_policy_review_ref": config.get("active_worker_policy_review_ref", {}),
         "forbidden_operation_proof": _forbidden_operation_proof(),
     }
+
+
+def build_fastlane_post_close_waiting_policy_review(
+    *,
+    for_trade_date: str,
+    source_trade_date: str = "",
+    current_exchange_time: str = "",
+) -> dict[str, Any]:
+    safe_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit())
+    if not safe_trade_date:
+        raise ValueError("for_trade_date_required")
+    return {
+        "result": "WAITING",
+        "final_verdict": "RUNTIME_CONTROL_FASTLANE_ACTIVE_WORKER_POLICY_WAITING_FOR_MONITOR_PASS",
+        "policy_type": FASTLANE_ACTIVE_WORKER_POLICY_TYPE,
+        "for_trade_date": safe_trade_date,
+        "source_trade_date": str(source_trade_date or ""),
+        "current_exchange_time": str(current_exchange_time or ""),
+        "session_phase": "pre_open_before_0925",
+        "activation_scope": "not_ready",
+        "active_worker_write_enabled_ready": False,
+        "automatic_chain_verified": False,
+        "manual_gate_required": False,
+        "waiting_reasons": ["waiting_for_0925_or_n4_triggermatched"],
+        "blockers": [],
+        "chain_backlog": {
+            "n5_intake_remaining": 0,
+            "n3t_metric_remaining": 0,
+        },
+        "next_safe_order": "RUNTIME_CONTROL_N5_N3T_0925_ACTIVE_WORKER_MONITOR_READ_ONLY_GATE",
+        "forbidden_operation_proof": _forbidden_operation_proof(),
+    }
+
+
+def retarget_fastlane_activation_config_for_trade_date(
+    base_config: Mapping[str, Any],
+    *,
+    for_trade_date: str,
+) -> dict[str, Any]:
+    if not isinstance(base_config, Mapping):
+        raise ValueError("base activation config must be a JSON object")
+    old_trade_date = "".join(ch for ch in str(base_config.get("for_trade_date") or "") if ch.isdigit())
+    new_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit())
+    if not old_trade_date:
+        raise ValueError("base activation config for_trade_date required")
+    if not new_trade_date:
+        raise ValueError("target for_trade_date required")
+
+    def retarget(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace(old_trade_date, new_trade_date)
+        if isinstance(value, list):
+            return [retarget(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): retarget(item) for key, item in value.items()}
+        return value
+
+    config = retarget(json.loads(json.dumps(dict(base_config), ensure_ascii=False)))
+    config["for_trade_date"] = new_trade_date
+    config["post_close_final_a_pass_done_marker_path"] = default_post_close_final_a_pass_done_marker_path(
+        for_trade_date=new_trade_date
+    )
+    return config
+
+
+def write_fastlane_stable_activation_config_atomic(
+    *,
+    stable_activation_config_path: Path,
+    config: Mapping[str, Any],
+    expected_for_trade_date: str,
+) -> dict[str, Any]:
+    expected_trade_date = "".join(ch for ch in str(expected_for_trade_date or "") if ch.isdigit())
+    if not expected_trade_date:
+        raise ValueError("expected_for_trade_date_required")
+    payload_text = json.dumps(dict(config), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    _assert_no_unresolved_placeholder_or_secret(payload_text)
+    payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise ValueError("stable activation config must be a JSON object")
+    if payload.get("artifact_type") != FASTLANE_ACTIVATION_CONFIG_ARTIFACT_TYPE:
+        raise ValueError("stable activation config artifact_type mismatch")
+    if str(payload.get("for_trade_date") or "") != expected_trade_date:
+        raise ValueError("stable activation config for_trade_date mismatch")
+
+    stable_activation_config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = stable_activation_config_path.with_name(stable_activation_config_path.name + ".tmp")
+    tmp_path.write_text(payload_text, encoding="utf-8")
+    try:
+        loaded = load_fastlane_activation_config(tmp_path)
+        if str(loaded.get("for_trade_date") or "") != expected_trade_date:
+            raise ValueError("stable activation config tmp for_trade_date mismatch")
+        os.replace(tmp_path, stable_activation_config_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return {
+        "stable_activation_config_path": str(stable_activation_config_path),
+        "tmp_path": str(tmp_path),
+        "os_replace_used": True,
+        "sha256": _sha256_file(stable_activation_config_path),
+    }
+
+
+def write_fastlane_post_close_readiness_config_rollover(
+    *,
+    base_activation_config_path: Path,
+    output_dir: Path,
+    for_trade_date: str,
+    next_trade_date: str,
+    trade_calendar_is_open: bool,
+    current_exchange_time: str = "",
+    active_worker_policy_review_path: Path | None = None,
+) -> dict[str, Any]:
+    source_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit())
+    target_trade_date = "".join(ch for ch in str(next_trade_date or "") if ch.isdigit())
+    if not source_trade_date:
+        raise ValueError("for_trade_date_required")
+    if not target_trade_date:
+        raise ValueError("next_trade_date_required")
+
+    base_config = load_fastlane_activation_config(base_activation_config_path)
+    target_base_config = retarget_fastlane_activation_config_for_trade_date(
+        base_config,
+        for_trade_date=target_trade_date,
+    )
+    review = build_fastlane_post_close_waiting_policy_review(
+        for_trade_date=target_trade_date,
+        source_trade_date=source_trade_date,
+        current_exchange_time=current_exchange_time,
+    )
+    review_path = active_worker_policy_review_path or Path(
+        default_fastlane_active_worker_policy_review_path(for_trade_date=target_trade_date)
+    )
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    config = build_fastlane_write_enabled_activation_config(
+        target_base_config,
+        trade_calendar_is_open=trade_calendar_is_open,
+        active_worker_policy_review=None,
+        enable_n5_intake=True,
+        enable_n5_active_scope_artifact=True,
+        enable_n3_c1_n3t=True,
+        enable_n5_executed=True,
+        defer_active_worker_policy_review_to_runtime=True,
+    )
+    config["active_worker_policy_review_path"] = str(review_path)
+    config["active_worker_policy_review_path_policy"] = {
+        "policy_type": FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_PATH_POLICY_TYPE,
+        "resolution": "runtime_read_only_latest_artifact",
+        "authorization_timing": FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_DEFERRED_AUTHORIZATION_TIMING,
+        "no_secret_embedded": True,
+    }
+    _assert_active_worker_policy_review_runtime_deferred_loadable(
+        review,
+        for_trade_date=target_trade_date,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dated_path = output_dir / f"write_enabled_activation_config_{target_trade_date}_runtime_deferred_v1.json"
+    dated_payload = json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    _assert_no_unresolved_placeholder_or_secret(dated_payload)
+    dated_path.write_text(dated_payload, encoding="utf-8")
+
+    stable_path = output_dir / Path(default_fastlane_stable_activation_config_path()).name
+    stable_write = write_fastlane_stable_activation_config_atomic(
+        stable_activation_config_path=stable_path,
+        config=config,
+        expected_for_trade_date=target_trade_date,
+    )
+
+    report = {
+        "artifact_type": FASTLANE_POST_CLOSE_READINESS_CONFIG_ROLLOVER_ARTIFACT_TYPE,
+        "result": "PASS",
+        "final_verdict": "RUNTIME_CONTROL_N5_N3T_POST_CLOSE_READINESS_CONFIG_ROLLOVER_PATCH_PASS_READY_FOR_REVIEW",
+        "for_trade_date": source_trade_date,
+        "next_trade_date": target_trade_date,
+        "base_activation_config_path": str(base_activation_config_path),
+        "dated_activation_config_path": str(dated_path),
+        "dated_activation_config_sha256": _sha256_file(dated_path),
+        "stable_activation_config_path": str(stable_path),
+        "stable_activation_config_sha256": stable_write["sha256"],
+        "stable_atomic_write": stable_write,
+        "active_worker_policy_review_path": str(review_path),
+        "active_worker_policy_review": {
+            "result": review["result"],
+            "active_worker_write_enabled_ready": review["active_worker_write_enabled_ready"],
+            "waiting_reasons": list(review["waiting_reasons"]),
+        },
+        "boundary": {
+            "db_written": False,
+            "runtime_executed": False,
+            "n4_outbox_updated": False,
+            "n5_outbox_updated": False,
+            "inbox_checkpoint_written": False,
+            "launchd_reloaded": False,
+            "n6_touched": False,
+        },
+    }
+    report_path = output_dir / f"n5_n3t_post_close_readiness_config_rollover_{target_trade_date}.json"
+    report["report_path"] = str(report_path)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
 
 
 def build_fastlane_write_enabled_activation_config_full_chain_preflight(

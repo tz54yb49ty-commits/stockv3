@@ -66,10 +66,12 @@ Boundary rules:
 Only TriggerMatched may enter N5 action confirmation entry.
 TriggerPendingMarketData must not create ActionEligible.
 TriggerPendingMarketData must not create ActionExecuted.
-TriggerStateChanged may be consumed by N5 as state-gate input only.
-TriggerStateChanged allowed uses = update_context / expire_window / live-state synchronization.
+TriggerStateChanged may be consumed by N5 as state-gate / active-ref-refresh input only.
+TriggerStateChanged(trigger_live=true,current_status=matched) may refresh an executable active ref with action_eligible_entry_allowed=false.
+TriggerStateChanged(trigger_live=false) may expire/remove a matching active ref.
+TriggerStateChanged allowed uses = update_context / expire_window / live-state synchronization / active_ref_refresh.
 TriggerStateChanged must not create ActionEligible.
-TriggerStateChanged must not create ActionExecuted.
+TriggerStateChanged must not directly create ActionExecuted without matching N3T_C1_CLOSED proof.
 TriggerStateChanged must not be treated as action confirmation entry.
 ```
 
@@ -1443,7 +1445,8 @@ HINT lifecycle baseline rule:
 ```text
 TriggerMatched may enter N5.
 TriggerPendingMarketData must not enter N5.
-TriggerStateChanged must not enter N5.
+TriggerStateChanged may enter N5 only as state-gate / active-ref-refresh input.
+TriggerStateChanged must not enter N5 as ActionEligible or action confirmation entry.
 ```
 
 ## 15. Final Compact Form

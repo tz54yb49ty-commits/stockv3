@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,11 +22,17 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ashare_v3.action.dry_run import build_action_tracking_state_key
-from ashare_v3.action.live_tracking_poller import build_live_tracking_plan
+from ashare_v3.action.live_tracking_poller import (
+    build_active_set_a_rebuild_from_n4_day_events,
+    build_live_tracking_plan,
+)
+from ashare_v3.market.minute_label_normalization import canonical_ashare_1m_labels
 from ashare_v3.runtime_control.n5_n3t_fastlane import (
     FASTLANE_LANE_ID,
+    POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE,
     build_fastlane_source_run_namespace,
     classify_fastlane_session_phase,
+    default_post_close_final_a_pass_done_marker_path,
     load_fastlane_activation_config,
     resolve_fastlane_runtime_session_context,
     resolve_fastlane_active_worker_decision,
@@ -37,6 +44,7 @@ DEFAULT_DSN = os.environ.get("ASHARE_V3_POSTGRES_DSN", "")
 DEFAULT_EVENT_LIMIT = 1000
 DEFAULT_FASTLANE_MAX_RUNTIME_SECONDS = 10.0
 DEFAULT_FASTLANE_CONSUMER_NAME = "n5_live_tracking_poller_v2_fastlane"
+FASTLANE_EXECUTED_DISCOVERY_CANDIDATE_LIMIT = 50
 N5_OUTPUT_EVENT_TYPES = ("ActionEligible", "ActionExecuted")
 N4_INPUT_EVENT_TYPES = ("TriggerMatched", "TriggerStateChanged")
 N5_LIVE_TRACKING_SCHEMA_VERSION = "v2"
@@ -44,7 +52,10 @@ N5_LIVE_TRACKING_TRIGGER_TYPE = "N5_live_tracking_v2"
 SCHEMA_ALLOWED_TRACKING_TRIGGER_TYPES = ("BUY", "BUY:FULL", "SELL", "SELL:FULL", "BUY_HINT", "SELL_HINT")
 TRACKING_MONITOR_WINDOW_ID_PREFIX = "N5_live_tracking_monitor_window_v1"
 FASTLANE_ACTION_RUN_ID_REGEX = r"^n5_live_tracking_.*__fastlane_v1$"
-FASTLANE_N3T_METRIC_RUN_ID_SUFFIX_REGEX = r"__fastlane.*$"
+ACTIVE_SET_A_INTAKE_EVENT_KINDS = {
+    "active_set_a",
+    "post_close_final_a_scope_snapshot",
+}
 
 
 class N5LiveTrackingBlocked(RuntimeError):
@@ -76,6 +87,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--for-trade-date", default="")
     parser.add_argument("--source-trigger-run-id", default="")
     parser.add_argument("--source-metric-run-id", default="")
+    parser.add_argument("--fastlane-ref-state-key", default="")
     parser.add_argument("--action-run-id", default="")
     parser.add_argument("--consumer-name", default="")
     parser.add_argument("--max-events", type=int, default=0)
@@ -86,6 +98,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fastlane-phase", choices=("intake", "executed", ""), default="")
     parser.add_argument("--n5-intake-event-kind", default="")
     parser.add_argument("--active-scope-artifact-path", default="")
+    parser.add_argument("--output-artifact-path", default="")
+    parser.add_argument("--current-exchange-time", default="")
+    parser.add_argument("--post-close-final-a-rebuild-from-n4-day-events", action="store_true")
+    parser.add_argument("--post-close-final-a-pass-done-marker-path", default="")
     parser.add_argument("--write-active-scope-artifact", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--user-confirmed", action="store_true")
@@ -107,6 +123,8 @@ def run_n5_live_tracking_poller_once(
     invocation_id = f"n5_live_tracking_invocation_{uuid.uuid4().hex}"
     started = now_monotonic()
     try:
+        if bool(getattr(args, "post_close_final_a_rebuild_from_n4_day_events", False)):
+            return _run_post_close_final_a_rebuild_from_n4_day_events(args, invocation_id, started, now_monotonic)
         _apply_activation_config(args, activation_discovery_provider=activation_discovery_provider)
         _validate_args(args)
         if args.execute and not args.user_confirmed:
@@ -122,11 +140,17 @@ def run_n5_live_tracking_poller_once(
             manifest["verdict"] = "N5_LIVE_TRACKING_PLAN_ONLY"
             manifest["write_result"] = {"executed": False}
             manifest["active_scope_artifact_write_result"] = _write_active_scope_artifact(args, plan)
+            manifest["post_close_final_a_pass_done_marker_write_result"] = (
+                _maybe_write_post_close_final_a_pass_done_marker(args, plan, manifest)
+            )
             return manifest
         write_result = dict((writer or _default_execute_writer)(args, plan))
-        manifest["verdict"] = "N5_LIVE_TRACKING_EXECUTE_PASS"
+        manifest["verdict"] = _execute_verdict(args, plan)
         manifest["write_result"] = write_result
         manifest["active_scope_artifact_write_result"] = _write_active_scope_artifact(args, plan)
+        manifest["post_close_final_a_pass_done_marker_write_result"] = (
+            _maybe_write_post_close_final_a_pass_done_marker(args, plan, manifest)
+        )
         return manifest
     except N5LiveTrackingBlocked as exc:
         reason = str(exc)
@@ -161,14 +185,151 @@ def run_n5_live_tracking_poller_once(
         }
 
 
+def _run_post_close_final_a_rebuild_from_n4_day_events(
+    args: argparse.Namespace,
+    invocation_id: str,
+    started: float,
+    now_monotonic: Callable[[], float],
+) -> dict[str, Any]:
+    _validate_post_close_final_a_rebuild_args(args)
+    action_run_id = str(args.action_run_id or _fastlane_active_set_a_action_run_id(for_trade_date=str(args.for_trade_date)))
+    consumer_name = str(args.consumer_name or DEFAULT_FASTLANE_CONSUMER_NAME)
+    with psycopg.connect(
+        args.dsn,
+        row_factory=dict_row,
+        options="-c default_transaction_read_only=on",
+        connect_timeout=10,
+    ) as conn, conn.cursor() as cur:
+        n4_rows = _fetch_n4_day_event_rows_for_active_set_rebuild(cur, args)
+        action_executed_rows = _fetch_n5_action_executed_rows_for_active_set_rebuild(cur, args)
+    plan = build_active_set_a_rebuild_from_n4_day_events(
+        n4_event_rows=n4_rows,
+        action_executed_event_rows=action_executed_rows,
+        for_trade_date=str(args.for_trade_date),
+        action_run_id=action_run_id,
+        consumer_name=consumer_name,
+        current_exchange_time=str(getattr(args, "current_exchange_time", "") or ""),
+    )
+    write_result = _write_post_close_final_a_rebuild_artifact(args, plan)
+    return {
+        "verdict": "N5_ACTIVE_SET_A_REBUILD_FROM_N4_DAY_EVENTS_PASS",
+        "invocation_id": invocation_id,
+        "for_trade_date": str(args.for_trade_date),
+        "action_run_id": action_run_id,
+        "consumer_name": consumer_name,
+        "execute_requested": False,
+        "writes_enabled": False,
+        "artifact_writes_enabled": True,
+        "bounded": {
+            "max_events": int(getattr(args, "max_events", 0) or 0),
+            "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
+            "elapsed_seconds": round(now_monotonic() - started, 6),
+        },
+        "boundary": {
+            "n4_outbox_updated": False,
+            "n5_outbox_updated": False,
+            "common_event_inbox_written": False,
+            "common_event_consumer_checkpoint_written": False,
+            "db_written": False,
+            "n6_touched": False,
+            "launchd_touched": False,
+        },
+        "write_result": write_result,
+        "plan": plan,
+    }
+
+
+def _validate_post_close_final_a_rebuild_args(args: argparse.Namespace) -> None:
+    if not str(args.for_trade_date).isdigit() or len(str(args.for_trade_date)) != 8:
+        raise N5LiveTrackingBlocked("for_trade_date_must_be_yyyymmdd")
+    if not str(args.dsn or "").strip():
+        raise N5LiveTrackingBlocked("dsn_required_for_active_set_a_rebuild")
+    if not str(getattr(args, "output_artifact_path", "") or "").strip():
+        raise N5LiveTrackingBlocked("output_artifact_path_required")
+    if not bool(getattr(args, "user_confirmed", False)):
+        raise N5LiveTrackingBlocked("active_set_a_rebuild_local_artifact_write_requires_user_confirmed")
+
+
+def _fetch_n4_day_event_rows_for_active_set_rebuild(cur: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT o.*
+        FROM common_event_outbox o
+        WHERE o.source_layer = 'N4_trigger'
+          AND o.trade_date = %s
+          AND o.event_type IN ('TriggerMatched', 'TriggerStateChanged')
+        ORDER BY o.event_time, o.source_run_id, o.event_id
+        """,
+        (args.for_trade_date,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _fetch_n5_action_executed_rows_for_active_set_rebuild(cur: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT o.*
+        FROM common_event_outbox o
+        WHERE o.source_layer = 'N5_action'
+          AND o.trade_date = %s
+          AND o.event_type = 'ActionExecuted'
+        ORDER BY o.event_time, o.source_run_id, o.event_id
+        """,
+        (args.for_trade_date,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _write_post_close_final_a_rebuild_artifact(args: argparse.Namespace, plan: Mapping[str, Any]) -> dict[str, Any]:
+    artifact = plan.get("active_scope_snapshot_artifact")
+    if not isinstance(artifact, Mapping):
+        raise N5LiveTrackingBlocked("active_scope_snapshot_artifact_missing")
+    path = Path(str(getattr(args, "output_artifact_path", "") or ""))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_json_safe_value(artifact), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "executed": True,
+        "path": str(path),
+        "artifact_type": artifact.get("artifact_type"),
+        "scope_count": artifact.get("scope_count"),
+        "active_tracking_ref_count": artifact.get("active_tracking_ref_count"),
+        "n4_outbox_updated": False,
+        "db_written": False,
+        "n6_touched": False,
+    }
+
+
 def _is_fastlane_readiness_waiting_reason(reason: str) -> bool:
-    return reason == "fastlane_worker_waiting_for_n4_triggermatched"
+    return reason in {
+        "fastlane_worker_waiting_for_n4_triggermatched",
+        "fastlane_worker_waiting_for_n3t_c1_closed_metric",
+        "fastlane_worker_waiting_for_actionexecuted_candidate",
+        "fastlane_worker_post_close_final_a_pass_done",
+    }
+
+
+def _execute_verdict(args: argparse.Namespace, plan: Mapping[str, Any]) -> str:
+    if (
+        _is_fastlane_executed_phase(args)
+        and _plan_action_executed_count(plan) == 0
+        and _plan_tracking_update_count(plan) > 0
+    ):
+        return "N5_LIVE_TRACKING_EVALUATION_PASS_NO_ACTIONEXECUTED"
+    return "N5_LIVE_TRACKING_EXECUTE_PASS"
 
 
 def _validate_args(args: argparse.Namespace) -> None:
     if not str(args.for_trade_date).isdigit() or len(str(args.for_trade_date)) != 8:
         raise N5LiveTrackingBlocked("for_trade_date_must_be_yyyymmdd")
-    required_names = ["source_trigger_run_id", "action_run_id", "consumer_name"]
+    required_names = ["action_run_id", "consumer_name"]
+    ref_scoped_executed = _is_fastlane_executed_phase(args) and bool(
+        str(getattr(args, "fastlane_ref_state_key", "") or "").strip()
+    )
+    if not _is_active_set_a_intake(args) and not ref_scoped_executed:
+        required_names.insert(0, "source_trigger_run_id")
     if str(getattr(args, "fastlane_phase", "") or "") != "intake":
         required_names.append("source_metric_run_id")
     for name in required_names:
@@ -213,6 +374,8 @@ def _apply_activation_config(
     for name in ("source_trigger_run_id", "source_metric_run_id", "action_run_id", "consumer_name", "n5_intake_event_kind"):
         if not str(getattr(args, name, "") or "").strip():
             setattr(args, name, str(runtime_inputs.get(name) or ""))
+    if not str(getattr(args, "fastlane_ref_state_key", "") or "").strip():
+        args.fastlane_ref_state_key = str(runtime_inputs.get("fastlane_ref_state_key") or runtime_inputs.get("state_key") or "")
     if _activation_config_needs_discovery(args, phase):
         if activation_discovery_provider is not None or _activation_config_allows_runtime_env_discovery(config):
             provider = activation_discovery_provider or _default_activation_discovery_provider
@@ -228,6 +391,10 @@ def _apply_activation_config(
                     setattr(args, name, str(discovered.get(name) or ""))
             if not str(getattr(args, "fastlane_trigger_time", "") or "").strip():
                 args.fastlane_trigger_time = str(discovered.get("trigger_time") or "")
+            if not str(getattr(args, "fastlane_ref_state_key", "") or "").strip():
+                args.fastlane_ref_state_key = str(
+                    discovered.get("fastlane_ref_state_key") or discovered.get("state_key") or ""
+                )
     if not str(args.consumer_name or "").strip():
         args.consumer_name = str(runtime_inputs.get("consumer_name") or config.get("n5_consumer_name") or DEFAULT_FASTLANE_CONSUMER_NAME)
     if not str(args.action_run_id or "").strip() and str(args.source_trigger_run_id or "").strip():
@@ -242,6 +409,14 @@ def _apply_activation_config(
             runtime_inputs.get("max_runtime_seconds")
             or (config.get("max_runtime_seconds_by_lane") or {}).get(lane_key)
             or DEFAULT_FASTLANE_MAX_RUNTIME_SECONDS
+        )
+    if not str(getattr(args, "post_close_final_a_pass_done_marker_path", "") or "").strip():
+        args.post_close_final_a_pass_done_marker_path = str(
+            config.get("post_close_final_a_pass_done_marker_path")
+            or (config.get("session_context_policy") or {}).get("post_close_final_a_pass_done_marker_path")
+            or default_post_close_final_a_pass_done_marker_path(
+                for_trade_date=str(args.for_trade_date or config.get("for_trade_date") or "")
+            )
         )
     if phase == "intake" and not str(args.active_scope_artifact_path or "").strip():
         artifact_dir = str(config.get("n5_active_scope_artifact_dir") or "").strip()
@@ -266,16 +441,21 @@ def _apply_fastlane_worker_phase_gate(
     session_context = config.get("session_context") or {}
     try:
         n5_intake_event_kind = str(getattr(args, "n5_intake_event_kind", "") or "")
-        formal_trigger_matched_available = (
-            n5_intake_event_kind != "inactive_TriggerStateChanged_false"
+        active_set_a_available = n5_intake_event_kind in ACTIVE_SET_A_INTAKE_EVENT_KINDS
+        formal_trigger_matched_available = active_set_a_available or (
+            n5_intake_event_kind in {"", "formal_TriggerMatched"}
             and bool(str(args.source_trigger_run_id or "").strip())
         )
         inactive_trigger_state_changed_available = n5_intake_event_kind == "inactive_TriggerStateChanged_false"
+        active_trigger_state_changed_available = (
+            active_set_a_available or n5_intake_event_kind == "active_TriggerStateChanged_true"
+        )
         session_context = resolve_fastlane_runtime_session_context(
             config,
             trigger_time=str(getattr(args, "fastlane_trigger_time", "") or ""),
             formal_trigger_matched_available=formal_trigger_matched_available,
             inactive_trigger_state_changed_available=inactive_trigger_state_changed_available,
+            active_trigger_state_changed_available=active_trigger_state_changed_available,
             matching_n3t_metric_available=lane_key == "n5_action_executed"
             and bool(str(args.source_metric_run_id or "").strip()),
         )
@@ -296,16 +476,28 @@ def _apply_fastlane_worker_phase_gate(
         or formal_trigger_matched_available,
         inactive_trigger_state_changed_available=bool(session_context.get("inactive_trigger_state_changed_available"))
         or inactive_trigger_state_changed_available,
+        active_trigger_state_changed_available=bool(session_context.get("active_trigger_state_changed_available"))
+        or active_trigger_state_changed_available,
         closed_minute_available=bool(session_context.get("closed_minute_available")),
         matching_n3t_metric_available=bool(session_context.get("matching_n3t_metric_available"))
         or (lane_key == "n5_action_executed" and bool(str(args.source_metric_run_id or "").strip())),
+        for_trade_date_is_current_date=bool(
+            session_context.get("for_trade_date_is_current_date", classification.get("current_date_matches_for_trade_date"))
+        ),
+        trade_calendar_is_open=bool(session_context.get("trade_calendar_is_open")),
+        post_close_final_a_pass_available=bool(
+            session_context.get("post_close_final_a_pass_available", classification["phase"] == "post_close")
+        ),
+        post_close_final_a_pass_done=bool(session_context.get("post_close_final_a_pass_done")),
     )
     args.fastlane_session_phase = classification["phase"]
     args.fastlane_active_worker_decision = decision
     if decision["worker_mode"] == "fail_closed":
         raise N5LiveTrackingBlocked(f"fastlane_worker_{decision.get('blocked_reason') or 'fail_closed'}")
-    if (args.execute or args.write_active_scope_artifact) and not decision["writes_enabled_allowed"]:
+    if args.execute and not decision["writes_enabled_allowed"]:
         raise N5LiveTrackingBlocked(f"fastlane_worker_{decision.get('blocked_reason') or 'write_not_allowed'}")
+    if args.write_active_scope_artifact and not decision["artifact_writes_enabled_allowed"]:
+        raise N5LiveTrackingBlocked(f"fastlane_worker_{decision.get('blocked_reason') or 'artifact_write_not_allowed'}")
 
 
 def _activation_config_needs_discovery(args: argparse.Namespace, phase: str) -> bool:
@@ -330,6 +522,11 @@ def _fastlane_action_run_id(*, for_trade_date: str, source_trigger_run_id: str) 
         ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(source_trigger_run_id).strip()
     )
     return f"n5_live_tracking_{safe_trade_date}__{safe_source_run_id}__fastlane_v1"
+
+
+def _fastlane_active_set_a_action_run_id(*, for_trade_date: str) -> str:
+    safe_trade_date = "".join(ch for ch in str(for_trade_date) if ch.isdigit()) or "unknown_trade_date"
+    return f"n5_live_tracking_{safe_trade_date}__active_set_a__fastlane_v1"
 
 
 def _default_activation_discovery_provider(
@@ -360,92 +557,213 @@ def _discover_intake_runtime_inputs(cur: Any, args: argparse.Namespace) -> dict[
     cur.execute(
         """
         SELECT
-          o.source_run_id,
-          min(o.event_time)::text AS trigger_time,
+          min(o.event_time)::text AS first_trigger_time,
+          max(o.event_time)::text AS latest_trigger_time,
           bool_or(o.event_type = 'TriggerMatched') AS has_trigger_matched,
-          bool_or(
-            o.event_type = 'TriggerStateChanged'
-            AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) IN ('false', 'f', '0', 'no', 'n')
-          ) AS has_inactive_state_changed
-        FROM common_event_outbox o
+	          bool_or(
+	            o.event_type = 'TriggerStateChanged'
+	            AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) IN ('false', 'f', '0', 'no', 'n')
+	          ) AS has_inactive_state_changed,
+	          bool_or(
+	            o.event_type = 'TriggerStateChanged'
+	            AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) NOT IN ('false', 'f', '0', 'no', 'n')
+	          ) AS has_active_state_changed
+	        FROM common_event_outbox o
         WHERE o.source_layer = 'N4_trigger'
           AND o.trade_date = %s
           AND o.status = 'pending'
-          AND (
-            o.event_type = 'TriggerMatched'
-            OR (
-              o.event_type = 'TriggerStateChanged'
-              AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) IN ('false', 'f', '0', 'no', 'n')
-            )
-          )
+	          AND (
+	            o.event_type = 'TriggerMatched'
+	            OR o.event_type = 'TriggerStateChanged'
+	          )
           AND NOT EXISTS (
             SELECT 1
             FROM common_event_inbox i
             WHERE i.consumer_name = %s
               AND i.event_id = o.event_id
           )
-        GROUP BY o.source_run_id
-        ORDER BY min(o.event_time), o.source_run_id
-        LIMIT 1
         """,
         (args.for_trade_date, DEFAULT_FASTLANE_CONSUMER_NAME),
     )
     row = cur.fetchone()
-    source_trigger_run_id = str((row or {}).get("source_run_id") or "")
-    if not source_trigger_run_id:
-        return {}
-    has_trigger_matched = bool((row or {}).get("has_trigger_matched"))
+    if not row or not any(
+        bool((row or {}).get(name))
+        for name in ("has_trigger_matched", "has_inactive_state_changed", "has_active_state_changed")
+    ):
+        return _discover_processed_tsc_true_repair_inputs(cur, args)
     return {
-        "source_trigger_run_id": source_trigger_run_id,
-        "trigger_time": str((row or {}).get("trigger_time") or ""),
-        "n5_intake_event_kind": (
-            "formal_TriggerMatched" if has_trigger_matched else "inactive_TriggerStateChanged_false"
-        ),
-        "action_run_id": _fastlane_action_run_id(
-            for_trade_date=str(args.for_trade_date),
-            source_trigger_run_id=source_trigger_run_id,
-        ),
+        "trigger_time": str((row or {}).get("latest_trigger_time") or (row or {}).get("first_trigger_time") or ""),
+        "n5_intake_event_kind": "active_set_a",
+        "action_run_id": _fastlane_active_set_a_action_run_id(for_trade_date=str(args.for_trade_date)),
         "consumer_name": DEFAULT_FASTLANE_CONSUMER_NAME,
+    }
+
+
+def _discover_processed_tsc_true_repair_inputs(cur: Any, args: argparse.Namespace) -> dict[str, str]:
+    consumer_name = str(getattr(args, "consumer_name", "") or DEFAULT_FASTLANE_CONSUMER_NAME)
+    cur.execute(
+        """
+        SELECT
+          min(o.event_time)::text AS first_trigger_time,
+          max(o.event_time)::text AS latest_trigger_time,
+          bool_or(true) AS has_active_state_changed
+        FROM common_event_outbox o
+        JOIN common_event_inbox i
+          ON i.event_id = o.event_id
+         AND i.consumer_name = %s
+         AND i.status = 'processed'
+        WHERE o.source_layer = 'N4_trigger'
+          AND o.trade_date = %s
+          AND o.event_type = 'TriggerStateChanged'
+          AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) NOT IN ('false', 'f', '0', 'no', 'n')
+          AND coalesce(o.payload_json->>'current_status', 'matched') = 'matched'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM common_action_tracking_state t
+            WHERE t.trade_date = o.trade_date
+              AND t.source_trigger_event_id = o.event_id
+              AND t.source_trigger_event_type = 'TriggerStateChanged'
+              AND t.action_state = 'eligible'
+              AND t.tracking_status = 'tracking'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM common_event_outbox inactive
+            WHERE inactive.source_layer = 'N4_trigger'
+              AND inactive.trade_date = o.trade_date
+              AND inactive.event_type = 'TriggerStateChanged'
+              AND inactive.event_time >= o.event_time
+              AND inactive.asset_kind = o.asset_kind
+              AND inactive.identity_key = o.identity_key
+              AND coalesce(inactive.payload_json->>'condition_key', '') = coalesce(o.payload_json->>'condition_key', '')
+              AND lower(coalesce(inactive.payload_json->>'trigger_live', 'true')) IN ('false', 'f', '0', 'no', 'n')
+          )
+        """,
+        (consumer_name, args.for_trade_date),
+    )
+    row = cur.fetchone()
+    if not row or not bool((row or {}).get("has_active_state_changed")):
+        return {}
+    return {
+        "trigger_time": str((row or {}).get("latest_trigger_time") or (row or {}).get("first_trigger_time") or ""),
+        "n5_intake_event_kind": "active_set_a",
+        "action_run_id": _fastlane_active_set_a_action_run_id(for_trade_date=str(args.for_trade_date)),
+        "consumer_name": consumer_name,
     }
 
 
 def _discover_executed_runtime_inputs(cur: Any, args: argparse.Namespace) -> dict[str, str]:
     cur.execute(
         """
-        SELECT run_id, source_trigger_run_id, latest_n4_event_time::text AS trigger_time
-        FROM common_action_tracking_state
-        WHERE trade_date = %s
-          AND run_id ~ %s
-          AND action_state = 'eligible'
-          AND tracking_status = 'tracking'
-        ORDER BY latest_n4_event_time NULLS LAST, run_id, source_trigger_run_id
-        LIMIT 1
+        WITH active_tracking AS (
+          SELECT *
+          FROM common_action_tracking_state
+          WHERE trade_date = %s
+            AND run_id ~ %s
+            AND action_state = 'eligible'
+            AND tracking_status = 'tracking'
+        ),
+        source_run_scoped AS (
+          SELECT
+            run_id,
+            source_trigger_run_id,
+            ''::text AS source_trigger_event_id,
+            ''::text AS state_key,
+            min(latest_n4_event_time)::text AS trigger_time,
+            min(latest_n4_event_time)::text AS latest_n4_event_time,
+            ''::text AS last_checked_minute_label,
+            ''::text AS next_unchecked_minute_label,
+            NULL::jsonb AS raw_json,
+            ''::text AS source_run_hash,
+            count(*) AS active_tracking_count
+          FROM active_tracking
+          WHERE coalesce(source_trigger_run_id, '') <> ''
+          GROUP BY run_id, source_trigger_run_id
+        ),
+        ref_scoped AS (
+          SELECT
+            run_id,
+            coalesce(source_trigger_run_id, '') AS source_trigger_run_id,
+            coalesce(source_trigger_event_id, '') AS source_trigger_event_id,
+            coalesce(state_key, '') AS state_key,
+            latest_n4_event_time::text AS trigger_time,
+            latest_n4_event_time::text AS latest_n4_event_time,
+            coalesce(last_checked_minute_label, '')::text AS last_checked_minute_label,
+            coalesce(raw_json->>'next_unchecked_minute_label', '') AS next_unchecked_minute_label,
+            raw_json,
+            coalesce(raw_json->>'source_run_hash', '') AS source_run_hash,
+            1 AS active_tracking_count
+          FROM active_tracking
+          WHERE coalesce(source_trigger_run_id, '') = ''
+        )
+        SELECT *
+        FROM (
+          SELECT * FROM source_run_scoped
+          UNION ALL
+          SELECT * FROM ref_scoped
+        ) candidates
+        ORDER BY trigger_time NULLS LAST, run_id, source_trigger_run_id, state_key
+        LIMIT %s
         """,
-        (args.for_trade_date, FASTLANE_ACTION_RUN_ID_REGEX),
+        (args.for_trade_date, FASTLANE_ACTION_RUN_ID_REGEX, FASTLANE_EXECUTED_DISCOVERY_CANDIDATE_LIMIT),
     )
-    row = cur.fetchone()
-    action_run_id = str((row or {}).get("run_id") or "")
-    source_trigger_run_id = str((row or {}).get("source_trigger_run_id") or "")
-    target_minute_label = _metric_minute_label_from_source_trigger_run_id(source_trigger_run_id)
-    source_metric_run_id = ""
-    if target_minute_label:
+    evidence_candidate: dict[str, str] | None = None
+    matched_metric_seen = False
+    for candidate in [dict(row) for row in cur.fetchall()]:
+        action_run_id = str(candidate.get("run_id") or "")
+        source_trigger_run_id = str(candidate.get("source_trigger_run_id") or "")
+        target_minute_label = _candidate_target_minute_label(candidate, for_trade_date=str(args.for_trade_date))
+        if not action_run_id or not target_minute_label:
+            continue
+        source_run_hash = _candidate_source_run_hash(
+            candidate,
+            for_trade_date=str(args.for_trade_date),
+            action_run_id=action_run_id,
+            source_trigger_run_id=source_trigger_run_id,
+            target_minute_label=target_minute_label,
+        )
+        if not source_run_hash:
+            continue
+        candidate["target_minute_label"] = target_minute_label
+        candidate["source_run_hash"] = source_run_hash
         source_metric_run_id = _discover_latest_ready_n3t_metric_run_id(
             cur,
             str(args.for_trade_date),
             target_minute_label=target_minute_label,
+            source_run_hash=source_run_hash,
         )
-    output: dict[str, str] = {}
-    if action_run_id:
-        output["action_run_id"] = action_run_id
-    if source_trigger_run_id:
-        output["source_trigger_run_id"] = source_trigger_run_id
-    if row and row.get("trigger_time"):
-        output["trigger_time"] = str(row.get("trigger_time") or "")
-    if source_metric_run_id:
-        output["source_metric_run_id"] = source_metric_run_id
-    if action_run_id or source_trigger_run_id or source_metric_run_id:
-        output["consumer_name"] = DEFAULT_FASTLANE_CONSUMER_NAME
-    return output
+        if not source_metric_run_id:
+            continue
+        matched_metric_seen = True
+        plan = _build_executed_candidate_plan(cur, args, candidate, source_metric_run_id)
+        if _plan_action_executed_count(plan) > 0:
+            return _executed_runtime_input_output(candidate, source_metric_run_id)
+        if evidence_candidate is None and _plan_tracking_update_count(plan) > 0:
+            evidence_candidate = _executed_runtime_input_output(candidate, source_metric_run_id)
+    if evidence_candidate is not None:
+        return evidence_candidate
+    if not matched_metric_seen:
+        raise N5LiveTrackingBlocked("fastlane_worker_waiting_for_n3t_c1_closed_metric")
+    raise N5LiveTrackingBlocked("fastlane_worker_waiting_for_actionexecuted_candidate")
+
+
+def _plan_action_executed_count(plan: Mapping[str, Any]) -> int:
+    summary = plan.get("summary") or {}
+    try:
+        return int(summary.get("action_executed_count") or 0)
+    except (TypeError, ValueError):
+        return sum(1 for event in plan.get("action_events") or [] if event.get("event_type") == "ActionExecuted")
+
+
+def _plan_tracking_update_count(plan: Mapping[str, Any]) -> int:
+    summary = plan.get("summary") or {}
+    try:
+        count = int(summary.get("tracking_upsert_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        return count
+    return len(plan.get("tracking_updates") or [])
 
 
 def _metric_minute_label_from_source_trigger_run_id(source_trigger_run_id: str) -> str:
@@ -453,12 +771,153 @@ def _metric_minute_label_from_source_trigger_run_id(source_trigger_run_id: str) 
     return match.group(1) if match else ""
 
 
-def _fastlane_n3t_metric_run_id_regex(for_trade_date: str, target_minute_label: str) -> str:
+def _candidate_target_minute_label(candidate: Mapping[str, Any], *, for_trade_date: str = "") -> str:
+    source_trigger_run_id = str(candidate.get("source_trigger_run_id") or "")
+    label = _metric_minute_label_from_source_trigger_run_id(source_trigger_run_id)
+    if label:
+        return label
+    explicit_label = str(candidate.get("target_minute_label") or "")
+    if re.fullmatch(r"[0-2][0-9][0-5][0-9]", explicit_label):
+        return explicit_label
+    cursor_label = _candidate_next_unchecked_minute_label(candidate, for_trade_date=for_trade_date)
+    if cursor_label:
+        return cursor_label
+    for key in ("trigger_time", "latest_n4_event_time"):
+        label = _metric_minute_label_from_time_text(candidate.get(key))
+        if label:
+            return label
+    return ""
+
+
+def _candidate_next_unchecked_minute_label(candidate: Mapping[str, Any], *, for_trade_date: str) -> str:
+    explicit_label = _minute_label_text(candidate.get("next_unchecked_minute_label"))
+    if explicit_label:
+        return explicit_label.replace(":", "")
+    first_label = _minute_label_text(candidate.get("trigger_time") or candidate.get("latest_n4_event_time"))
+    last_label = _minute_label_text(candidate.get("last_checked_minute_label"))
+    if not first_label:
+        return ""
+    labels = canonical_ashare_1m_labels(for_trade_date) if re.fullmatch(r"\d{8}", str(for_trade_date or "")) else []
+    if first_label not in labels:
+        return first_label.replace(":", "")
+    if not last_label or last_label not in labels:
+        return first_label.replace(":", "")
+    first_index = labels.index(first_label)
+    last_index = labels.index(last_label)
+    if last_index < first_index:
+        return first_label.replace(":", "")
+    next_index = last_index + 1
+    if next_index >= len(labels):
+        return ""
+    return labels[next_index].replace(":", "")
+
+
+def _minute_label_text(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"([0-2][0-9]):([0-5][0-9])", text)
+    if match:
+        return f"{match.group(1)}:{match.group(2)}"
+    if re.fullmatch(r"[0-2][0-9][0-5][0-9]", text):
+        return f"{text[:2]}:{text[2:]}"
+    return ""
+
+
+def _metric_minute_label_from_time_text(value: Any) -> str:
+    match = re.search(r"(?:T|\s)([0-2][0-9]):([0-5][0-9])(?::[0-5][0-9])?", str(value or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}{match.group(2)}"
+
+
+def _candidate_source_run_hash(
+    candidate: Mapping[str, Any],
+    *,
+    for_trade_date: str,
+    action_run_id: str,
+    source_trigger_run_id: str,
+    target_minute_label: str,
+) -> str:
+    if source_trigger_run_id:
+        namespace = build_fastlane_source_run_namespace(
+            for_trade_date=for_trade_date,
+            source_trigger_run_id=source_trigger_run_id,
+            action_run_id=action_run_id,
+            target_hhmm=target_minute_label,
+        )
+        return str(namespace.get("source_run_hash") or "")
+    raw_json = candidate.get("raw_json") or {}
+    if isinstance(raw_json, Mapping):
+        existing = str(raw_json.get("source_run_hash") or "")
+        if existing:
+            return existing
+    for key in ("source_run_hash", "source_trigger_event_id", "state_key"):
+        value = str(candidate.get(key) or "")
+        if value:
+            return _short_scope_hash(value)
+    return ""
+
+
+def _short_scope_hash(*parts: str) -> str:
+    text = "|".join(str(part).strip() for part in parts if str(part).strip())
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _executed_runtime_input_output(candidate: Mapping[str, Any], source_metric_run_id: str) -> dict[str, str]:
+    output: dict[str, str] = {
+        "action_run_id": str(candidate.get("run_id") or ""),
+        "source_trigger_run_id": str(candidate.get("source_trigger_run_id") or ""),
+        "source_metric_run_id": str(source_metric_run_id),
+        "consumer_name": DEFAULT_FASTLANE_CONSUMER_NAME,
+    }
+    if candidate.get("trigger_time"):
+        output["trigger_time"] = str(candidate.get("trigger_time") or "")
+    if candidate.get("state_key"):
+        output["state_key"] = str(candidate.get("state_key") or "")
+    return {key: value for key, value in output.items() if value}
+
+
+def _build_executed_candidate_plan(
+    cur: Any,
+    args: argparse.Namespace,
+    candidate: Mapping[str, Any],
+    source_metric_run_id: str,
+) -> dict[str, Any]:
+    candidate_args = argparse.Namespace(**vars(args))
+    candidate_args.action_run_id = str(candidate.get("run_id") or "")
+    candidate_args.source_trigger_run_id = str(candidate.get("source_trigger_run_id") or "")
+    candidate_args.source_metric_run_id = str(source_metric_run_id)
+    candidate_args.fastlane_ref_state_key = str(candidate.get("state_key") or "")
+    candidate_args.consumer_name = str(getattr(args, "consumer_name", "") or DEFAULT_FASTLANE_CONSUMER_NAME)
+    candidate_args.max_events = int(getattr(args, "max_events", 0) or DEFAULT_EVENT_LIMIT)
+    active_tracking = _fetch_active_tracking_rows(cur, candidate_args, n4_event_rows=[])
+    active_scope_tracking = _fetch_active_scope_tracking_rows(cur, args)
+    metric_rows = _fetch_metric_rows(cur, candidate_args)
+    existing_event_keys = _fetch_existing_action_event_keys(cur, candidate_args)
+    return build_live_tracking_plan(
+        n4_event_rows=[],
+        active_tracking_rows=active_tracking,
+        metric_rows=metric_rows,
+        action_run_id=candidate_args.action_run_id,
+        source_trigger_run_id=candidate_args.source_trigger_run_id,
+        source_metric_run_id=candidate_args.source_metric_run_id,
+        consumer_name=candidate_args.consumer_name,
+        existing_action_event_keys=existing_event_keys,
+        active_scope_tracking_rows=active_scope_tracking,
+        for_trade_date=str(args.for_trade_date),
+    )
+
+
+def _fastlane_n3t_metric_run_id_regex(for_trade_date: str, target_minute_label: str, source_run_hash: str) -> str:
     safe_trade_date = re.escape(str(for_trade_date or ""))
     safe_minute_label = re.escape(str(target_minute_label or ""))
+    safe_source_run_hash = re.escape(str(source_run_hash or ""))
+    if not safe_source_run_hash:
+        return r"a^"
     return (
         rf"^n3t_action_confirmation_metric_{safe_trade_date}_until_{safe_minute_label}"
-        + FASTLANE_N3T_METRIC_RUN_ID_SUFFIX_REGEX
+        rf"__fastlane_sr_{safe_source_run_hash}_raw_prevday_c1_amount_v1$"
     )
 
 
@@ -476,9 +935,17 @@ def _fastlane_active_scope_artifact_filename(
     return f"n5_active_scope_snapshot_v1_{namespace['token']}.json"
 
 
-def _discover_latest_ready_n3t_metric_run_id(cur: Any, for_trade_date: str, *, target_minute_label: str) -> str:
+def _discover_latest_ready_n3t_metric_run_id(
+    cur: Any,
+    for_trade_date: str,
+    *,
+    target_minute_label: str,
+    source_run_hash: str,
+) -> str:
+    if not str(source_run_hash or "").strip():
+        return ""
     candidates: list[tuple[str, str]] = []
-    metric_run_id_regex = _fastlane_n3t_metric_run_id_regex(for_trade_date, target_minute_label)
+    metric_run_id_regex = _fastlane_n3t_metric_run_id_regex(for_trade_date, target_minute_label, source_run_hash)
     for table_name in (
         "stock_n3t_action_confirmation_metric",
         "index_n3t_action_confirmation_metric",
@@ -501,7 +968,7 @@ def _discover_latest_ready_n3t_metric_run_id(cur: Any, for_trade_date: str, *, t
             ORDER BY max(metric_time) DESC, projection_run_id DESC
             LIMIT 1
             """,
-            (for_trade_date, f"%until_{target_minute_label}%", metric_run_id_regex),
+            (for_trade_date, f"%until_{target_minute_label}__fastlane_sr_{source_run_hash}%", metric_run_id_regex),
         )
         row = cur.fetchone()
         if row and row.get("projection_run_id"):
@@ -530,6 +997,13 @@ def _validate_fastlane_phase_plan_boundary(args: argparse.Namespace, plan: Mappi
 
 def _is_fastlane_executed_phase(args: argparse.Namespace) -> bool:
     return str(getattr(args, "fastlane_phase", "") or "") == "executed"
+
+
+def _is_active_set_a_intake(args: argparse.Namespace) -> bool:
+    return (
+        str(getattr(args, "fastlane_phase", "") or "") == "intake"
+        and str(getattr(args, "n5_intake_event_kind", "") or "") in ACTIVE_SET_A_INTAKE_EVENT_KINDS
+    )
 
 
 def _write_active_scope_artifact(args: argparse.Namespace, plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -575,6 +1049,202 @@ def _active_scope_artifact_writes_enabled(args: argparse.Namespace) -> bool:
     if bool(getattr(args, "write_active_scope_artifact", False)) and bool(getattr(args, "user_confirmed", False)):
         return True
     return False
+
+
+def _maybe_write_post_close_final_a_pass_done_marker(
+    args: argparse.Namespace,
+    plan: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    decision = getattr(args, "fastlane_active_worker_decision", {}) or {}
+    if str(getattr(args, "fastlane_session_phase", "") or "") != "post_close":
+        return {"executed": False, "reason": "not_post_close"}
+    if not bool(decision.get("post_close_final_a_pass_allowed")):
+        return {"executed": False, "reason": str(decision.get("blocked_reason") or "post_close_final_a_pass_not_allowed")}
+
+    phase = str(getattr(args, "fastlane_phase", "") or "")
+    if phase == "intake" and decision.get("worker_mode") == "post_close_final_a_scope_snapshot":
+        active_scope_result = manifest.get("active_scope_artifact_write_result") or {}
+        artifact = plan.get("active_scope_snapshot_artifact") or {}
+        if not active_scope_result.get("executed"):
+            return {"executed": False, "reason": "active_scope_artifact_not_written"}
+        if int(artifact.get("scope_count") or 0) != 0:
+            return {"executed": False, "reason": "active_scope_not_empty"}
+        return _write_post_close_final_a_pass_done_marker(
+            args,
+            completion_mode="empty_a_noop",
+            active_scope_artifact_path=str(active_scope_result.get("path") or ""),
+            evaluated_ref_count=0,
+            action_executed_count=0,
+            evaluation_only_count=0,
+            unprocessed_ref_count=0,
+        )
+
+    if phase == "executed" and decision.get("worker_mode") == "post_close_final_a_execute":
+        summary = _post_close_final_a_executed_completion_summary(plan)
+        if summary["unprocessed_ref_count"] != 0:
+            return {
+                "executed": False,
+                "reason": "active_refs_not_all_evaluated",
+                **summary,
+            }
+        if summary["evaluated_ref_count"] == 0:
+            return {"executed": False, "reason": "active_refs_empty_for_executed_marker", **summary}
+        return _write_post_close_final_a_pass_done_marker(
+            args,
+            completion_mode="n5_executed_all_refs_evaluated",
+            active_scope_artifact_path=str(getattr(args, "active_scope_artifact_path", "") or ""),
+            evaluated_ref_count=summary["evaluated_ref_count"],
+            action_executed_count=summary["action_executed_count"],
+            evaluation_only_count=summary["evaluation_only_count"],
+            unprocessed_ref_count=summary["unprocessed_ref_count"],
+        )
+
+    return {"executed": False, "reason": "lane_not_marker_writer"}
+
+
+def _post_close_final_a_executed_completion_summary(plan: Mapping[str, Any]) -> dict[str, int]:
+    active_keys = _post_close_final_a_active_scope_ref_state_keys(plan)
+    completed_keys: set[str] = set()
+    action_executed_keys: set[str] = set()
+    for event in plan.get("action_events") or []:
+        if str(event.get("event_type") or "") != "ActionExecuted":
+            continue
+        state_key = _action_event_state_key(event)
+        if state_key:
+            action_executed_keys.add(state_key)
+            completed_keys.add(state_key)
+    for update in plan.get("tracking_updates") or []:
+        state_key = str(update.get("state_key") or "")
+        if state_key and _tracking_update_has_terminal_or_evaluation_evidence(update):
+            completed_keys.add(state_key)
+    if not active_keys:
+        active_keys = set(completed_keys)
+    evaluated_keys = active_keys & completed_keys
+    action_keys = active_keys & action_executed_keys
+    return {
+        "evaluated_ref_count": len(evaluated_keys),
+        "action_executed_count": len(action_keys),
+        "evaluation_only_count": max(0, len(evaluated_keys) - len(action_keys)),
+        "unprocessed_ref_count": len(active_keys - completed_keys),
+    }
+
+
+def _post_close_final_a_active_scope_ref_state_keys(plan: Mapping[str, Any]) -> set[str]:
+    artifact = plan.get("active_scope_snapshot_artifact") or {}
+    artifact_keys: set[str] = set()
+    if isinstance(artifact, Mapping):
+        for row in artifact.get("scope_rows") or []:
+            if not isinstance(row, Mapping):
+                continue
+            for ref in row.get("active_tracking_refs") or []:
+                if not isinstance(ref, Mapping):
+                    continue
+                state_key = str(ref.get("state_key") or "").strip()
+                if state_key:
+                    artifact_keys.add(state_key)
+    if artifact_keys:
+        return artifact_keys
+    return {
+        str(row.get("state_key") or "").strip()
+        for row in plan.get("active_tracking_rows") or []
+        if str(row.get("state_key") or "").strip()
+    }
+
+
+def _action_event_state_key(event: Mapping[str, Any]) -> str:
+    payload = event.get("payload_json") or {}
+    if isinstance(payload, Mapping):
+        trace = payload.get("trace_json") or {}
+        if isinstance(trace, Mapping) and str(trace.get("tracking_state_key") or "").strip():
+            return str(trace.get("tracking_state_key") or "")
+        if str(payload.get("action_key") or "").strip():
+            return str(payload.get("action_key") or "")
+    return str(event.get("state_key") or "")
+
+
+def _tracking_update_has_terminal_or_evaluation_evidence(update: Mapping[str, Any]) -> bool:
+    if str(update.get("action_state") or "") in {"blocked", "executed", "skipped", "expired"}:
+        return True
+    if str(update.get("confirmation_status") or "") in {"passed", "failed", "expired"}:
+        return True
+    raw_json = update.get("raw_json") or {}
+    if isinstance(raw_json, Mapping):
+        for key in (
+            "latest_metric_status",
+            "metric_evaluation_key",
+            "last_seen_metric_key",
+            "source_action_confirmation_metric_id",
+        ):
+            if str(raw_json.get(key) or "").strip():
+                return True
+    for key in ("latest_metric_status", "metric_evaluation_key", "last_seen_metric_key"):
+        if str(update.get(key) or "").strip():
+            return True
+    return False
+
+
+def _write_post_close_final_a_pass_done_marker(
+    args: argparse.Namespace,
+    *,
+    completion_mode: str,
+    active_scope_artifact_path: str,
+    evaluated_ref_count: int,
+    action_executed_count: int,
+    evaluation_only_count: int,
+    unprocessed_ref_count: int,
+) -> dict[str, Any]:
+    path_text = str(getattr(args, "post_close_final_a_pass_done_marker_path", "") or "").strip()
+    if not path_text:
+        path_text = default_post_close_final_a_pass_done_marker_path(
+            for_trade_date=str(getattr(args, "for_trade_date", "") or "")
+        )
+    path = Path(path_text)
+    active_scope_hash = _sha256_file(active_scope_artifact_path) if active_scope_artifact_path else ""
+    marker = {
+        "artifact_type": POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE,
+        "for_trade_date": str(getattr(args, "for_trade_date", "") or ""),
+        "status": "done",
+        "completion_mode": completion_mode,
+        "active_scope_artifact_path": active_scope_artifact_path,
+        "active_scope_artifact_sha256": active_scope_hash,
+        "evaluated_ref_count": int(evaluated_ref_count),
+        "action_executed_count": int(action_executed_count),
+        "evaluation_only_count": int(evaluation_only_count),
+        "unprocessed_ref_count": int(unprocessed_ref_count),
+        "created_at": datetime.now().astimezone().isoformat(),
+        "boundary": {
+            "n4_outbox_updated": False,
+            "n6_touched": False,
+            "canonical_minute_bar_1m_written": False,
+            "db_marker_table_written": False,
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_json_safe_value(marker), ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return {
+        "executed": True,
+        "path": str(path),
+        "artifact_type": POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE,
+        "completion_mode": completion_mode,
+        "evaluated_ref_count": int(evaluated_ref_count),
+        "action_executed_count": int(action_executed_count),
+        "evaluation_only_count": int(evaluation_only_count),
+        "unprocessed_ref_count": int(unprocessed_ref_count),
+    }
+
+
+def _sha256_file(path_text: str) -> str:
+    if not path_text:
+        return ""
+    path = Path(path_text)
+    if not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _build_manifest(
@@ -631,11 +1301,18 @@ def _default_plan_provider(args: argparse.Namespace) -> dict[str, Any]:
         connect_timeout=10,
     ) as conn, conn.cursor() as cur:
         n4_rows = [] if _is_fastlane_executed_phase(args) else _fetch_pending_n4_rows(cur, args)
-        active_tracking = _fetch_active_tracking_rows(cur, args, n4_event_rows=n4_rows)
+        repair_n4_rows = (
+            []
+            if _is_fastlane_executed_phase(args) or not _is_active_set_a_intake(args)
+            else _fetch_processed_tsc_true_repair_rows(cur, args)
+        )
+        active_tracking = _fetch_active_tracking_rows(cur, args, n4_event_rows=[*n4_rows, *repair_n4_rows])
+        active_scope_tracking = _fetch_active_scope_tracking_rows(cur, args)
         metric_rows = _fetch_metric_rows(cur, args)
         existing_event_keys = _fetch_existing_action_event_keys(cur, args)
     return build_live_tracking_plan(
         n4_event_rows=n4_rows,
+        repair_n4_event_rows=repair_n4_rows,
         active_tracking_rows=active_tracking,
         metric_rows=metric_rows,
         action_run_id=args.action_run_id,
@@ -643,11 +1320,38 @@ def _default_plan_provider(args: argparse.Namespace) -> dict[str, Any]:
         source_metric_run_id=args.source_metric_run_id,
         consumer_name=args.consumer_name,
         existing_action_event_keys=existing_event_keys,
+        active_scope_tracking_rows=active_scope_tracking,
         for_trade_date=args.for_trade_date,
     )
 
 
 def _fetch_pending_n4_rows(cur: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    if _is_active_set_a_intake(args):
+        cur.execute(
+            """
+            SELECT o.*
+            FROM common_event_outbox o
+            WHERE o.source_layer = 'N4_trigger'
+              AND o.trade_date = %s
+              AND o.status = 'pending'
+              AND o.event_type = ANY(%s)
+              AND NOT EXISTS (
+                SELECT 1
+                FROM common_event_inbox i
+                WHERE i.consumer_name = %s
+                  AND i.event_id = o.event_id
+              )
+            ORDER BY o.event_time, o.source_run_id, o.outbox_id
+            LIMIT %s
+            """,
+            (
+                args.for_trade_date,
+                list(N4_INPUT_EVENT_TYPES),
+                args.consumer_name,
+                int(args.max_events),
+            ),
+        )
+        return [dict(row) for row in cur.fetchall()]
     cur.execute(
         """
         SELECT o.*
@@ -677,12 +1381,88 @@ def _fetch_pending_n4_rows(cur: Any, args: argparse.Namespace) -> list[dict[str,
     return [dict(row) for row in cur.fetchall()]
 
 
+def _fetch_processed_tsc_true_repair_rows(cur: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT o.*
+        FROM common_event_outbox o
+        JOIN common_event_inbox i
+          ON i.event_id = o.event_id
+         AND i.consumer_name = %s
+         AND i.status = 'processed'
+        WHERE o.source_layer = 'N4_trigger'
+          AND o.trade_date = %s
+          AND o.event_type = 'TriggerStateChanged'
+          AND lower(coalesce(o.payload_json->>'trigger_live', 'true')) NOT IN ('false', 'f', '0', 'no', 'n')
+          AND coalesce(o.payload_json->>'current_status', 'matched') = 'matched'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM common_action_tracking_state t
+            WHERE t.trade_date = o.trade_date
+              AND t.source_trigger_event_id = o.event_id
+              AND t.source_trigger_event_type = 'TriggerStateChanged'
+              AND t.action_state = 'eligible'
+              AND t.tracking_status = 'tracking'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM common_event_outbox inactive
+            WHERE inactive.source_layer = 'N4_trigger'
+              AND inactive.trade_date = o.trade_date
+              AND inactive.event_type = 'TriggerStateChanged'
+              AND inactive.event_time >= o.event_time
+              AND inactive.asset_kind = o.asset_kind
+              AND inactive.identity_key = o.identity_key
+              AND coalesce(inactive.payload_json->>'condition_key', '') = coalesce(o.payload_json->>'condition_key', '')
+              AND lower(coalesce(inactive.payload_json->>'trigger_live', 'true')) IN ('false', 'f', '0', 'no', 'n')
+          )
+        ORDER BY o.event_time, o.source_run_id, o.outbox_id
+        LIMIT %s
+        """,
+        (args.consumer_name, args.for_trade_date, int(args.max_events)),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
 def _fetch_active_tracking_rows(
     cur: Any,
     args: argparse.Namespace,
     *,
     n4_event_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    ref_state_key = str(getattr(args, "fastlane_ref_state_key", "") or "")
+    if _is_fastlane_executed_phase(args) and ref_state_key:
+        cur.execute(
+            """
+            SELECT *
+            FROM common_action_tracking_state
+            WHERE trade_date = %s
+              AND run_id = %s
+              AND state_key = %s
+              AND action_state = 'eligible'
+              AND tracking_status = 'tracking'
+            ORDER BY latest_n4_event_time NULLS LAST, run_id, state_key
+            """,
+            (args.for_trade_date, args.action_run_id, ref_state_key),
+        )
+        return [dict(row) for row in cur.fetchall()]
+    if _is_active_set_a_intake(args):
+        state_keys = _n4_event_state_keys(n4_event_rows or [])
+        if not state_keys:
+            return []
+        cur.execute(
+            """
+            SELECT *
+            FROM common_action_tracking_state
+            WHERE trade_date = %s
+              AND state_key = ANY(%s)
+              AND action_state = 'eligible'
+              AND tracking_status = 'tracking'
+            ORDER BY latest_n4_event_time NULLS LAST, run_id, state_key
+            """,
+            (args.for_trade_date, state_keys),
+        )
+        return [dict(row) for row in cur.fetchall()]
     cur.execute(
         """
         SELECT *
@@ -720,6 +1500,45 @@ def _fetch_active_tracking_rows(
                 rows.append(row_dict)
                 existing_keys.add(key)
     return rows
+
+
+def _n4_event_state_keys(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    keys: set[str] = set()
+    for row in rows:
+        event_type = str(row.get("event_type") or "")
+        if event_type not in N4_INPUT_EVENT_TYPES:
+            continue
+        payload = _event_payload(row)
+        signal_type = str(_event_value(row, payload, "signal_type") or "")
+        direction = str(_event_value(row, payload, "direction") or "")
+        if not direction:
+            direction = "buy" if signal_type == "B_BUY" else "sell" if signal_type == "S_SELL" else ""
+        grain = {
+            "trade_date": str(_event_value(row, payload, "trade_date", "for_trade_date") or ""),
+            "asset_kind": str(_event_value(row, payload, "asset_kind") or ""),
+            "identity_key": str(_event_value(row, payload, "identity_key") or ""),
+            "direction": direction,
+            "signal_type": signal_type,
+            "condition_key": str(_event_value(row, payload, "condition_key", "original_condition_key") or ""),
+        }
+        if all(grain.values()):
+            keys.add(build_action_tracking_state_key(**grain))
+    return sorted(keys)
+
+
+def _fetch_active_scope_tracking_rows(cur: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT *
+        FROM common_action_tracking_state
+        WHERE trade_date = %s
+          AND action_state = 'eligible'
+          AND tracking_status = 'tracking'
+        ORDER BY latest_n4_event_time NULLS LAST, run_id, state_key
+        """,
+        (args.for_trade_date,),
+    )
+    return [dict(row) for row in cur.fetchall()]
 
 
 def _inactive_state_change_keys(rows: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1179,13 +1998,133 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = run_n5_live_tracking_poller_once(argv)
     if scheduler_quiet and _is_scheduler_phase_noop(manifest):
         return 0
-    print(json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str, indent=2))
+    if scheduler_quiet:
+        print(json.dumps(_scheduler_compact_manifest(manifest), ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        print(json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str, indent=2))
     return 2 if str(manifest.get("verdict") or "").startswith("BLOCKED") else 0
 
 
 def _scheduler_quiet_requested(argv: Sequence[str] | None) -> bool:
     values = list(sys.argv[1:] if argv is None else argv)
     return "--scheduler-quiet" in values
+
+
+def _scheduler_compact_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    fastlane = manifest.get("fastlane") if isinstance(manifest.get("fastlane"), Mapping) else {}
+    compact: dict[str, Any] = {
+        "verdict": str(manifest.get("verdict") or ""),
+        "scheduler_quiet": True,
+    }
+    for key in ("blocked_reason", "reason", "for_trade_date", "writes_enabled", "artifact_writes_enabled"):
+        if key in manifest:
+            compact[key] = _compact_scalar(manifest.get(key))
+    for key in ("phase", "session_phase"):
+        if key in fastlane:
+            compact[key] = _compact_scalar(fastlane.get(key))
+    write_result = _compact_mapping_scalars(
+        manifest.get("write_result"),
+        {
+            "executed",
+            "common_action_tracking_state",
+            "common_event_consumer_checkpoint",
+            "common_event_inbox",
+            "common_event_outbox",
+            "n4_outbox_status_updated",
+            "rows_written",
+        },
+    )
+    if write_result:
+        compact["write_result"] = write_result
+    counts = _scheduler_compact_counts(manifest)
+    if counts:
+        compact["counts"] = counts
+    artifact_paths = _scheduler_compact_artifact_paths(manifest)
+    if artifact_paths:
+        compact["artifact_paths"] = artifact_paths
+    boundary = _compact_mapping_scalars(
+        manifest.get("boundary"),
+        {
+            "n4_outbox_updated",
+            "n3_or_n4_fact_modified",
+            "n6_written_directly",
+            "market_data_pulled",
+            "launchd_touched",
+            "long_running_worker_started",
+        },
+    )
+    if boundary:
+        compact["boundary"] = boundary
+    return compact
+
+
+def _scheduler_compact_counts(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    counts = _compact_mapping_scalars(
+        manifest,
+        {"scope_count", "active_tracking_ref_count", "active_scope_artifact_count"},
+    )
+    plan = manifest.get("plan") if isinstance(manifest.get("plan"), Mapping) else {}
+    artifact = plan.get("active_scope_artifact") if isinstance(plan.get("active_scope_artifact"), Mapping) else {}
+    counts.update(
+        _compact_mapping_scalars(
+            artifact,
+            {"scope_count", "active_tracking_ref_count"},
+        )
+    )
+    list_count_keys = {
+        "tracking_updates": "tracking_update_count",
+        "action_events": "action_event_count",
+        "consumed_n4_events": "consumed_n4_event_count",
+        "active_tracking_refs": "active_tracking_ref_row_count",
+        "attention_event_refs": "attention_event_ref_count",
+        "metric_rows": "metric_row_count",
+    }
+    for key, output_key in list_count_keys.items():
+        value = plan.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            counts[output_key] = len(value)
+    return counts
+
+
+def _scheduler_compact_artifact_paths(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    paths = _compact_mapping_scalars(
+        manifest,
+        {
+            "active_scope_artifact_path",
+            "output_artifact_path",
+            "post_close_final_a_pass_done_marker_path",
+        },
+    )
+    active_scope_result = (
+        manifest.get("active_scope_artifact_write_result")
+        if isinstance(manifest.get("active_scope_artifact_write_result"), Mapping)
+        else {}
+    )
+    paths.update(
+        _compact_mapping_scalars(
+            active_scope_result,
+            {"path", "artifact_path", "active_scope_artifact_path"},
+        )
+    )
+    return paths
+
+
+def _compact_mapping_scalars(value: Any, allowed_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    for key in sorted(allowed_keys):
+        if key in value:
+            result[key] = _compact_scalar(value.get(key))
+    return result
+
+
+def _compact_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date, Decimal)):
+        return _json_safe_value(value)
+    return str(value)
 
 
 def _is_scheduler_phase_noop(manifest: Mapping[str, Any]) -> bool:
@@ -1198,18 +2137,22 @@ def _is_scheduler_phase_noop(manifest: Mapping[str, Any]) -> bool:
     if manifest.get("artifact_writes_enabled") is True:
         return False
     reason = str(manifest.get("blocked_reason") or "")
-    return reason.startswith("fastlane_worker_") or reason in {
-        "fastlane write-enabled active plan requires session_context or session_context_policy",
-        "fastlane write-enabled active plan requires session_context_policy.trade_calendar_is_open",
-        "fastlane write-enabled active plan requires active_worker_policy_review_ref",
-        "fastlane active_worker_policy_review_ref not ready",
-        "fastlane active_worker_policy_review_ref for_trade_date mismatch",
-        "active worker policy review not ready",
-        "active worker policy review not ready: manual_gate_required",
-        "active worker policy review not ready: blockers_or_waiting_reasons",
-        "active worker policy review chain_backlog mismatch",
-        "fastlane active_worker_policy_review_path not readable",
-    }
+    return (
+        reason.startswith("fastlane_worker_")
+        or reason.startswith("fastlane active_worker_policy_review_ref_not_ready:")
+        or reason in {
+            "fastlane write-enabled active plan requires session_context or session_context_policy",
+            "fastlane write-enabled active plan requires session_context_policy.trade_calendar_is_open",
+            "fastlane write-enabled active plan requires active_worker_policy_review_ref",
+            "fastlane active_worker_policy_review_ref not ready",
+            "fastlane active_worker_policy_review_ref for_trade_date mismatch",
+            "active worker policy review not ready",
+            "active worker policy review not ready: manual_gate_required",
+            "active worker policy review not ready: blockers_or_waiting_reasons",
+            "active worker policy review chain_backlog mismatch",
+            "fastlane active_worker_policy_review_path not readable",
+        }
+    )
 
 
 def _scheduler_noop_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:

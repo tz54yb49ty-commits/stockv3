@@ -281,6 +281,29 @@ class ProvisionalActionExecutedWriteTest(unittest.TestCase):
 
         self.assertIn("BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF", str(raised.exception))
 
+    def test_source_trigger_proof_trace_does_not_block_n5_v2_final_proof(self) -> None:
+        plans = n5_v2_action_executed_plans()
+        payload = dict(plans[0]["payload"])
+        trace = dict(payload.get("trace") or {})
+        source_payload = dict(trace.get("source_actioneligible_payload") or {})
+        source_payload.update(
+            {
+                "source_metric_kind": "realtime_action_confirmation_metric",
+                "metric_role": "trigger_proof",
+                "proof_owner": "N3",
+                "proof_consumer": "N4",
+                "not_n5_final_proof": True,
+                "source_trigger_proof_kind": "n3p_formal_amount_chain",
+            }
+        )
+        trace["source_actioneligible_payload"] = source_payload
+        payload["trace"] = trace
+
+        plan = build_plan([{**plans[0], "payload": payload}])
+
+        self.assertEqual(plan["event_counts"], {"ActionExecuted": 1})
+        self.assertEqual(plan["writes"]["common_event_outbox"][0]["payload_json"]["source_metric_kind"], N5_CONFIRMATION_METRIC_V2_KIND)
+
     def test_b2_projection_proof_is_rejected_as_actionexecuted_final_proof(self) -> None:
         plans = action_executed_plans()
         projection_proof_payload = dict(plans[0]["payload"])
@@ -408,11 +431,8 @@ class ProvisionalActionExecutedWriteTest(unittest.TestCase):
         self.assertFalse(args.user_confirmed)
 
     def test_runner_report_blocks_n3p_actionexecuted_plans(self) -> None:
-        n3p_row = eligible_row(1)
-        payload = n3p_row["payload_json"]
-        if not isinstance(payload, dict):
-            raise AssertionError("test helper expected dict payload")
-        payload.update(
+        n3p_metric = confirmation_metric_row(1)
+        n3p_metric.update(
             {
                 "source_metric_kind": "realtime_action_confirmation_metric",
                 "metric_role": "trigger_proof",
@@ -427,8 +447,8 @@ class ProvisionalActionExecutedWriteTest(unittest.TestCase):
             action_run_id=ACTION_RUN_ID,
             for_trade_date=FOR_TRADE_DATE,
             latest_closed_minute_label="2026-06-24T10:24:00+08:00",
-            source_actioneligible_rows=[n3p_row],
-            confirmation_metric_rows=[confirmation_metric_row(1)],
+            source_actioneligible_rows=[eligible_row(1)],
+            confirmation_metric_rows=[n3p_metric],
             confirmation_projection_rows=[],
             target_counts=empty_target_counts(),
             execute=False,

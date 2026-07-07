@@ -766,15 +766,21 @@ previous_day_full_30m_amount = previous trade date full same-position 30m window
 current_30m_virtual_amount =
   current_30m_elapsed_amount / previous_day_same_elapsed_30m_amount * previous_day_full_30m_amount
 reference_30m_amount = previous_day_full_30m_amount
-reference_30m_entity_high = max(open, close) of current-day adjacent previous completed 30m window
-reference_30m_entity_low = min(open, close) of current-day adjacent previous completed 30m window
+reference_30m_entity_high = max(open, close) of adjacent previous completed 30m window
+reference_30m_entity_low = min(open, close) of adjacent previous completed 30m window
 ```
 
-Fail-closed：`asset_kind=stock`、第一 30m window 无 current-day adjacent previous completed
-window、current-day 1m 缺失、previous-day same elapsed 缺失、previous elapsed amount
-非正、previous-day full 30m amount 缺失、previous completed 30m open/close 缺失、duplicate
-canonical labels、current-day raw/canonical `11:30` source bar 出现、source date mismatch、
-fake/synthetic/fabricated source marker。
+其中成交额基准始终取 previous trade date same-position 30m；价格实体高低点取相邻上一根
+completed 30m。对 `09:31..10:00` 第一窗口，相邻上一根跨交易日取 previous trade date
+last 30m `14:31..15:00`；后续窗口取 current trade date adjacent previous 30m。proof trace
+必须保留 `previous_completed_window_source`，区分 `previous_trade_date_last_30m` 与
+`current_trade_date_adjacent_previous_30m`。
+
+Fail-closed：`asset_kind=stock`、current-day 1m 缺失、previous-day same elapsed 缺失、
+previous elapsed amount 非正、previous-day full 30m amount 缺失、previous completed 30m
+open/close 缺失（第一窗口等价于 previous trade date last 30m `14:31..15:00` open/close
+缺失）、duplicate canonical labels、current-day raw/canonical `11:30` source bar 出现、
+source date mismatch、fake/synthetic/fabricated source marker。
 
 HINT proof persistence contract:
 

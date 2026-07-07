@@ -7,6 +7,8 @@ that a bounded one-shot runner can persist later.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,6 +25,7 @@ from ashare_v3.action.dry_run import (
 )
 from ashare_v3.condition.basis import normalize_mapping
 from ashare_v3.events.ids import build_stable_event_id, join_dedup_parts
+from ashare_v3.market.minute_label_normalization import canonical_ashare_1m_labels
 
 
 N5_SOURCE_LAYER = "N5_action"
@@ -40,6 +43,7 @@ N3T_POLICY_ALIGNMENT_TRACE_KEY = "n5_n3t_closed_c1_policy_alignment"
 def build_live_tracking_plan(
     *,
     n4_event_rows: Sequence[Mapping[str, Any]],
+    repair_n4_event_rows: Sequence[Mapping[str, Any]] = (),
     active_tracking_rows: Sequence[Mapping[str, Any]],
     metric_rows: Sequence[Mapping[str, Any]],
     action_run_id: str,
@@ -47,6 +51,7 @@ def build_live_tracking_plan(
     source_metric_run_id: str,
     consumer_name: str,
     existing_action_event_keys: set[str] | Sequence[str] | None = None,
+    active_scope_tracking_rows: Sequence[Mapping[str, Any]] | None = None,
     for_trade_date: str | None = None,
 ) -> dict[str, Any]:
     """Plan one bounded N5 live-tracking invocation.
@@ -63,6 +68,7 @@ def build_live_tracking_plan(
     tracking_updates: list[dict[str, Any]] = []
     consumed_n4_event_ids: list[str] = []
     consumed_n4_events: list[dict[str, Any]] = []
+    attention_scope_events: list[dict[str, Any]] = []
     input_counter: Counter[str] = Counter()
 
     def append_consumed_n4_event(row: Mapping[str, Any]) -> None:
@@ -71,12 +77,13 @@ def build_live_tracking_plan(
             consumed_n4_event_ids.append(event_id)
             consumed_n4_events.append(normalize_mapping(row))
 
+    source_trigger_filter = str(source_trigger_run_id or "")
     for row in _sort_event_rows(n4_event_rows):
         event_type = str(row.get("event_type") or "")
         if event_type not in N5_LIVE_TRACKING_INPUT_EVENTS:
             continue
         input_counter[event_type] += 1
-        if str(row.get("source_run_id") or "") != str(source_trigger_run_id):
+        if source_trigger_filter and str(row.get("source_run_id") or "") != source_trigger_filter:
             continue
         if not _is_pending_n4_event(row):
             continue
@@ -92,8 +99,9 @@ def build_live_tracking_plan(
             prior = active_by_key.get(state_key) or _find_tracking_row(active_tracking_rows, state_key)
             if _is_terminal_tracking(prior):
                 continue
-            if not prior:
-                _append_tracking_update(tracking_updates, planned_update_keys, state)
+            action_eligible_required = not prior or str(prior.get("planned_output_event_type") or "") != "ActionEligible"
+            if action_eligible_required:
+                _replace_tracking_update(tracking_updates, planned_update_keys, state)
                 eligible_event = _build_action_event(
                     "ActionEligible",
                     state,
@@ -119,6 +127,45 @@ def build_live_tracking_plan(
                 tracking_updates.append(expired)
                 planned_update_keys.add(expired["state_key"])
                 active_by_key.pop(expired["state_key"], None)
+            continue
+
+        if _is_trigger_state_changed_active(row):
+            append_consumed_n4_event(row)
+            state = _tracking_state_from_trigger_state_changed_active(
+                row,
+                action_run_id=action_run_id,
+                source_trigger_run_id=source_trigger_run_id,
+            )
+            state_key = state["state_key"]
+            prior = active_by_key.get(state_key) or _find_tracking_row(active_tracking_rows, state_key)
+            if prior and not _event_is_newer_or_equal(state.get("latest_n4_event_time"), prior.get("latest_n4_event_time")):
+                active_by_key[state_key] = _normalize_tracking_row(prior)
+                continue
+            active_by_key[state_key] = state
+            _replace_tracking_update(tracking_updates, planned_update_keys, state)
+
+    for row in _sort_event_rows(repair_n4_event_rows):
+        if not _is_matched_trigger_state_changed_active(row):
+            continue
+        state = _tracking_state_from_trigger_state_changed_active(
+            row,
+            action_run_id=action_run_id,
+            source_trigger_run_id=source_trigger_run_id,
+        )
+        state_key = state["state_key"]
+        prior = active_by_key.get(state_key) or _find_tracking_row(active_tracking_rows, state_key)
+        if (
+            prior
+            and _is_active_tracking(prior)
+            and str(prior.get("source_trigger_event_id") or "") == str(state.get("source_trigger_event_id") or "")
+        ):
+            active_by_key[state_key] = _normalize_tracking_row(prior)
+            continue
+        if prior and not _event_is_newer_or_equal(state.get("latest_n4_event_time"), prior.get("latest_n4_event_time")):
+            active_by_key[state_key] = _normalize_tracking_row(prior)
+            continue
+        active_by_key[state_key] = state
+        _replace_tracking_update(tracking_updates, planned_update_keys, state)
 
     for row in active_tracking_rows:
         normalized = _normalize_tracking_row(row)
@@ -145,10 +192,12 @@ def build_live_tracking_plan(
                 action_events.append(executed_event)
                 existing_event_keys.add(executed_event["event_key"])
             continue
+        if result.get("reason") == "metric_missing" and str(state.get("state_key") or "") in planned_update_keys:
+            continue
         evidence_update = _pending_tracking_evidence(state, result)
-        if evidence_update["state_key"] not in planned_update_keys:
-            tracking_updates.append(evidence_update)
-            planned_update_keys.add(evidence_update["state_key"])
+        if _pending_tracking_evidence_unchanged(state, evidence_update):
+            continue
+        _replace_tracking_update(tracking_updates, planned_update_keys, evidence_update)
 
     output_counter = Counter(event["event_type"] for event in action_events)
     active_scope_snapshot_artifact = _build_active_scope_snapshot_artifact(
@@ -156,14 +205,16 @@ def build_live_tracking_plan(
         action_run_id=action_run_id,
         source_trigger_run_id=source_trigger_run_id,
         consumer_name=consumer_name,
-        active_tracking_rows=active_tracking_rows,
+        active_tracking_rows=active_scope_tracking_rows if active_scope_tracking_rows is not None else active_tracking_rows,
         tracking_updates=tracking_updates,
+        attention_n4_event_rows=attention_scope_events,
     )
     return {
         "action_run_id": action_run_id,
         "source_trigger_run_id": source_trigger_run_id,
         "source_metric_run_id": source_metric_run_id,
         "consumer_name": consumer_name,
+        "active_tracking_rows": [normalize_mapping(row) for row in active_tracking_rows],
         "action_events": action_events,
         "tracking_updates": tracking_updates,
         "consumed_n4_event_ids": consumed_n4_event_ids,
@@ -188,6 +239,127 @@ def build_live_tracking_plan(
     }
 
 
+def build_active_set_a_rebuild_from_n4_day_events(
+    *,
+    n4_event_rows: Sequence[Mapping[str, Any]],
+    action_executed_event_rows: Sequence[Mapping[str, Any]],
+    for_trade_date: str,
+    action_run_id: str,
+    consumer_name: str,
+    current_exchange_time: str = "",
+) -> dict[str, Any]:
+    """Replay one trade day's N4 events into a post-close final A artifact.
+
+    This is an artifact-only rebuild path. It does not consume N4 events and
+    does not create inbox/checkpoint intent.
+    """
+
+    active_by_key: dict[str, dict[str, Any]] = {}
+    input_counter: Counter[str] = Counter()
+    ignored_other_trade_date_count = 0
+    removed_by_tsc_false_count = 0
+    action_executed_removed_ref_count = 0
+
+    replay_rows = [
+        ("n4", row)
+        for row in n4_event_rows
+    ] + [
+        ("n5_action_executed", row)
+        for row in action_executed_event_rows
+    ]
+    for source, row in _sort_day_replay_rows(replay_rows):
+        if source == "n5_action_executed":
+            for state_key, state in list(active_by_key.items()):
+                if _action_executed_event_matches_state(row, state, for_trade_date):
+                    active_by_key.pop(state_key, None)
+                    action_executed_removed_ref_count += 1
+            continue
+
+        event_type = str(row.get("event_type") or "")
+        if event_type not in N5_LIVE_TRACKING_INPUT_EVENTS:
+            continue
+        grain = _tracking_grain_from_event(row)
+        if str(grain.get("trade_date") or "") != str(for_trade_date):
+            ignored_other_trade_date_count += 1
+            continue
+        input_counter[event_type] += 1
+
+        if _is_valid_trigger_matched_entry(row):
+            state = _tracking_state_from_trigger_match(
+                row,
+                action_run_id=action_run_id,
+                source_trigger_run_id=str(row.get("source_run_id") or ""),
+            )
+            active_by_key[state["state_key"]] = state
+            continue
+
+        if _is_trigger_state_changed_inactive(row):
+            state_key = _tracking_state_key_from_event(row)
+            if state_key in active_by_key:
+                removed_by_tsc_false_count += 1
+            active_by_key.pop(state_key, None)
+            continue
+
+        if _is_matched_trigger_state_changed_active(row):
+            state = _tracking_state_from_trigger_state_changed_active(
+                row,
+                action_run_id=action_run_id,
+                source_trigger_run_id=str(row.get("source_run_id") or ""),
+            )
+            prior = active_by_key.get(state["state_key"])
+            if prior and not _event_is_newer_or_equal(state.get("latest_n4_event_time"), prior.get("latest_n4_event_time")):
+                continue
+            active_by_key[state["state_key"]] = state
+
+    artifact = _build_active_scope_snapshot_artifact(
+        for_trade_date=for_trade_date,
+        action_run_id=action_run_id,
+        source_trigger_run_id="post_close_final_a_rebuild_from_n4_day_events",
+        consumer_name=consumer_name,
+        active_tracking_rows=[],
+        tracking_updates=list(active_by_key.values()),
+    )
+    artifact["rebuild_mode"] = "post_close_final_a_rebuild_from_n4_day_events"
+    artifact["current_exchange_time"] = str(current_exchange_time or "")
+    artifact["boundary"] = {
+        **normalize_mapping(artifact.get("boundary") or {}),
+        "n4_outbox_updated": False,
+        "inbox_checkpoint_written": False,
+        "db_written": False,
+        "n6_touched": False,
+    }
+    artifact["n4_outbox_updated"] = False
+    artifact["inbox_checkpoint_written"] = False
+    artifact["db_written"] = False
+    artifact["n6_touched"] = False
+    return {
+        "action_run_id": action_run_id,
+        "source_trigger_run_id": "post_close_final_a_rebuild_from_n4_day_events",
+        "source_metric_run_id": "",
+        "consumer_name": consumer_name,
+        "action_events": [],
+        "tracking_updates": [],
+        "consumed_n4_event_ids": [],
+        "consumed_n4_events": [],
+        "active_scope_snapshot_artifact": artifact,
+        "inbox_checkpoint_intent": {
+            "consumer_name": consumer_name,
+            "source_layer": "N4_trigger",
+            "source_event_ids": [],
+            "updates_n4_outbox": False,
+        },
+        "summary": {
+            "input_event_count": sum(input_counter.values()),
+            "input_event_type_counts": dict(sorted(input_counter.items())),
+            "active_ref_count": artifact["active_tracking_ref_count"],
+            "scope_count": artifact["scope_count"],
+            "removed_by_tsc_false_count": removed_by_tsc_false_count,
+            "action_executed_removed_ref_count": action_executed_removed_ref_count,
+            "ignored_other_trade_date_count": ignored_other_trade_date_count,
+        },
+    }
+
+
 def _sort_event_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(
         rows,
@@ -195,6 +367,30 @@ def _sort_event_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any
             _dt_sort_key(row.get("event_time")),
             int(row.get("outbox_id") or 0),
             str(row.get("event_id") or ""),
+        ),
+    )
+
+
+def _sort_day_replay_event_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _dt_sort_key(row.get("event_time")),
+            str(row.get("source_run_id") or ""),
+            str(row.get("event_id") or ""),
+        ),
+    )
+
+
+def _sort_day_replay_rows(rows: Sequence[tuple[str, Mapping[str, Any]]]) -> list[tuple[str, Mapping[str, Any]]]:
+    source_order = {"n4": 0, "n5_action_executed": 1}
+    return sorted(
+        rows,
+        key=lambda item: (
+            _dt_sort_key(item[1].get("event_time")),
+            source_order.get(item[0], 9),
+            str(item[1].get("source_run_id") or ""),
+            str(item[1].get("event_id") or ""),
         ),
     )
 
@@ -281,6 +477,48 @@ def _is_trigger_state_changed_inactive(row: Mapping[str, Any]) -> bool:
     return not _bool_value(_value(row, payload, "trigger_live"), default=True)
 
 
+def _is_trigger_state_changed_active(row: Mapping[str, Any]) -> bool:
+    if str(row.get("event_type") or "") != "TriggerStateChanged":
+        return False
+    payload = _payload(row)
+    grain = _tracking_grain_from_event(row)
+    return (
+        _bool_value(_value(row, payload, "trigger_live"), default=True)
+        and grain["signal_type"] in CANONICAL_RUNTIME_SIGNAL_TYPES
+        and all(grain[key] for key in ("trade_date", "asset_kind", "identity_key", "direction", "condition_key"))
+    )
+
+
+def _is_matched_trigger_state_changed_active(row: Mapping[str, Any]) -> bool:
+    if not _is_trigger_state_changed_active(row):
+        return False
+    payload = _payload(row)
+    return str(_value(row, payload, "current_status") or "matched") == "matched"
+
+
+def _action_executed_event_matches_state(
+    row: Mapping[str, Any],
+    state: Mapping[str, Any],
+    for_trade_date: str,
+) -> bool:
+    if str(row.get("source_layer") or "") != N5_SOURCE_LAYER:
+        return False
+    if str(row.get("event_type") or "") != "ActionExecuted":
+        return False
+    payload = _payload(row)
+    grain = _tracking_grain_from_event(row)
+    if str(grain.get("trade_date") or "") != str(for_trade_date):
+        return False
+    for key in ("asset_kind", "identity_key", "direction", "signal_type", "condition_key"):
+        if str(grain.get(key) or "") != str(state.get(key) or ""):
+            return False
+    executed_dt = datetime_or_none(row.get("event_time"))
+    trigger_dt = datetime_or_none(state.get("latest_n4_event_time"))
+    if executed_dt is not None and trigger_dt is not None and executed_dt < trigger_dt:
+        return False
+    return True
+
+
 def _is_pending_n4_event(row: Mapping[str, Any]) -> bool:
     return str(row.get("status") or "") == "pending"
 
@@ -294,6 +532,7 @@ def _tracking_state_from_trigger_match(
     payload = _payload(row)
     grain = _tracking_grain_from_event(row)
     state_key = build_action_tracking_state_key(**grain)
+    trigger_periods = _triggered_periods(payload)
     raw_json = {
         "action_run_id": action_run_id,
         "source_trigger_run_id": source_trigger_run_id,
@@ -317,7 +556,10 @@ def _tracking_state_from_trigger_match(
         "trigger_live": True,
         "current_status": "matched",
         "primary_trigger_period": _value(row, payload, "primary_trigger_period", "trigger_period"),
-        "all_trigger_periods": list(payload.get("all_trigger_periods") or []),
+        "all_trigger_periods": trigger_periods,
+        "trigger_price": _value(row, payload, "trigger_price"),
+        "projection_30m_flag": _bool_value(_value(row, payload, "projection_30m_flag"), default=False),
+        "projection_30m_type": _value(row, payload, "projection_30m_type"),
         "trigger_mark_candidate": _value(row, payload, "trigger_mark_candidate"),
         "latest_n4_event_id": str(row.get("event_id") or ""),
         "latest_n4_event_type": "TriggerMatched",
@@ -332,6 +574,81 @@ def _tracking_state_from_trigger_match(
         "last_checked_minute_label": None,
         "raw_json": raw_json,
     }
+
+
+def _tracking_state_from_trigger_state_changed_active(
+    row: Mapping[str, Any],
+    *,
+    action_run_id: str,
+    source_trigger_run_id: str,
+) -> dict[str, Any]:
+    payload = _payload(row)
+    grain = _tracking_grain_from_event(row)
+    state_key = build_action_tracking_state_key(**grain)
+    trigger_periods = _triggered_periods(payload)
+    raw_json = {
+        "action_run_id": action_run_id,
+        "source_trigger_run_id": str(row.get("source_run_id") or source_trigger_run_id),
+        "source_n4_payload": payload,
+        "n4_trigger_mark_candidate_ignored": _value(row, payload, "trigger_mark_candidate"),
+        "action_eligible_entry_allowed": False,
+    }
+    return {
+        "run_id": action_run_id,
+        "source_trigger_run_id": str(row.get("source_run_id") or source_trigger_run_id),
+        "source_trigger_state_id": _value(row, payload, "trigger_state_id", "source_trigger_state_id"),
+        "source_trigger_event_id": str(row.get("event_id") or ""),
+        "source_trigger_event_type": "TriggerStateChanged",
+        "source_trigger_match_id": _value(row, payload, "trigger_match_id", "source_trigger_match_id"),
+        "trade_date": grain["trade_date"],
+        "state_key": state_key,
+        "asset_kind": grain["asset_kind"],
+        "identity_key": grain["identity_key"],
+        "direction": grain["direction"],
+        "signal_type": grain["signal_type"],
+        "condition_key": grain["condition_key"],
+        "trigger_live": True,
+        "current_status": str(_value(row, payload, "current_status") or "matched"),
+        "primary_trigger_period": _value(row, payload, "primary_trigger_period", "trigger_period"),
+        "all_trigger_periods": trigger_periods,
+        "trigger_price": _value(row, payload, "trigger_price"),
+        "projection_30m_flag": _bool_value(_value(row, payload, "projection_30m_flag"), default=False),
+        "projection_30m_type": _value(row, payload, "projection_30m_type"),
+        "trigger_mark_candidate": _value(row, payload, "trigger_mark_candidate"),
+        "latest_n4_event_id": str(row.get("event_id") or ""),
+        "latest_n4_event_type": "TriggerStateChanged",
+        "latest_n4_event_time": row.get("event_time"),
+        "action_state": "eligible",
+        "confirmation_status": "pending",
+        "tracking_status": "tracking",
+        "planned_output_event_type": None,
+        "expired_reason": None,
+        "expired_at": None,
+        "tracking_until": None,
+        "last_checked_minute_label": None,
+        "raw_json": raw_json,
+    }
+
+
+def _triggered_periods(payload: Mapping[str, Any]) -> list[Any]:
+    periods = payload.get("all_trigger_periods")
+    if periods is None:
+        periods = payload.get("triggered_periods")
+    if periods is None:
+        return []
+    if isinstance(periods, list):
+        return list(periods)
+    if isinstance(periods, tuple):
+        return list(periods)
+    return [periods]
+
+
+def _event_is_newer_or_equal(candidate_time: Any, prior_time: Any) -> bool:
+    candidate_dt = datetime_or_none(candidate_time)
+    prior_dt = datetime_or_none(prior_time)
+    if candidate_dt is None or prior_dt is None:
+        return True
+    return candidate_dt >= prior_dt
 
 
 def _normalize_tracking_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -399,6 +716,17 @@ def _append_tracking_update(updates: list[dict[str, Any]], update_keys: set[str]
     update_keys.add(normalized["state_key"])
 
 
+def _replace_tracking_update(updates: list[dict[str, Any]], update_keys: set[str], row: Mapping[str, Any]) -> None:
+    normalized = _normalize_tracking_row(row)
+    for index, existing in enumerate(updates):
+        if str(existing.get("state_key") or "") == normalized["state_key"]:
+            updates[index] = normalized
+            update_keys.add(normalized["state_key"])
+            return
+    updates.append(normalized)
+    update_keys.add(normalized["state_key"])
+
+
 def _expire_tracking_state(prior: Mapping[str, Any], event_row: Mapping[str, Any]) -> dict[str, Any]:
     payload = _payload(event_row)
     rollback_before = normalize_mapping(_normalize_tracking_row(prior))
@@ -461,6 +789,9 @@ def _select_confirming_metric(
             continue
         metric_dt = datetime_or_none(fact.get("metric_time"))
         if trigger_dt is not None and metric_dt is not None and metric_dt < trigger_dt:
+            metric_id = str(fact.get("action_confirmation_metric_id") or fact.get("metric_id") or "")
+            latest_evaluation = _blocked_metric_guard_evaluation(fact, metric_id, "metric_before_trigger_time")
+            latest_fact = fact
             continue
         metric_id = str(fact.get("action_confirmation_metric_id") or fact.get("metric_id") or "")
         guard = _n3t_action_execution_metric_guard(fact)
@@ -607,6 +938,10 @@ def _metric_matches_state(metric: Mapping[str, Any], state: Mapping[str, Any]) -
 def _final_confirmation_passed(signal_type: str, evaluation: Mapping[str, Any]) -> bool:
     if evaluation.get("metric_context_status") != "ready":
         return False
+    if evaluation.get("blocked_reason"):
+        return False
+    if "all_period_confirmation_pass" in evaluation:
+        return _bool_value(evaluation.get("all_period_confirmation_pass"), default=False)
     flags = normalize_mapping(evaluation.get("selected_flags") or {})
     required = BUY_CONFIRMATION_FLAGS if signal_type == "B_BUY" else SELL_CONFIRMATION_FLAGS if signal_type == "S_SELL" else ()
     return bool(required) and all(_bool_value(flags.get(flag), default=False) for flag in required)
@@ -679,24 +1014,60 @@ def _pending_tracking_evidence(state: Mapping[str, Any], result: Mapping[str, An
     pending = dict(_normalize_tracking_row(state))
     evaluation = normalize_mapping(result.get("metric_evaluation") or {})
     raw_json = normalize_mapping(pending.get("raw_json") or {})
-    raw_json["latest_metric_status"] = {
+    metric_status = {
         "status": result.get("status"),
         "reason": result.get("reason"),
         "source_action_confirmation_metric_id": evaluation.get("source_action_confirmation_metric_id"),
+        "projection_run_id": evaluation.get("projection_run_id"),
         "metric_context_status": evaluation.get("metric_context_status"),
         "metric_minute_label": evaluation.get("metric_minute_label"),
     }
+    metric_status["metric_evaluation_key"] = _pending_metric_evaluation_key(metric_status)
+    raw_json["latest_metric_status"] = metric_status
     pending.update(
         {
             "action_state": "eligible",
             "confirmation_status": "pending",
             "tracking_status": "tracking",
-            "planned_output_event_type": "ActionEligible",
+            "planned_output_event_type": pending.get("planned_output_event_type"),
             "last_checked_minute_label": evaluation.get("metric_minute_label") or pending.get("last_checked_minute_label"),
             "raw_json": raw_json,
         }
     )
     return pending
+
+
+def _pending_metric_evaluation_key(metric_status: Mapping[str, Any]) -> str:
+    return "|".join(
+        str(metric_status.get(key) or "")
+        for key in (
+            "status",
+            "reason",
+            "source_action_confirmation_metric_id",
+            "projection_run_id",
+            "metric_context_status",
+            "metric_minute_label",
+        )
+    )
+
+
+def _pending_tracking_evidence_unchanged(state: Mapping[str, Any], update: Mapping[str, Any]) -> bool:
+    current_status = normalize_mapping(normalize_mapping(state.get("raw_json") or {}).get("latest_metric_status") or {})
+    new_status = normalize_mapping(normalize_mapping(update.get("raw_json") or {}).get("latest_metric_status") or {})
+    new_key = str(new_status.get("metric_evaluation_key") or "")
+    if new_key and new_key == str(current_status.get("metric_evaluation_key") or ""):
+        return True
+    comparable_keys = (
+        "status",
+        "reason",
+        "source_action_confirmation_metric_id",
+        "projection_run_id",
+        "metric_context_status",
+        "metric_minute_label",
+    )
+    return bool(current_status) and all(
+        str(current_status.get(key) or "") == str(new_status.get(key) or "") for key in comparable_keys
+    )
 
 
 def _build_action_event(
@@ -709,7 +1080,10 @@ def _build_action_event(
     consumer_name: str,
 ) -> dict[str, Any]:
     state_key = str(state.get("state_key") or "")
-    dedup_key = join_dedup_parts("N5_live_tracking_v2", event_type, action_run_id, state_key)
+    dedup_parts = ["N5_live_tracking_v2", event_type, action_run_id, state_key]
+    if event_type == "ActionExecuted":
+        dedup_parts.append(str(state.get("source_trigger_event_id") or state.get("latest_n4_event_id") or ""))
+    dedup_key = join_dedup_parts(*dedup_parts)
     event_id = build_stable_event_id(
         source_layer=N5_SOURCE_LAYER,
         event_type=event_type,
@@ -718,10 +1092,14 @@ def _build_action_event(
         event_schema_version=N5_LIVE_TRACKING_SCHEMA_VERSION,
     )
     raw_json = normalize_mapping(state.get("raw_json") or {})
+    source_n4_payload = normalize_mapping(raw_json.get("source_n4_payload") or {})
+    source_trigger_event_time = _scope_time_text(state.get("latest_n4_event_time"))
     payload = {
         "run_id": action_run_id,
         "source_trigger_event_id": state.get("source_trigger_event_id"),
-        "source_trigger_run_id": source_trigger_run_id,
+        "source_trigger_event_type": state.get("source_trigger_event_type") or state.get("latest_n4_event_type"),
+        "source_trigger_event_time": source_trigger_event_time,
+        "source_trigger_run_id": state.get("source_trigger_run_id") or source_trigger_run_id,
         "source_trigger_state_id": state.get("source_trigger_state_id"),
         "source_trigger_match_id": state.get("source_trigger_match_id"),
         "source_metric_run_id": source_metric_run_id,
@@ -735,6 +1113,13 @@ def _build_action_event(
         "original_condition_key": state.get("condition_key"),
         "trigger_period": state.get("primary_trigger_period"),
         "all_trigger_periods": state.get("all_trigger_periods") or [],
+        "trigger_time": source_trigger_event_time,
+        "trigger_price": state.get("trigger_price") if state.get("trigger_price") is not None else source_n4_payload.get("trigger_price"),
+        "triggered_periods": state.get("all_trigger_periods") or source_n4_payload.get("triggered_periods") or [],
+        "projection_30m_flag": state.get("projection_30m_flag"),
+        "projection_30m_type": state.get("projection_30m_type"),
+        "trigger_mark_candidate": state.get("trigger_mark_candidate"),
+        "source_n4_payload": source_n4_payload,
         "action_state": state.get("action_state"),
         "confirmation_status": state.get("confirmation_status"),
         "action_mark": raw_json.get("action_mark"),
@@ -747,6 +1132,10 @@ def _build_action_event(
             "source_action_confirmation_metric_id": raw_json.get("source_action_confirmation_metric_id"),
             "selected_metric_time": raw_json.get("selected_metric_time"),
             "selected_metric_minute_label": raw_json.get("selected_metric_minute_label"),
+            "source_trigger_event_id": state.get("source_trigger_event_id"),
+            "source_trigger_event_type": state.get("source_trigger_event_type") or state.get("latest_n4_event_type"),
+            "source_trigger_event_time": source_trigger_event_time,
+            "source_n4_payload": source_n4_payload,
         },
         "data_quality_status": "passed",
         "event_schema_version": N5_LIVE_TRACKING_SCHEMA_VERSION,
@@ -799,6 +1188,7 @@ def _build_active_scope_snapshot_artifact(
     consumer_name: str,
     active_tracking_rows: Sequence[Mapping[str, Any]],
     tracking_updates: Sequence[Mapping[str, Any]],
+    attention_n4_event_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     final_states: dict[str, dict[str, Any]] = {}
     for row in active_tracking_rows:
@@ -810,15 +1200,25 @@ def _build_active_scope_snapshot_artifact(
         if _state_in_trade_date(normalized, for_trade_date):
             final_states[normalized["state_key"]] = normalized
 
+    object_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for state in final_states.values():
+        if not _is_active_tracking(state):
+            continue
+        ref = _active_scope_ref(state)
+        key = _object_scope_key(ref)
+        object_row = object_rows.setdefault(key, _object_scope_row(ref))
+        object_row["active_tracking_refs"].append(ref)
+    for event_row in attention_n4_event_rows:
+        ref = _attention_scope_ref(event_row, for_trade_date=for_trade_date)
+        if not ref:
+            continue
+        key = _object_scope_key(ref)
+        object_row = object_rows.setdefault(key, _object_scope_row(ref))
+        object_row["attention_event_refs"].append(ref)
+
     scope_rows = sorted(
-        (_active_scope_row(row) for row in final_states.values() if _is_active_tracking(row)),
-        key=lambda row: (
-            row["asset_kind"],
-            row["identity_key"],
-            row["direction"],
-            row["signal_type"],
-            row["condition_key"],
-        ),
+        (_finalize_object_scope_row(row) for row in object_rows.values()),
+        key=lambda row: (row["asset_kind"], row["identity_key"]),
     )
     removed_scope_rows = sorted(
         (_removed_scope_row(row) for row in final_states.values() if _scope_exit_reason(row)),
@@ -832,15 +1232,19 @@ def _build_active_scope_snapshot_artifact(
     )
     return {
         "artifact_type": "n5_active_scope_snapshot_v1",
-        "artifact_schema_version": "v1",
+        "artifact_schema_version": "v2",
         "producer_layer": N5_SOURCE_LAYER,
         "for_trade_date": str(for_trade_date or ""),
         "action_run_id": action_run_id,
         "source_trigger_run_id": source_trigger_run_id,
         "consumer_name": consumer_name,
+        "scope_granularity": "object",
         "scope_status": "active" if scope_rows else "empty",
         "empty_scope_noop": not scope_rows,
         "scope_count": len(scope_rows),
+        "active_tracking_ref_count": sum(len(row["active_tracking_refs"]) for row in scope_rows),
+        "attention_event_ref_count": sum(len(row["attention_event_refs"]) for row in scope_rows),
+        "active_sets": _active_sets_by_family(scope_rows),
         "scope_rows": scope_rows,
         "removed_scope_rows": removed_scope_rows,
         "full_market_fallback_allowed": False,
@@ -864,18 +1268,250 @@ def _state_in_trade_date(state: Mapping[str, Any], for_trade_date: str) -> bool:
     return not for_trade_date or str(state.get("trade_date") or "") == str(for_trade_date)
 
 
-def _active_scope_row(state: Mapping[str, Any]) -> dict[str, Any]:
+def _object_scope_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("for_trade_date") or ""),
+        str(row.get("asset_kind") or ""),
+        str(row.get("identity_key") or ""),
+    )
+
+
+def _object_scope_row(ref: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "for_trade_date": str(ref.get("for_trade_date") or ""),
+        "asset_kind": str(ref.get("asset_kind") or ""),
+        "identity_key": str(ref.get("identity_key") or ""),
+        "scope_status": "active",
+        "active_tracking_refs": [],
+        "attention_event_refs": [],
+    }
+
+
+def _finalize_object_scope_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    active_refs = sorted(
+        (normalize_mapping(ref) for ref in row.get("active_tracking_refs") or []),
+        key=lambda ref: (
+            str(ref.get("direction") or ""),
+            str(ref.get("signal_type") or ""),
+            str(ref.get("condition_key") or ""),
+            str(ref.get("source_trigger_event_id") or ""),
+        ),
+    )
+    attention_refs = sorted(
+        (normalize_mapping(ref) for ref in row.get("attention_event_refs") or []),
+        key=lambda ref: (
+            str(ref.get("event_time") or ""),
+            str(ref.get("source_trigger_event_id") or ""),
+        ),
+    )
+    return {
+        "for_trade_date": str(row.get("for_trade_date") or ""),
+        "asset_kind": str(row.get("asset_kind") or ""),
+        "identity_key": str(row.get("identity_key") or ""),
+        "scope_status": "active",
+        "active_families": sorted(
+            {
+                _source_run_family(ref.get("source_trigger_run_id"))
+                for ref in (*active_refs, *attention_refs)
+                if _source_run_family(ref.get("source_trigger_run_id"))
+            }
+        ),
+        "active_tracking_refs": active_refs,
+        "attention_event_refs": attention_refs,
+    }
+
+
+def _active_scope_ref(state: Mapping[str, Any]) -> dict[str, Any]:
+    raw_json = normalize_mapping(state.get("raw_json") or {})
+    source_n4_payload = normalize_mapping(raw_json.get("source_n4_payload") or {})
+    latest_metric_status = raw_json.get("latest_metric_status")
+    if isinstance(latest_metric_status, Mapping):
+        latest_metric_status = normalize_mapping(latest_metric_status)
+    trigger_time = _scope_time_text(state.get("latest_n4_event_time"))
+    source_trigger_event_type = str(state.get("source_trigger_event_type") or state.get("latest_n4_event_type") or "")
+    first_confirmation_minute_label = _first_confirmation_minute_label(trigger_time)
+    last_checked_minute_label = _minute_label_text(state.get("last_checked_minute_label"))
+    next_unchecked_minute_label = _next_unchecked_minute_label(
+        for_trade_date=str(state.get("trade_date") or ""),
+        first_confirmation_minute_label=first_confirmation_minute_label,
+        last_checked_minute_label=last_checked_minute_label,
+    )
     return {
         "for_trade_date": str(state.get("trade_date") or ""),
+        "state_key": str(state.get("state_key") or ""),
         "asset_kind": str(state.get("asset_kind") or ""),
         "identity_key": str(state.get("identity_key") or ""),
         "direction": str(state.get("direction") or ""),
         "signal_type": str(state.get("signal_type") or ""),
         "condition_key": str(state.get("condition_key") or ""),
+        "action_run_id": str(state.get("run_id") or raw_json.get("action_run_id") or ""),
         "source_trigger_event_id": str(state.get("source_trigger_event_id") or ""),
+        "source_trigger_event_type": source_trigger_event_type,
         "source_trigger_run_id": str(state.get("source_trigger_run_id") or ""),
+        "source_run_family": _source_run_family(state.get("source_trigger_run_id")),
+        "source_run_hash": _state_source_run_hash(state),
+        "ref_hash": _active_ref_hash(state),
+        "trigger_time": trigger_time,
+        "source_trigger_event_time": trigger_time,
+        "latest_n4_event_time": trigger_time,
+        "latest_n4_event_id": str(state.get("latest_n4_event_id") or state.get("source_trigger_event_id") or ""),
+        "latest_n4_event_type": str(state.get("latest_n4_event_type") or source_trigger_event_type),
+        "trigger_price": state.get("trigger_price") if state.get("trigger_price") is not None else source_n4_payload.get("trigger_price"),
+        "triggered_periods": state.get("all_trigger_periods") or source_n4_payload.get("triggered_periods") or [],
+        "projection_30m_flag": state.get("projection_30m_flag"),
+        "projection_30m_type": state.get("projection_30m_type"),
+        "trigger_mark_candidate": state.get("trigger_mark_candidate"),
+        "source_n4_payload": source_n4_payload,
+        "action_eligible_entry_allowed": source_trigger_event_type != "TriggerStateChanged",
+        "planned_output_event_type": state.get("planned_output_event_type"),
+        "first_confirmation_minute_label": first_confirmation_minute_label,
+        "last_checked_minute_label": last_checked_minute_label or None,
+        "next_unchecked_minute_label": next_unchecked_minute_label,
+        "latest_metric_status": latest_metric_status,
+        "metric_evaluation_key": str(
+            raw_json.get("metric_evaluation_key")
+            or (latest_metric_status.get("metric_evaluation_key") if isinstance(latest_metric_status, Mapping) else "")
+            or ""
+        ),
+        "last_seen_metric_key": str(raw_json.get("last_seen_metric_key") or ""),
+        "action_state": str(state.get("action_state") or ""),
+        "confirmation_status": str(state.get("confirmation_status") or ""),
+        "tracking_status": str(state.get("tracking_status") or ""),
         "scope_status": "active",
     }
+
+
+def _state_source_run_hash(state: Mapping[str, Any]) -> str:
+    raw_json = normalize_mapping(state.get("raw_json") or {})
+    existing = str(state.get("source_run_hash") or raw_json.get("source_run_hash") or "")
+    if existing:
+        return existing
+    return _short_scope_hash(str(state.get("source_trigger_run_id") or state.get("source_trigger_event_id") or ""))
+
+
+def _active_ref_hash(state: Mapping[str, Any]) -> str:
+    return _short_scope_hash(
+        str(state.get("state_key") or ""),
+        str(state.get("source_trigger_event_id") or ""),
+        str(state.get("latest_n4_event_time") or ""),
+    )
+
+
+def _short_scope_hash(*parts: str) -> str:
+    text = join_dedup_parts(*(part for part in parts if part))
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _active_scope_row(state: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in _active_scope_ref(state).items() if key != "action_run_id"}
+
+
+def _attention_scope_ref(row: Mapping[str, Any], *, for_trade_date: str) -> dict[str, Any]:
+    payload = _payload(row)
+    grain = _tracking_grain_from_event(row)
+    if for_trade_date and grain["trade_date"] != str(for_trade_date):
+        return {}
+    if grain["asset_kind"] not in {"stock", "index", "board"} or not grain["identity_key"]:
+        return {}
+    trigger_time = _scope_time_text(row.get("event_time"))
+    return {
+        "for_trade_date": grain["trade_date"],
+        "asset_kind": grain["asset_kind"],
+        "identity_key": grain["identity_key"],
+        "direction": grain["direction"],
+        "signal_type": grain["signal_type"],
+        "condition_key": grain["condition_key"],
+        "source_trigger_event_id": str(row.get("event_id") or ""),
+        "source_trigger_event_type": "TriggerStateChanged",
+        "source_trigger_run_id": str(row.get("source_run_id") or ""),
+        "source_run_family": _source_run_family(row.get("source_run_id")),
+        "trigger_time": trigger_time,
+        "source_trigger_event_time": trigger_time,
+        "latest_n4_event_time": trigger_time,
+        "first_confirmation_minute_label": _first_confirmation_minute_label(trigger_time),
+        "trigger_live": True,
+        "current_status": str(_value(row, payload, "current_status") or "matched"),
+        "action_eligible_entry_allowed": False,
+        "scope_status": "active",
+    }
+
+
+def _scope_time_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _first_confirmation_minute_label(trigger_time: Any) -> str:
+    parsed = datetime_or_none(trigger_time)
+    if parsed is None:
+        return ""
+    return parsed.strftime("%H:%M")
+
+
+def _minute_label_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    match = re.search(r"([0-2][0-9]):([0-5][0-9])", text)
+    if match:
+        return f"{match.group(1)}:{match.group(2)}"
+    if re.fullmatch(r"[0-2][0-9][0-5][0-9]", text):
+        return f"{text[:2]}:{text[2:]}"
+    parsed = datetime_or_none(value)
+    if parsed is None:
+        return ""
+    return parsed.strftime("%H:%M")
+
+
+def _next_unchecked_minute_label(
+    *,
+    for_trade_date: str,
+    first_confirmation_minute_label: str,
+    last_checked_minute_label: str,
+) -> str:
+    first_label = _minute_label_text(first_confirmation_minute_label)
+    last_label = _minute_label_text(last_checked_minute_label)
+    if not first_label:
+        return ""
+    labels = canonical_ashare_1m_labels(for_trade_date) if re.fullmatch(r"\d{8}", str(for_trade_date or "")) else []
+    if first_label not in labels:
+        return first_label
+    if not last_label or last_label not in labels:
+        return first_label
+    first_index = labels.index(first_label)
+    last_index = labels.index(last_label)
+    if last_index < first_index:
+        return first_label
+    next_index = last_index + 1
+    return labels[next_index] if next_index < len(labels) else ""
+
+
+def _active_sets_by_family(scope_rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, str]]]:
+    output = {"ordinary_active": [], "b2_active": []}
+    for row in scope_rows:
+        object_ref = {
+            "for_trade_date": str(row.get("for_trade_date") or ""),
+            "asset_kind": str(row.get("asset_kind") or ""),
+            "identity_key": str(row.get("identity_key") or ""),
+        }
+        families = set(row.get("active_families") or [])
+        if "ordinary" in families:
+            output["ordinary_active"].append(object_ref)
+        if "b2_active" in families:
+            output["b2_active"].append(object_ref)
+    return output
+
+
+def _source_run_family(source_trigger_run_id: Any) -> str:
+    text = str(source_trigger_run_id or "").lower()
+    if "b2" in text or "hint_projection" in text:
+        return "b2_active"
+    return "ordinary"
 
 
 def _removed_scope_row(state: Mapping[str, Any]) -> dict[str, Any]:

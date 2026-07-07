@@ -375,7 +375,7 @@ def build_actionexecuted_candidate(
         raise N5PActionExecutedBlocked("ActionExecuted requires closed N3P confirmation metric")
     if str(payload.get("source_fact_kind") or "") == "realtime_projection_metric":
         raise N5PActionExecutedBlocked("ActionExecuted cannot use B2 projection as final confirmation proof")
-    if payload_is_n3p_trigger_proof(payload, source_payload):
+    if payload_is_n3p_trigger_proof(payload):
         raise N5PActionExecutedBlocked(N3P_NOT_ACTION_CONFIRMATION_PROOF_BLOCKER)
     if str(payload.get("source_metric_kind") or "") != N5_ACTION_CONFIRMATION_METRIC_V2_KIND:
         raise N5PActionExecutedBlocked("ActionExecuted requires N5 action-confirmation metric v2 proof")
@@ -463,16 +463,15 @@ def build_actionexecuted_candidate(
     return candidate
 
 
-def payload_is_n3p_trigger_proof(payload: Mapping[str, Any], source_payload: Mapping[str, Any]) -> bool:
-    for item in (payload, source_payload):
-        if str(item.get("metric_role") or "") == "trigger_proof":
-            return True
-        if bool_value(item.get("not_n5_final_proof")):
-            return True
-        if str(item.get("source_trigger_proof_kind") or ""):
-            return True
-        if str(item.get("source_metric_kind") or "") == "realtime_action_confirmation_metric":
-            return True
+def payload_is_n3p_trigger_proof(payload: Mapping[str, Any]) -> bool:
+    if str(payload.get("metric_role") or "") == "trigger_proof":
+        return True
+    if bool_value(payload.get("not_n5_final_proof")):
+        return True
+    if str(payload.get("source_trigger_proof_kind") or ""):
+        return True
+    if str(payload.get("source_metric_kind") or "") == "realtime_action_confirmation_metric":
+        return True
     return False
 
 

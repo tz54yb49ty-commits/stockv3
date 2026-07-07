@@ -72,17 +72,6 @@ from ashare_v3.web.n6_app_v1 import (
     app_status_monitor_model,
     app_watchlist_model,
 )
-from ashare_v3.web.n6_replay import (
-    N6ReplayBlocked,
-    build_c1_index_board_readiness_report,
-    create_local_replay_job,
-    export_c1_index_board_full_day_source_bundle,
-    list_replay_dates,
-    read_replay_job,
-    read_replay_messages,
-    read_replay_timeline,
-    replay_excel_response_bytes,
-)
 from ashare_v3.web.n6_ui_v1 import (
     artifacts_model,
     cash_ledger_model,
@@ -108,10 +97,6 @@ from ashare_v3.web.n6_ui_v1 import (
 )
 from ashare_v3.web.post_close_fastlane_status import read_post_close_fastlane_status
 from ashare_v3.web.rag_status import read_rag_status_answer
-from ashare_v3.web.runtime_archive_control import (
-    build_runtime_archive_preview,
-    create_runtime_archive_job_request,
-)
 from ashare_v3.web.runtime_archive_status import read_runtime_archive_status
 
 
@@ -9190,198 +9175,6 @@ def create_app(
         )
         return JSONResponse(data)
 
-    @app.get("/api/n6/ui/v1/replay/dates")
-    async def ui_v1_replay_dates(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        return JSONResponse({
-            "ok": True,
-            "dates": list_replay_dates(Path(web_config.replay_docs_root)),
-            "side_effects": dict(READ_ONLY_SIDE_EFFECTS),
-        })
-
-    @app.get("/api/n6/ui/v1/replay/c1-readiness")
-    async def ui_v1_replay_c1_readiness(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        trade_date = str(request.query_params.get("trade_date") or "")
-        asset_scope = str(request.query_params.get("asset_scope") or "index_board_only")
-        rows = repo.fetch_index_board_c1_minute_rows(trade_date)
-        try:
-            readiness = build_c1_index_board_readiness_report(
-                trade_date=trade_date,
-                asset_scope=asset_scope,
-                index_rows=rows.get("index") or [],
-                board_rows=rows.get("board") or [],
-            )
-        except N6ReplayBlocked as exc:
-            return JSONResponse({"ok": False, "error": str(exc), "side_effects": dict(READ_ONLY_SIDE_EFFECTS)}, status_code=400)
-        return JSONResponse({
-            "ok": readiness["status"] == "passed",
-            "readiness": readiness,
-            "side_effects": dict(READ_ONLY_SIDE_EFFECTS),
-        })
-
-    @app.post("/api/n6/ui/v1/replay/source-bundles/from-c1")
-    async def ui_v1_replay_source_bundle_from_c1(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        payload = await request.json()
-        asset_scope = str(payload.get("asset_scope") or "index_board_only")
-        if asset_scope != "index_board_only":
-            return JSONResponse({"ok": False, "error": "BLOCKED_REPLAY_C1_READINESS_REQUIRES_INDEX_BOARD_ONLY"}, status_code=400)
-        trade_date = str(payload.get("trade_date") or "")
-        rows = repo.fetch_index_board_c1_minute_rows(trade_date)
-        try:
-            report = export_c1_index_board_full_day_source_bundle(
-                replay_root=Path(web_config.replay_docs_root),
-                trade_date=trade_date,
-                index_rows=rows.get("index") or [],
-                board_rows=rows.get("board") or [],
-                template_source_bundle_key=str(payload.get("template_source_bundle_key") or ""),
-            )
-        except N6ReplayBlocked as exc:
-            return JSONResponse({"ok": False, "error": str(exc), "detail": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, **report})
-
-    @app.post("/api/n6/ui/v1/replay/jobs")
-    async def ui_v1_replay_jobs(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        payload = await request.json()
-        if str(payload.get("mode") or "local_only") != "local_only":
-            return JSONResponse({"ok": False, "error": "BLOCKED_REPLAY_SIDE_EFFECT_RISK"}, status_code=400)
-        try:
-            job = create_local_replay_job(
-                replay_root=Path(web_config.replay_docs_root),
-                trade_date=str(payload.get("trade_date") or ""),
-                start_hhmm=str(payload.get("start_hhmm") or "09:31"),
-                end_hhmm=str(payload.get("end_hhmm") or "15:00"),
-                replay_engine_version=str(payload.get("replay_engine_version") or "canonical_plan_v1"),
-                asset_scope=str(payload.get("asset_scope") or "all"),
-                source_bundle_key=str(payload.get("source_bundle_key") or "auto"),
-                validation_mode=str(payload.get("validation_mode") or "none"),
-                n3p_strategy=str(payload.get("n3p_strategy") or "full_n3p"),
-                n3p_reduction_mode=str(payload.get("n3p_reduction_mode") or "none"),
-                enable_profiling=bool(payload.get("enable_profiling") or False),
-            )
-        except N6ReplayBlocked as exc:
-            detail = str(exc)
-            error = (
-                "BLOCKED_REPLAY_SOURCE_BUNDLE_NOT_FOUND"
-                if detail.startswith("BLOCKED_REPLAY_SOURCE_BUNDLE_NOT_FOUND")
-                else "BLOCKED_REPLAY_SIDE_EFFECT_RISK"
-            )
-            return JSONResponse({"ok": False, "error": error, "detail": detail}, status_code=400)
-        return JSONResponse({"ok": True, **job})
-
-    @app.get("/api/n6/ui/v1/replay/jobs/{job_id}")
-    async def ui_v1_replay_job(request: Request, job_id: str) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        try:
-            job = read_replay_job(Path(web_config.replay_docs_root), job_id)
-        except FileNotFoundError:
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return JSONResponse({"ok": True, **job})
-
-    @app.get("/api/n6/ui/v1/replay/jobs/{job_id}/n4-messages")
-    async def ui_v1_replay_n4_messages(request: Request, job_id: str) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        try:
-            job = read_replay_job(Path(web_config.replay_docs_root), job_id)
-            rows = read_replay_messages(Path(job["artifact_dir"]), "n4")
-        except FileNotFoundError:
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return JSONResponse({
-            "ok": True,
-            "job_id": job_id,
-            "returned_count": len(rows),
-            "summary": dict(job.get("summary", {}).get("n4") or {}),
-            "items": rows,
-            "side_effects": dict(READ_ONLY_SIDE_EFFECTS),
-        })
-
-    @app.get("/api/n6/ui/v1/replay/jobs/{job_id}/n5-messages")
-    async def ui_v1_replay_n5_messages(request: Request, job_id: str) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        try:
-            job = read_replay_job(Path(web_config.replay_docs_root), job_id)
-            rows = read_replay_messages(Path(job["artifact_dir"]), "n5")
-        except FileNotFoundError:
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return JSONResponse({
-            "ok": True,
-            "job_id": job_id,
-            "returned_count": len(rows),
-            "summary": dict(job.get("summary", {}).get("n5") or {}),
-            "items": rows,
-            "side_effects": dict(READ_ONLY_SIDE_EFFECTS),
-        })
-
-    @app.get("/api/n6/ui/v1/replay/jobs/{job_id}/timeline")
-    async def ui_v1_replay_timeline(request: Request, job_id: str) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        try:
-            job = read_replay_job(Path(web_config.replay_docs_root), job_id)
-            rows = read_replay_timeline(Path(job["artifact_dir"]))
-        except FileNotFoundError:
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return JSONResponse({
-            "ok": True,
-            "job_id": job_id,
-            "returned_count": len(rows),
-            "items": rows,
-            "side_effects": dict(READ_ONLY_SIDE_EFFECTS),
-        })
-
-    @app.get("/api/n6/ui/v1/replay/jobs/{job_id}/export.xlsx")
-    async def ui_v1_replay_export(request: Request, job_id: str) -> Response:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        try:
-            payload = replay_excel_response_bytes(Path(web_config.replay_docs_root), job_id)
-        except FileNotFoundError:
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return Response(
-            payload,
-            media_type=N2_CONDITION_BASIS_EXPORT_MEDIA_TYPE,
-            headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote('N3_N5_full_day_local_replay_' + job_id + '.xlsx')}",
-                "Cache-Control": "no-store",
-            },
-        )
-
     @app.get("/api/n6/b-track/v1/buy-signals")
     async def b_track_v1_buy_signals(request: Request) -> JSONResponse:
         session = current_session(request, repo)
@@ -9457,38 +9250,6 @@ def create_app(
             trade_date=request.query_params.get("trade_date"),
         )
         return JSONResponse(runtime_archive_status_model(data))
-
-    @app.get("/api/n6/ui/v1/archive-preview")
-    async def ui_v1_archive_preview(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        preview = build_runtime_archive_preview(
-            docs_root=web_config.runtime_archive_docs_root,
-            archive_root=web_config.runtime_archive_root,
-            retention_trade_days=5,
-        )
-        return JSONResponse(preview)
-
-    @app.post("/api/n6/ui/v1/archive-execute")
-    async def ui_v1_archive_execute(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        payload = await request.json()
-        result = create_runtime_archive_job_request(
-            docs_root=web_config.runtime_archive_docs_root,
-            archive_root=web_config.runtime_archive_root,
-            confirm_token=str(payload.get("confirm_token") or ""),
-            retention_trade_days=5,
-        )
-        if not result.get("ok"):
-            return JSONResponse(result, status_code=400)
-        return JSONResponse(result)
 
     @app.get("/api/n6/ui/v1/n2-condition-basis")
     async def ui_v1_n2_condition_basis(request: Request) -> JSONResponse:
@@ -10135,73 +9896,6 @@ def create_app(
                 "user": session_user_payload(session),
                 "nav": nav_context(session, "status_monitor"),
                 "monitor": monitor,
-            },
-        )
-
-    @app.get("/n6/replay", response_class=HTMLResponse)
-    async def n6_replay(request: Request) -> Response:
-        session = current_session(request, repo)
-        if session is None:
-            return RedirectResponse("/n6/login", status_code=303)
-        if session.role != "admin":
-            return HTMLResponse("forbidden", status_code=403)
-        replay_root = Path(web_config.replay_docs_root)
-        replay_dates = list_replay_dates(replay_root)
-        supported_trade_dates = replay_dates or ["2026-06-26"]
-        source_root = replay_root / "_sources"
-        source_bundle_keys: list[str] = []
-        if source_root.exists():
-            for path in sorted(source_root.iterdir(), key=lambda item: item.name):
-                if path.is_dir() and (path / "source_bundle.json").exists():
-                    source_bundle_keys.append(path.name)
-                elif path.is_file() and path.suffix == ".json":
-                    source_bundle_keys.append(path.stem)
-        supported_source_bundle_keys = ["auto"] + [
-            key for key in source_bundle_keys if key != "auto"
-        ]
-        default_trade_date_key = supported_trade_dates[-1].replace("-", "")
-        full_day_source_key = f"{default_trade_date_key}_index_board_only_full_day"
-        partial_source_key = f"{default_trade_date_key}_index_board_only"
-        if full_day_source_key in supported_source_bundle_keys:
-            default_source_bundle_key = full_day_source_key
-            default_asset_scope = "index_board_only"
-            default_validation_mode = "full_day_shadow_v1"
-        elif partial_source_key in supported_source_bundle_keys:
-            default_source_bundle_key = partial_source_key
-            default_asset_scope = "index_board_only"
-            default_validation_mode = "none"
-        else:
-            default_source_bundle_key = "auto"
-            default_asset_scope = "all"
-            default_validation_mode = "none"
-        return templates.TemplateResponse(
-            request,
-            "n6_replay.html",
-            {
-                "request": request,
-                "user": session_user_payload(session),
-                "nav": nav_context(session, "replay"),
-                "replay": {
-                    "title": "全日回放",
-                    "mode": "local_only",
-                    "default_trade_date": supported_trade_dates[-1],
-                    "supported_trade_dates": supported_trade_dates,
-                    "default_start_hhmm": "09:31",
-                    "default_end_hhmm": "15:00",
-                    "default_replay_engine_version": "canonical_plan_v1",
-                    "supported_replay_engine_versions": ["canonical_plan_v1", "fixture_v1"],
-                    "default_validation_mode": default_validation_mode,
-                    "supported_validation_modes": ["none", "full_day_shadow_v1", "asset_unit_fix_delta_v1"],
-                    "default_n3p_strategy": "prefilter_audit" if default_validation_mode == "full_day_shadow_v1" else "full_n3p",
-                    "supported_n3p_strategies": ["full_n3p", "prefilter_audit", "prefilter_prune"],
-                    "default_n3p_reduction_mode": "none",
-                    "supported_n3p_reduction_modes": ["none", "active_state_fast_path"],
-                    "default_asset_scope": default_asset_scope,
-                    "supported_asset_scopes": ["all", "index_board_only", "index_only", "board_only", "stock_only"],
-                    "default_source_bundle_key": default_source_bundle_key,
-                    "supported_source_bundle_keys": supported_source_bundle_keys,
-                    "notice": "LOCAL REPLAY ONLY / No DB write / No outbox consumption / No checkpoint update",
-                },
             },
         )
 
@@ -11118,7 +10812,6 @@ def nav_context(session: AuthSession, active: str) -> dict[str, Any]:
             {"key": "input_messages", "label": "N6输入消息", "href": "/n6/input-messages"},
             {"key": "n5_messages", "label": "N5消息", "href": "/n6/n5-messages"},
             {"key": "n5_actions", "label": "N5动作", "href": "/n6/n5-actions"},
-            {"key": "replay", "label": "全日回放", "href": "/n6/replay"},
             {"key": "b_track_buy_signals", "label": "B轨买入信号", "href": "/n6/b-track/buy-signals"},
             {"key": "rag", "label": "RAG问答", "href": "/n6/rag"},
         ],

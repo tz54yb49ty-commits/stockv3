@@ -44,6 +44,12 @@ CANONICAL_ACTION_MARKS = ("normal", "30m_volume", "30m_shrink")
 ACTION_MARK_SOURCE_N5_METRIC = "n5_action_confirmation_metric"
 ACTION_MARK_BASIS_PREVIOUS_DAY_SAME_WINDOW = "previous_day_same_window_amount"
 CALIBRATED_METRIC_POLICY_VERSION = "previous_day_same_window_elapsed_ratio_v1"
+SAME_TRADE_DATE_PREVIOUS_PERIOD = "same_trade_date_previous_period"
+PREVIOUS_TRADE_DATE_LAST_PERIOD = "previous_trade_date_last_period"
+VALID_PREVIOUS_PERIOD_SOURCES = {
+    SAME_TRADE_DATE_PREVIOUS_PERIOD,
+    PREVIOUS_TRADE_DATE_LAST_PERIOD,
+}
 ALLOWED_BLOCKED_REASONS = (
     "metric_missing",
     "metric_scope_excluded",
@@ -1607,7 +1613,12 @@ def evaluate_action_confirmation_metric(
         flag: bool(flag_status.get(flag))
         for flag in action_execution_flags
     }
-    all_period_confirmation_pass = metric_ready_for_confirmation and all(action_execution_flag_status.values())
+    numeric_blocked_reason = numeric_evaluation.get("blocked_reason")
+    all_period_confirmation_pass = (
+        metric_ready_for_confirmation
+        and not numeric_blocked_reason
+        and all(action_execution_flag_status.values())
+    )
     if not source_action_confirmation_metric_id and metric_required:
         metric_context_status = "missing"
     elif not source_action_confirmation_metric_id:
@@ -1635,7 +1646,7 @@ def evaluate_action_confirmation_metric(
         blocked_reason = "metric_quality_failed"
     elif fact_available and metric_ready_for_confirmation and not all_period_confirmation_pass:
         blocked_reason = str(
-            numeric_evaluation.get("blocked_reason")
+            numeric_blocked_reason
             or infer_blocked_reason_from_flags(action_execution_flag_status)
         )
     return {
@@ -1874,27 +1885,59 @@ def compare_amount(
 
 def missing_previous_session_reference(metric_fact: Mapping[str, Any]) -> bool:
     source_by_period = {
-        "1m": str(metric_fact.get("previous_1m_period_source") or ""),
-        "5m": str(metric_fact.get("previous_5m_period_source") or ""),
-        "120m": str(metric_fact.get("previous_120m_period_source") or ""),
+        "1m": str(_metric_fact_value(metric_fact, "previous_1m_period_source") or ""),
+        "5m": str(_metric_fact_value(metric_fact, "previous_5m_period_source") or ""),
+        "30m": str(_metric_fact_value(metric_fact, "previous_30m_period_source") or ""),
+        "120m": str(_metric_fact_value(metric_fact, "previous_120m_period_source") or ""),
     }
     first_by_period = {
-        "1m": bool_value(metric_fact.get("is_first_1m_of_day")),
-        "5m": bool_value(metric_fact.get("is_first_5m_of_day")),
-        "120m": bool_value(metric_fact.get("is_first_120m_of_day")),
+        "1m": bool_value(_metric_fact_value(metric_fact, "is_first_1m_of_day")),
+        "5m": bool_value(_metric_fact_value(metric_fact, "is_first_5m_of_day")),
+        "30m": bool_value(_metric_fact_value(metric_fact, "is_first_30m_of_day")),
+        "120m": bool_value(_metric_fact_value(metric_fact, "is_first_120m_of_day")),
     }
     for period, is_first in first_by_period.items():
-        if is_first and source_by_period[period] == "not_available":
+        source = source_by_period[period]
+        if source not in VALID_PREVIOUS_PERIOD_SOURCES:
+            return True
+        if is_first and source != PREVIOUS_TRADE_DATE_LAST_PERIOD:
+            return True
+        if not is_first and source != SAME_TRADE_DATE_PREVIOUS_PERIOD:
             return True
     required_previous_fields = (
         "previous_120m_body_high",
         "previous_120m_body_low",
+        "previous_30m_body_high",
+        "previous_30m_body_low",
         "previous_5m_body_high",
         "previous_5m_body_low",
         "previous_1m_body_high",
         "previous_1m_body_low",
     )
     return any(field in metric_fact and metric_fact.get(field) in {None, ""} for field in required_previous_fields)
+
+
+def _metric_fact_value(metric_fact: Mapping[str, Any], key: str) -> Any:
+    value = metric_fact.get(key)
+    if value is not None and value != "":
+        return value
+    for payload_key in ("raw_json", "trace_json"):
+        payload = normalize_mapping(metric_fact.get(payload_key) or {})
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+        for nested_key in ("boundary_policy", "previous_period_sources", "metric_values"):
+            nested = normalize_mapping(payload.get(nested_key) or {})
+            value = nested.get(key)
+            if value is not None and value != "":
+                return value
+        previous_sources = normalize_mapping(payload.get("previous_period_sources") or {})
+        if key.startswith("previous_") and key.endswith("_period_source"):
+            period = key.removeprefix("previous_").removesuffix("_period_source")
+            value = previous_sources.get(period)
+            if value is not None and value != "":
+                return value
+    return None
 
 
 def infer_blocked_reason_from_flags(flag_status: Mapping[str, bool]) -> str:

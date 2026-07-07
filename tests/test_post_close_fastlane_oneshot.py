@@ -12,6 +12,7 @@ from ashare_v3.runtime.post_close_fastlane import (
     n4_context_run_id_for,
     run_post_close_oneshot,
 )
+from ashare_v3.web.post_close_fastlane_status import read_post_close_fastlane_status
 
 
 class PostCloseFastLaneOneShotTest(unittest.TestCase):
@@ -223,6 +224,402 @@ class PostCloseFastLaneOneShotTest(unittest.TestCase):
             self.assertEqual(payload["n4_context_run_id"], n4_context_run_id_for("20260611", "20260612"))
             self.assertEqual(payload["source_status_path"], str(docs_root / "20260612" / "00_status.json"))
             self.assertEqual(payload["source_oneshot_report_path"], str(docs_root / "20260612" / "01_oneshot_execute_report.json"))
+
+    def test_n5_n3t_readiness_rollover_failure_does_not_fail_main_post_close_result(self) -> None:
+        calls = []
+
+        def fake_runner(argv):
+            calls.append(argv)
+            if "scripts/plan_n5_n3t_fastlane_launchd.py" in argv:
+                return SimpleNamespace(returncode=2, stdout="", stderr="rollover failed")
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"result": "EXECUTE_PASS"}), stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_post_close_oneshot(
+                source_trade_date="20260611",
+                for_trade_date="20260612",
+                prev_trade_date="20260610",
+                next_trade_date="20260615",
+                dsn="postgresql://example/db",
+                docs_root=Path(tmp) / "docs",
+                sql_root=Path(tmp) / "sql",
+                execute=True,
+                user_confirmed=True,
+                postgres_commit_enabled=True,
+                include_calendar_repair=False,
+                enable_n5_n3t_readiness_rollover=True,
+                command_runner=fake_runner,
+            )
+
+        self.assertEqual(report["result"], "EXECUTE_PASS")
+        self.assertIsNone(report["failed_step_id"])
+        self.assertEqual(report["n5_n3t_readiness_blocker"], "n5_n3t_next_trade_day_readiness_rollover_failed")
+        self.assertEqual(report["n5_n3t_next_trade_day_readiness"]["returncode"], 2)
+        self.assertIn("rollover failed", report["n5_n3t_next_trade_day_readiness"]["stderr_tail"])
+        self.assertTrue(any("scripts/plan_n5_n3t_fastlane_launchd.py" in call for call in calls))
+        self.assertEqual(report["sub_steps"][-1]["step_id"], "worker_launchd_guard")
+
+    def test_n5_n3t_readiness_rollover_uses_source_trade_date_and_current_stable_base(self) -> None:
+        calls = []
+
+        def fake_runner(argv):
+            calls.append(argv)
+            if "scripts/plan_n5_n3t_fastlane_launchd.py" in argv:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "result": "PASS",
+                            "next_trade_date": "20260612",
+                            "stable_activation_config_path": "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_current_runtime_deferred_v1.json",
+                            "dated_activation_config_path": "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_20260612_runtime_deferred_v1.json",
+                            "active_worker_policy_review_path": "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/20260612/active_worker_policy_review_current_latest.json",
+                            "active_worker_policy_review": {
+                                "result": "WAITING",
+                                "active_worker_write_enabled_ready": False,
+                            },
+                        }
+                    ),
+                    stderr="",
+                )
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"result": "EXECUTE_PASS"}), stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "ashare_v3.runtime.post_close_fastlane.select_n5_n3t_readiness_rollover_base_activation_config",
+            return_value=Path(
+                "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_current_runtime_deferred_v1.json"
+            ),
+        ):
+            report = run_post_close_oneshot(
+                source_trade_date="20260611",
+                for_trade_date="20260612",
+                prev_trade_date="20260610",
+                next_trade_date="20260615",
+                dsn="postgresql://example/db",
+                docs_root=Path(tmp) / "docs",
+                sql_root=Path(tmp) / "sql",
+                execute=True,
+                user_confirmed=True,
+                postgres_commit_enabled=True,
+                include_calendar_repair=False,
+                enable_n5_n3t_readiness_rollover=True,
+                command_runner=fake_runner,
+            )
+
+        rollover_call = next(call for call in calls if "scripts/plan_n5_n3t_fastlane_launchd.py" in call)
+        self.assertEqual(rollover_call[rollover_call.index("--for-trade-date") + 1], "20260611")
+        self.assertEqual(
+            rollover_call[rollover_call.index("--base-activation-config") + 1],
+            "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_current_runtime_deferred_v1.json",
+        )
+        self.assertEqual(rollover_call[rollover_call.index("--current-exchange-time") + 1], "2026-06-11T18:00:00+08:00")
+        self.assertEqual(report["result"], "EXECUTE_PASS")
+        self.assertEqual(report["n5_n3t_next_trade_day_readiness"]["result"], "PASS")
+
+    def test_n5_n3t_readiness_rollover_base_config_prefers_matching_stable_then_source_dated(self) -> None:
+        from ashare_v3.runtime.post_close_fastlane import select_n5_n3t_readiness_rollover_base_activation_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            stable = output_dir / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+            source_dated = output_dir / "write_enabled_activation_config_20260611_runtime_deferred_v1.json"
+            stable.write_text(
+                json.dumps({"artifact_type": "n5_n3t_fastlane_activation_config_v1", "for_trade_date": "20260611"}),
+                encoding="utf-8",
+            )
+            source_dated.write_text(
+                json.dumps({"artifact_type": "n5_n3t_fastlane_activation_config_v1", "for_trade_date": "20260611"}),
+                encoding="utf-8",
+            )
+
+            selected = select_n5_n3t_readiness_rollover_base_activation_config(
+                output_dir=output_dir,
+                source_trade_date="20260611",
+            )
+
+            self.assertEqual(selected, stable)
+
+            stable.write_text(
+                json.dumps({"artifact_type": "n5_n3t_fastlane_activation_config_v1", "for_trade_date": "20260610"}),
+                encoding="utf-8",
+            )
+
+            selected = select_n5_n3t_readiness_rollover_base_activation_config(
+                output_dir=output_dir,
+                source_trade_date="20260611",
+            )
+
+            self.assertEqual(selected, source_dated)
+
+    def test_status_helper_exposes_n5_n3t_next_trade_day_readiness_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "docs"
+            run_dir = docs_root / "20260612"
+            run_dir.mkdir(parents=True)
+            (run_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "failed_step_id": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "n5_n3t_next_trade_day_readiness": {
+                            "result": "PASS",
+                            "next_trade_date": "20260615",
+                            "stable_activation_config_path": "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_current_runtime_deferred_v1.json",
+                            "active_worker_policy_review_path": "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/20260615/active_worker_policy_review_current_latest.json",
+                            "review_result": "WAITING",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            status = read_post_close_fastlane_status(docs_root=docs_root, for_trade_date="20260612")
+
+        readiness = status["n5_n3t_next_trade_day_readiness"]
+        self.assertEqual(readiness["next_trade_date"], "20260615")
+        self.assertEqual(readiness["review_result"], "WAITING")
+        labels = [item["label"] for item in status["artifacts"]]
+        self.assertIn("N5/N3T stable activation config", labels)
+        self.assertIn("N5/N3T active worker policy review", labels)
+
+    def test_status_helper_derives_n5_n3t_readiness_from_local_artifacts_when_report_is_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            docs_root = project_root / "docs" / "post_close_fastlane"
+            run_dir = docs_root / "20260612"
+            run_dir.mkdir(parents=True)
+            (run_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "failed_step_id": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stable_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_activation_config"
+                / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+            )
+            review_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_open_monitor_precheck"
+                / "20260615"
+                / "active_worker_policy_review_current_latest.json"
+            )
+            rollover_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_activation_config"
+                / "n5_n3t_post_close_readiness_config_rollover_20260615.json"
+            )
+            stable_path.parent.mkdir(parents=True)
+            review_path.parent.mkdir(parents=True)
+            stable_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260615",
+                        "active_worker_policy_review_path": (
+                            "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/"
+                            "20260615/active_worker_policy_review_current_latest.json"
+                        ),
+                        "policy": {"authorization_timing": "runtime_deferred_to_runner"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            review_path.write_text(
+                json.dumps(
+                    {
+                        "for_trade_date": "20260615",
+                        "result": "WAITING",
+                        "active_worker_write_enabled_ready": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            rollover_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_post_close_readiness_config_rollover_v1",
+                        "for_trade_date": "20260612",
+                        "next_trade_date": "20260615",
+                        "result": "PASS",
+                        "stable_activation_config_path": (
+                            "tmp/N5_N3T_action_confirmation_fastlane_activation_config/"
+                            "write_enabled_activation_config_current_runtime_deferred_v1.json"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            status = read_post_close_fastlane_status(docs_root=docs_root, for_trade_date="20260612")
+
+        readiness = status["n5_n3t_next_trade_day_readiness"]
+        self.assertEqual(readiness["source"], "derived_from_local_readiness_artifacts")
+        self.assertEqual(readiness["next_trade_date"], "20260615")
+        self.assertEqual(readiness["result"], "PASS")
+        self.assertEqual(readiness["review_result"], "WAITING")
+        self.assertFalse(readiness["active_worker_write_enabled_ready"])
+        self.assertEqual(readiness["launchd_live_state"], "not_checked_by_status_page")
+        labels = [item["label"] for item in status["artifacts"]]
+        self.assertIn("N5/N3T readiness rollover report", labels)
+        self.assertIn("N5/N3T stable activation config", labels)
+        self.assertIn("N5/N3T active worker policy review", labels)
+
+    def test_status_helper_overrides_stale_blocked_n5_n3t_readiness_from_local_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            docs_root = project_root / "docs" / "post_close_fastlane"
+            run_dir = docs_root / "20260708"
+            run_dir.mkdir(parents=True)
+            (run_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260707",
+                        "for_trade_date": "20260708",
+                        "failed_step_id": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260707",
+                        "for_trade_date": "20260708",
+                        "n5_n3t_next_trade_day_readiness": {
+                            "result": "BLOCKED",
+                            "next_trade_date": "",
+                            "stable_activation_config_path": "",
+                            "active_worker_policy_review_path": "",
+                            "review_result": "",
+                        },
+                        "n5_n3t_readiness_blocker": "n5_n3t_next_trade_day_readiness_rollover_failed",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stable_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_activation_config"
+                / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+            )
+            review_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_open_monitor_precheck"
+                / "20260708"
+                / "active_worker_policy_review_current_latest.json"
+            )
+            rollover_path = (
+                project_root
+                / "tmp"
+                / "N5_N3T_action_confirmation_fastlane_activation_config"
+                / "n5_n3t_post_close_readiness_config_rollover_20260708.json"
+            )
+            stable_path.parent.mkdir(parents=True)
+            review_path.parent.mkdir(parents=True)
+            stable_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260708",
+                        "active_worker_policy_review_path": (
+                            "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/"
+                            "20260708/active_worker_policy_review_current_latest.json"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            review_path.write_text(
+                json.dumps(
+                    {
+                        "for_trade_date": "20260708",
+                        "result": "WAITING",
+                        "active_worker_write_enabled_ready": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            rollover_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_post_close_readiness_config_rollover_v1",
+                        "for_trade_date": "20260707",
+                        "next_trade_date": "20260708",
+                        "result": "PASS",
+                        "stable_activation_config_path": (
+                            "tmp/N5_N3T_action_confirmation_fastlane_activation_config/"
+                            "write_enabled_activation_config_current_runtime_deferred_v1.json"
+                        ),
+                        "active_worker_policy_review_path": (
+                            "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/"
+                            "20260708/active_worker_policy_review_current_latest.json"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            status = read_post_close_fastlane_status(docs_root=docs_root, for_trade_date="20260708")
+
+        readiness = status["n5_n3t_next_trade_day_readiness"]
+        self.assertEqual(readiness["source"], "derived_from_local_readiness_artifacts")
+        self.assertEqual(readiness["result"], "PASS")
+        self.assertEqual(readiness["next_trade_date"], "20260708")
+        self.assertEqual(readiness["review_result"], "WAITING")
+        self.assertFalse(readiness["active_worker_write_enabled_ready"])
+        self.assertEqual(status["result"], "EXECUTE_PASS")
+        labels = [item["label"] for item in status["artifacts"]]
+        self.assertIn("N5/N3T readiness rollover report", labels)
+        self.assertIn("N5/N3T stable activation config", labels)
+        self.assertIn("N5/N3T active worker policy review", labels)
 
     def test_execute_pass_does_not_rewrite_identical_intraday_worker_lineage_config(self) -> None:
         def fake_runner(argv):

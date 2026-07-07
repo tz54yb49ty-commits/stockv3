@@ -26,27 +26,24 @@ repomix-output.xml
 data_lake/*
 !data_lake/.gitkeep
 
-# Clean snapshot guardrails
-tmp/
-logs/
+# Generated gate/runtime artifacts. Keep canonical Markdown docs separately.
 docs/**/*.json
 docs/**/*.jsonl
 docs/**/*.csv
-docs/**/*.txt
-docs/post_close_fastlane/
+docs/**/*.parquet
+docs/**/*.xlsx
+docs/**/*.xls
+docs/intraday_live_current/
 docs/runtime/
 docs/runtime_archive/
-docs/intraday_live_current/
+docs/post_close_fastlane/
 docs/replay/
-docs/query_audit/
-*.parquet
-*.db
-*.sqlite
-*.duckdb
-*.zip
-*.tar
-*.gz
-*.csv
-__pycache__/
-*.pyc
-.DS_Store
+
+# Root-level ad-hoc data exports.
+/*.csv
+/*.parquet
+/*.xlsx
+/*.xls
+
+# Patch artifacts are local handoff material, not source.
+*.patch

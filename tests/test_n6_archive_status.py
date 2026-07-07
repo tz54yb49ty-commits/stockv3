@@ -273,15 +273,6 @@ def write_archive_manifest_fixture(archive_root: Path, *, trade_date: str = "202
     return manifest_path
 
 
-def write_archive_date_dirs(docs_root: Path, trade_dates: list[str]) -> None:
-    docs_root.mkdir(parents=True, exist_ok=True)
-    for trade_date in trade_dates:
-        (docs_root / trade_date).mkdir(parents=True, exist_ok=True)
-        (docs_root.parent / "runtime" / trade_date).mkdir(parents=True, exist_ok=True)
-        (docs_root.parent / "intraday_live_current" / trade_date).mkdir(parents=True, exist_ok=True)
-        (docs_root.parent / "post_close_fastlane" / trade_date).mkdir(parents=True, exist_ok=True)
-
-
 class N6ArchiveStatusPageTest(unittest.TestCase):
     def test_archive_status_api_reads_artifact_without_database_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,117 +339,6 @@ class N6ArchiveStatusPageTest(unittest.TestCase):
         self.assertNotIn("ARCHIVE_KEEP_5", response.text)
         self.assertNotIn("RUNTIME_HOT_KEEP5_DIRECT_DELETE_NO_ARCHIVE_CONFIRMED", response.text)
         self.assertNotIn("/api/n6/ui/v1/archive-execute", response.text)
-        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
-
-    def test_archive_preview_api_keeps_latest_five_trade_dates_and_has_no_side_effects(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_root = Path(tmp) / "runtime_archive"
-            archive_root = Path(tmp) / "MacRaid" / "stock_db_archive" / "v3_runtime"
-            archive_root.mkdir(parents=True)
-            write_archive_date_dirs(
-                docs_root,
-                ["20260622", "20260623", "20260624", "20260625", "20260626", "20260629", "20260630"],
-            )
-            client, repo = build_archive_status_client(
-                docs_root=str(docs_root),
-                archive_root=str(archive_root),
-            )
-            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
-
-            response = client.get("/api/n6/ui/v1/archive-preview")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["component"], "Runtime Archive Control")
-        self.assertEqual(payload["retention_trade_days"], 5)
-        self.assertEqual(payload["retained_trade_dates"], ["20260624", "20260625", "20260626", "20260629", "20260630"])
-        self.assertEqual(payload["eligible_trade_dates"], ["20260622", "20260623"])
-        self.assertTrue(payload["execute_ready"])
-        self.assertFalse(payload["side_effects"]["writes_database"])
-        self.assertFalse(payload["side_effects"]["writes_archive_files"])
-        self.assertFalse(payload["side_effects"]["cleanup_local_runtime"])
-        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
-
-    def test_archive_execute_requires_confirmation_token(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_root = Path(tmp) / "runtime_archive"
-            archive_root = Path(tmp) / "MacRaid" / "stock_db_archive" / "v3_runtime"
-            archive_root.mkdir(parents=True)
-            write_archive_date_dirs(
-                docs_root,
-                ["20260622", "20260623", "20260624", "20260625", "20260626", "20260629"],
-            )
-            client, repo = build_archive_status_client(
-                docs_root=str(docs_root),
-                archive_root=str(archive_root),
-            )
-            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
-
-            response = client.post("/api/n6/ui/v1/archive-execute", json={"confirm_token": "WRONG"})
-
-        self.assertEqual(response.status_code, 400)
-        payload = response.json()
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"], "BLOCKED_ARCHIVE_CONFIRMATION_REQUIRED")
-        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
-
-    def test_archive_execute_blocks_when_no_dates_are_older_than_retention_window(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_root = Path(tmp) / "runtime_archive"
-            archive_root = Path(tmp) / "MacRaid" / "stock_db_archive" / "v3_runtime"
-            archive_root.mkdir(parents=True)
-            write_archive_date_dirs(docs_root, ["20260624", "20260625", "20260626", "20260629", "20260630"])
-            client, repo = build_archive_status_client(
-                docs_root=str(docs_root),
-                archive_root=str(archive_root),
-            )
-            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
-
-            response = client.post("/api/n6/ui/v1/archive-execute", json={"confirm_token": "ARCHIVE_KEEP_5"})
-
-        self.assertEqual(response.status_code, 400)
-        payload = response.json()
-        self.assertEqual(payload["error"], "BLOCKED_ARCHIVE_PREVIEW_NOT_READY")
-        self.assertIn("no_trade_dates_older_than_retention_window", payload["preview"]["blockers"])
-        self.assertFalse(payload["side_effects"]["writes_archive_files"])
-        self.assertFalse(payload["side_effects"]["cleanup_local_runtime"])
-        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
-
-    def test_archive_execute_registers_bounded_job_without_running_archive_or_cleanup(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_root = Path(tmp) / "runtime_archive"
-            archive_root = Path(tmp) / "MacRaid" / "stock_db_archive" / "v3_runtime"
-            archive_root.mkdir(parents=True)
-            write_archive_date_dirs(
-                docs_root,
-                ["20260622", "20260623", "20260624", "20260625", "20260626", "20260629", "20260630"],
-            )
-            client, repo = build_archive_status_client(
-                docs_root=str(docs_root),
-                archive_root=str(archive_root),
-            )
-            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
-
-            response = client.post("/api/n6/ui/v1/archive-execute", json={"confirm_token": "ARCHIVE_KEEP_5"})
-
-            job_path = docs_root / "jobs" / f"{response.json()['job_id']}.json"
-            saved = json.loads(job_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["job_id"].startswith("runtime_archive_keep5_"))
-        self.assertEqual(payload["job_status"], "WAIT_RUNTIME_CONTROL_EXECUTE")
-        self.assertEqual(payload["eligible_trade_dates"], ["20260622", "20260623"])
-        self.assertFalse(payload["side_effects"]["writes_database"])
-        self.assertFalse(payload["side_effects"]["writes_archive_files"])
-        self.assertFalse(payload["side_effects"]["cleanup_local_runtime"])
-        self.assertEqual(saved["confirm_token"], "ARCHIVE_KEEP_5")
-        self.assertEqual(saved["retention_trade_days"], 5)
-        self.assertEqual(saved["eligible_trade_dates"], ["20260622", "20260623"])
-        self.assertTrue(all(isinstance(command, list) for command in saved["bounded_commands"]))
-        self.assertNotIn("rm ", json.dumps(saved, ensure_ascii=False))
         self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
 
     def test_archive_status_api_prefers_verified_manifest_when_status_has_no_plan(self) -> None:
