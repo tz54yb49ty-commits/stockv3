@@ -4001,6 +4001,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
+                {self._app_v1_signal_display_join()}
                 WHERE {where_sql}
                 ORDER BY p.created_at DESC, p.user_signal_projection_id DESC
                 LIMIT %(limit)s
@@ -4040,6 +4041,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
+                {self._app_v1_signal_display_join()}
                 WHERE {where_sql}
                   AND p.user_signal_projection_id = %(user_signal_projection_id)s
                 LIMIT 1
@@ -4220,8 +4222,100 @@ class PostgresN6UserRepository:
             ),
         }
 
+    def _app_v1_stock_signal_display_join(self) -> str:
+        return self._app_v1_signal_display_join()
+
+    def _app_v1_signal_display_join(self) -> str:
+        trade_date_expr = self._app_v1_trade_date_expr()
+        stock_basis_join = (
+            f"""
+                LEFT JOIN v_n6_stock_condition_display_basis s
+                  ON p.asset_kind = 'stock'
+                 AND s.identity_key = p.identity_key
+                 AND s.for_trade_date::text = ({trade_date_expr})::text
+                """
+            if self._app_v2_relation_exists("v_n6_stock_condition_display_basis")
+            else """
+                LEFT JOIN (
+                  SELECT NULL::text AS display_code,
+                         NULL::text AS display_name,
+                         NULL::text AS industry_code,
+                         NULL::text AS industry_name
+                ) s ON FALSE
+                """
+        )
+        membership_join = (
+            f"""
+                LEFT JOIN LATERAL (
+                  SELECT bm.stock_code,
+                         bm.stock_name,
+                         bm.parent_code,
+                         bm.parent_name
+                  FROM n6_board_membership_display_cache bm
+                  WHERE p.asset_kind = 'stock'
+                    AND bm.stock_identity_key = p.identity_key
+                    AND bm.board_type = 'tdx_industry'
+                    AND bm.quality_status = 'passed'
+                    AND bm.source_trade_date <= ({trade_date_expr})::text
+                  ORDER BY bm.source_trade_date DESC, bm.parent_code ASC
+                  LIMIT 1
+                ) bm ON TRUE
+                """
+            if self._app_v2_relation_exists("n6_board_membership_display_cache")
+            else """
+                LEFT JOIN (
+                  SELECT NULL::text AS stock_code,
+                         NULL::text AS stock_name,
+                         NULL::text AS parent_code,
+                         NULL::text AS parent_name
+                ) bm ON FALSE
+                """
+        )
+        index_basis_join = (
+            f"""
+                LEFT JOIN v_n6_index_condition_display_basis i
+                  ON p.asset_kind = 'index'
+                 AND i.identity_key = p.identity_key
+                 AND i.for_trade_date::text = ({trade_date_expr})::text
+                """
+            if self._app_v2_relation_exists("v_n6_index_condition_display_basis")
+            else """
+                LEFT JOIN (
+                  SELECT NULL::text AS display_code,
+                         NULL::text AS display_name
+                ) i ON FALSE
+                """
+        )
+        board_basis_join = (
+            f"""
+                LEFT JOIN v_n6_board_condition_display_basis b
+                  ON p.asset_kind = 'board'
+                 AND b.identity_key = p.identity_key
+                 AND b.for_trade_date::text = ({trade_date_expr})::text
+                """
+            if self._app_v2_relation_exists("v_n6_board_condition_display_basis")
+            else """
+                LEFT JOIN (
+                  SELECT NULL::text AS display_code,
+                         NULL::text AS display_name
+                ) b ON FALSE
+                """
+        )
+        return f"{stock_basis_join}\n{membership_join}\n{index_basis_join}\n{board_basis_join}"
+
     def _app_v1_signal_select_list(self) -> str:
         actual_trigger_period_expr = self._app_v1_actual_trigger_period_expr()
+        stock_filter_columns = (
+            self._app_v2_filter_columns("v_n6_stock_condition_display_basis")
+            if self._app_v2_relation_exists("v_n6_stock_condition_display_basis")
+            else set()
+        )
+        stock_basis_industry_code_expr = (
+            "NULLIF(s.industry_code::text, '')" if "industry_code" in stock_filter_columns else "NULL::text"
+        )
+        stock_basis_industry_name_expr = (
+            "NULLIF(s.industry_name::text, '')" if "industry_name" in stock_filter_columns else "NULL::text"
+        )
         return f"""
                p.user_signal_projection_id,
                c.user_signal_card_id,
@@ -4234,9 +4328,41 @@ class PostgresN6UserRepository:
                p.asset_kind,
                p.identity_key,
                p.code,
-               p.code AS display_code,
+               COALESCE(
+                 NULLIF(bm.stock_code::text, ''),
+                 CASE WHEN s.display_code::text LIKE 'stock:%%' THEN NULL ELSE NULLIF(s.display_code::text, '') END,
+                 NULLIF(i.display_code::text, ''),
+                 NULLIF(b.display_code::text, ''),
+                 CASE
+                   WHEN p.code::text LIKE 'stock:%%' OR p.code::text LIKE 'index:%%' OR p.code::text LIKE 'board:%%' THEN NULL
+                   ELSE NULLIF(p.code::text, '')
+                 END,
+                 p.code
+               ) AS display_code,
                p.name,
-               p.name AS display_name,
+               COALESCE(
+                 NULLIF(bm.stock_name::text, ''),
+                 CASE WHEN s.display_name::text LIKE 'stock:%%' THEN NULL ELSE NULLIF(s.display_name::text, '') END,
+                 NULLIF(i.display_name::text, ''),
+                 NULLIF(b.display_name::text, ''),
+                 CASE
+                   WHEN p.name::text LIKE 'stock:%%' OR p.name::text LIKE 'index:%%' OR p.name::text LIKE 'board:%%' THEN NULL
+                   ELSE NULLIF(p.name::text, '')
+                 END,
+                 p.name
+               ) AS display_name,
+               COALESCE(
+                 {stock_basis_industry_code_expr},
+                 NULLIF(bm.parent_code::text, ''),
+                 NULLIF(p.display_payload_json->>'industry_code', ''),
+                 NULLIF(p.trace_json->>'industry_code', '')
+               ) AS industry_code,
+               COALESCE(
+                 {stock_basis_industry_name_expr},
+                 NULLIF(bm.parent_name::text, ''),
+                 NULLIF(p.display_payload_json->>'industry_name', ''),
+                 NULLIF(p.trace_json->>'industry_name', '')
+               ) AS industry_name,
                p.direction,
                p.signal_type,
                {self._app_v1_action_state_expr()} AS action_state,

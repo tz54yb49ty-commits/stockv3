@@ -1395,6 +1395,8 @@ class FakeN6UserRepository:
                 "expected_return_pct": None,
                 "board_code": "881001",
                 "board_name": "行业一",
+                "industry_code": "881001",
+                "industry_name": "行业一",
                 "card_payload_json": {
                     "blocked_reason": "price_confirmation_failed",
                     "trigger_kind": "market_action_confirmation",
@@ -1451,6 +1453,8 @@ class FakeN6UserRepository:
                 "expected_return_pct": 22.06,
                 "board_code": "881002",
                 "board_name": "行业二",
+                "industry_code": "881002",
+                "industry_name": "行业二",
                 "card_payload_json": {
                     "trigger_kind": "market_action_confirmation",
                     "source_n4_run_id": "trigger_action_confirmation_metric_execute_20260602_1105",
@@ -8374,6 +8378,8 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("user_projection_run_id", item)
         self.assertEqual(item["display_code"], "600000")
         self.assertEqual(item["display_name"], "浦发银行")
+        self.assertEqual(item["industry_code"], "881002")
+        self.assertEqual(item["industry_name"], "行业二")
         self.assertEqual(item["asset_kind_label"], "个股")
         self.assertEqual(item["direction_label"], "买向观察")
         self.assertEqual(item["action_state_label"], "已确认")
@@ -8945,6 +8951,9 @@ class N6UserAppTest(unittest.TestCase):
             [
                 inspect.getsource(PostgresN6UserRepository.fetch_app_signals),
                 inspect.getsource(PostgresN6UserRepository.fetch_app_signal_detail),
+                inspect.getsource(PostgresN6UserRepository._app_v1_stock_signal_display_join),
+                inspect.getsource(PostgresN6UserRepository._app_v1_signal_display_join),
+                inspect.getsource(PostgresN6UserRepository._app_v1_signal_select_list),
                 inspect.getsource(PostgresN6UserRepository._app_v1_signal_where),
                 inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_clause),
                 inspect.getsource(PostgresN6UserRepository._app_v1_effective_monitor_scope_cte),
@@ -8958,6 +8967,20 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("user_monitor_board", adapter_source)
         self.assertIn("valid_for_trade_date", adapter_source)
         self.assertIn("v_n6_stock_condition_display_basis", adapter_source)
+        self.assertIn("n6_board_membership_display_cache", adapter_source)
+        self.assertIn("bm.stock_name", adapter_source)
+        self.assertIn("s.display_name::text LIKE 'stock:%%'", adapter_source)
+        self.assertIn("p.name::text LIKE 'stock:%%'", adapter_source)
+        self.assertIn("i.display_name", adapter_source)
+        self.assertIn("b.display_name", adapter_source)
+        self.assertLess(
+            adapter_source.index("NULLIF(bm.stock_name::text, '')"),
+            adapter_source.index("s.display_name::text LIKE 'stock:%%'"),
+        )
+        self.assertIn("bm.parent_code", adapter_source)
+        self.assertIn("bm.parent_name", adapter_source)
+        self.assertIn("bm.source_trade_date <=", adapter_source)
+        self.assertIn("bm.board_type = 'tdx_industry'", adapter_source)
         self.assertIn("v_n6_index_condition_display_basis", adapter_source)
         self.assertIn("v_n6_board_condition_display_basis", adapter_source)
         self.assertIn('historical_projection_mode = bool(filters.get("historical_projection_mode"))', adapter_source)
@@ -11713,12 +11736,9 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("来源板块 ·", page_response.text)
         self.assertNotIn("<th>当前所属指数</th>", page_response.text)
         self.assertNotIn("<th>当前所属板块</th>", page_response.text)
-        self.assertIn("所有字段 · 当前所属关系", page_response.text)
-        self.assertNotIn('<details class="monitor-relationship-detail" open', page_response.text)
-        self.assertIn("当前所属指数", page_response.text)
-        self.assertIn("沪深300", page_response.text)
-        self.assertIn("当前所属板块", page_response.text)
-        self.assertIn("关系日期: 20260604", page_response.text)
+        self.assertNotIn("所有字段 · 当前所属关系", page_response.text)
+        self.assertNotIn('class="monitor-relationship-detail"', page_response.text)
+        self.assertNotIn("关系日期: 20260604", page_response.text)
         self.assertNotIn("买入到监控", page_response.text)
         self.assertNotIn("一键下单", page_response.text)
 
@@ -11759,8 +11779,9 @@ class N6UserAppTest(unittest.TestCase):
 
         self.assertEqual(page_response.status_code, 200)
         self.assertNotIn("来源指数 ·", page_response.text)
-        self.assertIn("index:SH:000300", page_response.text)
-        self.assertIn("关系日期: 20260604", page_response.text)
+        self.assertNotIn("所有字段 · 当前所属关系", page_response.text)
+        self.assertNotIn('class="monitor-relationship-detail"', page_response.text)
+        self.assertNotIn("关系日期: 20260604", page_response.text)
         self.assertNotIn("single_row", page_response.text)
 
     def test_b_track_v2_monitor_validity_defaults_to_current_filter_batch(self) -> None:
@@ -12543,7 +12564,12 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=board", signals_response.text)
         self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=stock", signals_response.text)
         self.assertIn('name="asset_kind" value="stock"', signals_response.text)
+        self.assertIn("股票名称", signals_response.text)
+        self.assertIn("行业代码", signals_response.text)
+        self.assertIn("行业名称", signals_response.text)
         self.assertIn("浦发银行", signals_response.text)
+        self.assertIn("881002", signals_response.text)
+        self.assertIn("行业二", signals_response.text)
         self.assertNotIn("上证指数", signals_response.text)
         self.assertNotIn("煤炭开采", signals_response.text)
         self.assertEqual(repo.app_signal_filter_reads[-2]["asset_kind"], "stock")
@@ -12560,6 +12586,67 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("user_signal_card_id=9512", messages_response.text)
         self.assertNotIn("user_signal_card_id=9513", messages_response.text)
         self.assertEqual(repo.app_signal_filter_reads[-1]["asset_kind"], "stock")
+
+    def test_b_track_signals_asset_kind_specific_name_columns(self) -> None:
+        client, repo, _, _ = build_client()
+        stock_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        stock_signal["user_signal_projection_id"] = 9461
+        stock_signal["user_signal_card_id"] = 9561
+        stock_signal["trade_date"] = "20260605"
+        index_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        index_signal.update(
+            {
+                "user_signal_projection_id": 9462,
+                "user_signal_card_id": 9562,
+                "trade_date": "20260605",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        board_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        board_signal.update(
+            {
+                "user_signal_projection_id": 9463,
+                "user_signal_card_id": 9563,
+                "trade_date": "20260605",
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "code": "881001",
+                "name": "煤炭开采",
+            }
+        )
+        for signal in (stock_signal, index_signal, board_signal):
+            seed_effective_monitor_for_signal(repo, signal)
+        repo.ui_v1_signals = [stock_signal, index_signal, board_signal]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_response = client.get("/n6/app/signals?asset_kind=stock&trade_date=20260605")
+        board_response = client.get("/n6/app/signals?asset_kind=board&trade_date=20260605")
+        index_response = client.get("/n6/app/signals?asset_kind=index&trade_date=20260605")
+
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertIn("股票名称", stock_response.text)
+        self.assertIn("行业代码", stock_response.text)
+        self.assertIn("行业名称", stock_response.text)
+        self.assertIn("浦发银行", stock_response.text)
+        self.assertIn("881002", stock_response.text)
+        self.assertIn("行业二", stock_response.text)
+
+        self.assertEqual(board_response.status_code, 200)
+        self.assertIn("板块名称", board_response.text)
+        self.assertIn("煤炭开采", board_response.text)
+        self.assertNotIn("股票名称", board_response.text)
+        self.assertNotIn("行业代码", board_response.text)
+        self.assertNotIn("行业名称", board_response.text)
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertIn("指数名称", index_response.text)
+        self.assertIn("上证指数", index_response.text)
+        self.assertNotIn("股票名称", index_response.text)
+        self.assertNotIn("行业代码", index_response.text)
+        self.assertNotIn("行业名称", index_response.text)
 
     def test_b_track_signals_and_messages_asset_kind_filter_reuses_monitor_visibility(self) -> None:
         client, repo, _, _ = build_client()

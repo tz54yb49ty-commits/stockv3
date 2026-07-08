@@ -1,5 +1,5 @@
--- Roll back the generic ready CHECK to the legacy action-confirmation branch.
--- Artifact only: do not execute without an explicit rollback gate.
+-- N3P ready CHECK compatibility rollback.
+-- Artifact only. Execute only in an explicit schema migration gate.
 
 BEGIN;
 

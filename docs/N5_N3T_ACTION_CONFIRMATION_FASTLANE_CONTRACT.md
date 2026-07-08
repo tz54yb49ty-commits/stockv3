@@ -93,11 +93,14 @@ The resolver may fill `source_trigger_run_id`, `source_metric_run_id`,
 `action_run_id`, and `consumer_name`, but it must not open the write path.
 `n5_action_intake` may run without a ready `source_metric_run_id` because it only
 creates `ActionEligible` / active tracking and emits an N5 active-scope artifact.
-Its read-only discovery may select the earliest pending N4 source run with either
-formal `TriggerMatched` rows or inactive `TriggerStateChanged(trigger_live=false)`
-rows. `TriggerMatched` remains the only `ActionEligible` entry. Inactive
-`TriggerStateChanged` rows may only expire/remove matching active tracking by
-state key; `TriggerStateChanged(trigger_live=true)` remains ignored.
+Its read-only discovery may select pending N4 rows that maintain the active set
+A: formal `TriggerMatched` rows, matched
+`TriggerStateChanged(trigger_live=true)` rows, or inactive
+`TriggerStateChanged(trigger_live=false)` rows. `TriggerMatched` remains the
+only `ActionEligible` entry. Matched `TriggerStateChanged(trigger_live=true)`
+rows enter or refresh executable active refs with
+`action_eligible_entry_allowed=false`; inactive `TriggerStateChanged` rows may
+only expire/remove matching active tracking by state key.
 `n5_action_executed` must resolve a matching N3T run before planning
 `ActionExecuted`; if no `N3T_C1_CLOSED` metric is available, it fails closed and
 does not fall back to N3P, B1, B2, time-ordered backlog, or legacy realtime
@@ -167,11 +170,13 @@ generate a write-enabled config for an exact-cover backlog drain, but
 lane as the finished automatic micro-batch worker.
 
 This policy may enable N5 intake with `--execute --user-confirmed` and
-`--write-active-scope-artifact` for formal `TriggerMatched` intake or inactive
+`--write-active-scope-artifact` for formal `TriggerMatched` intake, matched
+`TriggerStateChanged(trigger_live=true)` active-ref refresh, or inactive
 `TriggerStateChanged(trigger_live=false)` cleanup. Only formal `TriggerMatched`
-may create `ActionEligible`; inactive state changes may only expire/remove
-matching tracking and update the active-scope artifact. The policy may enable the
-N5 executed lane with `--execute --user-confirmed`, and may pass
+may create `ActionEligible`; matched true state changes may create/refresh
+executable active refs without `ActionEligible`, and inactive state changes may
+only expire/remove matching tracking and update the active-scope artifact. The
+policy may enable the N5 executed lane with `--execute --user-confirmed`, and may pass
 `--execute --user-confirmed` to the N3 C1/N3T lane. The N3 lane is artifact-first.
 Under explicit execute/user-confirmed activation it may materialize a missing
 scoped C1 pull plan artifact from the
@@ -335,11 +340,13 @@ or non-positive bounds must fail before any child command is invoked. For the
 event_time ASC, source_run_id ASC
 ```
 
-Only formal N4 `TriggerMatched` source runs in the ordinary family are eligible.
-B2 / hint-projection source runs must be excluded from the ordinary drain batch
-even when they share the same HHMM. `TriggerStateChanged(trigger_live=true)` and
-dead-letter N4 rows remain ignored. N4 outbox status is read-only and must never
-be updated by the orchestrator or by the N5 Fastlane consumer.
+Only formal N4 `TriggerMatched` source runs and matched
+`TriggerStateChanged(trigger_live=true)` active-ref refresh rows in the ordinary
+family are eligible for the ordinary active-set drain. B2 / hint-projection
+source runs must be excluded from the ordinary drain batch even when they share
+the same HHMM. Non-matched true state changes and dead-letter N4 rows remain
+ignored. N4 outbox status is read-only and must never be updated by the
+orchestrator or by the N5 Fastlane consumer.
 
 Each selected source run expands to the fixed lane sequence:
 
@@ -501,12 +508,12 @@ pre_open_before_0925:
   n5_action_executed = disabled
 
 pre_open_call_auction_after_0925:
-  n5_action_intake = write_enabled_bounded only if formal TriggerMatched exists
+  n5_action_intake = write_enabled_bounded only if executable A input exists
   n3_c1_n3t_action_confirmation = wait_first_closed_minute
   n5_action_executed = wait_matching_n3t_metric
 
 trading:
-  n5_action_intake = write_enabled_bounded with formal TriggerMatched
+  n5_action_intake = write_enabled_bounded with executable A input
   n3_c1_n3t_action_confirmation = write_enabled_bounded after closed minute
   n5_action_executed = write_enabled_bounded with matching N3T_C1_CLOSED metric
 
@@ -574,13 +581,16 @@ Allowed input:
 
 ```text
 TriggerMatched
+TriggerStateChanged(trigger_live=true,current_status=matched)
 TriggerStateChanged(trigger_live=false)
 ```
 
 Ignored input:
 
 ```text
-TriggerStateChanged(trigger_live=true)
+TriggerStateChanged(trigger_live=true,current_status!=matched)
+TriggerPendingMarketData
+dead-letter N4 rows
 ```
 
 Allowed writes when a later execute gate is explicitly authorized:
@@ -592,6 +602,10 @@ common_event_inbox for N5 consumer
 common_event_consumer_checkpoint for N5 consumer
 local n5_active_scope_snapshot_v1 artifact
 ```
+
+`TriggerStateChanged(trigger_live=true,current_status=matched)` may only create
+or refresh executable active tracking refs and the local active scope artifact.
+It must not create `ActionEligible`.
 
 Forbidden:
 

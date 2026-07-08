@@ -1,0 +1,190 @@
+{
+  "artifact": "N6_LOCAL_DISPLAY_CACHE_SCHEMA_IMPLEMENTATION",
+  "result": "IMPLEMENTATION_PASS",
+  "layer_role": "N6_user",
+  "date": "2026-06-07",
+  "scope": "Create empty N6 local display cache schema and rollback SQL only.",
+  "schema_sql": "sql/N6_local_display_cache_schema.sql",
+  "rollback_sql": "sql/N6_local_display_cache_schema_rollback.sql",
+  "created_schema": [
+    "n6_display_cache_run",
+    "n6_stock_display_cache",
+    "n6_index_display_cache",
+    "n6_board_display_cache",
+    "n6_index_membership_display_cache",
+    "n6_board_membership_display_cache"
+  ],
+  "source_readiness_reference": {
+    "latest_active_n2_run": "condition_layer_20260604_source_20260604_v1",
+    "stock_condition_display_basis_rows": 1952,
+    "index_condition_display_basis_rows": 9,
+    "board_condition_display_basis_rows": 428,
+    "index_membership_fact_rows": 128410,
+    "board_membership_fact_rows": 569332,
+    "readiness_mode": "read_only_reference_only",
+    "rows_synced_by_this_gate": 0
+  },
+  "n6_display_cache_run_fields": [
+    "cache_run_id",
+    "source_condition_run_id",
+    "source_trade_date",
+    "cache_version",
+    "status",
+    "is_active",
+    "started_at",
+    "finished_at",
+    "row_counts_json",
+    "hash_summary_json",
+    "validation_summary_json",
+    "error_json",
+    "created_at",
+    "updated_at"
+  ],
+  "cache_common_fields": [
+    "cache_run_id",
+    "cache_version",
+    "source_condition_run_id",
+    "source_trade_date",
+    "source_table",
+    "source_version",
+    "synced_at",
+    "row_hash"
+  ],
+    "display_cache_fields": [
+        "asset_kind",
+        "identity_key",
+    "stock_identity_key",
+    "index_identity_key",
+    "board_identity_key",
+    "code",
+    "name",
+    "display_code",
+    "display_name",
+    "display_title",
+    "display_summary",
+    "condition_key",
+    "original_condition_key",
+    "direction",
+    "selected_signal_types_json",
+    "period_summary_json",
+    "year_overheat_level",
+    "quarter_overheat_level",
+    "month_overheat_level",
+    "week_overheat_level",
+    "day_overheat_level",
+    "target_price_context_json",
+    "label_json",
+    "explanation_json",
+    "quality_status",
+    "source_condition_display_basis_id",
+    "source_updated_at",
+        "created_at"
+    ],
+    "mapping_repair_update": {
+        "date": "2026-06-07",
+        "artifact": "docs/N6_LOCAL_DISPLAY_CACHE_MAPPING_REPAIR.json",
+        "schema_sql_revised": true,
+        "mapping_strategy": "cartesian_fanout_v1",
+        "added_display_fields": [
+            "source_row_hash",
+            "source_identity_key",
+            "source_selected_directions_json",
+            "source_selected_condition_keys_json",
+            "expansion_strategy"
+        ],
+        "source_condition_display_basis_id_required": true,
+        "fanout_unique_indexes": [
+            "uq_n6_stock_display_cache_source_fanout",
+            "uq_n6_index_display_cache_source_fanout",
+            "uq_n6_board_display_cache_source_fanout"
+        ]
+    },
+    "membership_cache_fields": [
+        "membership_kind",
+    "parent_identity_key",
+    "parent_code",
+    "parent_name",
+    "index_identity_key",
+    "board_identity_key",
+    "board_type",
+    "stock_identity_key",
+    "stock_code",
+    "stock_name",
+    "display_title",
+    "display_summary",
+    "label_json",
+    "explanation_json",
+    "quality_status",
+    "trade_date",
+    "created_at"
+  ],
+  "index_groups": {
+    "active_lookup": [
+      "n6_display_cache_run_active_once",
+      "idx_n6_display_cache_run_active",
+      "idx_n6_display_cache_run_source"
+    ],
+    "display_lookup": [
+      "idx_n6_stock_display_cache_identity",
+      "idx_n6_stock_display_cache_stock_identity",
+      "idx_n6_stock_display_cache_direction_condition",
+      "idx_n6_index_display_cache_identity",
+      "idx_n6_index_display_cache_index_identity",
+      "idx_n6_index_display_cache_direction_condition",
+      "idx_n6_board_display_cache_identity",
+      "idx_n6_board_display_cache_board_identity",
+      "idx_n6_board_display_cache_identity_board_type",
+      "idx_n6_board_display_cache_direction_condition",
+      "idx_n6_board_display_cache_board_type"
+    ],
+    "membership_lookup": [
+      "idx_n6_index_membership_display_cache_parent",
+      "idx_n6_index_membership_display_cache_stock",
+      "idx_n6_index_membership_display_cache_index_identity",
+      "idx_n6_board_membership_display_cache_parent",
+      "idx_n6_board_membership_display_cache_stock",
+      "idx_n6_board_membership_display_cache_board_identity",
+      "idx_n6_board_membership_display_cache_parent_board_type",
+      "idx_n6_board_membership_display_cache_stock_board_type"
+    ]
+  },
+  "rollback_proof": {
+    "hard_fail_before_drop": true,
+    "guard_message": "N6 local display cache schema rollback blocked",
+    "drops_only_created_cache_tables": true,
+    "business_delete": false,
+    "source_table_mutation": false
+  },
+  "forbidden_scope_proof": {
+    "writes_n1_n2_source_tables": false,
+    "reads_forbidden_n2_runtime_tables": false,
+    "touches_n3_n4_n5_facts": false,
+    "touches_n6_projection_or_card": false,
+    "outbox_consumed_or_updated": false,
+    "worker_started": false,
+    "proposal_generated": false,
+    "order_generated": false,
+    "trade_generated": false,
+    "position_or_pnl_generated": false,
+    "real_trade_submitted": false
+  },
+  "side_effects": {
+    "schema_sql_created": true,
+    "rollback_sql_created": true,
+    "schema_executed": false,
+    "sync_executed": false,
+    "cache_activated": false,
+    "database_rows_written": 0,
+    "outbox_consumed": false,
+    "worker_started": false
+  },
+  "validations": {
+    "migration_static_check": "PASS",
+    "rollback_static_check": "PASS",
+    "compileall": "PASS",
+    "test_n6_user_app": "PASS",
+    "json_parse": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "next_gate": "N6_LOCAL_DISPLAY_CACHE_SYNC_DRY_RUN_GATE"
+}

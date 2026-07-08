@@ -762,6 +762,7 @@
       </div>
       {% elif page.page_key == "signals" %}
       {% set signals_auto_refresh_enabled = page.data.available_trade_dates and page.data.selected_trade_date == page.data.available_trade_dates[0] %}
+      {% set selected_signal_asset_kind = page.data.selected_asset_kind or "stock" %}
       <div class="text-block">
         <h3>{{ page.data.component_label }}</h3>
         <span class="chip">消息</span>
@@ -807,6 +808,15 @@
               <th>类型</th>
               <th>标的</th>
               <th>identity_key</th>
+              {% if selected_signal_asset_kind == "stock" %}
+              <th>股票名称</th>
+              <th>行业代码</th>
+              <th>行业名称</th>
+              {% elif selected_signal_asset_kind == "board" %}
+              <th>板块名称</th>
+              {% elif selected_signal_asset_kind == "index" %}
+              <th>指数名称</th>
+              {% endif %}
               <th>方向</th>
               <th>条件 trace</th>
               <th>触发周期</th>
@@ -816,7 +826,7 @@
               <th>未确认原因</th>
             </tr>
           </thead>
-          <tbody data-n6-signals-body>
+          <tbody data-n6-signals-body data-asset-kind="{{ selected_signal_asset_kind }}">
             {% for item in page.data['items'] %}
             <tr>
               <td>{{ item.trade_date }}</td>
@@ -824,6 +834,13 @@
               <td>{{ item.asset_kind_label }}</td>
               <td>{{ item.display_name }}<br><span class="subtle">{{ item.display_code }}</span></td>
               <td>{{ item.identity_key }}</td>
+              {% if selected_signal_asset_kind == "stock" %}
+              <td>{{ item.display_name if item.asset_kind == "stock" else "—" }}</td>
+              <td>{{ item.industry_code if item.asset_kind == "stock" else "—" }}</td>
+              <td>{{ item.industry_name if item.asset_kind == "stock" else "—" }}</td>
+              {% elif selected_signal_asset_kind in ["board", "index"] %}
+              <td>{{ item.display_name }}</td>
+              {% endif %}
               <td>{{ item.direction_label }}</td>
               <td>{{ item.condition_trace.condition_key }}<br><span class="subtle">{{ item.condition_trace.rendering_policy }}</span></td>
               <td>{{ item.triggered_periods }}</td>
@@ -1392,32 +1409,7 @@
 	              <td class="{{ cell.align }}">{{ cell.value }}</td>
 	              {% endfor %}
             </tr>
-	            {% if selected_section.asset_kind == "stock" %}
-	            <tr>
-	              <td class="field-detail" colspan="{{ selected_section.columns|length + 1 }}">
-	                <details class="monitor-relationship-detail">
-	                  <summary>所有字段 · 当前所属关系</summary>
-	                  <div class="field-grid">
-                    <div class="field-item">
-                      <span>current_index_memberships</span>
-                      <code>当前所属指数: {{ item.current_memberships.index_count }}{% for membership in item.current_memberships.indexes %}
-{{ membership.display_name }} {{ membership.display_code }}
-{{ membership.identity_key }} · 关系日期: {{ membership.trade_date }}{% else %}
-暂无指数关系{% endfor %}</code>
-                    </div>
-                    <div class="field-item">
-                      <span>current_board_memberships</span>
-                      <code>当前所属板块: {{ item.current_memberships.board_count }}{% for membership in item.current_memberships.boards %}
-{{ membership.display_name }} {{ membership.display_code }}
-{{ membership.identity_key }} · {{ membership.board_type }} · 关系日期: {{ membership.trade_date }}{% else %}
-暂无板块关系{% endfor %}</code>
-                    </div>
-                  </div>
-                </details>
-              </td>
-            </tr>
-            {% endif %}
-            {% endfor %}
+	            {% endfor %}
           </tbody>
         </table>
         {% if not selected_section['items'] %}
@@ -1996,12 +1988,27 @@
       const renderSignals = (payload) => {
         const target = document.querySelector("[data-n6-signals-body]");
         if (!target) return 0;
+        const assetKind = target.dataset.assetKind || payload.selected_asset_kind || "stock";
+        const columnCount = assetKind === "stock" ? 15 : 13;
         const items = Array.isArray(payload.items) ? payload.items : [];
         if (!items.length) {
           const message = payload.empty_state?.message || "暂无已审核消息。";
-          target.innerHTML = `<tr><td colspan="12"><div class="empty">${escapeHtml(message)}</div></td></tr>`;
+          target.innerHTML = `<tr><td colspan="${columnCount}"><div class="empty">${escapeHtml(message)}</div></td></tr>`;
           return 0;
         }
+        const renderAssetNameCells = (item) => {
+          if (assetKind === "stock") {
+            return `
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.display_name) : "—"}</td>
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_code || "—") : "—"}</td>
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_name || "—") : "—"}</td>
+            `;
+          }
+          if (assetKind === "board" || assetKind === "index") {
+            return `<td>${escapeHtml(item.display_name || "—")}</td>`;
+          }
+          return "";
+        };
         target.innerHTML = items.map((item) => `
           <tr>
             <td>${escapeHtml(item.trade_date)}</td>
@@ -2009,6 +2016,7 @@
             <td>${escapeHtml(item.asset_kind_label)}</td>
             <td>${escapeHtml(item.display_name)}<br><span class="subtle">${escapeHtml(item.display_code)}</span></td>
             <td>${escapeHtml(item.identity_key)}</td>
+            ${renderAssetNameCells(item)}
             <td>${escapeHtml(item.direction_label)}</td>
             <td>${escapeHtml(item.condition_trace?.condition_key)}<br><span class="subtle">${escapeHtml(item.condition_trace?.rendering_policy)}</span></td>
             <td>${escapeHtml(formatList(item.triggered_periods))}</td>

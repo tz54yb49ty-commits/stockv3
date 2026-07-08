@@ -1915,6 +1915,8 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item["proposal_eligibility"] = proposal_eligibility_model(row)
     item["display_code"] = _first_text(row, "display_code", "code")
     item["display_name"] = _first_text(row, "display_name", "name")
+    item["industry_code"] = _first_text(row, "industry_code", default="—")
+    item["industry_name"] = _first_text(row, "industry_name", default="—")
     item["source_run_id"] = _first_text(row, "source_run_id", "source_action_run_id")
     item["projection_run_id"] = _first_text(row, "projection_run_id", "user_projection_run_id")
     item["quality_status"] = _first_text(row, "quality_status", default="reviewed")

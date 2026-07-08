@@ -1,252 +1,133 @@
--- N5 active-monitor v2 unified N4 trigger events scoped rollback.
+-- N5 active-monitor v2 unified N4 trigger events rollback.
+-- Scope: target only the 20260626 provisional active-monitor v2 action run
+-- and its two source trigger runs. This artifact is rollback-readiness SQL;
+-- do not execute without an explicit rollback gate and current DB preflight.
 --
--- Execute only after an explicitly approved rollback execute gate.
+-- Target action run:
+-- action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1
 --
--- Scope:
---   action_run_id:
---     action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1
---   allowed source_trigger_run_ids:
---     trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1
---     trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1
---   consumer_name:
---     n5_active_monitor_v2_unified_n4_trigger_events_live_current_v1
+-- Source trigger runs:
+-- trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1
+-- trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1
 --
--- Boundary:
---   Deletes only scoped N5 action-layer rows and this scoped consumer's N4
---   inbox/checkpoint rows. It does not mutate N4 outbox status, N3 facts,
---   N6/user projection, voice/mobile/sim/order/real-trade, or old system tables.
+-- Boundaries: no N4 outbox status update, no user projection, no sim, no N6,
+-- no worker, no voice/mobile/order/real trade.
 
 BEGIN;
 
-\set action_run_id 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'
-\set source_trigger_run_id_ordinary 'trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1'
-\set source_trigger_run_id_hint 'trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1'
-\set consumer_name 'n5_active_monitor_v2_unified_n4_trigger_events_live_current_v1'
-
-SET LOCAL n5.rollback_action_run_id = :'action_run_id';
-SET LOCAL n5.rollback_source_trigger_run_id_ordinary = :'source_trigger_run_id_ordinary';
-SET LOCAL n5.rollback_source_trigger_run_id_hint = :'source_trigger_run_id_hint';
-SET LOCAL n5.rollback_consumer_name = :'consumer_name';
-
 DO $$
 DECLARE
-  v_action_run_id text := current_setting('n5.rollback_action_run_id');
-  v_source_trigger_run_id_ordinary text := current_setting('n5.rollback_source_trigger_run_id_ordinary');
-  v_source_trigger_run_id_hint text := current_setting('n5.rollback_source_trigger_run_id_hint');
-  v_consumer_name text := current_setting('n5.rollback_consumer_name');
-  v_allowed_source_run_ids text[] := ARRAY[v_source_trigger_run_id_ordinary, v_source_trigger_run_id_hint];
-  v_count bigint := 0;
-  v_table_name text;
-  v_table_regclass regclass;
+  v_action_run_id TEXT := 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1';
+  v_ordinary_trigger_run_id TEXT := 'trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1';
+  v_b2_trigger_run_id TEXT := 'trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1';
 BEGIN
-  SELECT count(*) INTO v_count
-  FROM common_action_tracking_state
-  WHERE run_id = v_action_run_id
-    AND source_trigger_run_id <> ALL(v_allowed_source_run_ids);
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: tracking rows share action_run_id but not allowed source_trigger_run_id (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM stock_action_fact
-  WHERE run_id = v_action_run_id
-    AND source_trigger_run_id <> ALL(v_allowed_source_run_ids);
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: stock_action_fact has wrong source_trigger_run_id rows (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM index_action_fact
-  WHERE run_id = v_action_run_id
-    AND source_trigger_run_id <> ALL(v_allowed_source_run_ids);
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: index_action_fact has wrong source_trigger_run_id rows (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM board_action_fact
-  WHERE run_id = v_action_run_id
-    AND source_trigger_run_id <> ALL(v_allowed_source_run_ids);
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: board_action_fact has wrong source_trigger_run_id rows (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_action_event
-  WHERE run_id = v_action_run_id
-    AND source_trigger_run_id <> ALL(v_allowed_source_run_ids);
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: common_action_event has wrong source_trigger_run_id rows (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_event_outbox
-  WHERE source_layer = 'N5_action'
-    AND source_run_id = v_action_run_id
-    AND status IN ('delivering', 'delivered');
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: scoped N5 outbox has delivered/delivering rows (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_event_inbox
-  WHERE source_layer = 'N5_action'
-    AND source_run_id = v_action_run_id;
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: scoped N5 outbox has downstream inbox refs (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_event_consumer_checkpoint
-  WHERE source_layer = 'N5_action'
-    AND (
-      checkpoint_payload::text LIKE '%' || v_action_run_id || '%'
-      OR last_event_id IN (
-        SELECT event_id
-        FROM common_event_outbox
-        WHERE source_layer = 'N5_action' AND source_run_id = v_action_run_id
+  IF EXISTS (
+    SELECT 1
+    FROM public.common_event_inbox
+    WHERE status IN ('delivering', 'delivered')
+      AND consumer_name LIKE 'n5%'
+      AND source_layer = 'N4_trigger'
+      AND (
+        source_run_id = v_ordinary_trigger_run_id
+        OR source_run_id = v_b2_trigger_run_id
+        OR payload_json::TEXT LIKE '%' || v_action_run_id || '%'
+        OR payload_json::TEXT LIKE '%' || v_ordinary_trigger_run_id || '%'
+        OR payload_json::TEXT LIKE '%' || v_b2_trigger_run_id || '%'
+        OR raw_json::TEXT LIKE '%' || v_action_run_id || '%'
+        OR raw_json::TEXT LIKE '%' || v_ordinary_trigger_run_id || '%'
+        OR raw_json::TEXT LIKE '%' || v_b2_trigger_run_id || '%'
       )
-    );
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: scoped N5 outbox has downstream checkpoint refs (%)', v_count;
+    LIMIT 1
+  ) THEN
+    RAISE EXCEPTION 'rollback blocked: common_event_inbox has delivering/delivered rows for active-monitor v2 target';
   END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_event_inbox
-  WHERE source_layer = 'N4_trigger'
-    AND source_run_id = ANY(v_allowed_source_run_ids)
-    AND consumer_name <> v_consumer_name;
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: non-scoped consumer inbox refs exist for selected N4 source runs (%)', v_count;
-  END IF;
-
-  SELECT count(*) INTO v_count
-  FROM common_event_consumer_checkpoint
-  WHERE source_layer = 'N4_trigger'
-    AND consumer_name <> v_consumer_name
-    AND (
-      checkpoint_payload::text LIKE '%' || v_action_run_id || '%'
-      OR checkpoint_payload::text LIKE '%' || v_source_trigger_run_id_ordinary || '%'
-      OR checkpoint_payload::text LIKE '%' || v_source_trigger_run_id_hint || '%'
-    );
-  IF v_count > 0 THEN
-    RAISE EXCEPTION 'N5 rollback blocked: non-scoped consumer checkpoint refs exist for unified target (%)', v_count;
-  END IF;
-
-  FOREACH v_table_name IN ARRAY ARRAY[
-    'user_projection_run',
-    'user_card_projection',
-    'user_signal_projection',
-    'user_signal_decision',
-    'user_notification_queue',
-    'user_notification_projection',
-    'user_voice_delivery',
-    'user_device_ack',
-    'user_market_projection',
-    'voice_delivery_queue',
-    'mobile_projection',
-    'mobile_notification_queue',
-    'sim_projection',
-    'sim_order',
-    'sim_trade',
-    'user_sim_order',
-    'user_sim_trade',
-    'user_sim_position',
-    'common_position_state',
-    'common_position_event',
-    'order_request',
-    'order_execution',
-    'real_trade_order',
-    'real_trade_execution',
-    'n6_virtual_order'
-  ]
-  LOOP
-    v_table_regclass := to_regclass('public.' || v_table_name);
-    IF v_table_regclass IS NOT NULL THEN
-      EXECUTE format(
-        'SELECT count(*) FROM %s t WHERE to_jsonb(t)::text LIKE $1 OR to_jsonb(t)::text LIKE $2 OR to_jsonb(t)::text LIKE $3',
-        v_table_regclass
-      )
-      INTO v_count
-      USING '%' || v_action_run_id || '%', '%' || v_source_trigger_run_id_ordinary || '%', '%' || v_source_trigger_run_id_hint || '%';
-      IF v_count > 0 THEN
-        RAISE EXCEPTION 'N5 rollback blocked: downstream table % has scoped refs (%)', v_table_name, v_count;
-      END IF;
-    END IF;
-  END LOOP;
 END $$;
 
-SELECT 'common_action_tracking_state' AS table_name, count(*) AS row_count
-FROM common_action_tracking_state
-WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'stock_action_fact', count(*) FROM stock_action_fact WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'index_action_fact', count(*) FROM index_action_fact WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'board_action_fact', count(*) FROM board_action_fact WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'common_action_event', count(*) FROM common_action_event WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'common_event_outbox_n5', count(*) FROM common_event_outbox WHERE source_layer = 'N5_action' AND source_run_id = :'action_run_id'
-UNION ALL
-SELECT 'common_event_inbox_scoped_consumer', count(*)
-FROM common_event_inbox
-WHERE consumer_name = :'consumer_name'
-  AND source_layer = 'N4_trigger'
-  AND source_run_id IN (:'source_trigger_run_id_ordinary', :'source_trigger_run_id_hint')
-UNION ALL
-SELECT 'common_event_consumer_checkpoint_scoped_consumer', count(*)
-FROM common_event_consumer_checkpoint
-WHERE consumer_name = :'consumer_name'
-  AND source_layer = 'N4_trigger'
+WITH target AS (
+  SELECT
+    'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id,
+    'trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1'::TEXT AS ordinary_trigger_run_id,
+    'trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1'::TEXT AS b2_trigger_run_id
+)
+DELETE FROM public.common_event_consumer_checkpoint checkpoint
+USING target
+WHERE checkpoint.consumer_name LIKE 'n5%'
+  AND checkpoint.source_layer = 'N4_trigger'
   AND (
-    checkpoint_payload::text LIKE '%' || :'source_trigger_run_id_ordinary' || '%'
-    OR checkpoint_payload::text LIKE '%' || :'source_trigger_run_id_hint' || '%'
-    OR checkpoint_payload::text LIKE '%' || :'action_run_id' || '%'
-  )
-UNION ALL
-SELECT 'common_action_quality_item', count(*) FROM common_action_quality_item WHERE run_id = :'action_run_id'
-UNION ALL
-SELECT 'common_action_run', count(*) FROM common_action_run WHERE run_id = :'action_run_id';
-
-DELETE FROM common_event_consumer_checkpoint
-WHERE consumer_name = :'consumer_name'
-  AND source_layer = 'N4_trigger'
-  AND (
-    checkpoint_payload::text LIKE '%' || :'source_trigger_run_id_ordinary' || '%'
-    OR checkpoint_payload::text LIKE '%' || :'source_trigger_run_id_hint' || '%'
-    OR checkpoint_payload::text LIKE '%' || :'action_run_id' || '%'
+    checkpoint.checkpoint_payload::TEXT LIKE '%' || target.action_run_id || '%'
+    OR checkpoint.checkpoint_payload::TEXT LIKE '%' || target.ordinary_trigger_run_id || '%'
+    OR checkpoint.checkpoint_payload::TEXT LIKE '%' || target.b2_trigger_run_id || '%'
+    OR checkpoint.last_event_id LIKE '%' || target.action_run_id || '%'
+    OR checkpoint.last_event_id LIKE '%' || target.ordinary_trigger_run_id || '%'
+    OR checkpoint.last_event_id LIKE '%' || target.b2_trigger_run_id || '%'
   );
 
-DELETE FROM common_event_inbox
-WHERE consumer_name = :'consumer_name'
-  AND source_layer = 'N4_trigger'
-  AND source_run_id IN (:'source_trigger_run_id_ordinary', :'source_trigger_run_id_hint');
+WITH target AS (
+  SELECT
+    'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id,
+    'trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1'::TEXT AS ordinary_trigger_run_id,
+    'trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1'::TEXT AS b2_trigger_run_id
+)
+DELETE FROM public.common_event_inbox inbox
+USING target
+WHERE inbox.status NOT IN ('delivering', 'delivered')
+  AND inbox.consumer_name LIKE 'n5%'
+  AND inbox.source_layer = 'N4_trigger'
+  AND (
+    inbox.source_run_id = target.ordinary_trigger_run_id
+    OR inbox.source_run_id = target.b2_trigger_run_id
+    OR inbox.payload_json::TEXT LIKE '%' || target.action_run_id || '%'
+    OR inbox.payload_json::TEXT LIKE '%' || target.ordinary_trigger_run_id || '%'
+    OR inbox.payload_json::TEXT LIKE '%' || target.b2_trigger_run_id || '%'
+    OR inbox.raw_json::TEXT LIKE '%' || target.action_run_id || '%'
+    OR inbox.raw_json::TEXT LIKE '%' || target.ordinary_trigger_run_id || '%'
+    OR inbox.raw_json::TEXT LIKE '%' || target.b2_trigger_run_id || '%'
+  );
 
-DELETE FROM common_event_outbox
-WHERE source_layer = 'N5_action'
-  AND source_run_id = :'action_run_id';
+WITH target AS (
+  SELECT
+    'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id,
+    'trigger_provisional_ordinary_20260626_until_1447__realtime_action_confirmation_metric_20260626_until_1447__asset_all__live_current_1m_amount_chain_v2_unified_payload_v1__atomic_rule_v1'::TEXT AS ordinary_trigger_run_id,
+    'trigger_provisional_b2_20260626_until_1447__realtime_projection_metric_20260626_until_1447__live_current_1m_unified_payload_v1__atomic_rule_v1'::TEXT AS b2_trigger_run_id
+)
+DELETE FROM public.common_event_outbox outbox
+USING target
+WHERE outbox.source_layer = 'N5_action'
+  AND outbox.source_run_id = target.action_run_id;
 
-DELETE FROM common_action_tracking_state
-WHERE run_id = :'action_run_id';
+WITH target AS (
+  SELECT 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id
+)
+DELETE FROM public.common_action_event event
+USING target
+WHERE event.run_id = target.action_run_id;
 
-DELETE FROM common_action_event
-WHERE run_id = :'action_run_id';
+WITH target AS (
+  SELECT 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id
+)
+DELETE FROM public.stock_action_fact fact
+USING target
+WHERE fact.run_id = target.action_run_id;
 
-DELETE FROM board_action_fact
-WHERE run_id = :'action_run_id';
+WITH target AS (
+  SELECT 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id
+)
+DELETE FROM public.index_action_fact fact
+USING target
+WHERE fact.run_id = target.action_run_id;
 
-DELETE FROM index_action_fact
-WHERE run_id = :'action_run_id';
+WITH target AS (
+  SELECT 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id
+)
+DELETE FROM public.board_action_fact fact
+USING target
+WHERE fact.run_id = target.action_run_id;
 
-DELETE FROM stock_action_fact
-WHERE run_id = :'action_run_id';
-
-DELETE FROM common_action_quality_item
-WHERE run_id = :'action_run_id';
-
-DELETE FROM common_action_run
-WHERE run_id = :'action_run_id';
+WITH target AS (
+  SELECT 'action_provisional_active_monitor_v2_20260626_until_1447__unified_n4_trigger_events_live_current_v1'::TEXT AS action_run_id
+)
+DELETE FROM public.common_action_tracking_state state
+USING target
+WHERE state.run_id = target.action_run_id;
 
 COMMIT;
