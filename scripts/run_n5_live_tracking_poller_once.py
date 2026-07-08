@@ -44,7 +44,9 @@ DEFAULT_DSN = os.environ.get("ASHARE_V3_POSTGRES_DSN", "")
 DEFAULT_EVENT_LIMIT = 1000
 DEFAULT_FASTLANE_MAX_RUNTIME_SECONDS = 10.0
 DEFAULT_FASTLANE_CONSUMER_NAME = "n5_live_tracking_poller_v2_fastlane"
-FASTLANE_EXECUTED_DISCOVERY_CANDIDATE_LIMIT = 50
+# Keep the executed poller bounded, but large enough to reach exact-ready refs
+# behind a backlog of active refs that do not yet have N3T proof.
+FASTLANE_EXECUTED_DISCOVERY_CANDIDATE_LIMIT = 256
 N5_OUTPUT_EVENT_TYPES = ("ActionEligible", "ActionExecuted")
 N4_INPUT_EVENT_TYPES = ("TriggerMatched", "TriggerStateChanged")
 N5_LIVE_TRACKING_SCHEMA_VERSION = "v2"

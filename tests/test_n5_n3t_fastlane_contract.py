@@ -3359,6 +3359,117 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             ],
         )
 
+    def test_n5_executed_discovery_reaches_exact_ready_ref_behind_no_proof_backlog(self) -> None:
+        import hashlib
+
+        from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_n3t_metric_run_id
+        import run_n5_live_tracking_poller_once as runner
+
+        action_run_id = "n5_live_tracking_20260708__active_set_a__fastlane_v1"
+        ready_event_id = "evt_ready_0956"
+        ready_source_hash = hashlib.sha256(ready_event_id.encode("utf-8")).hexdigest()[:12]
+        ready_state_key = (
+            "N5_action_tracking_state_v1|trade_date|20260708|asset_kind|stock|"
+            "identity_key|stock:SZ:002287|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,Q,M,W,D"
+        )
+        ready_metric_run_id = build_fastlane_n3t_metric_run_id(
+            for_trade_date="20260708",
+            target_hhmm="0956",
+            source_run_hash=ready_source_hash,
+        )
+        backlog_candidates = []
+        for idx in range(80):
+            event_id = f"evt_no_proof_{idx:02d}"
+            backlog_candidates.append(
+                {
+                    "run_id": action_run_id,
+                    "source_trigger_run_id": "",
+                    "source_trigger_event_id": event_id,
+                    "state_key": (
+                        "N5_action_tracking_state_v1|trade_date|20260708|asset_kind|stock|"
+                        f"identity_key|stock:SH:{600000 + idx:06d}|direction|buy|signal_type|B_BUY|condition_key|BUY:Y,D"
+                    ),
+                    "trigger_time": "2026-07-08 09:31:00+08",
+                    "latest_n4_event_time": "2026-07-08 09:31:00+08",
+                    "last_checked_minute_label": "",
+                    "next_unchecked_minute_label": "",
+                    "raw_json": {},
+                    "source_run_hash": "",
+                    "active_tracking_count": 1,
+                }
+            )
+        candidates = backlog_candidates + [
+            {
+                "run_id": action_run_id,
+                "source_trigger_run_id": "",
+                "source_trigger_event_id": ready_event_id,
+                "state_key": ready_state_key,
+                "trigger_time": "2026-07-08 09:56:00+08",
+                "latest_n4_event_time": "2026-07-08 09:56:00+08",
+                "last_checked_minute_label": "",
+                "next_unchecked_minute_label": "",
+                "raw_json": {},
+                "source_run_hash": "",
+                "active_tracking_count": 1,
+            }
+        ]
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = []
+
+            def execute(self, sql, params):
+                self.sql = str(sql)
+                self.params.append(params)
+
+            def fetchone(self):
+                rows = self.fetchall()
+                return rows[0] if rows else None
+
+            def fetchall(self):
+                sql = self.sql.lower()
+                if "from common_action_tracking_state" in sql:
+                    limit = int(self.params[-1][-1])
+                    return candidates[:limit]
+                if "n3t_action_confirmation_metric" in sql:
+                    params_text = " ".join(str(item) for item in self.params[-1])
+                    if f"fastlane_sr_{ready_source_hash}" in params_text and "until_0956" in params_text:
+                        return [{"projection_run_id": ready_metric_run_id, "latest_metric_time": "2026-07-08T09:57:00+08:00"}]
+                return []
+
+        planned_candidates = []
+
+        def fake_candidate_plan(_cur, _args, candidate, source_metric_run_id):
+            planned_candidates.append(
+                {
+                    "state_key": candidate.get("state_key"),
+                    "source_run_hash": candidate.get("source_run_hash"),
+                    "target_minute_label": candidate.get("target_minute_label"),
+                    "metric_run_id": source_metric_run_id,
+                }
+            )
+            return {"summary": {"tracking_upsert_count": 1}}
+
+        args = argparse.Namespace(for_trade_date="20260708")
+        with patch.object(runner, "_build_executed_candidate_plan", side_effect=fake_candidate_plan):
+            output = runner._discover_executed_runtime_inputs(FakeCursor(), args)
+
+        self.assertEqual(output["state_key"], ready_state_key)
+        self.assertEqual(output["source_metric_run_id"], ready_metric_run_id)
+        self.assertEqual(output["trigger_time"], "2026-07-08 09:56:00+08")
+        self.assertEqual(
+            planned_candidates,
+            [
+                {
+                    "state_key": ready_state_key,
+                    "source_run_hash": ready_source_hash,
+                    "target_minute_label": "0956",
+                    "metric_run_id": ready_metric_run_id,
+                }
+            ],
+        )
+
     def test_n5_executed_candidate_plan_passes_ref_state_key_for_empty_source_trigger_run_id(self) -> None:
         import run_n5_live_tracking_poller_once as runner
 

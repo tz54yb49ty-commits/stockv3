@@ -195,6 +195,26 @@ class FakeScopeConnection:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class FakePreviousDayReferenceConnection:
+    def __init__(self, *, cumulative_rows=None, entity_rows=None):
+        self.cumulative_rows = list(cumulative_rows or [])
+        self.entity_rows = list(entity_rows or [])
+        self.statements = []
+
+    def execute(self, sql, params=()):
+        self.statements.append((sql, params))
+        normalized = " ".join(sql.lower().split())
+        if "from board_previous_day_minute_cumulative" in normalized:
+            return FakeCursor(self.cumulative_rows)
+        if "from board_minute_bar_1m" in normalized:
+            return FakeCursor(self.entity_rows)
+        if "from index_previous_day_minute_cumulative" in normalized:
+            return FakeCursor([])
+        if "from index_minute_bar_1m" in normalized:
+            return FakeCursor([])
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
 class FakeTargetSnapshotConnection:
     def __init__(self, *, table_counts=None, existing_tables=None, columns_by_table=None):
         self.table_counts = table_counts or {}
@@ -373,6 +393,59 @@ def _previous_day_rows_for_first_window_preflight():
             }
         )
     return rows
+
+
+def _cumulative_row(identity_key, label, cumulative, *, elapsed_index):
+    return {
+        "asset_kind": "board",
+        "identity_key": identity_key,
+        "source_trade_date": "20260702",
+        "canonical_minute_label": label,
+        "cumulative_amount_yuan": cumulative,
+        "code": identity_key.rsplit(":", 1)[-1],
+        "exchange": "TDX",
+        "elapsed_index": elapsed_index,
+    }
+
+
+def _previous_day_cumulative_rows_for_first_window(identity_key="board:TDX:881001"):
+    rows = []
+    cumulative = 0
+    elapsed_index = 1
+    for label in _labels_between("09:31", "10:00"):
+        cumulative += 50
+        rows.append(_cumulative_row(identity_key, label, cumulative, elapsed_index=elapsed_index))
+        elapsed_index += 1
+    for label in _labels_between("14:31", "15:00"):
+        cumulative += 1
+        rows.append(_cumulative_row(identity_key, label, cumulative, elapsed_index=elapsed_index))
+        elapsed_index += 1
+    return rows
+
+
+def _previous_day_last_30m_entity_rows(identity_key="board:TDX:881001"):
+    return [
+        {
+            "asset_kind": "board",
+            "identity_key": identity_key,
+            "trade_date": "20260702",
+            "minute_label": "14:31",
+            "open": 7,
+            "close": 8,
+            "code": identity_key.rsplit(":", 1)[-1],
+            "exchange": "TDX",
+        },
+        {
+            "asset_kind": "board",
+            "identity_key": identity_key,
+            "trade_date": "20260702",
+            "minute_label": "15:00",
+            "open": 9,
+            "close": 11,
+            "code": identity_key.rsplit(":", 1)[-1],
+            "exchange": "TDX",
+        },
+    ]
 
 
 def _sample_execute_proof_row(index, *, projection_30m_type):
@@ -934,6 +1007,84 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
         )
         self.assertEqual(duplicate["result"], "BLOCKED_N3_HINT_SOURCE_SCOPE_NOT_READY")
         self.assertIn("duplicate_identity_ambiguity:board:board:TDX:881001", duplicate["reason"])
+
+    def test_previous_day_reference_loader_merges_a1_last_30m_entity_open_close(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_previous_day_reference_rows_with_connection
+
+        conn = FakePreviousDayReferenceConnection(
+            cumulative_rows=_previous_day_cumulative_rows_for_first_window(),
+            entity_rows=_previous_day_last_30m_entity_rows(),
+        )
+        target_run_id = (
+            "realtime_hint_projection_metric_20260703_until_0931__asset_index_board__"
+            "index_board_1m_hint_projection_v1_midday_bridge_v1__"
+            "market_data_subscription_20260703_condition_layer_20260702_source_20260702_for_20260703_v1"
+        )
+
+        result = _load_n3_hint_previous_day_reference_rows_with_connection(
+            conn=conn,
+            scope=_scope(index=False, stock_hint_excluded_count=0, for_trade_date="20260703"),
+            target_run_id=target_run_id,
+        )
+
+        self.assertNotIn("result", result)
+        rows_by_label = {row["minute_label"]: row for row in result["previous_day_1m_rows"]}
+        self.assertEqual(rows_by_label["09:31"]["amount"], 50)
+        self.assertNotIn("open", rows_by_label["09:31"])
+        self.assertEqual(rows_by_label["14:31"]["open"], 7)
+        self.assertEqual(rows_by_label["15:00"]["close"], 11)
+        self.assertEqual(rows_by_label["14:31"]["source_marker"], "a1_previous_day_cumulative_alias")
+        self.assertEqual(rows_by_label["14:31"]["entity_reference_source"], "previous_day_minute_bar_1m")
+        self.assertEqual(result["previous_day_entity_reference_rows"], 2)
+        self.assertEqual(result["previous_day_entity_reference_rows_merged"], 2)
+        self.assertTrue(any("board_previous_day_minute_cumulative" in sql for sql, _params in conn.statements))
+        self.assertTrue(any("board_minute_bar_1m" in sql for sql, _params in conn.statements))
+
+    def test_previous_day_reference_loader_does_not_invent_missing_a1_entity_open_close(self) -> None:
+        from ashare_v3.market.hint_1m_projection_proof import build_index_board_1m_hint_projection_proof
+        from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_previous_day_reference_rows_with_connection
+
+        target_run_id = (
+            "realtime_hint_projection_metric_20260703_until_0931__asset_index_board__"
+            "index_board_1m_hint_projection_v1_midday_bridge_v1__"
+            "market_data_subscription_20260703_condition_layer_20260702_source_20260702_for_20260703_v1"
+        )
+        result = _load_n3_hint_previous_day_reference_rows_with_connection(
+            conn=FakePreviousDayReferenceConnection(
+                cumulative_rows=_previous_day_cumulative_rows_for_first_window(),
+                entity_rows=[],
+            ),
+            scope=_scope(index=False, stock_hint_excluded_count=0, for_trade_date="20260703"),
+            target_run_id=target_run_id,
+        )
+
+        rows_by_label = {row["minute_label"]: row for row in result["previous_day_1m_rows"]}
+        self.assertNotIn("open", rows_by_label["14:31"])
+        self.assertEqual(result["previous_day_entity_reference_rows"], 0)
+        self.assertEqual(result["previous_day_entity_reference_rows_merged"], 0)
+
+        proof = build_index_board_1m_hint_projection_proof(
+            asset_kind="board",
+            identity_key="board:TDX:881001",
+            for_trade_date="20260703",
+            previous_trade_date="20260702",
+            proof_input_time="2026-07-03T09:31:00+08:00",
+            current_day_1m_rows=[
+                {
+                    "asset_kind": "board",
+                    "identity_key": "board:TDX:881001",
+                    "trade_date": "20260703",
+                    "minute_label": "09:31",
+                    "open": 10,
+                    "close": 10,
+                    "amount": 100,
+                }
+            ],
+            previous_day_1m_rows=result["previous_day_1m_rows"],
+            projection_run_id=target_run_id,
+        )
+        self.assertFalse(proof["valid"])
+        self.assertIn("missing_previous_trade_date_last_30m_open_close", proof["blocked_reasons"])
 
     def test_target_snapshot_loader_uses_structured_event_refs_without_json_text_scans(self) -> None:
         from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_target_snapshot_with_connection

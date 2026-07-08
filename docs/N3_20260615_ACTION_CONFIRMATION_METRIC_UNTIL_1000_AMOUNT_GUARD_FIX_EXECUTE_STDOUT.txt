@@ -1,0 +1,155 @@
+{
+  "blocked_reasons": [],
+  "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+  "quality": {
+    "P0": 0,
+    "P1": 1,
+    "P2": 0,
+    "items": [
+      {
+        "actual_value": "{\"board\": 1, \"index\": 0, \"stock\": 29, \"total\": 30}",
+        "data_domain": "common",
+        "details": {
+          "blocked_reasons": [],
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "{\"board\": 1, \"index\": 0, \"stock\": 29, \"total\": 30}",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_payload_valid",
+        "gate_name": "payload row counts, metric_ready, BJ/FULL exclusion, and DB CHECK simulation must pass",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "{\"covered\": 30, \"distinct_metric_rows\": 30, \"excluded_bj_or_full\": 0, \"excluded_full\": 0, \"expected\": 30, \"missing\": 0, \"missing_metric_identity_count\": 0, \"missing_metric_identity_sample\": [], \"source_total_trigger_matched\": 30}",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "30",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_n4_coverage",
+        "gate_name": "payload must account for every in-scope N4 TriggerMatched event; excluded rows stay quality-visible and are not silently materialized",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "{\"board_action_confirmation_projection_metric\": 0, \"common_event_consumer_checkpoint\": 0, \"common_event_inbox\": 0, \"common_event_outbox\": 0, \"common_market_data_quality_item\": 0, \"common_market_data_run\": 0, \"downstream_refs\": {\"common_action_event\": 0, \"common_trigger_match\": 0, \"common_trigger_state\": 0, \"n6_virtual_account\": 0, \"n6_virtual_order\": 0, \"n6_virtual_pnl_snapshot\": 0, \"n6_virtual_position\": 0, \"n6_virtual_position_event\": 0, \"n6_virtual_trade\": 0, \"total\": 0, \"user_card_projection\": 0, \"user_notification_queue\": 0, \"user_signal_card\": 0, \"user_signal_projection\": 0, \"user_sim_order\": 0, \"user_sim_position\": 0, \"user_sim_trade\": 0}, \"index_action_confirmation_projection_metric\": 0, \"stock_action_confirmation_projection_metric\": 0}",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "nonzero": {},
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "all scoped counts 0",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_scoped_baseline_zero",
+        "gate_name": "projection_run_id scoped run/quality/metric/outbox/inbox/checkpoint rows must be zero",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "{\"common_action_event\": 0, \"common_trigger_match\": 0, \"common_trigger_state\": 0, \"n6_virtual_account\": 0, \"n6_virtual_order\": 0, \"n6_virtual_pnl_snapshot\": 0, \"n6_virtual_position\": 0, \"n6_virtual_position_event\": 0, \"n6_virtual_trade\": 0, \"total\": 0, \"user_card_projection\": 0, \"user_notification_queue\": 0, \"user_signal_card\": 0, \"user_signal_projection\": 0, \"user_sim_order\": 0, \"user_sim_position\": 0, \"user_sim_trade\": 0}",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "0",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_downstream_refs_zero",
+        "gate_name": "N4/N5/N6 downstream refs for projection_run_id must be zero before execute",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "0",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "0",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_bj_excluded",
+        "gate_name": "BJ identities are intentionally excluded from this action-confirmation metric lineage",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "{\"full_condition_key_rows\": 0, \"full_signal_type_rows\": 0}",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "0",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_full_excluded",
+        "gate_name": "FULL rows are intentionally excluded from this action-confirmation metric lineage",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P0",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "passed",
+        "table_name": "common_market_data_run"
+      },
+      {
+        "actual_value": "N4 payload unchanged by N3",
+        "data_domain": "common",
+        "details": {
+          "metric_scope": "action_confirmation_projection_metric",
+          "projection_run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1"
+        },
+        "expected_value": "explicit downstream join/link policy",
+        "for_trade_date": "20260615",
+        "gate_code": "n3_action_metric_materialization_n4_payload_metric_id_still_zero",
+        "gate_name": "N3 materialization does not mutate N4 payload source_action_confirmation_metric_id; downstream must use deterministic join or a separate link refresh",
+        "layer_scope": "market_data_run",
+        "run_id": "action_confirmation_projection_metric_20260615_until_1000_after_n4_amount_guard_fix_v1",
+        "severity": "P1",
+        "source_condition_run_id": "condition_layer_20260612_source_20260612_for_20260615_v1",
+        "source_trade_date": "20260612",
+        "status": "warning",
+        "table_name": "common_market_data_run"
+      }
+    ]
+  },
+  "result": "EXECUTE_PASS",
+  "rows": {
+    "board": 1,
+    "index": 0,
+    "stock": 29,
+    "total": 30
+  },
+  "writes_database": true,
+  "writes_outbox": false
+}

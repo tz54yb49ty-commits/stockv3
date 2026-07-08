@@ -1573,9 +1573,23 @@ def _load_n3_hint_previous_day_reference_rows_with_connection(
     parsed = parse_hint_projection_run_id(target_run_id)
     source_previous_day_minute_run_id = _derive_previous_day_minute_run_id(parsed_target=parsed)
     rows: list[dict[str, Any]] = []
-    for asset_kind, table_name, objects_key in (
-        ("index", "index_previous_day_minute_cumulative", "index_1m_objects"),
-        ("board", "board_previous_day_minute_cumulative", "board_1m_objects"),
+    entity_reference_row_count = 0
+    merged_entity_reference_row_count = 0
+    for asset_kind, cumulative_table_name, minute_table_name, identity_column, objects_key in (
+        (
+            "index",
+            "index_previous_day_minute_cumulative",
+            "index_minute_bar_1m",
+            "index_identity_key",
+            "index_1m_objects",
+        ),
+        (
+            "board",
+            "board_previous_day_minute_cumulative",
+            "board_minute_bar_1m",
+            "board_identity_key",
+            "board_1m_objects",
+        ),
     ):
         identities = [str(obj.get("identity_key") or "") for obj in _rows(scope, objects_key)]
         identities = [identity for identity in identities if identity]
@@ -1593,7 +1607,7 @@ def _load_n3_hint_previous_day_reference_rows_with_connection(
               code,
               exchange,
               elapsed_index
-            FROM {table_name}
+            FROM {cumulative_table_name}
             WHERE source_previous_day_minute_run_id=%s
               AND for_trade_date=%s
               AND source_trade_date=%s
@@ -1607,13 +1621,30 @@ def _load_n3_hint_previous_day_reference_rows_with_connection(
                 identities,
             ),
         )
-        rows.extend(_cumulative_rows_to_1m_reference_rows(cumulative_rows, expected_asset_kind=asset_kind))
+        reference_rows = _cumulative_rows_to_1m_reference_rows(cumulative_rows, expected_asset_kind=asset_kind)
+        entity_reference_rows = _fetch_previous_day_last_30m_entity_reference_rows(
+            conn=conn,
+            asset_kind=asset_kind,
+            table_name=minute_table_name,
+            identity_column=identity_column,
+            for_trade_date=parsed["trade_date"],
+            previous_trade_date=parsed["source_trade_date"],
+            identities=identities,
+        )
+        entity_reference_row_count += len(entity_reference_rows)
+        merged_entity_reference_row_count += _merge_previous_day_last_30m_entity_reference_rows(
+            reference_rows,
+            entity_reference_rows,
+        )
+        rows.extend(reference_rows)
     if not rows:
         return _blocked(HINT_PROOF_PREFLIGHT_BLOCKER, "previous_day_reference_rows_missing")
     return {
         "previous_day_1m_rows": rows,
         "source_previous_day_minute_run_id": source_previous_day_minute_run_id,
         "previous_day_reference_rows": len(rows),
+        "previous_day_entity_reference_rows": entity_reference_row_count,
+        "previous_day_entity_reference_rows_merged": merged_entity_reference_row_count,
     }
 
 
@@ -2115,6 +2146,89 @@ def _cumulative_rows_to_1m_reference_rows(rows: Sequence[Any], *, expected_asset
             }
         )
     return output
+
+
+def _fetch_previous_day_last_30m_entity_reference_rows(
+    *,
+    conn: Any,
+    asset_kind: str,
+    table_name: str,
+    identity_column: str,
+    for_trade_date: str,
+    previous_trade_date: str,
+    identities: Sequence[str],
+) -> list[Any]:
+    return _fetchall(
+        conn,
+        f"""
+        SELECT
+          '{asset_kind}' AS asset_kind,
+          {identity_column} AS identity_key,
+          trade_date,
+          to_char(bar_time AT TIME ZONE 'Asia/Shanghai', 'HH24:MI') AS minute_label,
+          open,
+          close,
+          code,
+          exchange
+        FROM {table_name}
+        WHERE for_trade_date=%s
+          AND trade_date=%s
+          AND is_previous_day_preload IS TRUE
+          AND quality_status='passed'
+          AND {identity_column} = ANY(%s)
+          AND to_char(bar_time AT TIME ZONE 'Asia/Shanghai', 'HH24:MI') = ANY(%s)
+        ORDER BY {identity_column}, bar_time
+        """,
+        (
+            for_trade_date,
+            previous_trade_date,
+            list(identities),
+            ["14:31", "15:00"],
+        ),
+    )
+
+
+def _merge_previous_day_last_30m_entity_reference_rows(
+    reference_rows: list[dict[str, Any]],
+    entity_rows: Sequence[Any],
+) -> int:
+    entity_by_key: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    for raw in entity_rows:
+        row = raw if isinstance(raw, Mapping) else {
+            "asset_kind": raw[0],
+            "identity_key": raw[1],
+            "trade_date": raw[2],
+            "minute_label": raw[3],
+            "open": raw[4],
+            "close": raw[5],
+            "code": raw[6],
+            "exchange": raw[7],
+        }
+        key = (
+            str(row.get("asset_kind") or ""),
+            str(row.get("identity_key") or ""),
+            str(row.get("trade_date") or ""),
+            str(row.get("minute_label") or ""),
+        )
+        entity_by_key[key] = row
+
+    merged_count = 0
+    for row in reference_rows:
+        key = (
+            str(row.get("asset_kind") or ""),
+            str(row.get("identity_key") or ""),
+            str(row.get("trade_date") or ""),
+            str(row.get("minute_label") or row.get("canonical_minute_label") or ""),
+        )
+        entity = entity_by_key.get(key)
+        if entity is None:
+            continue
+        for field in ("open", "close"):
+            if entity.get(field) is not None:
+                row[field] = entity.get(field)
+        row["entity_reference_source"] = "previous_day_minute_bar_1m"
+        merged_count += 1
+    return merged_count
 
 
 def _count_sql(conn: Any, sql: str, params: Sequence[Any] = ()) -> int:
