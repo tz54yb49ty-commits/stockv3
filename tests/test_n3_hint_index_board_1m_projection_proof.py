@@ -313,6 +313,53 @@ class N3HintIndexBoard1mProjectionProofTest(unittest.TestCase):
         self.assertIn("missing_previous_day_full_30m_rows", missing_previous["blocked_reasons"])
         self.assertIn("previous_day_same_elapsed_30m_amount_non_positive", non_positive["blocked_reasons"])
 
+    def test_missing_current_elapsed_row_reports_specific_missing_labels(self) -> None:
+        proof = build_index_board_1m_hint_projection_proof(
+            asset_kind="index",
+            identity_key="index:SH:000016",
+            for_trade_date="20260629",
+            previous_trade_date="20260626",
+            proof_input_time="2026-06-29T10:12:00+08:00",
+            current_day_1m_rows=current_rows_for_1012()[:-1],
+            previous_day_1m_rows=previous_rows_for_1001_window(),
+        )
+
+        self.assertFalse(proof["valid"])
+        self.assertIn("missing_current_day_elapsed_1m_rows", proof["blocked_reasons"])
+        self.assertNotIn("missing_current_day_1m_rows", proof["blocked_reasons"])
+        self.assertEqual(proof["missing_current_day_elapsed_labels"], ["10:12"])
+        self.assertEqual(proof["current_day_available_latest_minute_label"], "10:11")
+
+    def test_current_row_with_missing_fields_reports_field_specific_blockers(self) -> None:
+        amount_rows = current_rows_for_1012()
+        amount_rows[-1]["amount"] = None
+        price_rows = current_rows_for_1012()
+        price_rows[-1]["close"] = None
+
+        missing_amount = build_index_board_1m_hint_projection_proof(
+            asset_kind="index",
+            identity_key="index:SH:000016",
+            for_trade_date="20260629",
+            previous_trade_date="20260626",
+            proof_input_time="2026-06-29T10:12:00+08:00",
+            current_day_1m_rows=amount_rows,
+            previous_day_1m_rows=previous_rows_for_1001_window(),
+        )
+        missing_price = build_index_board_1m_hint_projection_proof(
+            asset_kind="index",
+            identity_key="index:SH:000016",
+            for_trade_date="20260629",
+            previous_trade_date="20260626",
+            proof_input_time="2026-06-29T10:12:00+08:00",
+            current_day_1m_rows=price_rows,
+            previous_day_1m_rows=previous_rows_for_1001_window(),
+        )
+
+        self.assertIn("missing_current_30m_elapsed_amount", missing_amount["blocked_reasons"])
+        self.assertNotIn("missing_current_day_elapsed_1m_rows", missing_amount["blocked_reasons"])
+        self.assertIn("missing_current_30m_price", missing_price["blocked_reasons"])
+        self.assertNotIn("missing_current_day_elapsed_1m_rows", missing_price["blocked_reasons"])
+
 
 def current_rows_for_1012(
     *,

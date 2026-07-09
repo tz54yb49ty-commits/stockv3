@@ -20,7 +20,7 @@ from ashare_v3.market.intraday_supervisor import (
 try:
     from check_condition_source_ready import DEFAULT_DSN
 except ModuleNotFoundError:
-    DEFAULT_DSN = "postgresql://ashare_v3_user:ashare_v3_password@127.0.0.1:5432/ashare_v3"
+    DEFAULT_DSN = ""
 
 
 def main(argv: list[str] | None = None) -> int:

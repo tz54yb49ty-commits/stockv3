@@ -12,6 +12,9 @@ from ashare_v3.runtime.post_close_fastlane import (
     n4_context_run_id_for,
     run_post_close_oneshot,
 )
+from ashare_v3.runtime.intraday_worker_lineage import (
+    build_intraday_worker_lineage_refresh_report,
+)
 from ashare_v3.web.post_close_fastlane_status import read_post_close_fastlane_status
 
 
@@ -225,6 +228,141 @@ class PostCloseFastLaneOneShotTest(unittest.TestCase):
             self.assertEqual(payload["source_status_path"], str(docs_root / "20260612" / "00_status.json"))
             self.assertEqual(payload["source_oneshot_report_path"], str(docs_root / "20260612" / "01_oneshot_execute_report.json"))
 
+    def test_repair_refresh_writes_intraday_worker_lineage_config_after_status_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "docs" / "post_close_fastlane"
+            docs_dir = docs_root / "20260612"
+            docs_dir.mkdir(parents=True)
+            (docs_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "failed_step_id": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (docs_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "run_ids": {
+                            "condition_run_id": "condition_layer_20260611_source_20260611_for_20260612_v1",
+                            "subscription_run_id": "market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                            "preload_run_id": "previous_day_minute_preload_20260611_for_20260612__market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_intraday_worker_lineage_refresh_report(
+                docs_root=docs_root,
+                docs_dir=docs_dir,
+                updated_by="runtime_control_status_repair",
+                execute=True,
+            )
+            config_path = docs_root.parent / "runtime" / "current_intraday_worker_lineage.json"
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["result"], "LINEAGE_REFRESH_PASS")
+        self.assertTrue(report["lineage_written"])
+        self.assertEqual(payload["for_trade_date"], "20260612")
+        self.assertEqual(payload["source_trade_date"], "20260611")
+        self.assertEqual(payload["updated_by"], "runtime_control_status_repair")
+
+    def test_repair_refresh_noops_when_intraday_worker_lineage_already_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "docs" / "post_close_fastlane"
+            docs_dir = docs_root / "20260612"
+            docs_dir.mkdir(parents=True)
+            status_path = docs_dir / "00_status.json"
+            report_path = docs_dir / "01_oneshot_execute_report.json"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "result": "EXECUTE_PASS",
+                        "run_ids": {
+                            "condition_run_id": "condition_layer_20260611_source_20260611_for_20260612_v1",
+                            "subscription_run_id": "market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                            "preload_run_id": "previous_day_minute_preload_20260611_for_20260612__market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = docs_root.parent / "runtime" / "current_intraday_worker_lineage.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "for_trade_date": "20260612",
+                        "source_trade_date": "20260611",
+                        "n2_run_id": "condition_layer_20260611_source_20260611_for_20260612_v1",
+                        "subscription_run_id": "market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                        "a1_preload_run_id": "previous_day_minute_preload_20260611_for_20260612__market_data_subscription_20260612_condition_layer_20260611_source_20260611_for_20260612_v1",
+                        "n4_context_run_id": n4_context_run_id_for("20260611", "20260612"),
+                        "updated_by": "previous_refresh",
+                        "updated_at": "2026-06-12T02:06:21+08:00",
+                        "source_status_path": str(status_path),
+                        "source_oneshot_report_path": str(report_path),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report = build_intraday_worker_lineage_refresh_report(docs_root=docs_root, docs_dir=docs_dir, execute=True)
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["result"], "LINEAGE_REFRESH_NOOP_ALREADY_CURRENT")
+        self.assertFalse(report["lineage_written"])
+        self.assertEqual(payload["updated_by"], "previous_refresh")
+
+    def test_repair_refresh_blocks_when_fastlane_status_is_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "docs" / "post_close_fastlane"
+            docs_dir = docs_root / "20260612"
+            docs_dir.mkdir(parents=True)
+            (docs_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "PARTIAL_BLOCKED",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "failed_step_id": "n4_trigger_context_snapshot",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (docs_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps({"result": "PARTIAL_BLOCKED"}),
+                encoding="utf-8",
+            )
+
+            report = build_intraday_worker_lineage_refresh_report(docs_root=docs_root, docs_dir=docs_dir, execute=True)
+
+        self.assertEqual(report["result"], "BLOCKED_FASTLANE_NOT_PASS")
+        self.assertEqual(report["blocked_reason"], "fastlane_not_execute_pass")
+
     def test_n5_n3t_readiness_rollover_failure_does_not_fail_main_post_close_result(self) -> None:
         calls = []
 
@@ -392,6 +530,13 @@ class PostCloseFastLaneOneShotTest(unittest.TestCase):
         readiness = status["n5_n3t_next_trade_day_readiness"]
         self.assertEqual(readiness["next_trade_date"], "20260615")
         self.assertEqual(readiness["review_result"], "WAITING")
+        readiness_steps = [
+            row for row in status["sub_steps"] if row["step_id"] == "n5_n3t_next_trade_day_readiness_rollover"
+        ]
+        self.assertEqual(len(readiness_steps), 1)
+        self.assertEqual(readiness_steps[0]["layer_role"], "runtime_control")
+        self.assertEqual(readiness_steps[0]["status"], "PASS")
+        self.assertEqual(readiness_steps[0]["report_paths"][0], "tmp/N5_N3T_action_confirmation_fastlane_activation_config/write_enabled_activation_config_current_runtime_deferred_v1.json")
         labels = [item["label"] for item in status["artifacts"]]
         self.assertIn("N5/N3T stable activation config", labels)
         self.assertIn("N5/N3T active worker policy review", labels)
@@ -498,6 +643,12 @@ class PostCloseFastLaneOneShotTest(unittest.TestCase):
         self.assertEqual(readiness["review_result"], "WAITING")
         self.assertFalse(readiness["active_worker_write_enabled_ready"])
         self.assertEqual(readiness["launchd_live_state"], "not_checked_by_status_page")
+        readiness_steps = [
+            row for row in status["sub_steps"] if row["step_id"] == "n5_n3t_next_trade_day_readiness_rollover"
+        ]
+        self.assertEqual(len(readiness_steps), 1)
+        self.assertEqual(readiness_steps[0]["status"], "PASS")
+        self.assertEqual(readiness_steps[0]["returncode"], "—")
         labels = [item["label"] for item in status["artifacts"]]
         self.assertIn("N5/N3T readiness rollover report", labels)
         self.assertIn("N5/N3T stable activation config", labels)

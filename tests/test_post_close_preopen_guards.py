@@ -9,6 +9,7 @@ from unittest.mock import patch
 from scripts.review_post_close_preopen_guards import (
     GuardBlocked,
     SAFE_PROOF_POLLER_ALLOWLIST,
+    build_active_lineage_materialization_guard_report,
     build_lineage_pollution_guard_report,
     build_n4_context_rollback_ready_report,
     build_preopen_readiness_noop_report,
@@ -47,6 +48,61 @@ COMMIT;
 
 
 class PostClosePreopenGuardsTest(unittest.TestCase):
+    def _write_fastlane_pass_artifacts(self, docs_root: Path, *, source_trade_date: str, for_trade_date: str) -> Path:
+        docs_dir = docs_root / for_trade_date
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "00_status.json").write_text(
+            json.dumps(
+                {
+                    "result": "EXECUTE_PASS",
+                    "source_trade_date": source_trade_date,
+                    "for_trade_date": for_trade_date,
+                    "failed_step_id": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (docs_dir / "01_oneshot_execute_report.json").write_text(
+            json.dumps(
+                {
+                    "result": "EXECUTE_PASS",
+                    "source_trade_date": source_trade_date,
+                    "for_trade_date": for_trade_date,
+                }
+            ),
+            encoding="utf-8",
+        )
+        latest = docs_root / "latest"
+        if latest.exists() or latest.is_symlink():
+            latest.unlink()
+        latest.symlink_to(docs_dir.name)
+        return docs_dir
+
+    def _write_lineage_config(self, path: Path, *, source_trade_date: str, for_trade_date: str, docs_dir: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "for_trade_date": for_trade_date,
+                    "source_trade_date": source_trade_date,
+                    "n2_run_id": f"condition_layer_{source_trade_date}_source_{source_trade_date}_for_{for_trade_date}_v1",
+                    "subscription_run_id": f"market_data_subscription_{for_trade_date}_condition_layer_{source_trade_date}_source_{source_trade_date}_for_{for_trade_date}_v1",
+                    "a1_preload_run_id": f"previous_day_minute_preload_{source_trade_date}_for_{for_trade_date}__market_data_subscription_{for_trade_date}_condition_layer_{source_trade_date}_source_{source_trade_date}_for_{for_trade_date}_v1",
+                    "n4_context_run_id": f"trigger_context_snapshot_{for_trade_date}_condition_layer_{source_trade_date}_source_{source_trade_date}_for_{for_trade_date}_v1__atomic_rule_v1",
+                    "updated_by": "runtime_control_status_repair",
+                    "updated_at": "2026-06-12T02:06:21+08:00",
+                    "source_status_path": str(docs_dir / "00_status.json"),
+                    "source_oneshot_report_path": str(docs_dir / "01_oneshot_execute_report.json"),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def _write_worker_report(self, path: Path, payload: dict) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -140,6 +196,95 @@ class PostClosePreopenGuardsTest(unittest.TestCase):
             )
 
         self.assertIn("preopen_readiness_missing:n3_a1_cumulative_amount", str(caught.exception))
+
+    def test_active_lineage_materialization_guard_passes_when_latest_pass_matches_current_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs_root = root / "docs" / "post_close_fastlane"
+            docs_dir = self._write_fastlane_pass_artifacts(
+                docs_root,
+                source_trade_date="20260611",
+                for_trade_date="20260612",
+            )
+            lineage_path = root / "docs" / "runtime" / "current_intraday_worker_lineage.json"
+            self._write_lineage_config(
+                lineage_path,
+                source_trade_date="20260611",
+                for_trade_date="20260612",
+                docs_dir=docs_dir,
+            )
+
+            report = build_active_lineage_materialization_guard_report(
+                for_trade_date="20260612",
+                docs_root=docs_root,
+                lineage_config_path=lineage_path,
+            )
+
+        self.assertEqual(report["result"], "PASS")
+        self.assertTrue(report["active_lineage_materialized"])
+        self.assertFalse(report["launchd_mutated"])
+
+    def test_active_lineage_materialization_guard_blocks_latest_pass_with_stale_current_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs_root = root / "docs" / "post_close_fastlane"
+            docs_dir = self._write_fastlane_pass_artifacts(
+                docs_root,
+                source_trade_date="20260611",
+                for_trade_date="20260612",
+            )
+            old_docs_dir = docs_root / "20260611"
+            old_docs_dir.mkdir(parents=True)
+            lineage_path = root / "docs" / "runtime" / "current_intraday_worker_lineage.json"
+            self._write_lineage_config(
+                lineage_path,
+                source_trade_date="20260610",
+                for_trade_date="20260611",
+                docs_dir=old_docs_dir,
+            )
+
+            with self.assertRaises(GuardBlocked) as caught:
+                build_active_lineage_materialization_guard_report(
+                    for_trade_date="20260612",
+                    docs_root=docs_root,
+                    lineage_config_path=lineage_path,
+                )
+
+        self.assertEqual(caught.exception.report["blocked_reason"], "BLOCKED_ACTIVE_LINEAGE_NOT_MATERIALIZED")
+        self.assertIn("for_trade_date", caught.exception.report["mismatches"])
+
+    def test_active_lineage_materialization_guard_blocks_when_latest_fastlane_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs_root = root / "docs" / "post_close_fastlane"
+            docs_dir = docs_root / "20260612"
+            docs_dir.mkdir(parents=True)
+            (docs_dir / "00_status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "PARTIAL_BLOCKED",
+                        "source_trade_date": "20260611",
+                        "for_trade_date": "20260612",
+                        "failed_step_id": "n4_trigger_context_snapshot",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (docs_dir / "01_oneshot_execute_report.json").write_text(
+                json.dumps({"result": "PARTIAL_BLOCKED"}),
+                encoding="utf-8",
+            )
+            (docs_root / "latest").symlink_to("20260612")
+
+            with self.assertRaises(GuardBlocked) as caught:
+                build_active_lineage_materialization_guard_report(
+                    for_trade_date="20260612",
+                    docs_root=docs_root,
+                    lineage_config_path=root / "docs" / "runtime" / "current_intraday_worker_lineage.json",
+                )
+
+        self.assertEqual(caught.exception.report["blocked_reason"], "BLOCKED_FASTLANE_NOT_PASS")
+        self.assertEqual(caught.exception.report["failed_step_id"], "n4_trigger_context_snapshot")
 
     def test_lineage_pollution_guard_blocks_intraday_runtime_refs(self) -> None:
         with self.assertRaises(GuardBlocked) as caught:

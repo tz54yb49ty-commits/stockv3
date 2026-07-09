@@ -43,7 +43,7 @@ BLOCKED_PREVIOUS_DAY_RAW_C1_CONTEXT_INSUFFICIENT = "BLOCKED_PREVIOUS_DAY_RAW_C1_
 BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH = "BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH"
 BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE = "BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE"
 
-SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_morning_close_boundary_v2"
+SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_morning_close_boundary_v3"
 SOURCE_LABEL_SEMANTICS = "source_label"
 PHYSICAL_LABEL_SEMANTICS = "start_label"
 FORBIDDEN_SOURCE_CLOSE_LABELS = {"11:30"}
@@ -385,33 +385,18 @@ def apply_source_close_label_policy_to_row(row: Mapping[str, Any], *, for_trade_
 
 
 def _source_close_label_for_physical_label(physical_label: str) -> str:
-    if physical_label == "11:29":
-        return "13:00"
     if not validate_ashare_c1_minute_label(physical_label):
         return ""
-    hour_text, minute_text = physical_label.split(":", 1)
-    hour = int(hour_text)
-    minute = int(minute_text) + 1
-    if minute >= 60:
-        hour += 1
-        minute = 0
-    return f"{hour:02d}:{minute:02d}"
+    return physical_label
 
 
 def _physical_label_for_source_close_label(raw_label: str) -> str:
-    if raw_label in {"11:30", "13:00"}:
-        return "11:29"
+    if raw_label == "11:30":
+        return "13:00"
     if not re.fullmatch(r"\d{2}:\d{2}", raw_label or ""):
         return ""
-    hour_text, minute_text = raw_label.split(":", 1)
-    hour = int(hour_text)
-    minute = int(minute_text) - 1
-    if minute < 0:
-        hour -= 1
-        minute = 59
-    physical_label = f"{hour:02d}:{minute:02d}"
     try:
-        return validate_ashare_c1_minute_label(physical_label)
+        return validate_ashare_c1_minute_label(raw_label)
     except MinuteLabelNormalizationError:
         return ""
 
@@ -458,7 +443,7 @@ def build_n3_c1_scoped_artifact_plan(
         )
         return base
 
-    normalized_rows = _expand_active_scope_rows(scope_rows, for_trade_date=for_trade_date)
+    normalized_rows = _expand_scope_rows_for_metric_artifact(scope, scope_rows, for_trade_date=for_trade_date)
     if normalized_rows is None:
         return _blocked_artifact(base, BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH)
     if not normalized_rows:
@@ -657,7 +642,7 @@ def build_n3_c1_n3t_metric_context_source_artifact(
         return base
 
     object_scope_rows = _normalize_c1_object_scope_rows(scope_rows, for_trade_date=for_trade_date)
-    normalized_scope_rows = _expand_active_scope_rows(scope_rows, for_trade_date=for_trade_date)
+    normalized_scope_rows = _expand_scope_rows_for_metric_artifact(scope, scope_rows, for_trade_date=for_trade_date)
     if object_scope_rows is None or normalized_scope_rows is None:
         return _blocked_metric_context_source_artifact(base, BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH)
     if not normalized_scope_rows:
@@ -677,10 +662,15 @@ def build_n3_c1_n3t_metric_context_source_artifact(
         refs_by_object.setdefault(_object_scope_key(scope_row), []).append(scope_row)
     current_rows_by_scope = _index_current_day_closed_rows(staging.get("closed_minute_rows") or [])
     previous_rows_by_identity = _index_previous_day_minute_rows(previous_day_minute_rows or [])
+    target_label = _hhmm_label(target_hhmm)
     metric_context_rows: list[dict[str, Any]] = []
     for object_row in object_scope_rows:
         object_key = _object_scope_key(object_row)
-        current_rows = current_rows_by_scope.get(object_key) or []
+        current_rows = _current_rows_through_target(
+            current_rows_by_scope.get(object_key) or [],
+            labels=canonical_ashare_1m_labels(for_trade_date),
+            target_label=target_label,
+        )
         previous_rows = previous_rows_by_identity.get((object_row["asset_kind"], object_row["identity_key"])) or []
         if not current_rows:
             return _blocked_metric_context_source_artifact(base, BLOCKED_N3_C1_SCOPED_CONTEXT_INSUFFICIENT)
@@ -1340,6 +1330,109 @@ def _expand_active_scope_rows(scope_rows: Sequence[Any], *, for_trade_date: str)
     return expanded
 
 
+def _expand_scope_rows_for_metric_artifact(
+    scope: Mapping[str, Any],
+    scope_rows: Sequence[Any],
+    *,
+    for_trade_date: str,
+) -> list[dict[str, Any]] | None:
+    if scope.get("object_minute_scope") is True:
+        return _expand_object_minute_scope_rows(scope_rows, for_trade_date=for_trade_date)
+    return _expand_active_scope_rows(scope_rows, for_trade_date=for_trade_date)
+
+
+def _expand_object_minute_scope_rows(scope_rows: Sequence[Any], *, for_trade_date: str) -> list[dict[str, Any]] | None:
+    expanded: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in scope_rows:
+        source = dict(row or {})
+        refs = list(source.get("active_tracking_refs") or [])
+        if not refs:
+            normalized = _normalize_scope_row(source)
+            if not _valid_scope_row(normalized, for_trade_date):
+                return None
+            key = _object_minute_scope_key(normalized)
+            if key not in seen:
+                expanded.append(normalized)
+                seen.add(key)
+            continue
+        grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for ref_source in refs:
+            ref = dict(ref_source or {})
+            enriched = {
+                "for_trade_date": source.get("for_trade_date"),
+                "asset_kind": source.get("asset_kind"),
+                "identity_key": source.get("identity_key"),
+                "scope_status": source.get("scope_status"),
+                **ref,
+            }
+            normalized = _normalize_scope_row(enriched)
+            if not _valid_scope_row(normalized, for_trade_date, source_trigger_run_id_required=False):
+                return None
+            grouped.setdefault(_object_minute_scope_key(normalized), []).append(enriched)
+        for key, group_refs in grouped.items():
+            if key in seen:
+                continue
+            primary = sorted(group_refs, key=_object_minute_primary_ref_sort_key)[0]
+            normalized = _normalize_scope_row(primary)
+            normalized.update(
+                {
+                    "object_minute_scope": True,
+                    "object_minute_ref_count": len(group_refs),
+                    "object_minute_ref_trace": _compact_object_minute_ref_trace(group_refs),
+                }
+            )
+            expanded.append(normalized)
+            seen.add(key)
+    return expanded
+
+
+def _object_minute_scope_key(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return (
+        str(row.get("for_trade_date") or ""),
+        str(row.get("asset_kind") or ""),
+        str(row.get("identity_key") or ""),
+        str(row.get("direction") or ""),
+        str(row.get("signal_type") or ""),
+    )
+
+
+def _object_minute_primary_ref_sort_key(ref: Mapping[str, Any]) -> tuple[int, str, str, str]:
+    event_time = str(ref.get("source_trigger_event_time") or ref.get("latest_n4_event_time") or ref.get("trigger_time") or "")
+    return (
+        1 if _is_hint_condition_key(ref.get("condition_key")) else 0,
+        _reverse_text_sort_key(event_time),
+        str(ref.get("condition_key") or ""),
+        str(ref.get("state_key") or ""),
+    )
+
+
+def _reverse_text_sort_key(value: str) -> str:
+    return "".join(chr(0x10FFFF - ord(ch)) for ch in str(value or ""))
+
+
+def _is_hint_condition_key(condition_key: Any) -> bool:
+    text = str(condition_key or "").strip().upper()
+    return text.startswith("BUY_HINT") or text.startswith("SELL_HINT")
+
+
+def _compact_object_minute_ref_trace(refs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for ref in refs:
+        output.append(
+            {
+                "state_key": ref.get("state_key"),
+                "condition_key": ref.get("condition_key"),
+                "source_trigger_event_id": ref.get("source_trigger_event_id"),
+                "source_trigger_event_type": ref.get("source_trigger_event_type"),
+                "source_trigger_event_time": ref.get("source_trigger_event_time")
+                or ref.get("latest_n4_event_time")
+                or ref.get("trigger_time"),
+            }
+        )
+    return output
+
+
 def _normalize_metric_context_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     normalized_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -1352,6 +1445,9 @@ def _normalize_metric_context_rows(rows: Sequence[Mapping[str, Any]]) -> list[di
                 "previous_day_minute_refs": list(source.get("previous_day_minute_refs") or []),
                 "metric_values": dict(source.get("metric_values") or {}),
                 "deterministic_derivation_inputs": dict(source.get("deterministic_derivation_inputs") or {}),
+                "object_minute_scope": bool(source.get("object_minute_scope")),
+                "object_minute_ref_count": int(source.get("object_minute_ref_count") or 0),
+                "object_minute_ref_trace": list(source.get("object_minute_ref_trace") or []),
             }
         )
     return normalized_rows
@@ -1402,13 +1498,15 @@ def _metric_context_matches_scope(
     scope_rows: Sequence[Mapping[str, str]],
     for_trade_date: str,
 ) -> bool:
-    scope_keys = {_scope_key(row) for row in scope_rows}
+    object_minute_scope = any(row.get("object_minute_scope") is True for row in scope_rows)
+    key_fn = _object_minute_scope_key if object_minute_scope else _scope_key
+    scope_keys = {key_fn(row) for row in scope_rows}
     context_keys: set[tuple[str, ...]] = set()
     for row in context_rows:
         context_scope = {field: str(row.get(field) or "") for field in REQUIRED_SCOPE_GRAIN}
-        context_key = _scope_key(context_scope)
         if not _valid_scope_row(context_scope, for_trade_date, source_trigger_run_id_required=False):
             return False
+        context_key = key_fn(row if object_minute_scope else context_scope)
         if context_key not in scope_keys or context_key in context_keys:
             return False
         context_keys.add(context_key)
@@ -1451,6 +1549,29 @@ def _index_previous_day_minute_rows(rows: Sequence[Any]) -> dict[tuple[str, str]
     for key in indexed:
         indexed[key].sort(key=_minute_sort_key)
     return indexed
+
+
+def _current_rows_through_target(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    labels: Sequence[str],
+    target_label: str,
+) -> list[Mapping[str, Any]]:
+    if target_label not in labels:
+        return []
+    target_position = labels.index(target_label)
+    output: list[Mapping[str, Any]] = []
+    for row in rows:
+        label = _hhmm_label(row.get("physical_c1_label") or row.get("minute_label") or row.get("raw_source_label") or "")
+        if label not in labels:
+            continue
+        if labels.index(label) <= target_position:
+            output.append(row)
+    output.sort(key=_minute_sort_key)
+    if not output:
+        return []
+    latest_label = _hhmm_label(output[-1].get("physical_c1_label") or output[-1].get("minute_label") or "")
+    return output if latest_label == target_label else []
 
 
 def _derive_metric_values(
@@ -1509,6 +1630,10 @@ def _derive_metric_values(
         current_rows=current_30m_rows,
         previous_day_same_rows=previous_day_same_30m_rows,
     )
+    current_5m_elapsed_amount = _amount_sum_or_none(current_5m_rows)
+    current_30m_elapsed_amount = _amount_sum_or_none(current_30m_rows)
+    current_5m_amount = current_5m_elapsed_amount if len(current_5m_rows) >= 5 else current_5m_virtual_amount
+    current_30m_amount = current_30m_elapsed_amount if len(current_30m_rows) >= 30 else current_30m_virtual_amount
     return {
         "current_price": _numeric(latest_current.get("close")),
         "previous_120m_body_high": _body_high(previous_120m_rows),
@@ -1521,11 +1646,11 @@ def _derive_metric_values(
         "previous_1m_body_low": _body_low(previous_1m_rows),
         "current_1m_amount": _numeric(latest_current.get("amount")),
         "previous_1m_amount": None if is_first_1m else _amount_sum_or_none(previous_1m_rows),
-        "current_5m_amount": current_5m_virtual_amount,
-        "current_5m_elapsed_amount": _amount_sum_or_none(current_5m_rows),
+        "current_5m_amount": current_5m_amount,
+        "current_5m_elapsed_amount": current_5m_elapsed_amount,
         "previous_5m_amount": None if is_first_5m else _amount_sum_or_none(previous_5m_rows),
-        "current_30m_closed_elapsed_amount": _amount_sum_or_none(current_30m_rows),
-        "current_30m_virtual_amount": current_30m_virtual_amount,
+        "current_30m_closed_elapsed_amount": current_30m_elapsed_amount,
+        "current_30m_virtual_amount": current_30m_amount,
         "previous_day_same_window_amount": _amount_sum_or_none(previous_day_same_30m_rows),
         "is_first_1m_of_day": is_first_1m,
         "is_first_5m_of_day": is_first_5m,
@@ -1552,20 +1677,28 @@ def _resolve_previous_period_rows(
 ) -> tuple[list[Mapping[str, Any]], str]:
     if not labels or position <= 0:
         return [], NOT_AVAILABLE_PERIOD_SOURCE
-    current_start = ((position - 1) // size) * size
-    if current_start == 0:
+    previous_end = position - 1
+    previous_start = previous_end - size
+    if previous_start < 0:
         rows = _rows_for_labels(previous_rows, labels[-size:])
         return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
+    expected_labels = list(labels[previous_start:previous_end])
+    if expected_labels == ["09:30"] and _has_open_boundary_source_gap(current_rows):
+        rows = _rows_for_labels(previous_rows, labels[-size:])
+        return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
+    rows = _rows_for_labels(current_rows, expected_labels)
+    if len(rows) == size:
+        return rows, SAME_TRADE_DATE_PREVIOUS_PERIOD
     if (
-        current_start == 1
-        and size == 1
-        and labels[:2] == ["09:30", "09:31"]
+        expected_labels[:1] == ["09:30"]
+        and "09:31" in expected_labels
         and _has_open_boundary_source_gap(current_rows)
     ):
-        rows = _rows_for_labels(previous_rows, labels[-size:])
-        return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
-    rows = _rows_for_labels(current_rows, labels[current_start - size : current_start])
-    return rows, SAME_TRADE_DATE_PREVIOUS_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
+        open_gap_adjusted_labels = [label for label in expected_labels if label != "09:30"]
+        rows = _rows_for_labels(current_rows, open_gap_adjusted_labels)
+        if len(rows) == len(open_gap_adjusted_labels):
+            return rows, SAME_TRADE_DATE_PREVIOUS_PERIOD
+    return rows, NOT_AVAILABLE_PERIOD_SOURCE
 
 
 def _resolve_current_period_rows(
@@ -1577,7 +1710,7 @@ def _resolve_current_period_rows(
 ) -> list[Mapping[str, Any]]:
     if not labels or position <= 0:
         return []
-    current_start = ((position - 1) // size) * size
+    current_start = max(0, position - size)
     expected_labels = labels[current_start:position]
     output = _rows_for_labels(rows, expected_labels)
     if (
@@ -1600,8 +1733,8 @@ def _resolve_previous_day_same_period_rows(
 ) -> list[Mapping[str, Any]]:
     if not labels or position <= 0:
         return []
-    current_start = ((position - 1) // size) * size
-    expected_labels = list(labels[current_start : current_start + size])
+    current_start = max(0, position - size)
+    expected_labels = list(labels[current_start:position])
     if (
         expected_labels[:1] == ["09:30"]
         and "09:31" in expected_labels

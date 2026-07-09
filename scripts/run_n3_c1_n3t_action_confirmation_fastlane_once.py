@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
@@ -55,10 +56,16 @@ from ashare_v3.market.n3t_action_confirmation_metric import (
 INPUT_ARTIFACT_TYPE = "n5_active_scope_snapshot_v1"
 DEFAULT_FASTLANE_MAX_RUNTIME_SECONDS = 10.0
 DEFAULT_POST_CLOSE_FINAL_A_PASS_MAX_CANDIDATES = 12
-DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES = 1
-DEFAULT_EXISTING_SOURCE_STAGING_MAX_CANDIDATES = 12
-DEFAULT_EXISTING_STAGING_METRIC_CONTEXT_MAX_CANDIDATES = 12
-DEFAULT_SCOPED_PULL_PLAN_MAX_CANDIDATES = 12
+DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES = 128
+DEFAULT_ACTIVE_A_MINUTE_BATCH_MAX_MINUTES_PER_OBJECT = 4
+DEFAULT_EXISTING_SOURCE_STAGING_MAX_CANDIDATES = 16
+DEFAULT_EXISTING_STAGING_METRIC_CONTEXT_MAX_CANDIDATES = 64
+DEFAULT_SCOPED_PULL_PLAN_MAX_CANDIDATES = 16
+DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY = 8
+MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY = 8
+ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE = "active_a_minute_batch_direct_provider"
+JSON_ARTIFACT_CACHE_MAX_ENTRIES = 2048
+_JSON_ARTIFACT_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
 
 
 class FastlaneShellBlocked(RuntimeError):
@@ -89,9 +96,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-scope-artifact-path", default="")
     parser.add_argument("--active-scope-artifact-dir", default="")
     parser.add_argument("--output-dir", default="")
+    parser.add_argument("--current-exchange-time", dest="fastlane_current_exchange_time", default="")
     parser.add_argument("--current-day-source-artifact-dir", default="")
     parser.add_argument("--current-day-source-provider", default="")
     parser.add_argument("--current-day-source-provider-max-candidates-per-invocation", type=int, default=0)
+    parser.add_argument("--current-day-source-provider-concurrency", type=int, default=0)
     parser.add_argument("--scoped-pull-plan-max-candidates-per-invocation", type=int, default=0)
     parser.add_argument("--existing-source-staging-max-candidates-per-invocation", type=int, default=0)
     parser.add_argument("--existing-staging-metric-context-max-candidates-per-invocation", type=int, default=0)
@@ -125,6 +134,9 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
     current_day_source_provider_result: dict[str, Any] | None = None
     metric_context_builder_result: dict[str, Any] | None = None
     metric_context_priority_summary: dict[str, Any] | None = None
+    c1_active_a_minute_batch_summary: dict[str, Any] | None = None
+    n3t_writer_inputs: list[dict[str, Any]] = []
+    n3t_writer_done_markers: list[dict[str, Any]] = []
     lane_results: dict[str, Any] = _initial_independent_lane_results()
     try:
         _apply_activation_config(args)
@@ -135,6 +147,7 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             now_monotonic=now_monotonic,
         )
         deadline_check("validated")
+        raw_active_scope_artifacts = _discover_requested_active_scope_artifacts(args, fanout=False)
         artifacts = _discover_requested_active_scope_artifacts(args)
         deadline_check("active_scope_discovered")
         if args.execute:
@@ -161,56 +174,247 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 active_scope_artifacts=artifacts,
                 output_dir=Path(args.output_dir),
             )
+            base_active_scope_artifacts = list(artifacts)
             deadline_check("object_scope_ref_fanout_materialized")
             metric_source_dir_text = str(getattr(args, "metric_context_source_artifact_dir", "") or "").strip()
             previous_context_dir_text = str(getattr(args, "previous_day_context_artifact_dir", "") or "").strip()
             source_dir_text = str(getattr(args, "current_day_source_artifact_dir", "") or "").strip()
+            closed_hhmm_for_active_a_minute_batch = _active_a_minute_batch_closed_hhmm(
+                args,
+                raw_active_scope_artifacts or base_active_scope_artifacts,
+            )
+            n3t_candidate_scope_artifacts = _active_scope_artifacts_with_current_object_persisted_ref_fanout(
+                active_scope_artifacts=raw_active_scope_artifacts or base_active_scope_artifacts,
+                output_dir=Path(args.output_dir),
+                closed_hhmm=closed_hhmm_for_active_a_minute_batch,
+            )
             metric_context_priority_artifacts: list[dict[str, Any]] = []
+            metric_context_priority_summary: dict[str, Any] = {}
             metric_context_priority_artifacts, metric_context_priority_summary = (
                 _select_existing_staging_metric_context_artifact_chunk(
-                    active_scope_artifacts=artifacts,
+                    active_scope_artifacts=n3t_candidate_scope_artifacts,
                     output_dir=Path(args.output_dir),
                     metric_context_source_dir=Path(metric_source_dir_text) if metric_source_dir_text else None,
                     previous_context_dir=Path(previous_context_dir_text) if previous_context_dir_text else None,
                     max_candidates=_existing_staging_metric_context_max_candidates(args),
+                    allow_previous_day_context_missing=bool(
+                        str(getattr(args, "previous_day_context_provider", "") or "").strip()
+                    ),
                 )
             )
             lane_results["n3t_lane"] = _lane_result_from_priority_summary(
                 lane_name="n3t_lane",
                 summary=metric_context_priority_summary,
                 default_reason="n3t_lane_no_ready_staging",
+                selected_artifacts=metric_context_priority_artifacts,
+                observed_at=_runner_observed_at(args),
             )
             if metric_context_priority_artifacts:
                 artifacts = metric_context_priority_artifacts
                 args.prevctx_to_metric_context_chunk_summary = metric_context_priority_summary
-                lane_results["c1_lane"] = _empty_lane_result(
-                    lane_name="c1_lane",
-                    reason="not_run_n3t_lane_prioritized",
-                )
             prioritized_staging_artifacts: list[dict[str, Any]] = []
             staging_priority_skip_reason = ""
             scoped_pull_plan_artifacts: list[dict[str, Any]] = []
             scoped_pull_plan_summary: dict[str, Any] = {}
             existing_source_staging_count = 0
-            if source_dir_text and not metric_context_priority_artifacts:
-                prioritized_staging_artifacts = _select_existing_v2_source_stale_staging_rebuild_artifacts(
+            active_a_minute_batch_controls_c1 = False
+            post_close_c1_provider_disabled = _post_close_c1_provider_disabled(args)
+            if source_dir_text and not post_close_c1_provider_disabled:
+                prioritized_staging_artifacts, c1_active_a_minute_batch_summary = (
+                        _select_active_a_minute_batch_direct_provider_artifacts(
+                        active_scope_artifacts=raw_active_scope_artifacts or base_active_scope_artifacts,
+                        output_dir=Path(args.output_dir),
+                        source_dir=Path(source_dir_text),
+                        closed_hhmm=closed_hhmm_for_active_a_minute_batch,
+                        max_candidates=_current_day_source_provider_max_candidates(args),
+                    )
+                )
+                active_a_minute_batch_controls_c1 = _active_a_minute_batch_controls_c1(
+                    active_scope_artifacts=base_active_scope_artifacts,
+                    summary=c1_active_a_minute_batch_summary,
+                )
+                if active_a_minute_batch_controls_c1:
+                    args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
+                if prioritized_staging_artifacts:
+                    args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
+                    staging_priority_skip_reason = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                elif _active_a_minute_batch_closed_minute_unavailable(
+                    args=args,
+                    summary=c1_active_a_minute_batch_summary,
+                ):
+                    args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
+                    lane_results["c1_lane"] = _lane_result_from_active_a_minute_batch_summary(
+                        c1_active_a_minute_batch_summary,
+                        selected_artifacts=[],
+                        observed_at=_runner_observed_at(args),
+                    )
+                    return {
+                        "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
+                        "reason": "c1_active_a_minute_batch_closed_minute_unavailable",
+                        "invocation_id": invocation_id,
+                        "fastlane_lane_id": args.fastlane_lane_id,
+                        "active_scope_artifact_count": len(base_active_scope_artifacts),
+                        "artifact_paths": {
+                            "active_scope_artifact_dir": args.active_scope_artifact_dir,
+                            "output_dir": args.output_dir,
+                        },
+                        "counts": {
+                            "active_scope_artifact_count": len(base_active_scope_artifacts),
+                            "active_scope_artifact_row_count": sum(
+                                int(item.get("scope_count") or 0) for item in base_active_scope_artifacts
+                            ),
+                        },
+                        "lane_results": dict(lane_results),
+                        "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary or {}),
+                        "boundary": _boundary(),
+                        "bounded": {
+                            "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
+                            "elapsed_seconds": round(float(now_monotonic()) - float(started), 6),
+                        },
+                    }
+                elif active_a_minute_batch_controls_c1:
+                    staging_priority_skip_reason = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                else:
+                    prioritized_staging_artifacts = _select_existing_v2_source_stale_staging_rebuild_artifacts(
                     active_scope_artifacts=artifacts,
                     output_dir=Path(args.output_dir),
                     source_dir=Path(source_dir_text),
-                )
-                if prioritized_staging_artifacts:
-                    staging_priority_skip_reason = "existing_v2_source_staging_rebuild_prioritized"
-                else:
-                    prioritized_staging_artifacts = _select_existing_source_missing_staging_artifacts(
-                        active_scope_artifacts=artifacts,
-                        output_dir=Path(args.output_dir),
-                        source_dir=Path(source_dir_text),
-                        max_candidates=_existing_source_staging_max_candidates(args),
                     )
                     if prioritized_staging_artifacts:
-                        staging_priority_skip_reason = "existing_source_missing_staging_interleave_prioritized"
+                        staging_priority_skip_reason = "existing_v2_source_staging_rebuild_prioritized"
+                    else:
+                        prioritized_staging_artifacts = _select_existing_source_missing_staging_artifacts(
+                            active_scope_artifacts=artifacts,
+                            output_dir=Path(args.output_dir),
+                            source_dir=Path(source_dir_text),
+                            max_candidates=_existing_source_staging_max_candidates(args),
+                        )
+                        if prioritized_staging_artifacts:
+                            staging_priority_skip_reason = "existing_source_missing_staging_interleave_prioritized"
+                        else:
+                            prioritized_staging_artifacts, scoped_pull_plan_summary = (
+                                _select_object_minute_c1_lane_priority_artifacts(
+                                    active_scope_artifacts=artifacts,
+                                    output_dir=Path(args.output_dir),
+                                    max_candidates=_scoped_pull_plan_max_candidates(args),
+                                )
+                            )
+                            if prioritized_staging_artifacts:
+                                args.scoped_pull_plan_chunk_summary = scoped_pull_plan_summary
+                                staging_priority_skip_reason = "object_minute_c1_lane_prioritized"
+                            else:
+                                scoped_pull_plan_summary = {}
+                                prioritized_staging_artifacts = _select_existing_pull_plan_missing_source_staging_artifacts(
+                                    active_scope_artifacts=artifacts,
+                                    output_dir=Path(args.output_dir),
+                                    source_dir=Path(source_dir_text),
+                                    max_candidates=_current_day_source_provider_max_candidates(args),
+                                )
+                                if prioritized_staging_artifacts:
+                                    staging_priority_skip_reason = "pull_plan_missing_source_staging_backlog_prioritized"
+            if source_dir_text and post_close_c1_provider_disabled and not metric_context_priority_artifacts:
+                c1_active_a_minute_batch_summary = _post_close_c1_provider_disabled_summary(
+                    active_scope_artifacts=base_active_scope_artifacts,
+                )
+                args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
+                lane_results["c1_lane"] = _lane_result_from_active_a_minute_batch_summary(
+                    c1_active_a_minute_batch_summary,
+                    selected_artifacts=[],
+                    observed_at=_runner_observed_at(args),
+                )
+                return {
+                    "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
+                    "reason": "post_close_c1_provider_disabled",
+                    "invocation_id": invocation_id,
+                    "fastlane_lane_id": args.fastlane_lane_id,
+                    "active_scope_artifact_count": len(base_active_scope_artifacts),
+                    "artifact_paths": {
+                        "active_scope_artifact_dir": args.active_scope_artifact_dir,
+                        "output_dir": args.output_dir,
+                    },
+                    "counts": {
+                        "active_scope_artifact_count": len(base_active_scope_artifacts),
+                        "active_scope_artifact_row_count": sum(
+                            int(item.get("scope_count") or 0) for item in base_active_scope_artifacts
+                        ),
+                    },
+                    "lane_results": dict(lane_results),
+                    "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary),
+                    "boundary": _boundary(),
+                    "bounded": {
+                        "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
+                        "elapsed_seconds": round(float(now_monotonic()) - float(started), 6),
+                    },
+                }
             if prioritized_staging_artifacts:
                 artifacts = prioritized_staging_artifacts
+            if not metric_context_priority_artifacts and not prioritized_staging_artifacts:
+                ready_handoff_artifacts = [
+                    dict(item)
+                    for item in (c1_active_a_minute_batch_summary or {}).get("ready_handoff_artifacts", [])
+                    if isinstance(item, Mapping)
+                ]
+                metric_context_selection_scope = (
+                    _dedupe_active_scope_artifacts_by_namespace(ready_handoff_artifacts + n3t_candidate_scope_artifacts)
+                    if ready_handoff_artifacts
+                    else n3t_candidate_scope_artifacts
+                )
+                metric_context_priority_artifacts, metric_context_priority_summary = (
+                    _select_existing_staging_metric_context_artifact_chunk(
+                        active_scope_artifacts=metric_context_selection_scope,
+                        output_dir=Path(args.output_dir),
+                        metric_context_source_dir=Path(metric_source_dir_text) if metric_source_dir_text else None,
+                        previous_context_dir=Path(previous_context_dir_text) if previous_context_dir_text else None,
+                        max_candidates=_existing_staging_metric_context_max_candidates(args),
+                        allow_previous_day_context_missing=bool(
+                            str(getattr(args, "previous_day_context_provider", "") or "").strip()
+                        ),
+                    )
+                )
+                lane_results["n3t_lane"] = _lane_result_from_priority_summary(
+                    lane_name="n3t_lane",
+                    summary=metric_context_priority_summary,
+                    default_reason="n3t_lane_no_ready_staging",
+                    selected_artifacts=metric_context_priority_artifacts,
+                    observed_at=_runner_observed_at(args),
+                )
+                if metric_context_priority_artifacts:
+                    artifacts = metric_context_priority_artifacts
+                    args.prevctx_to_metric_context_chunk_summary = metric_context_priority_summary
+            if (
+                not metric_context_priority_artifacts
+                and not prioritized_staging_artifacts
+                and active_a_minute_batch_controls_c1
+            ):
+                lane_results["c1_lane"] = _lane_result_from_active_a_minute_batch_summary(
+                    c1_active_a_minute_batch_summary or {},
+                    selected_artifacts=base_active_scope_artifacts,
+                    observed_at=_runner_observed_at(args),
+                )
+                return {
+                    "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
+                    "reason": _active_a_minute_batch_waiting_reason(c1_active_a_minute_batch_summary or {}),
+                    "invocation_id": invocation_id,
+                    "fastlane_lane_id": args.fastlane_lane_id,
+                    "active_scope_artifact_count": len(base_active_scope_artifacts),
+                    "artifact_paths": {
+                        "active_scope_artifact_dir": args.active_scope_artifact_dir,
+                        "output_dir": args.output_dir,
+                    },
+                    "counts": {
+                        "active_scope_artifact_count": len(base_active_scope_artifacts),
+                        "active_scope_artifact_row_count": sum(
+                            int(item.get("scope_count") or 0) for item in base_active_scope_artifacts
+                        ),
+                    },
+                    "lane_results": dict(lane_results),
+                    "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary or {}),
+                    "boundary": _boundary(),
+                    "bounded": {
+                        "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
+                        "elapsed_seconds": round(float(now_monotonic()) - float(started), 6),
+                    },
+                }
             if not metric_context_priority_artifacts and not prioritized_staging_artifacts:
                 scoped_pull_plan_artifacts, scoped_pull_plan_summary = _select_scoped_pull_plan_candidate_chunk(
                     active_scope_artifacts=artifacts,
@@ -220,36 +424,42 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 if scoped_pull_plan_artifacts:
                     artifacts = scoped_pull_plan_artifacts
                     args.scoped_pull_plan_chunk_summary = scoped_pull_plan_summary
-            if not metric_context_priority_artifacts:
+            if not metric_context_priority_artifacts or prioritized_staging_artifacts or active_a_minute_batch_controls_c1:
                 lane_results["c1_lane"] = _lane_result_from_c1_selection(
                     prioritized_staging_artifacts=prioritized_staging_artifacts,
                     scoped_pull_plan_summary=scoped_pull_plan_summary,
                     skip_reason=staging_priority_skip_reason,
+                    selected_artifacts=prioritized_staging_artifacts or scoped_pull_plan_artifacts,
+                    observed_at=_runner_observed_at(args),
                 )
-                try:
-                    _materialize_missing_scoped_pull_plans(
-                        active_scope_artifacts=artifacts,
-                        output_dir=Path(args.output_dir),
-                        observed_at=_runner_observed_at(args),
-                        deadline_check=deadline_check,
-                    )
-                except FastlaneShellBlocked as exc:
-                    scoped_pull_plan_summary = dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {})
-                    if _scoped_pull_plan_progress_timeout(exc, chunk_summary=scoped_pull_plan_summary):
-                        manifest = _scoped_pull_plan_chunk_waiting_manifest(
-                            args=args,
-                            invocation_id=invocation_id,
-                            artifacts=artifacts,
+                if staging_priority_skip_reason != ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE:
+                    try:
+                        _materialize_missing_scoped_pull_plans(
+                            active_scope_artifacts=artifacts,
                             output_dir=Path(args.output_dir),
-                            chunk_summary=scoped_pull_plan_summary,
-                            started=started,
-                            now_monotonic=now_monotonic,
+                            observed_at=_runner_observed_at(args),
+                            deadline_check=deadline_check,
                         )
-                        manifest["lane_results"] = dict(lane_results)
-                        return manifest
-                    raise
-                deadline_check("scoped_pull_plan_materialized")
-                if prioritized_staging_artifacts:
+                    except FastlaneShellBlocked as exc:
+                        scoped_pull_plan_summary = dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {})
+                        if _scoped_pull_plan_progress_timeout(exc, chunk_summary=scoped_pull_plan_summary):
+                            manifest = _scoped_pull_plan_chunk_waiting_manifest(
+                                args=args,
+                                invocation_id=invocation_id,
+                                artifacts=artifacts,
+                                output_dir=Path(args.output_dir),
+                                chunk_summary=scoped_pull_plan_summary,
+                                started=started,
+                                now_monotonic=now_monotonic,
+                            )
+                            manifest["lane_results"] = dict(lane_results)
+                            return manifest
+                        raise
+                    deadline_check("scoped_pull_plan_materialized")
+                if prioritized_staging_artifacts and staging_priority_skip_reason not in {
+                    "object_minute_c1_lane_prioritized",
+                    ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+                }:
                     existing_source_staging_count = _materialize_missing_scoped_current_day_staging_artifacts(
                         args=args,
                         active_scope_artifacts=prioritized_staging_artifacts,
@@ -265,6 +475,58 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         skip_reason=staging_priority_skip_reason,
                         staging_artifact_count=existing_source_staging_count,
                     )
+                elif (
+                    staging_priority_skip_reason == ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                ):
+                    direct_staging_count = 0
+                    if not prioritized_staging_artifacts:
+                        current_day_source_provider_result = _skipped_current_day_source_provider_result(
+                            skip_reason=ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+                            staging_artifact_count=0,
+                            metric_context_candidate_count=len(metric_context_priority_artifacts),
+                        )
+                        current_day_source_provider_result["mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                    elif current_day_source_provider_adapter is not None:
+                        current_day_source_provider_result = _run_active_a_minute_batch_direct_provider_adapter(
+                            args=args,
+                            active_scope_artifacts=artifacts,
+                            output_dir=Path(args.output_dir),
+                            current_day_source_provider_adapter=current_day_source_provider_adapter,
+                        )
+                        provider_staging_count = _materialize_active_a_minute_batch_direct_staging_artifacts(
+                            args=args,
+                            active_scope_artifacts=artifacts,
+                            output_dir=Path(args.output_dir),
+                            observed_at=_runner_observed_at(args),
+                            deadline_check=deadline_check,
+                            source_artifacts=(
+                                list((current_day_source_provider_result or {}).get("source_artifacts") or [])
+                            ),
+                        )
+                        direct_staging_count += provider_staging_count
+                    else:
+                        direct_staging_count = _materialize_active_a_minute_batch_direct_staging_artifacts(
+                            args=args,
+                            active_scope_artifacts=artifacts,
+                            output_dir=Path(args.output_dir),
+                            observed_at=_runner_observed_at(args),
+                            deadline_check=deadline_check,
+                        )
+                        current_day_source_provider_result = _skipped_current_day_source_provider_result(
+                            skip_reason=ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+                            staging_artifact_count=direct_staging_count,
+                        )
+                        current_day_source_provider_result["mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                    c1_active_a_minute_batch_summary = _merge_active_a_minute_batch_execution_summary(
+                        c1_active_a_minute_batch_summary,
+                        current_day_source_provider_result=current_day_source_provider_result,
+                        staging_artifact_written_count=direct_staging_count,
+                    )
+                    if direct_staging_count > 0:
+                        c1_active_a_minute_batch_summary["ready_handoff_artifacts"] = [
+                            dict(item) for item in artifacts
+                        ]
+                    args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
                 elif current_day_source_provider_adapter is not None:
                     current_day_source_provider_result = _run_current_day_source_provider_adapter(
                         args=args,
@@ -292,7 +554,7 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         manifest["lane_results"] = dict(lane_results)
                         return manifest
                     raise
-                if existing_source_staging_count <= 0:
+                if existing_source_staging_count <= 0 and staging_priority_skip_reason != ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE:
                     _materialize_missing_scoped_current_day_staging_artifacts(
                         args=args,
                         active_scope_artifacts=artifacts,
@@ -306,13 +568,72 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                     existing_source_staging_count=existing_source_staging_count,
                     current_day_source_provider_result=current_day_source_provider_result,
                 )
+                if c1_active_a_minute_batch_summary:
+                    lane_results["c1_lane"] = _lane_result_from_active_a_minute_batch_summary(
+                        c1_active_a_minute_batch_summary,
+                        selected_artifacts=artifacts,
+                        observed_at=_runner_observed_at(args),
+                    )
+                    ready_handoff_artifacts = [
+                        dict(item)
+                        for item in (c1_active_a_minute_batch_summary or {}).get("ready_handoff_artifacts", [])
+                        if isinstance(item, Mapping)
+                    ]
+                    if scoped_executor is None and int(
+                        c1_active_a_minute_batch_summary.get("selected_candidate_count") or 0
+                    ) > 0 and not ready_handoff_artifacts and not metric_context_priority_artifacts:
+                        source_written = (
+                            int(c1_active_a_minute_batch_summary.get("source_artifact_written_count") or 0) > 0
+                        )
+                        staging_written = (
+                            int(c1_active_a_minute_batch_summary.get("staging_artifact_written_count") or 0) > 0
+                        )
+                        reason = (
+                            "c1_active_a_minute_batch_ready_for_n3t_lane"
+                            if source_written or staging_written
+                            else "c1_active_a_minute_batch_chunk_incomplete"
+                        )
+                        return {
+                            "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
+                            "reason": reason,
+                            "invocation_id": invocation_id,
+                            "fastlane_lane_id": args.fastlane_lane_id,
+                            "active_scope_artifact_count": len(artifacts),
+                            "artifact_paths": {
+                                "active_scope_artifact_dir": args.active_scope_artifact_dir,
+                                "output_dir": args.output_dir,
+                            },
+                            "counts": {
+                                "active_scope_artifact_count": len(artifacts),
+                                "active_scope_artifact_row_count": sum(
+                                    int(item.get("scope_count") or 0) for item in artifacts
+                                ),
+                            },
+                            "lane_results": dict(lane_results),
+                            "current_day_source_provider_result": current_day_source_provider_result,
+                            "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary),
+                            "boundary": _boundary(),
+                            "bounded": {
+                                "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
+                                "elapsed_seconds": round(float(now_monotonic()) - float(started), 6),
+                            },
+                        }
                 metric_context_priority_artifacts, metric_context_priority_summary = (
                     _select_existing_staging_metric_context_artifact_chunk(
-                        active_scope_artifacts=artifacts,
+                        active_scope_artifacts=(
+                            _dedupe_active_scope_artifacts_by_namespace(
+                                ready_handoff_artifacts + n3t_candidate_scope_artifacts
+                            )
+                            if ready_handoff_artifacts
+                            else n3t_candidate_scope_artifacts
+                        ),
                         output_dir=Path(args.output_dir),
                         metric_context_source_dir=Path(metric_source_dir_text) if metric_source_dir_text else None,
                         previous_context_dir=Path(previous_context_dir_text) if previous_context_dir_text else None,
                         max_candidates=_existing_staging_metric_context_max_candidates(args),
+                        allow_previous_day_context_missing=bool(
+                            str(getattr(args, "previous_day_context_provider", "") or "").strip()
+                        ),
                     )
                 )
                 if metric_context_priority_artifacts:
@@ -322,6 +643,8 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         lane_name="n3t_lane",
                         summary=metric_context_priority_summary,
                         default_reason="n3t_lane_no_ready_staging",
+                        selected_artifacts=metric_context_priority_artifacts,
+                        observed_at=_runner_observed_at(args),
                     )
             else:
                 current_day_source_provider_result = _skipped_current_day_source_provider_result(
@@ -334,16 +657,19 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             plan_status="blocked" if args.execute else "planned",
             blocked_reason="scoped_c1_n3t_executor_required" if args.execute else None,
         )
-        deadline_check("scoped_executor_plan_built")
+        if not (args.execute and scoped_executor is None and metric_context_priority_artifacts):
+            deadline_check("scoped_executor_plan_built")
         if args.execute and scoped_executor is None:
-            if metric_context_builder_adapter is None:
-                if previous_day_context_provider_adapter is None:
-                    previous_day_context_provider_adapter = _configured_previous_day_context_provider_adapter(args)
-                metric_context_builder_adapter = _configured_metric_context_builder_adapter(
-                    args,
-                    previous_day_context_provider_adapter=previous_day_context_provider_adapter,
-                )
-            if metric_context_priority_artifacts and metric_context_builder_adapter is not None:
+            if metric_context_priority_artifacts and _metric_context_priority_requires_builder(
+                metric_context_priority_summary
+            ):
+                if metric_context_builder_adapter is None:
+                    if previous_day_context_provider_adapter is None:
+                        previous_day_context_provider_adapter = _configured_previous_day_context_provider_adapter(args)
+                    metric_context_builder_adapter = _configured_metric_context_builder_adapter(
+                        args,
+                        previous_day_context_provider_adapter=previous_day_context_provider_adapter,
+                    )
                 metric_context_builder_result = _run_metric_context_builder_adapter(
                     args=args,
                     scoped_executor_plan=scoped_executor_plan,
@@ -357,6 +683,13 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         chunk_summary=metric_context_priority_summary,
                         metric_context_builder_result=metric_context_builder_result,
                     ):
+                        partial_writer_flush = _flush_metric_context_chunk_to_n3t_writer(
+                            args=args,
+                            active_scope_artifacts=artifacts,
+                            output_dir=Path(args.output_dir),
+                            chunk_summary=metric_context_priority_summary or {},
+                            n3t_writer_adapter=n3t_writer_adapter,
+                        )
                         manifest = _prevctx_to_metric_context_chunk_waiting_manifest(
                             args=args,
                             invocation_id=invocation_id,
@@ -368,6 +701,14 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                             now_monotonic=now_monotonic,
                         )
                         manifest["lane_results"] = dict(lane_results)
+                        if partial_writer_flush:
+                            manifest["partial_n3t_writer_flush"] = partial_writer_flush
+                            if partial_writer_flush.get("execute_result"):
+                                manifest["execute_result"] = partial_writer_flush["execute_result"]
+                            if partial_writer_flush.get("n3t_writer_done_markers"):
+                                manifest["n3t_writer_done_markers"] = list(
+                                    partial_writer_flush["n3t_writer_done_markers"]
+                                )
                         return manifest
                     raise
                 scoped_executor_plan = _build_scoped_executor_plan(
@@ -384,8 +725,8 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 execute_result = dict(scoped_executor(args=args, active_scope_artifacts=artifacts) or {})
             else:
                 n3t_writer_inputs = _n3t_writer_inputs_from_plan(scoped_executor_plan)
-                deadline_check("n3t_writer_inputs_selected")
                 if not n3t_writer_inputs:
+                    deadline_check("n3t_writer_inputs_selected")
                     if _scoped_executor_plan_only_clean_noop(scoped_executor_plan) or (
                         metric_context_builder_result is not None
                         and not _scoped_executor_plan_has_contract_blocker(scoped_executor_plan)
@@ -409,6 +750,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                             "lane_results": dict(lane_results),
                             "scoped_executor_plan": scoped_executor_plan,
                             "current_day_source_provider_result": current_day_source_provider_result,
+                            "c1_active_a_minute_batch": dict(
+                                c1_active_a_minute_batch_summary
+                                or getattr(args, "c1_active_a_minute_batch_summary", {})
+                                or {}
+                            ),
                             "metric_context_builder_result": metric_context_builder_result,
                             "scoped_pull_plan_chunk": dict(
                                 getattr(args, "scoped_pull_plan_chunk_summary", {}) or {}
@@ -428,11 +774,16 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                     execute_result = _build_n3t_writer_handoff_result(n3t_writer_inputs=n3t_writer_inputs)
                     handoff_only = True
                 else:
-                    deadline_check("before_n3t_writer")
                     execute_result = dict(
                         n3t_writer_adapter(args=args, n3t_writer_inputs=n3t_writer_inputs) or {}
                     )
             _validate_execute_result(execute_result)
+            n3t_writer_done_markers = _write_n3t_writer_done_markers(
+                output_dir=Path(args.output_dir),
+                n3t_writer_inputs=n3t_writer_inputs,
+                execute_result=execute_result,
+                observed_at=_runner_observed_at(args),
+            )
             if handoff_only and _metric_context_chunk_has_remaining(metric_context_priority_summary):
                 manifest = _prevctx_to_metric_context_chunk_waiting_manifest(
                     args=args,
@@ -447,7 +798,13 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 manifest["lane_results"] = dict(lane_results)
                 manifest["scoped_executor_plan"] = scoped_executor_plan
                 manifest["current_day_source_provider_result"] = current_day_source_provider_result
+                manifest["c1_active_a_minute_batch"] = dict(
+                    c1_active_a_minute_batch_summary
+                    or getattr(args, "c1_active_a_minute_batch_summary", {})
+                    or {}
+                )
                 manifest["execute_result"] = execute_result
+                manifest["n3t_writer_done_markers"] = list(n3t_writer_done_markers)
                 return manifest
             return {
                 "verdict": (
@@ -471,9 +828,15 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 "lane_results": dict(lane_results),
                 "scoped_executor_plan": scoped_executor_plan,
                 "current_day_source_provider_result": current_day_source_provider_result,
+                "c1_active_a_minute_batch": dict(
+                    c1_active_a_minute_batch_summary
+                    or getattr(args, "c1_active_a_minute_batch_summary", {})
+                    or {}
+                ),
                 "metric_context_builder_result": metric_context_builder_result,
                 "scoped_pull_plan_chunk": dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {}),
                 "execute_result": execute_result,
+                "n3t_writer_done_markers": list(n3t_writer_done_markers),
                 "bounded": {
                     "max_runtime_seconds": float(args.max_runtime_seconds),
                     "elapsed_seconds": round(now_monotonic() - started, 6),
@@ -498,6 +861,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             "lane_results": dict(lane_results),
             "scoped_executor_plan": scoped_executor_plan,
             "current_day_source_provider_result": current_day_source_provider_result,
+            "c1_active_a_minute_batch": dict(
+                c1_active_a_minute_batch_summary
+                or getattr(args, "c1_active_a_minute_batch_summary", {})
+                or {}
+            ),
             "metric_context_builder_result": metric_context_builder_result,
             "scoped_pull_plan_chunk": dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {}),
             "bounded": {
@@ -525,6 +893,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 "output_dir": args.output_dir,
                 "active_scope_artifact_count": len(artifacts),
                 "lane_results": dict(lane_results),
+                "c1_active_a_minute_batch": dict(
+                    c1_active_a_minute_batch_summary
+                    or getattr(args, "c1_active_a_minute_batch_summary", {})
+                    or {}
+                ),
                 "boundary": _boundary(),
             }
         if _is_post_close_final_a_pass(args) and str(exc).startswith("max_runtime_seconds_exceeded:"):
@@ -540,6 +913,23 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                     now_monotonic=now_monotonic,
                 )
         if str(exc).startswith("max_runtime_seconds_exceeded:"):
+            c1_summary = dict(getattr(args, "c1_active_a_minute_batch_summary", {}) or {})
+            if (
+                c1_summary.get("mode") == ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+                and current_day_source_provider_result is not None
+                and int(c1_summary.get("selected_candidate_count") or 0) > 0
+            ):
+                manifest = _current_day_source_provider_chunk_waiting_manifest(
+                    args=args,
+                    invocation_id=invocation_id,
+                    artifacts=artifacts,
+                    output_dir=Path(str(getattr(args, "output_dir", "") or ".")),
+                    current_day_source_provider_result=current_day_source_provider_result or {},
+                    started=started,
+                    now_monotonic=now_monotonic,
+                )
+                manifest["lane_results"] = dict(lane_results)
+                return manifest
             chunk_summary = dict(getattr(args, "prevctx_to_metric_context_chunk_summary", {}) or {})
             if _prevctx_to_metric_context_progress_timeout(
                 exc,
@@ -570,6 +960,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             "active_scope_artifact_count": len(artifacts),
             "lane_results": dict(lane_results),
             "current_day_source_provider_result": current_day_source_provider_result,
+            "c1_active_a_minute_batch": dict(
+                c1_active_a_minute_batch_summary
+                or getattr(args, "c1_active_a_minute_batch_summary", {})
+                or {}
+            ),
             "metric_context_builder_result": metric_context_builder_result,
             "scoped_pull_plan_chunk": dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {}),
             "scoped_executor_plan": _build_scoped_executor_plan(
@@ -588,7 +983,10 @@ def _empty_lane_result(*, lane_name: str, reason: str) -> dict[str, Any]:
         "selected_candidate_count": 0,
         "processed_candidate_count": 0,
         "skipped_candidate_count": 0,
+        "failed_candidate_count": 0,
         "remaining_candidate_count": 0,
+        "oldest_pending_trigger_time": "",
+        "max_pending_age_seconds": 0,
         "reason": reason,
         "hard_blocker_count": 0,
     }
@@ -612,21 +1010,30 @@ def _lane_result_from_priority_summary(
     lane_name: str,
     summary: Mapping[str, Any] | None,
     default_reason: str,
+    selected_artifacts: Sequence[Mapping[str, Any]] = (),
+    observed_at: str = "",
 ) -> dict[str, Any]:
     source = dict(summary or {})
     selected = int(source.get("selected_candidate_count") or 0)
     processed = int(source.get("processed_candidate_count") or selected)
     remaining = int(source.get("remaining_candidate_count") or 0)
     skipped = int(source.get("skipped_candidate_count") or remaining)
-    return {
+    reason = str(source.get("reason") or default_reason)
+    if selected <= 0:
+        processed = 0
+        reason = default_reason
+    result = {
         "lane_name": lane_name,
         "selected_candidate_count": selected,
         "processed_candidate_count": processed,
         "skipped_candidate_count": skipped,
+        "failed_candidate_count": int(source.get("failed_candidate_count") or 0),
         "remaining_candidate_count": remaining,
-        "reason": str(source.get("reason") or default_reason),
+        "reason": reason,
         "hard_blocker_count": 0,
     }
+    result.update(_lane_pending_latency_fields(selected_artifacts, observed_at=observed_at))
+    return result
 
 
 def _lane_result_from_c1_selection(
@@ -634,31 +1041,104 @@ def _lane_result_from_c1_selection(
     prioritized_staging_artifacts: Sequence[Mapping[str, Any]],
     scoped_pull_plan_summary: Mapping[str, Any] | None,
     skip_reason: str,
+    selected_artifacts: Sequence[Mapping[str, Any]] = (),
+    observed_at: str = "",
 ) -> dict[str, Any]:
     if prioritized_staging_artifacts:
         selected = len(prioritized_staging_artifacts)
-        return {
+        result = {
             "lane_name": "c1_lane",
             "selected_candidate_count": selected,
             "processed_candidate_count": 0,
             "skipped_candidate_count": 0,
+            "failed_candidate_count": 0,
             "remaining_candidate_count": 0,
             "reason": skip_reason or "existing_source_staging_prioritized",
             "hard_blocker_count": 0,
         }
+        result.update(_lane_pending_latency_fields(selected_artifacts, observed_at=observed_at))
+        return result
     source = dict(scoped_pull_plan_summary or {})
     selected = int(source.get("selected_candidate_count") or 0)
     remaining = int(source.get("remaining_candidate_count") or 0)
     skipped = int(source.get("skipped_candidate_count") or remaining)
-    return {
+    result = {
         "lane_name": "c1_lane",
         "selected_candidate_count": selected,
         "processed_candidate_count": 0,
         "skipped_candidate_count": skipped,
+        "failed_candidate_count": int(source.get("failed_candidate_count") or 0),
         "remaining_candidate_count": remaining,
         "reason": str(source.get("reason") or "c1_lane_no_candidate"),
         "hard_blocker_count": 0,
     }
+    result.update(_lane_pending_latency_fields(selected_artifacts, observed_at=observed_at))
+    return result
+
+
+def _lane_pending_latency_fields(
+    selected_artifacts: Sequence[Mapping[str, Any]],
+    *,
+    observed_at: str,
+) -> dict[str, Any]:
+    parsed: list[tuple[datetime, str]] = []
+    for artifact in selected_artifacts:
+        payload = _active_scope_payload_from_candidate(artifact)
+        for ref in _iter_active_scope_ref_records(payload):
+            for key in ("source_trigger_event_time", "trigger_time", "latest_n4_event_time", "event_time"):
+                text = str(ref.get(key) or "").strip()
+                if not text:
+                    continue
+                dt = _parse_iso_datetime_or_none(text)
+                if dt is not None:
+                    parsed.append((dt, text))
+                    break
+    if not parsed:
+        return {"oldest_pending_trigger_time": "", "max_pending_age_seconds": 0}
+    parsed.sort(key=lambda item: item[0])
+    oldest_dt, oldest_text = parsed[0]
+    observed_dt = _parse_iso_datetime_or_none(observed_at)
+    if observed_dt is None:
+        return {"oldest_pending_trigger_time": oldest_text, "max_pending_age_seconds": 0}
+    if oldest_dt.tzinfo is None and observed_dt.tzinfo is not None:
+        oldest_dt = oldest_dt.replace(tzinfo=observed_dt.tzinfo)
+    if oldest_dt.tzinfo is not None and observed_dt.tzinfo is None:
+        observed_dt = observed_dt.replace(tzinfo=oldest_dt.tzinfo)
+    age_seconds = max(0, int((observed_dt - oldest_dt).total_seconds()))
+    return {"oldest_pending_trigger_time": oldest_text, "max_pending_age_seconds": age_seconds}
+
+
+def _active_scope_payload_from_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    path = str(candidate.get("path") or candidate.get("input_active_scope_artifact_path") or "").strip()
+    if path:
+        source = _read_optional_json_artifact(path)
+        if source.get("exists"):
+            return dict(source.get("payload") or {})
+    return dict(candidate.get("payload") or candidate)
+
+
+def _iter_active_scope_ref_records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    if isinstance(payload.get("active_tracking_refs"), list):
+        refs.extend(dict(item) for item in payload.get("active_tracking_refs") or [] if isinstance(item, Mapping))
+    for row in payload.get("scope_rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        if isinstance(row.get("active_tracking_refs"), list):
+            refs.extend(dict(item) for item in row.get("active_tracking_refs") or [] if isinstance(item, Mapping))
+    if not refs:
+        refs.append(dict(payload))
+    return refs
+
+
+def _parse_iso_datetime_or_none(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _lane_result_after_c1_execution(
@@ -671,11 +1151,13 @@ def _lane_result_after_c1_execution(
     processed = int(existing_source_staging_count or 0)
     provider = dict(current_day_source_provider_result or {})
     processed += int(provider.get("artifact_count") or 0)
+    failed = int(provider.get("failed_candidate_count") or 0)
     if provider.get("artifact_written") and processed <= 0:
         processed = 1
     selected = int(result.get("selected_candidate_count") or processed)
     result["selected_candidate_count"] = selected
     result["processed_candidate_count"] = processed
+    result["failed_candidate_count"] = failed
     result["remaining_candidate_count"] = max(0, int(result.get("remaining_candidate_count") or 0))
     result["skipped_candidate_count"] = max(0, int(result.get("skipped_candidate_count") or 0))
     if processed > 0 and result.get("reason") in {"c1_lane_no_candidate", "scoped_pull_plan_candidate_chunk_ready"}:
@@ -683,6 +1165,61 @@ def _lane_result_after_c1_execution(
     result.setdefault("lane_name", "c1_lane")
     result.setdefault("hard_blocker_count", 0)
     return result
+
+
+def _lane_result_from_active_a_minute_batch_summary(
+    summary: Mapping[str, Any],
+    *,
+    selected_artifacts: Sequence[Mapping[str, Any]] = (),
+    observed_at: str = "",
+) -> dict[str, Any]:
+    source = dict(summary or {})
+    selected = int(source.get("selected_object_count") or source.get("selected_candidate_count") or 0)
+    processed = int(
+        source.get("staging_artifact_written_count")
+        or source.get("source_artifact_written_count")
+        or source.get("processed_candidate_count")
+        or 0
+    )
+    result = {
+        "lane_name": "c1_lane",
+        "mode": ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+        "selected_candidate_count": selected,
+        "selected_object_count": selected,
+        "selected_ref_count": int(source.get("selected_ref_count") or 0),
+        "processed_candidate_count": processed,
+        "skipped_candidate_count": int(source.get("skipped_existing_ready_count") or 0),
+        "failed_candidate_count": int(source.get("failed_candidate_count") or 0),
+        "remaining_candidate_count": int(source.get("remaining_candidate_count") or 0),
+        "reason": str(source.get("reason") or ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE),
+        "hard_blocker_count": 0,
+    }
+    result.update(_lane_pending_latency_fields(selected_artifacts, observed_at=observed_at))
+    return result
+
+
+def _active_a_minute_batch_controls_c1(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    summary: Mapping[str, Any] | None,
+) -> bool:
+    source = dict(summary or {})
+    if source.get("mode") != ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE:
+        return False
+    return any(item.get("object_scope_ref_fanout") is True for item in active_scope_artifacts)
+
+
+def _active_a_minute_batch_waiting_reason(summary: Mapping[str, Any]) -> str:
+    source = dict(summary or {})
+    if source.get("reason") == "active_a_minute_batch_closed_minute_unavailable":
+        return "c1_active_a_minute_batch_closed_minute_unavailable"
+    if (
+        int(source.get("source_artifact_written_count") or 0) > 0
+        or int(source.get("staging_artifact_written_count") or 0) > 0
+        or int(source.get("skipped_existing_ready_count") or 0) > 0
+    ):
+        return "c1_active_a_minute_batch_ready_for_n3t_lane"
+    return "c1_active_a_minute_batch_chunk_incomplete"
 
 
 def _metric_context_chunk_has_remaining(summary: Mapping[str, Any] | None) -> bool:
@@ -711,9 +1248,15 @@ def _current_day_source_provider_chunk_waiting_manifest(
     started: float,
     now_monotonic: Any,
 ) -> dict[str, Any]:
+    c1_active_summary = dict(getattr(args, "c1_active_a_minute_batch_summary", {}) or {})
+    reason = (
+        "c1_active_a_minute_batch_chunk_incomplete"
+        if c1_active_summary.get("mode") == ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        else "current_day_source_provider_chunk_incomplete"
+    )
     return {
         "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
-        "reason": "current_day_source_provider_chunk_incomplete",
+        "reason": reason,
         "invocation_id": invocation_id,
         "fastlane_lane_id": getattr(args, "fastlane_lane_id", ""),
         "fastlane": {
@@ -728,11 +1271,12 @@ def _current_day_source_provider_chunk_waiting_manifest(
         "active_scope_artifact_count": len(artifacts),
         "active_scope_artifacts": [dict(item) for item in artifacts],
         "current_day_source_provider_result": dict(current_day_source_provider_result),
+        "c1_active_a_minute_batch": c1_active_summary,
         "scoped_executor_plan": _build_scoped_executor_plan(
             active_scope_artifacts=artifacts,
             output_dir=output_dir,
             plan_status="blocked",
-            blocked_reason="current_day_source_provider_chunk_incomplete",
+            blocked_reason=reason,
         ),
         "bounded": {
             "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
@@ -750,11 +1294,13 @@ def _prevctx_to_metric_context_progress_timeout(
 ) -> bool:
     if not str(exc).startswith("max_runtime_seconds_exceeded:"):
         return False
+    result = dict(metric_context_builder_result or {})
+    if bool(result.get("artifact_written")) or int(result.get("artifact_count") or 0) > 0:
+        return True
     summary = dict(chunk_summary or {})
     if summary.get("reason") != "prevctx_to_metric_context_chunk_incomplete":
         return False
-    result = dict(metric_context_builder_result or {})
-    return bool(result.get("artifact_written")) or int(result.get("artifact_count") or 0) > 0
+    return False
 
 
 def _prevctx_to_metric_context_chunk_waiting_manifest(
@@ -798,6 +1344,84 @@ def _prevctx_to_metric_context_chunk_waiting_manifest(
         },
         "boundary": _boundary(),
     }
+
+
+def _flush_metric_context_chunk_to_n3t_writer(
+    *,
+    args: argparse.Namespace,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    chunk_summary: Mapping[str, Any],
+    n3t_writer_adapter: Callable[..., Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    selected_artifacts = _active_scope_artifacts_for_metric_context_chunk(
+        active_scope_artifacts=active_scope_artifacts,
+        chunk_summary=chunk_summary,
+    )
+    if not selected_artifacts:
+        return {}
+    scoped_executor_plan = _build_scoped_executor_plan(
+        active_scope_artifacts=selected_artifacts,
+        output_dir=output_dir,
+        plan_status="planned",
+        blocked_reason=None,
+    )
+    n3t_writer_inputs = _n3t_writer_inputs_from_plan(scoped_executor_plan)
+    if not n3t_writer_inputs:
+        return {
+            "n3t_writer_input_count": 0,
+            "selected_artifact_count": len(selected_artifacts),
+            "reason": "n3t_writer_inputs_not_ready_after_metric_context_chunk",
+        }
+    adapter = n3t_writer_adapter
+    handoff_only = False
+    if adapter is None:
+        adapter = _configured_n3t_writer_adapter(args)
+    if adapter is None:
+        execute_result = _build_n3t_writer_handoff_result(n3t_writer_inputs=n3t_writer_inputs)
+        handoff_only = True
+    else:
+        execute_result = dict(adapter(args=args, n3t_writer_inputs=n3t_writer_inputs) or {})
+    _validate_execute_result(execute_result)
+    done_markers = _write_n3t_writer_done_markers(
+        output_dir=output_dir,
+        n3t_writer_inputs=n3t_writer_inputs,
+        execute_result=execute_result,
+        observed_at=_runner_observed_at(args),
+    )
+    return {
+        "reason": "metric_context_chunk_flushed_to_n3t_writer",
+        "handoff_only": handoff_only,
+        "selected_artifact_count": len(selected_artifacts),
+        "n3t_writer_input_count": len(n3t_writer_inputs),
+        "execute_result": execute_result,
+        "n3t_writer_done_markers": done_markers,
+        "scoped_executor_plan": scoped_executor_plan,
+    }
+
+
+def _active_scope_artifacts_for_metric_context_chunk(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    chunk_summary: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    selected_keys = {
+        (
+            str(item.get("target_hhmm") or ""),
+            str(item.get("source_run_hash") or ""),
+        )
+        for item in chunk_summary.get("selected_source_runs") or []
+        if isinstance(item, Mapping)
+    }
+    if not selected_keys:
+        return []
+    selected: list[dict[str, Any]] = []
+    for artifact in active_scope_artifacts:
+        context = _infer_scope_context(artifact)
+        key = (str(context.get("target_hhmm") or ""), str(context.get("source_run_hash") or ""))
+        if key in selected_keys:
+            selected.append(dict(artifact))
+    return selected
 
 
 def _scoped_pull_plan_progress_timeout(
@@ -1004,12 +1628,807 @@ def _run_current_day_source_provider_adapter(
     if deadline_check is not None:
         deadline_check("before_current_day_source_provider_adapter")
     result = dict(current_day_source_provider_adapter(args=args, planned_artifacts=candidates) or {})
+    selection_reasons = sorted(
+        {
+            str(artifact.get("c1_lane_selection_reason") or "")
+            for artifact in active_scope_artifacts
+            if str(artifact.get("c1_lane_selection_reason") or "")
+        }
+    )
+    if selection_reasons:
+        result["selection_reason"] = selection_reasons[0] if len(selection_reasons) == 1 else ",".join(selection_reasons)
     result["candidate_scan_bounded"] = True
     result["candidate_scan_limit"] = max_candidates
     result["candidate_scan_scanned_count"] = scanned_count
     result["candidate_count"] = len(candidates)
     result["remaining_candidate_count"] = max(0, len(planned_artifacts) - scanned_count)
+    chunk_summary = dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {})
+    chunk_remaining = int(chunk_summary.get("remaining_candidate_count") or 0)
+    if chunk_remaining > int(result["remaining_candidate_count"] or 0):
+        result["remaining_candidate_count"] = chunk_remaining
     _validate_current_day_source_provider_result(result)
+    return result
+
+
+def _select_active_a_minute_batch_direct_provider_artifacts(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    source_dir: Path,
+    closed_hhmm: str,
+    max_candidates: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    bounded_max = max(1, int(max_candidates or DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES))
+    if not re.fullmatch(r"[0-2][0-9][0-5][0-9]", str(closed_hhmm or "")):
+        return [], {
+            "mode": ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+            "strategy": "active_a_minute_batch_direct_provider_v1",
+            "reason": "active_a_minute_batch_closed_minute_unavailable",
+            "selected_candidate_count": 0,
+            "selected_object_count": 0,
+            "selected_ref_count": 0,
+            "closed_minute_label": "",
+            "source_artifact_written_count": 0,
+            "staging_artifact_written_count": 0,
+            "skipped_existing_ready_count": 0,
+            "failed_candidate_count": 0,
+            "remaining_candidate_count": 0,
+            "selected_source_runs": [],
+        }
+    candidate_artifacts = [dict(item) for item in active_scope_artifacts]
+    records: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str, str, str]] = set()
+    for sequence, artifact in enumerate(candidate_artifacts):
+        closed_target_hhmm = str(closed_hhmm)
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        if not source["exists"]:
+            continue
+        source_payload = dict(source.get("payload") or {})
+        for artifact_candidate, payload in _active_a_minute_batch_payload_candidates(
+            artifact=artifact,
+            payload=source_payload,
+            closed_hhmm=closed_target_hhmm,
+        ):
+            target_hhmm = str(payload.get("target_hhmm") or artifact_candidate.get("target_hhmm") or closed_target_hhmm)
+            if _hhmm_int(target_hhmm) <= 0 or _hhmm_int(target_hhmm) > _hhmm_int(closed_target_hhmm):
+                continue
+            if not _active_a_minute_batch_has_ready_ref(payload, closed_hhmm=target_hhmm):
+                continue
+            source_run_hash = _active_a_minute_batch_source_run_hash(payload, target_hhmm=target_hhmm)
+            if not source_run_hash:
+                continue
+            for_trade_date = str(payload.get("for_trade_date") or artifact_candidate.get("for_trade_date") or "")
+            namespace_token = f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+            key = _active_a_minute_batch_object_key(payload, target_hhmm=target_hhmm)
+            object_group_key = key[:4]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            item = dict(artifact_candidate)
+            item["c1_lane_mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+            item["c1_lane_selection_reason"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+            item["target_hhmm"] = target_hhmm
+            item["source_run_hash"] = source_run_hash
+            item["source_run_namespace"] = namespace_token
+            records.append(
+                {
+                    "artifact": item,
+                    "payload": payload,
+                    "source_artifact_path": str(source.get("path") or artifact_candidate.get("path") or ""),
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "source_run_namespace": namespace_token,
+                    "selected_ref_count": _active_a_minute_batch_ref_count(payload),
+                    "object_group_key": object_group_key,
+                    "sort_key": (
+                        _hhmm_int(target_hhmm),
+                        _active_a_minute_batch_object_key(payload, target_hhmm=target_hhmm),
+                        sequence,
+                    ),
+                }
+            )
+    records.sort(key=lambda item: item["sort_key"])
+    pending_records: list[dict[str, Any]] = []
+    ready_records: list[dict[str, Any]] = []
+    for record in records:
+        target_hhmm = str(record.get("target_hhmm") or "")
+        source_run_hash = str(record.get("source_run_hash") or "")
+        source_run_namespace = str(record.get("source_run_namespace") or "")
+        source_rows = _find_current_day_source_rows_artifact(
+            source_dir,
+            target_hhmm=target_hhmm,
+            source_run_hash=source_run_hash,
+        )
+        staging_path = (
+            output_dir
+            / "current_day_staging"
+            / f"n3_c1_scoped_current_day_staging_v1_{source_run_namespace}_fastlane.json"
+        )
+        staging = _read_optional_json_artifact(str(staging_path))
+        source_ready = bool(source_rows) and not _current_day_artifact_needs_boundary_rebuild(
+            source_rows.get("payload") or {}
+        )
+        staging_ready = bool(staging["exists"]) and not _current_day_artifact_needs_boundary_rebuild(
+            staging.get("payload") or {}
+        )
+        if staging_ready:
+            ready_item = dict(record.get("artifact") or {})
+            ready_item["c1_lane_mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+            ready_item["c1_lane_selection_reason"] = "active_a_minute_batch_existing_ready_handoff"
+            ready_item["target_hhmm"] = target_hhmm
+            ready_item["source_run_hash"] = source_run_hash
+            ready_item["source_run_namespace"] = source_run_namespace
+            ready_record = dict(record)
+            ready_record["artifact"] = ready_item
+            ready_records.append(ready_record)
+            continue
+        pending_records.append(record)
+
+    selected_object_groups: set[tuple[str, str, str, str]] = set()
+    for item in pending_records:
+        selected_object_groups.add(tuple(item.get("object_group_key") or ()))
+        if len(selected_object_groups) >= bounded_max:
+            break
+    limited_pending_records = _active_a_minute_batch_limit_records_per_object(pending_records)
+    selected_records = [
+        item
+        for item in limited_pending_records
+        if tuple(item.get("object_group_key") or ()) in selected_object_groups
+    ]
+    ready_selected_records = _active_a_minute_batch_limit_records_per_object(ready_records)
+
+    def _materialize_active_a_minute_record(record: Mapping[str, Any]) -> dict[str, Any]:
+        artifact_item = dict(record.get("artifact") or {})
+        target_hhmm = str(record.get("target_hhmm") or artifact_item.get("target_hhmm") or "")
+        source_run_hash = str(record.get("source_run_hash") or artifact_item.get("source_run_hash") or "")
+        source_run_namespace = str(record.get("source_run_namespace") or artifact_item.get("source_run_namespace") or "")
+        artifact_item["path"] = _persist_active_a_minute_batch_closed_fanout_payload(
+            payload=record.get("payload") or {},
+            source_artifact_path=str(record.get("source_artifact_path") or artifact_item.get("path") or ""),
+            output_dir=output_dir,
+            target_hhmm=target_hhmm,
+            source_run_hash=source_run_hash,
+            source_run_namespace=source_run_namespace,
+        )
+        return artifact_item
+
+    selected = [_materialize_active_a_minute_record(item) for item in selected_records]
+    ready_handoff_artifacts = [_materialize_active_a_minute_record(item) for item in ready_selected_records]
+    remaining_count = max(0, len(limited_pending_records) - len(selected_records))
+    selected_hhmm = sorted({str(item.get("target_hhmm") or "") for item in selected_records})
+    selected_ref_count = sum(
+        int(item.get("selected_ref_count") or 0)
+        for item in [*selected_records, *ready_selected_records]
+    )
+    summary = {
+        "mode": ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+        "strategy": "active_a_minute_batch_direct_provider_v1",
+        "reason": (
+            "c1_active_a_minute_batch_chunk_incomplete"
+            if remaining_count > 0
+            else ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        ),
+        "selected_candidate_count": len(selected_records),
+        "selected_object_count": len(selected_object_groups),
+        "selected_ref_count": selected_ref_count,
+        "closed_minute_label": _hhmm_to_minute_label(selected_hhmm[0]) if len(selected_hhmm) == 1 else "multiple",
+        "source_artifact_written_count": 0,
+        "staging_artifact_written_count": 0,
+        "skipped_existing_ready_count": len(ready_selected_records),
+        "ready_handoff_artifacts": ready_handoff_artifacts,
+        "failed_candidate_count": 0,
+        "remaining_candidate_count": remaining_count,
+        "selected_source_runs": [
+            {
+                "target_hhmm": str(item.get("target_hhmm") or ""),
+                "source_run_hash": str(item.get("source_run_hash") or ""),
+                "source_run_namespace": str(item.get("source_run_namespace") or ""),
+            }
+            for item in selected_records
+        ],
+        "max_minutes_per_object": DEFAULT_ACTIVE_A_MINUTE_BATCH_MAX_MINUTES_PER_OBJECT,
+    }
+    return selected, summary
+
+
+def _active_a_minute_batch_limit_records_per_object(
+    records: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    counts: dict[tuple[str, str, str, str], int] = {}
+    selected: list[Mapping[str, Any]] = []
+    limit = max(1, DEFAULT_ACTIVE_A_MINUTE_BATCH_MAX_MINUTES_PER_OBJECT)
+    for item in records:
+        group_key = tuple(item.get("object_group_key") or ())
+        current = counts.get(group_key, 0)
+        if current >= limit:
+            continue
+        counts[group_key] = current + 1
+        selected.append(item)
+    return selected
+
+
+def _active_a_minute_batch_payload_candidates(
+    *,
+    artifact: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    closed_hhmm: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    if artifact.get("object_scope_ref_fanout") is True or payload.get("object_scope_ref_fanout") is True:
+        return [(dict(artifact), dict(payload))]
+    closed_value = _hhmm_int(closed_hhmm)
+    if closed_value <= 0:
+        return []
+    rows = [dict(row) for row in payload.get("scope_rows") or [] if isinstance(row, Mapping)]
+    buckets: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for object_row in rows:
+        if str(object_row.get("scope_status") or "active") != "active":
+            continue
+        for ref_source in object_row.get("active_tracking_refs") or []:
+            if not isinstance(ref_source, Mapping):
+                continue
+            ref = dict(ref_source)
+            ref_target = _target_hhmm_from_active_ref(ref)
+            if not ref_target:
+                continue
+            ref_for_trade_date = str(
+                ref.get("for_trade_date")
+                or object_row.get("for_trade_date")
+                or payload.get("for_trade_date")
+                or artifact.get("for_trade_date")
+                or ""
+            )
+            target_hhmms = _active_a_minute_batch_target_hhmms(
+                for_trade_date=ref_for_trade_date,
+                start_hhmm=ref_target,
+                closed_hhmm=closed_hhmm,
+            )
+            if not target_hhmms:
+                continue
+            # The hot path is cursor-driven: C1 materializes only the next
+            # unchecked bar for a ref. N5 advances the cursor after evaluating
+            # that proof, so expanding every minute up to latest closed creates
+            # a large backlog and can starve the exact missing bar.
+            target_hhmms = target_hhmms[:1]
+            direction = str(ref.get("direction") or object_row.get("direction") or "")
+            if not direction:
+                continue
+            for target_hhmm in target_hhmms:
+                key = (
+                    ref_for_trade_date,
+                    str(ref.get("asset_kind") or object_row.get("asset_kind") or ""),
+                    str(ref.get("identity_key") or object_row.get("identity_key") or ""),
+                    direction,
+                    target_hhmm,
+                )
+                bucket = buckets.setdefault(key, {"object_row": object_row, "refs": [], "target_hhmm": target_hhmm})
+                bucket["refs"].append(ref)
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for sequence, bucket in enumerate(buckets.values()):
+        refs = sorted(
+            (dict(ref) for ref in bucket["refs"]),
+            key=lambda ref: (
+                _hint_condition_priority(ref.get("condition_key")),
+                str(ref.get("source_trigger_event_time") or ref.get("trigger_time") or ref.get("latest_n4_event_time") or ""),
+                str(ref.get("condition_key") or ""),
+                str(ref.get("state_key") or ""),
+            ),
+        )
+        if not refs:
+            continue
+        target_hhmm = str(bucket.get("target_hhmm") or closed_hhmm)
+        source_run_hash = _object_minute_source_run_hash(
+            object_row=bucket["object_row"],
+            active_refs=refs,
+            target_hhmm=target_hhmm,
+        )
+        source_trigger_run_id = _joined_source_trigger_run_ids(refs) or str(payload.get("source_trigger_run_id") or "")
+        for_trade_date = str(
+            refs[0].get("for_trade_date")
+            or bucket["object_row"].get("for_trade_date")
+            or payload.get("for_trade_date")
+            or artifact.get("for_trade_date")
+            or ""
+        )
+        source_run_namespace = f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+        narrowed_payload = _object_scope_ref_fanout_payload(
+            payload=payload,
+            object_row=bucket["object_row"],
+            active_refs=refs,
+            target_hhmm=target_hhmm,
+            source_run_hash=source_run_hash,
+            source_run_namespace=source_run_namespace,
+            source_trigger_run_id=source_trigger_run_id,
+        )
+        candidate = dict(artifact)
+        candidate.update(
+            {
+                "for_trade_date": for_trade_date,
+                "target_hhmm": target_hhmm,
+                "source_trigger_run_id": source_trigger_run_id,
+                "source_run_hash": source_run_hash,
+                "source_run_namespace": source_run_namespace,
+                "scope_count": 1,
+                "active_tracking_ref_count": len(refs),
+                "object_scope_ref_fanout": True,
+                "source_trigger_event_id": _joined_source_trigger_event_ids(refs),
+                "source_trigger_event_type": _joined_source_trigger_event_types(refs),
+                "source_trigger_event_time": str(
+                    refs[0].get("source_trigger_event_time")
+                    or refs[0].get("latest_n4_event_time")
+                    or refs[0].get("trigger_time")
+                    or ""
+                ),
+                "sort_sequence": sequence,
+            }
+        )
+        candidates.append((candidate, narrowed_payload))
+    return candidates
+
+
+def _active_a_minute_batch_target_hhmms(
+    *,
+    for_trade_date: str,
+    start_hhmm: str,
+    closed_hhmm: str,
+) -> list[str]:
+    start_label = _hhmm_to_minute_label(start_hhmm)
+    closed_label = _hhmm_to_minute_label(closed_hhmm)
+    labels = canonical_ashare_1m_labels(for_trade_date) if re.fullmatch(r"\d{8}", str(for_trade_date or "")) else []
+    if start_label in labels and closed_label in labels:
+        start_index = labels.index(start_label)
+        closed_index = labels.index(closed_label)
+        if start_index > closed_index:
+            return []
+        return [label.replace(":", "") for label in labels[start_index : closed_index + 1]]
+    start_value = _hhmm_int(start_hhmm)
+    closed_value = _hhmm_int(closed_hhmm)
+    if start_value <= 0 or closed_value <= 0 or start_value > closed_value:
+        return []
+    return [f"{start_value:04d}"]
+
+
+def _persist_active_a_minute_batch_closed_fanout_payload(
+    *,
+    payload: Mapping[str, Any],
+    source_artifact_path: str,
+    output_dir: Path,
+    target_hhmm: str,
+    source_run_hash: str,
+    source_run_namespace: str,
+) -> str:
+    fanout_dir = output_dir / "active_scope_ref_fanout"
+    path = fanout_dir / f"n5_active_scope_snapshot_v1_{source_run_namespace}_ref_fanout.json"
+    closed_payload = dict(payload)
+    closed_payload.update(
+        {
+            "target_hhmm": target_hhmm,
+            "target_minute_label": _hhmm_to_minute_label(target_hhmm),
+            "source_run_hash": source_run_hash,
+            "source_run_namespace": source_run_namespace,
+            "object_scope_ref_fanout": True,
+            "object_minute_scope": True,
+            "object_minute_ref_dedupe_policy": "for_trade_date_asset_identity_direction_target_minute_v1",
+            "source_object_scope_artifact_path": source_artifact_path,
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(closed_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _active_a_minute_batch_object_key(
+    payload: Mapping[str, Any],
+    *,
+    target_hhmm: str,
+) -> tuple[str, str, str, str, str]:
+    rows = [row for row in payload.get("scope_rows") or [] if isinstance(row, Mapping)]
+    row = rows[0] if rows else {}
+    refs = [
+        ref
+        for scope_row in rows
+        for ref in scope_row.get("active_tracking_refs") or []
+        if isinstance(ref, Mapping)
+    ]
+    ref = refs[0] if refs else {}
+    return (
+        str(payload.get("for_trade_date") or row.get("for_trade_date") or ref.get("for_trade_date") or ""),
+        str(row.get("asset_kind") or ref.get("asset_kind") or ""),
+        str(row.get("identity_key") or ref.get("identity_key") or ""),
+        str(ref.get("direction") or row.get("direction") or ""),
+        str(target_hhmm),
+    )
+
+
+def _active_a_minute_batch_fetch_group_key_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    target_hhmm: str,
+) -> tuple[str, str, str, str]:
+    return _active_a_minute_batch_object_key(payload, target_hhmm=target_hhmm)[:4]
+
+
+def _active_a_minute_batch_fetch_group_key_for_planned(
+    planned_artifact: Mapping[str, Any],
+) -> tuple[str, str, str, str]:
+    target_hhmm = str(planned_artifact.get("target_hhmm") or "")
+    active_scope = _read_optional_json_artifact(str(planned_artifact.get("input_active_scope_artifact_path") or ""))
+    payload = active_scope.get("payload") or {}
+    if isinstance(payload, Mapping):
+        return _active_a_minute_batch_fetch_group_key_from_payload(payload, target_hhmm=target_hhmm)
+    return (str(planned_artifact.get("for_trade_date") or ""), "", "", "")
+
+
+def _active_a_minute_batch_fetch_target_sort_key(planned_artifact: Mapping[str, Any]) -> int:
+    return _hhmm_int(str(planned_artifact.get("target_hhmm") or ""))
+
+
+def _active_a_minute_batch_source_payload_fetch_group_key(
+    source_payload: Mapping[str, Any],
+) -> tuple[str, str, str, str]:
+    rows = [
+        row
+        for row in source_payload.get("closed_minute_rows") or source_payload.get("source_rows") or []
+        if isinstance(row, Mapping)
+    ]
+    row = rows[0] if rows else {}
+    return (
+        str(source_payload.get("for_trade_date") or row.get("for_trade_date") or ""),
+        str(row.get("asset_kind") or ""),
+        str(row.get("identity_key") or ""),
+        str(row.get("direction") or ""),
+    )
+
+
+def _active_a_minute_batch_source_target_sort_key(source: Mapping[str, Any]) -> int:
+    return _hhmm_int(str(source.get("_provider_target_hhmm") or ""))
+
+
+def _active_a_minute_batch_closed_hhmm(
+    args: argparse.Namespace,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+) -> str:
+    current_exchange_time = str(getattr(args, "fastlane_current_exchange_time", "") or "").strip()
+    current_hhmm = _hhmm_int(current_exchange_time)
+    for_trade_date = ""
+    for artifact in active_scope_artifacts:
+        for_trade_date = str(artifact.get("for_trade_date") or "")
+        if for_trade_date:
+            break
+    if not for_trade_date:
+        for_trade_date = str(getattr(args, "for_trade_date", "") or "")
+    labels = canonical_ashare_1m_labels(for_trade_date) if re.fullmatch(r"\d{8}", for_trade_date or "") else []
+    if current_hhmm <= 0:
+        return ""
+    last_closed = ""
+    for label in labels:
+        hhmm = _hhmm_int(label)
+        if hhmm <= 0:
+            continue
+        required = hhmm if hhmm >= 1500 else _add_hhmm_minutes(hhmm, 1)
+        if current_hhmm >= required:
+            last_closed = f"{hhmm:04d}"
+        else:
+            break
+    return last_closed
+
+
+def _active_a_minute_batch_closed_minute_unavailable(
+    *,
+    args: argparse.Namespace,
+    summary: Mapping[str, Any] | None,
+) -> bool:
+    source = dict(summary or {})
+    if source.get("mode") != ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE:
+        return False
+    if source.get("reason") != "active_a_minute_batch_closed_minute_unavailable":
+        return False
+    return str(getattr(args, "fastlane_session_phase", "") or "") == "post_close"
+
+
+def _post_close_c1_provider_disabled(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "fastlane_session_phase", "") or "").strip() == "post_close"
+
+
+def _post_close_c1_provider_disabled_summary(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    active_ref_count = 0
+    for artifact in active_scope_artifacts:
+        payload = _active_scope_payload_from_candidate(artifact)
+        active_ref_count += len(_iter_active_scope_ref_records(payload))
+    return {
+        "mode": ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+        "reason": "post_close_c1_provider_disabled",
+        "selected_candidate_count": 0,
+        "selected_object_count": 0,
+        "selected_ref_count": active_ref_count,
+        "processed_candidate_count": 0,
+        "source_artifact_written_count": 0,
+        "staging_artifact_written_count": 0,
+        "skipped_existing_ready_count": 0,
+        "failed_candidate_count": 0,
+        "remaining_candidate_count": len(active_scope_artifacts),
+    }
+
+
+def _active_a_minute_batch_source_run_hash(payload: Mapping[str, Any], *, target_hhmm: str) -> str:
+    rows = [row for row in payload.get("scope_rows") or [] if isinstance(row, Mapping)]
+    row = rows[0] if rows else {}
+    refs = [
+        dict(ref)
+        for scope_row in rows
+        for ref in scope_row.get("active_tracking_refs") or []
+        if isinstance(ref, Mapping)
+    ]
+    if not refs:
+        return ""
+    object_row = dict(row)
+    object_row.setdefault("for_trade_date", payload.get("for_trade_date"))
+    object_row.setdefault("asset_kind", refs[0].get("asset_kind"))
+    object_row.setdefault("identity_key", refs[0].get("identity_key"))
+    return _object_minute_source_run_hash(
+        object_row=object_row,
+        active_refs=refs,
+        target_hhmm=target_hhmm,
+    )
+
+
+def _active_a_minute_batch_has_ready_ref(payload: Mapping[str, Any], *, closed_hhmm: str) -> bool:
+    closed_value = _hhmm_int(closed_hhmm)
+    if closed_value <= 0:
+        return False
+    for ref in _iter_active_scope_ref_records(payload):
+        ref_target = _target_hhmm_from_active_ref(ref)
+        if not ref_target:
+            continue
+        if _hhmm_int(ref_target) <= closed_value:
+            return True
+    return False
+
+
+def _active_a_minute_batch_ref_count(payload: Mapping[str, Any]) -> int:
+    count = int(payload.get("active_tracking_ref_count") or 0)
+    if count > 0:
+        return count
+    return len(_iter_active_scope_ref_records(payload))
+
+
+def _build_inline_pull_plan_for_active_a_minute_batch(
+    planned_artifact: Mapping[str, Any],
+    *,
+    observed_at: Any,
+) -> dict[str, Any]:
+    active_scope = _read_optional_json_artifact(str(planned_artifact.get("input_active_scope_artifact_path") or ""))
+    if not active_scope["exists"]:
+        raise FastlaneShellBlocked("active_scope_artifact_missing")
+    target_hhmm = str(planned_artifact.get("target_hhmm") or "")
+    plan = build_n3_c1_scoped_current_day_pull_plan(
+        active_scope.get("payload") or {},
+        target_minute_label=_hhmm_to_minute_label(target_hhmm),
+        observed_at=observed_at,
+        source_artifact_path=str(active_scope.get("path") or ""),
+        source_artifact_hash=str(active_scope.get("sha256") or ""),
+    )
+    plan["plan_source"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+    plan["persistent_pull_plan_written"] = False
+    return plan
+
+
+def _run_active_a_minute_batch_direct_provider_adapter(
+    *,
+    args: argparse.Namespace,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if not active_scope_artifacts:
+        return None
+    source_dir_text = str(getattr(args, "current_day_source_artifact_dir", "") or "").strip()
+    if not source_dir_text:
+        raise FastlaneShellBlocked("current_day_source_artifact_dir_required")
+    source_dir = Path(source_dir_text)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    scoped_plan = _build_scoped_executor_plan(
+        active_scope_artifacts=active_scope_artifacts,
+        output_dir=output_dir,
+        plan_status="planned",
+        blocked_reason=None,
+    )
+    planned_artifacts_by_fetch_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    observed_at = _runner_observed_at(args)
+    for planned in scoped_plan.get("planned_artifacts") or []:
+        item = dict(planned)
+        source_rows = _find_current_day_source_rows_artifact(
+            source_dir,
+            target_hhmm=str(item.get("target_hhmm") or ""),
+            source_run_hash=str(item.get("source_run_hash") or ""),
+        )
+        if source_rows and not _current_day_artifact_needs_boundary_rebuild(source_rows.get("payload") or {}):
+            continue
+        item["c1_lane_mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        item["c1_lane_selection_reason"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        item["inline_pull_plan_payload"] = _build_inline_pull_plan_for_active_a_minute_batch(
+            item,
+            observed_at=observed_at,
+        )
+        fetch_key = _active_a_minute_batch_fetch_group_key_for_planned(item)
+        existing = planned_artifacts_by_fetch_key.get(fetch_key)
+        if existing is None or _active_a_minute_batch_fetch_target_sort_key(item) > _active_a_minute_batch_fetch_target_sort_key(existing):
+            planned_artifacts_by_fetch_key[fetch_key] = item
+    planned_artifacts = sorted(
+        planned_artifacts_by_fetch_key.values(),
+        key=lambda item: (
+            _active_a_minute_batch_fetch_target_sort_key(item),
+            _active_a_minute_batch_fetch_group_key_for_planned(item),
+        ),
+    )
+    summary = dict(getattr(args, "c1_active_a_minute_batch_summary", {}) or {})
+    if not planned_artifacts:
+        result = _skipped_current_day_source_provider_result(
+            skip_reason=ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
+            staging_artifact_count=0,
+        )
+        result["mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        result["selection_reason"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        result["selected_object_count"] = int(summary.get("selected_object_count") or 0)
+        result["selected_ref_count"] = int(summary.get("selected_ref_count") or 0)
+        result["closed_minute_label"] = str(summary.get("closed_minute_label") or "")
+        result["candidate_scan_bounded"] = True
+        result["candidate_scan_limit"] = _current_day_source_provider_max_candidates(args)
+        result["candidate_scan_scanned_count"] = len(active_scope_artifacts)
+        result["candidate_count"] = 0
+        result["remaining_candidate_count"] = int(summary.get("remaining_candidate_count") or 0)
+        _validate_current_day_source_provider_result(result)
+        return result
+    result = dict(current_day_source_provider_adapter(args=args, planned_artifacts=planned_artifacts) or {})
+    result["selection_reason"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+    result["mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+    result["selected_object_count"] = int(summary.get("selected_object_count") or len(planned_artifacts))
+    result["selected_ref_count"] = int(summary.get("selected_ref_count") or 0)
+    result["closed_minute_label"] = str(summary.get("closed_minute_label") or "")
+    result["candidate_scan_bounded"] = True
+    result["candidate_scan_limit"] = _current_day_source_provider_max_candidates(args)
+    result["candidate_scan_scanned_count"] = len(active_scope_artifacts)
+    result["candidate_count"] = len(planned_artifacts)
+    result["remaining_candidate_count"] = int(summary.get("remaining_candidate_count") or 0)
+    _validate_current_day_source_provider_result(result)
+    return result
+
+
+def _materialize_active_a_minute_batch_direct_staging_artifacts(
+    *,
+    args: argparse.Namespace,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    observed_at: Any,
+    deadline_check: Callable[[str], None] | None = None,
+    source_artifacts: Sequence[Mapping[str, Any]] | None = None,
+) -> int:
+    source_dir_text = str(getattr(args, "current_day_source_artifact_dir", "") or "").strip()
+    if not source_dir_text:
+        return 0
+    source_dir = Path(source_dir_text)
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise FastlaneShellBlocked("current_day_source_artifact_dir_missing")
+    materialized_count = 0
+    scoped_plan = _build_scoped_executor_plan(
+        active_scope_artifacts=active_scope_artifacts,
+        output_dir=output_dir,
+        plan_status="planned",
+        blocked_reason=None,
+    )
+    provider_source_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    provider_sources_by_object_key: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for source_artifact in source_artifacts or []:
+        path_text = str(source_artifact.get("path") or "").strip()
+        if not path_text:
+            continue
+        source = _read_optional_json_artifact(path_text)
+        if not source["exists"]:
+            continue
+        payload = source.get("payload") or {}
+        if payload.get("artifact_type") != CURRENT_DAY_SOURCE_ROWS_TYPE:
+            raise FastlaneShellBlocked("current_day_source_artifact_contract_mismatch")
+        target_hhmm = str(
+            payload.get("target_hhmm")
+            or source_artifact.get("target_hhmm")
+            or payload.get("target_minute_label")
+            or ""
+        ).replace(":", "")
+        source_run_hash = str(payload.get("source_run_hash") or source_artifact.get("source_run_hash") or "")
+        key = (target_hhmm, source_run_hash)
+        if key in provider_source_by_key and provider_source_by_key[key].get("path") != source.get("path"):
+            raise FastlaneShellBlocked("current_day_source_artifact_ambiguous")
+        provider_source_by_key[key] = source
+        object_key = _active_a_minute_batch_source_payload_fetch_group_key(payload)
+        if object_key:
+            source_with_target = dict(source)
+            source_with_target["_provider_target_hhmm"] = target_hhmm
+            provider_sources_by_object_key.setdefault(object_key, []).append(source_with_target)
+    for values in provider_sources_by_object_key.values():
+        values.sort(key=_active_a_minute_batch_source_target_sort_key)
+    for planned in scoped_plan.get("planned_artifacts") or []:
+        active_scope = _read_optional_json_artifact(str(planned.get("input_active_scope_artifact_path") or ""))
+        if not active_scope["exists"]:
+            raise FastlaneShellBlocked("active_scope_artifact_missing")
+        pull_plan_payload = _build_inline_pull_plan_for_active_a_minute_batch(planned, observed_at=observed_at)
+        if pull_plan_payload.get("artifact_type") != "n3_c1_scoped_current_day_pull_plan_v1":
+            raise FastlaneShellBlocked("scoped_pull_plan_contract_mismatch")
+        if pull_plan_payload.get("full_market_fallback_used") is True:
+            raise FastlaneShellBlocked("full_market_fallback_forbidden")
+        if _is_clean_noop_pull_plan_payload(pull_plan_payload):
+            continue
+        if pull_plan_payload.get("plan_status") != "planned":
+            raise FastlaneShellBlocked(str(pull_plan_payload.get("blocked_reason") or "scoped_pull_plan_not_planned"))
+        target_hhmm = str(planned.get("target_hhmm") or "")
+        source_run_hash = str(planned.get("source_run_hash") or "")
+        source_rows = provider_source_by_key.get((target_hhmm, source_run_hash))
+        if source_rows is None:
+            object_key = _active_a_minute_batch_fetch_group_key_from_payload(
+                active_scope.get("payload") or {},
+                target_hhmm=target_hhmm,
+            )
+            for candidate_source in provider_sources_by_object_key.get(object_key, []):
+                if _hhmm_int(str(candidate_source.get("_provider_target_hhmm") or "")) >= _hhmm_int(target_hhmm):
+                    source_rows = candidate_source
+                    break
+        if source_rows is None:
+            source_rows = _find_current_day_source_rows_artifact(
+                source_dir,
+                target_hhmm=target_hhmm,
+                source_run_hash=source_run_hash,
+            )
+        if not source_rows:
+            continue
+        source_rows_payload = source_rows["payload"]
+        source_rows_payload = _source_rows_filtered_to_pull_plan(
+            source_rows_payload,
+            pull_plan_payload=pull_plan_payload,
+        )
+        staging = build_n3_c1_scoped_current_day_staging_artifact(
+            active_scope["payload"],
+            pull_plan_artifact=pull_plan_payload,
+            source_rows_artifact=source_rows_payload,
+            target_hhmm=str(planned.get("target_hhmm") or ""),
+            observed_at=observed_at,
+            source_pull_plan_path="",
+            source_pull_plan_hash="",
+            source_rows_artifact_path=str(source_rows.get("path") or ""),
+            source_rows_artifact_hash=str(source_rows.get("sha256") or ""),
+        )
+        if staging.get("artifact_status") != "passed":
+            raise FastlaneShellBlocked(str(staging.get("blocked_reason") or "current_day_staging_contract_mismatch"))
+        staging["c1_lane_mode"] = ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE
+        staging_path = Path(str(planned.get("staging_artifact_path") or ""))
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text(
+            json.dumps(staging, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        materialized_count += 1
+    return materialized_count
+
+
+def _merge_active_a_minute_batch_execution_summary(
+    summary: Mapping[str, Any] | None,
+    *,
+    current_day_source_provider_result: Mapping[str, Any] | None,
+    staging_artifact_written_count: int,
+) -> dict[str, Any]:
+    result = dict(summary or {})
+    provider = dict(current_day_source_provider_result or {})
+    result.setdefault("mode", ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE)
+    result.setdefault("reason", ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE)
+    result["source_artifact_written_count"] = int(provider.get("artifact_count") or 0)
+    result["staging_artifact_written_count"] = int(staging_artifact_written_count or 0)
+    result["failed_candidate_count"] = int(provider.get("failed_candidate_count") or 0)
+    result["remaining_candidate_count"] = int(
+        provider.get("remaining_candidate_count") or result.get("remaining_candidate_count") or 0
+    )
     return result
 
 
@@ -1075,7 +2494,7 @@ def _configured_current_day_source_provider_adapter(
         return _build_current_day_source_rows_with_market_adapter(
             args=args,
             planned_artifacts=planned_artifacts,
-            market_adapter=MootdxTodayMinuteAdapter(),
+            market_adapter_factory=MootdxTodayMinuteAdapter,
             provider_name=provider_name,
         )
 
@@ -1099,42 +2518,89 @@ def _build_current_day_source_rows_with_market_adapter(
     *,
     args: argparse.Namespace,
     planned_artifacts: Sequence[Mapping[str, Any]],
-    market_adapter: Any,
+    market_adapter: Any | None = None,
+    market_adapter_factory: Callable[[], Any] | None = None,
     provider_name: str,
 ) -> dict[str, Any]:
     source_dir_text = str(getattr(args, "current_day_source_artifact_dir", "") or "").strip()
     if not source_dir_text:
         raise FastlaneShellBlocked("current_day_source_artifact_dir_required")
+    if market_adapter is None and market_adapter_factory is None:
+        raise FastlaneShellBlocked("current_day_source_provider_adapter_required")
     source_dir = Path(source_dir_text)
     source_dir.mkdir(parents=True, exist_ok=True)
     artifact_count = 0
     source_row_count = 0
     source_artifacts: list[dict[str, Any]] = []
-    for planned in planned_artifacts:
+    failed_candidates: list[dict[str, Any]] = []
+    candidate_results: list[dict[str, Any]] = []
+    provider_concurrency = min(_current_day_source_provider_concurrency(args), max(1, len(planned_artifacts)))
+
+    def process_planned_artifact(planned: Mapping[str, Any]) -> dict[str, Any]:
         target_hhmm = str(planned.get("target_hhmm") or "")
         source_run_hash = str(planned.get("source_run_hash") or "")
         namespace_token = str(planned.get("namespace_token") or "")
-        pull_plan = _read_optional_json_artifact(str(planned.get("pull_plan_path") or ""))
-        if not pull_plan["exists"]:
-            raise FastlaneShellBlocked("scoped_pull_plan_missing_for_source_provider")
-        payload = dict(pull_plan.get("payload") or {})
+        inline_payload = planned.get("inline_pull_plan_payload")
+        if isinstance(inline_payload, Mapping):
+            payload = dict(inline_payload)
+        else:
+            pull_plan = _read_optional_json_artifact(str(planned.get("pull_plan_path") or ""))
+            if not pull_plan["exists"]:
+                raise FastlaneShellBlocked("scoped_pull_plan_missing_for_source_provider")
+            payload = dict(pull_plan.get("payload") or {})
         if payload.get("artifact_type") != "n3_c1_scoped_current_day_pull_plan_v1":
             raise FastlaneShellBlocked("scoped_pull_plan_contract_mismatch")
         if _is_clean_noop_pull_plan_payload(payload):
-            continue
+            return {"status": "skipped", "reason": "clean_noop_pull_plan"}
         if payload.get("plan_status") != "planned":
             raise FastlaneShellBlocked("scoped_pull_plan_not_planned")
         if int(payload.get("scope_count") or 0) <= 0:
-            continue
+            return {"status": "skipped", "reason": "empty_pull_plan_scope"}
         if payload.get("full_market_fallback_used") is True:
             raise FastlaneShellBlocked("full_market_fallback_forbidden")
         for_trade_date = str(payload.get("for_trade_date") or planned.get("for_trade_date") or "")
         if not namespace_token:
             namespace_token = f"{for_trade_date}_{target_hhmm}_{source_run_hash or 'unknown'}"
+        try:
+            candidate_market_adapter = market_adapter_factory() if market_adapter_factory is not None else market_adapter
+        except Exception as exc:  # noqa: BLE001 - isolate provider connection setup failures per candidate.
+            return {
+                "status": "failed",
+                "candidate_result": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "status": "failed",
+                    "reason": "current_day_source_provider_adapter_init_failed",
+                    "error_type": type(exc).__name__,
+                },
+                "failed_candidate": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "failure_count": 1,
+                    "reason": "current_day_source_provider_adapter_init_failed",
+                    "error_type": type(exc).__name__,
+                },
+            }
         rows: list[dict[str, Any]] = []
+        plan_failures: list[dict[str, Any]] = []
         for plan_row in payload.get("plan_rows") or []:
             subscription = _subscription_from_plan_row(plan_row)
-            fetched_rows = market_adapter.fetch_minute_bars(subscription, for_trade_date)
+            try:
+                fetched_rows = candidate_market_adapter.fetch_minute_bars(subscription, for_trade_date)
+            except Exception as exc:  # noqa: BLE001 - isolate one provider candidate from the batch.
+                plan_failures.append(
+                    {
+                        "identity_key": subscription.get("identity_key"),
+                        "asset_kind": subscription.get("asset_kind"),
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "reason": "current_day_source_provider_fetch_failed",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                continue
             rows.extend(
                 _current_day_source_rows_from_provider_rows(
                     provider_rows=list(fetched_rows or []),
@@ -1143,6 +2609,25 @@ def _build_current_day_source_rows_with_market_adapter(
                     provider_name=provider_name,
                 )
             )
+        if plan_failures:
+            return {
+                "status": "failed",
+                "candidate_result": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "status": "failed",
+                    "reason": "current_day_source_provider_fetch_failed",
+                    "failure_count": len(plan_failures),
+                },
+                "failed_candidate": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "failure_count": len(plan_failures),
+                    "failures": plan_failures,
+                },
+            }
         artifact = {
             "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
             "artifact_schema_version": "v1",
@@ -1153,8 +2638,8 @@ def _build_current_day_source_rows_with_market_adapter(
             "source_run_hash": source_run_hash,
             "source_run_namespace": namespace_token,
             "source_provider": provider_name,
-            "source_adapter": getattr(market_adapter, "external_source", provider_name),
-            "source_version": getattr(market_adapter, "source_version", "unknown"),
+            "source_adapter": getattr(candidate_market_adapter, "external_source", provider_name),
+            "source_version": getattr(candidate_market_adapter, "source_version", "unknown"),
             "scope_count": int(payload.get("scope_count") or 0),
             "closed_minute_row_count": len(rows),
             "closed_minute_rows": rows,
@@ -1173,25 +2658,60 @@ def _build_current_day_source_rows_with_market_adapter(
             json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        artifact_count += 1
-        source_row_count += len(rows)
-        source_artifacts.append(
-            {
-                "path": str(path),
+        source_artifact = {
+            "path": str(path),
+            "target_hhmm": target_hhmm,
+            "for_trade_date": for_trade_date,
+            "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
+            "source_run_hash": source_run_hash,
+            "source_run_namespace": namespace_token,
+            "row_count": len(rows),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        return {
+            "status": "passed",
+            "row_count": len(rows),
+            "source_artifact": source_artifact,
+            "candidate_result": {
+                "namespace_token": namespace_token,
                 "target_hhmm": target_hhmm,
-                "for_trade_date": for_trade_date,
-                "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
+                "source_run_hash": source_run_hash,
+                "status": "passed",
                 "row_count": len(rows),
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            }
-        )
+                "artifact_path": str(path),
+            },
+        }
+
+    if provider_concurrency <= 1 or len(planned_artifacts) <= 1:
+        processed_results = [process_planned_artifact(planned) for planned in planned_artifacts]
+    else:
+        with ThreadPoolExecutor(max_workers=provider_concurrency) as executor:
+            processed_results = list(executor.map(process_planned_artifact, planned_artifacts))
+
+    for item in processed_results:
+        status = str(item.get("status") or "")
+        if status == "passed":
+            artifact_count += 1
+            source_row_count += int(item.get("row_count") or 0)
+            source_artifacts.append(dict(item.get("source_artifact") or {}))
+            candidate_results.append(dict(item.get("candidate_result") or {}))
+            continue
+        if status == "failed":
+            failed_candidates.append(dict(item.get("failed_candidate") or {}))
+            candidate_results.append(dict(item.get("candidate_result") or {}))
     return {
         "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
         "provider_name": provider_name,
+        "provider_concurrency": provider_concurrency,
+        "provider_max_concurrency": MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY,
+        "concurrency_limited": provider_concurrency < len(planned_artifacts),
         "artifact_written": artifact_count > 0,
         "artifact_count": artifact_count,
         "source_row_count": source_row_count,
         "source_artifacts": source_artifacts,
+        "candidate_results": candidate_results,
+        "failed_candidate_count": len(failed_candidates),
+        "failed_candidates": failed_candidates,
         "market_data_pulled": artifact_count > 0,
         "database_written": False,
         "runtime_execute": False,
@@ -1253,7 +2773,14 @@ def _build_metric_context_from_source_artifacts(
                 source_dir,
                 target_hhmm=target_hhmm,
                 source_run_hash=source_run_hash,
+                namespace_token=str(planned.get("namespace_token") or ""),
             )
+            if source:
+                source_payload = source.get("payload") or {}
+                if _metric_context_artifact_needs_open_boundary_previous_period_rebuild(
+                    source_payload
+                ) or _metric_context_artifact_needs_rolling_window_rebuild(source_payload):
+                    source = None
             if not source:
                 provider_result = _materialize_metric_context_source_artifact_from_previous_day_context(
                     args=args,
@@ -1268,6 +2795,7 @@ def _build_metric_context_from_source_artifacts(
                     source_dir,
                     target_hhmm=target_hhmm,
                     source_run_hash=source_run_hash,
+                    namespace_token=str(planned.get("namespace_token") or ""),
                 )
             if not source:
                 raise FastlaneShellBlocked("metric_context_source_artifact_missing")
@@ -1275,7 +2803,19 @@ def _build_metric_context_from_source_artifacts(
             if not active_scope["exists"]:
                 raise FastlaneShellBlocked("active_scope_artifact_missing")
             metric_path = Path(str(planned.get("metric_context_artifact_path") or ""))
-            if metric_path.exists():
+            existing_metric = _read_optional_json_artifact(str(metric_path)) if metric_path.exists() else {}
+            metric_context_needs_rebuild = bool(
+                existing_metric.get("exists")
+                and (
+                    _metric_context_artifact_needs_open_boundary_previous_period_rebuild(
+                        existing_metric.get("payload") or {}
+                    )
+                    or _metric_context_artifact_needs_rolling_window_rebuild(
+                        existing_metric.get("payload") or {}
+                    )
+                )
+            )
+            if metric_path.exists() and not metric_context_needs_rebuild:
                 skipped_candidates.append(
                     _metric_context_candidate_record(
                         planned,
@@ -1472,7 +3012,30 @@ def _find_metric_context_source_artifact(
     *,
     target_hhmm: str,
     source_run_hash: str = "",
+    namespace_token: str = "",
+    exact_only: bool = False,
 ) -> dict[str, Any] | None:
+    for path in _metric_context_source_candidate_paths(
+        source_dir,
+        target_hhmm=target_hhmm,
+        source_run_hash=source_run_hash,
+        namespace_token=namespace_token,
+    ):
+        source = _read_optional_json_artifact(str(path))
+        payload = source.get("payload") or {}
+        if payload.get("artifact_type") != "n3_c1_n3t_metric_context_source_v1":
+            continue
+        payload_hhmm = str(payload.get("target_hhmm") or payload.get("target_minute_label") or "")
+        if payload_hhmm.replace(":", "") != target_hhmm:
+            continue
+        payload_hash = str(payload.get("source_run_hash") or "")
+        if source_run_hash and payload_hash and payload_hash != source_run_hash:
+            continue
+        return source
+
+    if exact_only:
+        return None
+
     matches: list[dict[str, Any]] = []
     for path in sorted(source_dir.glob("*.json")):
         source = _read_optional_json_artifact(str(path))
@@ -1494,12 +3057,77 @@ def _find_metric_context_source_artifact(
     return matches[0] if matches else None
 
 
+def _metric_context_source_candidate_paths(
+    source_dir: Path,
+    *,
+    target_hhmm: str,
+    source_run_hash: str = "",
+    namespace_token: str = "",
+) -> list[Path]:
+    paths: list[Path] = []
+    if namespace_token:
+        paths.append(source_dir / f"n3_c1_n3t_metric_context_source_v1_{namespace_token}.json")
+    if source_run_hash:
+        paths.extend(sorted(source_dir.glob(f"n3_c1_n3t_metric_context_source_v1_*_{target_hhmm}_{source_run_hash}.json")))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _build_metric_context_source_artifact_index(source_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    return _build_hhmm_artifact_index(
+        source_dir,
+        artifact_type="n3_c1_n3t_metric_context_source_v1",
+    )
+
+
+def _find_metric_context_source_artifact_from_index(
+    index: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    target_hhmm: str,
+    source_run_hash: str = "",
+) -> dict[str, Any] | None:
+    matches = _matching_hhmm_hash_artifacts_from_index(
+        index,
+        target_hhmm=target_hhmm,
+        source_run_hash=source_run_hash,
+    )
+    if len(matches) > 1:
+        raise FastlaneShellBlocked("metric_context_source_artifact_ambiguous")
+    return dict(matches[0]) if matches else None
+
+
 def _find_current_day_source_rows_artifact(
     source_dir: Path,
     *,
     target_hhmm: str,
     source_run_hash: str = "",
 ) -> dict[str, Any] | None:
+    if source_run_hash:
+        exact_matches: list[dict[str, Any]] = []
+        for path in sorted(source_dir.glob(f"*_{target_hhmm}_{source_run_hash}.json")):
+            source = _read_optional_json_artifact(str(path))
+            payload = source.get("payload") or {}
+            if payload.get("artifact_type") != CURRENT_DAY_SOURCE_ROWS_TYPE:
+                continue
+            payload_hhmm = str(payload.get("target_hhmm") or payload.get("target_minute_label") or "")
+            if payload_hhmm.replace(":", "") != target_hhmm:
+                continue
+            payload_hash = str(payload.get("source_run_hash") or "")
+            if payload_hash and payload_hash != source_run_hash:
+                continue
+            exact_matches.append(source)
+        if len(exact_matches) > 1:
+            raise FastlaneShellBlocked("current_day_source_artifact_ambiguous")
+        if exact_matches:
+            return exact_matches[0]
+        return None
     matches: list[dict[str, Any]] = []
     for path in sorted(source_dir.glob("*.json")):
         source = _read_optional_json_artifact(str(path))
@@ -1522,7 +3150,7 @@ def _find_current_day_source_rows_artifact(
 
 
 def _has_stale_morning_close_boundary_gap(payload: Mapping[str, Any]) -> bool:
-    """Detect v1 artifacts that treated physical 11:29 as missing raw 11:30."""
+    """Detect old artifacts that mapped lunch-boundary source labels to 11:29."""
 
     source = dict(payload or {})
     gaps = list(source.get("source_gap_physical_labels") or [])
@@ -1547,9 +3175,7 @@ def _has_stale_morning_close_boundary_gap(payload: Mapping[str, Any]) -> bool:
             continue
         physical_label = str(row.get("physical_c1_label") or "")
         raw_label = str(row.get("raw_source_label") or "")
-        if physical_label == "11:29" and raw_label == "11:29":
-            return True
-        if physical_label == "13:00" and raw_label == "13:00":
+        if physical_label == "11:29" and raw_label in {"11:30", "13:00"}:
             return True
     return False
 
@@ -1565,6 +3191,40 @@ def _uses_stale_source_label_policy(payload: Mapping[str, Any]) -> bool:
         if isinstance(row, Mapping):
             policies.append(str(row.get("source_label_policy") or ""))
     return any(policy and policy != SOURCE_CLOSE_LABEL_POLICY for policy in policies)
+
+
+def _has_stale_raw_physical_label_mapping(payload: Mapping[str, Any]) -> bool:
+    source = dict(payload or {})
+    for_trade_date = str(source.get("for_trade_date") or "")
+    for row in (
+        list(source.get("plan_rows") or [])
+        + list(source.get("closed_minute_rows") or [])
+        + list(source.get("source_rows") or [])
+    ):
+        if not isinstance(row, Mapping):
+            continue
+        physical_label = _hhmm_to_minute_label(row.get("physical_c1_label") or "")
+        raw_label = _hhmm_to_minute_label(row.get("raw_source_label") or "")
+        if not physical_label or not raw_label:
+            continue
+        if (
+            "09:31" <= raw_label <= "11:29"
+            and physical_label != raw_label
+            and not (physical_label == "09:30" and raw_label == "09:31")
+        ):
+            return True
+        if raw_label not in {"11:30", "13:00"} and not ("13:01" <= raw_label <= "15:00"):
+            continue
+        mapped = source_close_label_to_physical_start_label(
+            str(row.get("for_trade_date") or for_trade_date),
+            raw_label,
+        )
+        if mapped.get("status") != "mapped":
+            continue
+        mapped_physical_label = _hhmm_to_minute_label(mapped.get("physical_c1_label") or "")
+        if mapped_physical_label and mapped_physical_label != physical_label:
+            return True
+    return False
 
 
 def _has_stale_open_boundary_pull_plan(payload: Mapping[str, Any]) -> bool:
@@ -1598,7 +3258,131 @@ def _current_day_artifact_needs_boundary_rebuild(payload: Mapping[str, Any]) -> 
         _has_stale_morning_close_boundary_gap(payload)
         or _has_stale_open_boundary_pull_plan(payload)
         or _uses_stale_source_label_policy(payload)
+        or _has_stale_raw_physical_label_mapping(payload)
     )
+
+
+def _metric_context_artifact_needs_open_boundary_previous_period_rebuild(payload: Mapping[str, Any]) -> bool:
+    source = dict(payload or {})
+    if source.get("artifact_type") not in {
+        "n3_c1_scoped_closed_1m_artifact_v1",
+        "n3_c1_n3t_metric_context_source_v1",
+    }:
+        return False
+    for row in source.get("metric_context_rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        metric_values = dict(row.get("metric_values") or {})
+        if str(metric_values.get("previous_120m_period_source") or "") != "not_available":
+            continue
+        if bool(metric_values.get("is_first_120m_of_day")):
+            continue
+        if metric_values.get("previous_120m_body_high") in {None, ""}:
+            continue
+        if metric_values.get("previous_120m_body_low") in {None, ""}:
+            continue
+        if _metric_context_row_has_open_boundary_source_gap(row):
+            return True
+    return False
+
+
+def _metric_context_artifact_needs_rolling_window_rebuild(payload: Mapping[str, Any]) -> bool:
+    source = dict(payload or {})
+    if source.get("artifact_type") not in {
+        "n3_c1_scoped_closed_1m_artifact_v1",
+        "n3_c1_n3t_metric_context_source_v1",
+    }:
+        return False
+    for row in source.get("metric_context_rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        metric_values = dict(row.get("metric_values") or {})
+        current_5m_amount = _rolling_current_amount_from_context_row(row, for_trade_date=source.get("for_trade_date"), size=5)
+        if current_5m_amount is not None:
+            if _has_numeric_value(metric_values.get("current_5m_elapsed_amount")) and _numeric_delta(
+                metric_values.get("current_5m_elapsed_amount"), current_5m_amount
+            ) > 0.000001:
+                return True
+            if _has_numeric_value(metric_values.get("current_5m_amount")) and _numeric_delta(
+                metric_values.get("current_5m_amount"), current_5m_amount
+            ) > 0.000001:
+                return True
+        current_30m_amount = _rolling_current_amount_from_context_row(row, for_trade_date=source.get("for_trade_date"), size=30)
+        if current_30m_amount is not None:
+            if _has_numeric_value(metric_values.get("current_30m_closed_elapsed_amount")) and _numeric_delta(
+                metric_values.get("current_30m_closed_elapsed_amount"), current_30m_amount
+            ) > 0.000001:
+                return True
+    return False
+
+
+def _rolling_current_amount_from_context_row(
+    row: Mapping[str, Any],
+    *,
+    for_trade_date: Any,
+    size: int,
+) -> float | None:
+    trade_date = str(for_trade_date or row.get("for_trade_date") or "")
+    labels = canonical_ashare_1m_labels(trade_date) if re.fullmatch(r"\d{8}", trade_date) else []
+    if not labels or size <= 0:
+        return None
+    rows_by_label: dict[str, Mapping[str, Any]] = {}
+    for item in row.get("closed_minute_rows") or []:
+        if not isinstance(item, Mapping) or item.get("fake_or_synthetic_row") is True:
+            continue
+        label = _hhmm_to_minute_label(item.get("physical_c1_label") or item.get("minute_label") or item.get("raw_source_label") or "")
+        if label in labels:
+            rows_by_label.setdefault(label, item)
+    if not rows_by_label:
+        return None
+    latest_label = max(rows_by_label, key=lambda label: labels.index(label))
+    position = labels.index(latest_label) + 1
+    start = max(0, position - size)
+    expected_labels = list(labels[start:position])
+    if expected_labels[:1] == ["09:30"] and "09:31" in expected_labels and "09:30" not in rows_by_label:
+        expected_labels = [label for label in expected_labels if label != "09:30"]
+    if len(expected_labels) < size:
+        return None
+    if any(label not in rows_by_label for label in expected_labels):
+        return None
+    return sum(_numeric_value(rows_by_label[label].get("amount")) for label in expected_labels)
+
+
+def _numeric_value(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _has_numeric_value(value: Any) -> bool:
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _numeric_delta(left: Any, right: float) -> float:
+    try:
+        return abs(float(left) - float(right))
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _metric_context_row_has_open_boundary_source_gap(row: Mapping[str, Any]) -> bool:
+    labels: set[str] = set()
+    for item in row.get("closed_minute_rows") or []:
+        if not isinstance(item, Mapping):
+            continue
+        label = str(item.get("physical_c1_label") or item.get("minute_label") or item.get("raw_source_label") or "")
+        if label:
+            labels.add(_hhmm_to_minute_label(label))
+    for item in row.get("source_closed_minute_bar_ids") or []:
+        match = re.search(r"(?<!\\d)([0-2][0-9]:[0-5][0-9])(?!\\d)", str(item or ""))
+        if match:
+            labels.add(match.group(1))
+    return "09:31" in labels and "09:30" not in labels
 
 
 def _planned_artifact_needs_current_day_boundary_rebuild(
@@ -1639,6 +3423,13 @@ def _post_close_final_a_pass_max_candidates(args: argparse.Namespace) -> int:
 def _current_day_source_provider_max_candidates(args: argparse.Namespace) -> int:
     value = int(getattr(args, "current_day_source_provider_max_candidates_per_invocation", 0) or 0)
     return value if value > 0 else DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES
+
+
+def _current_day_source_provider_concurrency(args: argparse.Namespace) -> int:
+    value = int(getattr(args, "current_day_source_provider_concurrency", 0) or 0)
+    if value <= 0:
+        value = DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY
+    return min(max(1, value), MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY)
 
 
 def _scoped_pull_plan_max_candidates(args: argparse.Namespace) -> int:
@@ -1896,6 +3687,104 @@ def _select_existing_source_missing_staging_artifacts(
     return selected
 
 
+def _select_object_minute_c1_lane_priority_artifacts(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    max_candidates: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Prioritize latest object-minute A fanout before older pull-plan backlog."""
+
+    selected, summary = _select_scoped_pull_plan_candidate_chunk(
+        active_scope_artifacts=active_scope_artifacts,
+        output_dir=output_dir,
+        max_candidates=max_candidates,
+        require_object_scope_ref_fanout=True,
+    )
+    result: list[dict[str, Any]] = []
+    for artifact in selected:
+        item = dict(artifact)
+        item["c1_lane_selection_reason"] = "object_minute_c1_lane_prioritized"
+        result.append(item)
+    return result, summary
+
+
+def _select_existing_pull_plan_missing_source_staging_artifacts(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    source_dir: Path,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    """Prioritize older refs that already have a pull plan but still need source/staging."""
+
+    if max_candidates <= 0:
+        return []
+    records: list[dict[str, Any]] = []
+    candidate_artifacts = [dict(item) for item in active_scope_artifacts]
+    for sequence, artifact in enumerate(candidate_artifacts):
+        context = _infer_scope_context(artifact)
+        namespace_token = context["namespace_token"]
+        pull_plan_path = output_dir / f"n3_c1_scoped_current_day_pull_plan_v1_{namespace_token}_fastlane.json"
+        staging_path = (
+            output_dir
+            / "current_day_staging"
+            / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+        )
+        pull_plan = _read_optional_json_artifact(str(pull_plan_path))
+        if not pull_plan["exists"]:
+            continue
+        payload = dict(pull_plan.get("payload") or {})
+        if payload.get("artifact_type") != "n3_c1_scoped_current_day_pull_plan_v1":
+            raise FastlaneShellBlocked("scoped_pull_plan_contract_mismatch")
+        if payload.get("full_market_fallback_used") is True:
+            raise FastlaneShellBlocked("full_market_fallback_forbidden")
+        if _is_clean_noop_pull_plan_payload(payload):
+            continue
+        if payload.get("plan_status") != "planned":
+            raise FastlaneShellBlocked("scoped_pull_plan_not_planned")
+        if int(payload.get("scope_count") or 0) <= 0:
+            continue
+        if _current_day_artifact_needs_boundary_rebuild(payload):
+            continue
+        staging = _read_optional_json_artifact(str(staging_path))
+        if staging["exists"] and not _current_day_artifact_needs_boundary_rebuild(staging.get("payload") or {}):
+            continue
+        try:
+            source_rows = _find_current_day_source_rows_artifact(
+                source_dir,
+                target_hhmm=context["target_hhmm"],
+                source_run_hash=context["source_run_hash"],
+            )
+        except FastlaneShellBlocked as exc:
+            if str(exc) == "current_day_source_artifact_ambiguous":
+                continue
+            raise
+        if source_rows and not _current_day_artifact_needs_boundary_rebuild(source_rows.get("payload") or {}):
+            continue
+        records.append(
+            {
+                "artifact": dict(artifact),
+                "sort_key": (
+                    _active_scope_event_sort_key(
+                        _read_optional_json_artifact(str(artifact.get("path") or "")).get("payload") or {},
+                        context=context,
+                    ),
+                    context["target_hhmm"],
+                    context["source_run_hash"],
+                    sequence,
+                ),
+            }
+        )
+    records.sort(key=lambda item: item["sort_key"])
+    selected: list[dict[str, Any]] = []
+    for item in records[:max_candidates]:
+        artifact = dict(item["artifact"])
+        artifact["c1_lane_selection_reason"] = "pull_plan_missing_source_staging_backlog_prioritized"
+        selected.append(artifact)
+    return selected
+
+
 def _select_existing_staging_metric_context_artifacts(
     *,
     active_scope_artifacts: Sequence[Mapping[str, Any]],
@@ -1916,6 +3805,59 @@ def _select_existing_staging_metric_context_artifacts(
     return selected
 
 
+def _active_scope_artifact_object_identity(artifact: Mapping[str, Any]) -> tuple[str, str, str]:
+    payload: Mapping[str, Any] = artifact
+    rows = payload.get("scope_rows")
+    if rows is None and artifact.get("path"):
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        payload = source.get("payload") or {}
+        rows = payload.get("scope_rows")
+    if not isinstance(rows, list) or not rows:
+        return "", "", ""
+    row = dict(rows[0] or {})
+    direction = str(row.get("direction") or "")
+    refs = row.get("active_tracking_refs")
+    if not direction and isinstance(refs, list) and refs:
+        direction = str((refs[0] or {}).get("direction") or "")
+    return (
+        str(row.get("asset_kind") or ""),
+        str(row.get("identity_key") or ""),
+        direction,
+    )
+
+
+def _staging_artifact_matches_active_scope_object(
+    artifact: Mapping[str, Any],
+    staging_payload: Mapping[str, Any],
+) -> bool:
+    expected_asset_kind, expected_identity_key, expected_direction = _active_scope_artifact_object_identity(artifact)
+    if not expected_asset_kind or not expected_identity_key:
+        return True
+    rows = (
+        staging_payload.get("closed_minute_rows")
+        or staging_payload.get("staging_rows")
+        or staging_payload.get("rows")
+        or []
+    )
+    if not isinstance(rows, list) or not rows:
+        return True
+    actual_keys = {
+        (
+            str(row.get("asset_kind") or ""),
+            str(row.get("identity_key") or ""),
+            str(row.get("direction") or ""),
+        )
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+    actual_object_keys = {(asset_kind, identity_key) for asset_kind, identity_key, _direction in actual_keys}
+    if (expected_asset_kind, expected_identity_key) not in actual_object_keys:
+        return False
+    if expected_direction and any(direction for _asset_kind, _identity_key, direction in actual_keys):
+        return (expected_asset_kind, expected_identity_key, expected_direction) in actual_keys
+    return True
+
+
 def _select_existing_staging_metric_context_artifact_chunk(
     *,
     active_scope_artifacts: Sequence[Mapping[str, Any]],
@@ -1923,6 +3865,7 @@ def _select_existing_staging_metric_context_artifact_chunk(
     metric_context_source_dir: Path | None,
     previous_context_dir: Path | None,
     max_candidates: int,
+    allow_previous_day_context_missing: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select a bounded batch that can advance from staging/prevctx to metric context."""
 
@@ -1932,15 +3875,32 @@ def _select_existing_staging_metric_context_artifact_chunk(
             selected_records=[],
             max_candidates=max_candidates,
         )
-    candidate_artifacts = _active_scope_artifacts_with_persisted_ref_fanout(
-        active_scope_artifacts=active_scope_artifacts,
-        output_dir=output_dir,
+    candidate_artifacts_all = [dict(item) for item in active_scope_artifacts]
+    candidate_artifacts_all.sort(
+        key=lambda item: (
+            _n3t_candidate_path_readiness_rank(
+                item,
+                output_dir=output_dir,
+                metric_context_source_dir=metric_context_source_dir,
+                previous_context_dir=previous_context_dir,
+            ),
+            _earliest_target_hhmm_first_sort_key(_infer_scope_context(item)["target_hhmm"]),
+            _infer_scope_context(item)["source_run_hash"],
+        )
     )
+    candidate_artifacts = candidate_artifacts_all[: max(0, max_candidates)]
+    unscanned_candidate_count = max(0, len(candidate_artifacts_all) - len(candidate_artifacts))
     local_plan = _build_scoped_executor_plan(
         active_scope_artifacts=candidate_artifacts,
         output_dir=output_dir,
         plan_status="planned",
         blocked_reason=None,
+    )
+    metric_context_source_dir_ready = bool(
+        metric_context_source_dir is not None and metric_context_source_dir.exists() and metric_context_source_dir.is_dir()
+    )
+    previous_context_dir_ready = bool(
+        previous_context_dir is not None and previous_context_dir.exists() and previous_context_dir.is_dir()
     )
     records: list[dict[str, Any]] = []
     for sequence, (artifact, planned) in enumerate(
@@ -1948,6 +3908,7 @@ def _select_existing_staging_metric_context_artifact_chunk(
     ):
         readiness = dict(planned.get("component_readiness") or {})
         target_hhmm = str(planned.get("target_hhmm") or "")
+        target_sort_key = _earliest_target_hhmm_first_sort_key(target_hhmm)
         source_run_hash = str(planned.get("source_run_hash") or "")
         staging = _read_optional_json_artifact(str(planned.get("staging_artifact_path") or ""))
         if not staging["exists"]:
@@ -1957,18 +3918,83 @@ def _select_existing_staging_metric_context_artifact_chunk(
             continue
         if staging_payload.get("artifact_status") != "passed":
             continue
+        if not _staging_artifact_matches_active_scope_object(artifact, staging_payload):
+            continue
         if _current_day_artifact_needs_boundary_rebuild(staging_payload):
             continue
         metric_path = Path(str(planned.get("metric_context_artifact_path") or ""))
         if metric_path.exists():
+            metric_artifact = _read_optional_json_artifact(str(metric_path))
+            if _metric_context_artifact_needs_open_boundary_previous_period_rebuild(
+                metric_artifact.get("payload") or {}
+            ):
+                records.append(
+                    {
+                        "artifact": dict(artifact),
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "component_status": str(readiness.get("status") or ""),
+                        "selection_reason": "stale_metric_context_open_boundary_rebuild",
+                        "selection_rank": 1,
+                        "sort_key": (1, target_sort_key, source_run_hash, sequence),
+                    }
+                )
+                continue
+            if _metric_context_artifact_needs_rolling_window_rebuild(metric_artifact.get("payload") or {}):
+                records.append(
+                    {
+                        "artifact": dict(artifact),
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "component_status": str(readiness.get("status") or ""),
+                        "selection_reason": "stale_metric_context_rolling_window_rebuild",
+                        "selection_rank": 1,
+                        "sort_key": (1, target_sort_key, source_run_hash, sequence),
+                    }
+                )
+                continue
+            if _n3t_writer_done_marker_path(output_dir=output_dir, planned_artifact=planned).exists():
+                if _n3t_writer_done_marker_is_current(
+                    output_dir=output_dir,
+                    planned_artifact=planned,
+                    metric_context_artifact=metric_artifact,
+                ):
+                    continue
+                records.append(
+                    {
+                        "artifact": dict(artifact),
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "component_status": str(readiness.get("status") or ""),
+                        "selection_reason": "stale_n3t_writer_done_metric_context_hash_mismatch",
+                        "selection_rank": -1,
+                        "sort_key": (-1, target_sort_key, source_run_hash, sequence),
+                    }
+                )
+                continue
+            records.append(
+                {
+                    "artifact": dict(artifact),
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "component_status": str(readiness.get("status") or ""),
+                    "selection_reason": "metric_context_exists",
+                    "selection_rank": -1,
+                    "sort_key": (-1, target_sort_key, source_run_hash, sequence),
+                }
+            )
             continue
-        metric_source = None
-        if metric_context_source_dir is not None and metric_context_source_dir.exists() and metric_context_source_dir.is_dir():
-            metric_source = _find_metric_context_source_artifact(
+        metric_source = (
+            _find_metric_context_source_artifact(
                 metric_context_source_dir,
                 target_hhmm=target_hhmm,
                 source_run_hash=source_run_hash,
+                namespace_token=str(planned.get("namespace_token") or ""),
+                exact_only=True,
             )
+            if metric_context_source_dir_ready and metric_context_source_dir is not None
+            else None
+        )
         if metric_source:
             records.append(
                 {
@@ -1978,23 +4004,33 @@ def _select_existing_staging_metric_context_artifact_chunk(
                     "component_status": str(readiness.get("status") or ""),
                     "selection_reason": "metric_context_source_exists",
                     "selection_rank": 0,
-                    "sort_key": (0, target_hhmm, source_run_hash, sequence),
+                    "sort_key": (0, target_sort_key, source_run_hash, sequence),
                 }
             )
             continue
 
         selection_reason = "previous_day_context_missing"
         selection_rank = 3
-        if previous_context_dir is not None and previous_context_dir.exists() and previous_context_dir.is_dir():
+        if previous_context_dir_ready and previous_context_dir is not None:
             if _find_previous_day_context_artifact(
                 previous_context_dir,
                 target_hhmm=target_hhmm,
                 source_run_hash=source_run_hash,
                 staging_artifact=staging_payload,
+                exact_only=True,
             ):
                 selection_reason = "previous_day_context_exists"
                 selection_rank = 1
-            elif _has_previous_day_context_artifact_for_hhmm(previous_context_dir, target_hhmm=target_hhmm):
+            elif _previous_day_context_exact_candidate_exists(
+                previous_context_dir,
+                target_hhmm=target_hhmm,
+                source_run_hash=source_run_hash,
+            ):
+                selection_reason = "previous_day_context_source_run_coverage_mismatch"
+                selection_rank = 2
+            elif _has_previous_day_context_artifact_for_hhmm(
+                previous_context_dir, target_hhmm=target_hhmm
+            ):
                 selection_reason = "previous_day_context_source_run_coverage_mismatch"
                 selection_rank = 2
         records.append(
@@ -2005,21 +4041,93 @@ def _select_existing_staging_metric_context_artifact_chunk(
                     "component_status": str(readiness.get("status") or ""),
                     "selection_reason": selection_reason,
                     "selection_rank": selection_rank,
-                    "sort_key": (selection_rank, target_hhmm, source_run_hash, sequence),
+                    "sort_key": (selection_rank, target_sort_key, source_run_hash, sequence),
                 }
             )
-    if any(int(item.get("selection_rank") or 0) <= 1 for item in records):
-        records = [item for item in records if int(item.get("selection_rank") or 0) <= 1]
-    elif any(int(item.get("selection_rank") or 0) == 2 for item in records):
-        records = [item for item in records if int(item.get("selection_rank") or 0) == 2]
+    if not allow_previous_day_context_missing:
+        if any(int(item.get("selection_rank") or 0) <= 1 for item in records):
+            records = [item for item in records if int(item.get("selection_rank") or 0) <= 1]
+        elif any(int(item.get("selection_rank") or 0) == 2 for item in records):
+            records = [item for item in records if int(item.get("selection_rank") or 0) == 2]
     records.sort(key=lambda item: item["sort_key"])
     selected_records = records[: max(0, max_candidates)]
+    if allow_previous_day_context_missing and max_candidates > 0:
+        selected_ids = {id(item) for item in selected_records}
+        deferred_records = [
+            item
+            for item in records
+            if id(item) not in selected_ids and int(item.get("selection_rank") or 0) >= 2
+        ]
+        if deferred_records and not any(int(item.get("selection_rank") or 0) >= 2 for item in selected_records):
+            selected_records = [*selected_records[: max(0, max_candidates - 1)], deferred_records[0]]
+            selected_records.sort(key=lambda item: item["sort_key"])
     selected = [dict(item["artifact"]) for item in selected_records]
-    return selected, _prevctx_to_metric_context_chunk_summary(
+    summary = _prevctx_to_metric_context_chunk_summary(
         total_candidate_count=len(records),
         selected_records=selected_records,
         max_candidates=max_candidates,
     )
+    if unscanned_candidate_count:
+        summary["priority_candidate_count"] = int(summary.get("priority_candidate_count") or 0) + unscanned_candidate_count
+        summary["skipped_candidate_count"] = int(summary.get("skipped_candidate_count") or 0) + unscanned_candidate_count
+        summary["remaining_candidate_count"] = int(summary.get("remaining_candidate_count") or 0) + unscanned_candidate_count
+        summary["reason"] = "prevctx_to_metric_context_chunk_incomplete"
+        summary["candidate_scan_bounded"] = True
+        summary["candidate_scan_limit"] = max(0, max_candidates)
+    return selected, summary
+
+
+def _n3t_candidate_path_readiness_rank(
+    artifact: Mapping[str, Any],
+    *,
+    output_dir: Path,
+    metric_context_source_dir: Path | None,
+    previous_context_dir: Path | None,
+) -> int:
+    context = _infer_scope_context(artifact)
+    namespace_token = context["namespace_token"]
+    target_hhmm = context["target_hhmm"]
+    source_run_hash = context["source_run_hash"]
+    staging_path = (
+        output_dir
+        / "current_day_staging"
+        / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+    )
+    if not staging_path.exists():
+        return 9
+    metric_path = (
+        output_dir
+        / "metric_context"
+        / f"n3_c1_scoped_closed_1m_artifact_v1_{namespace_token}_fastlane_raw_prevday_c1_amount_v1.json"
+    )
+    if metric_path.exists():
+        marker_path = output_dir / "n3t_writer_done" / f"n3t_writer_done_marker_v1_{namespace_token}.json"
+        if marker_path.exists():
+            return 8
+        return -1
+    if metric_context_source_dir is not None and metric_context_source_dir.exists() and metric_context_source_dir.is_dir():
+        if _metric_context_source_candidate_paths(
+            metric_context_source_dir,
+            target_hhmm=target_hhmm,
+            source_run_hash=source_run_hash,
+            namespace_token=namespace_token,
+        ):
+            return 0
+    if previous_context_dir is not None and previous_context_dir.exists() and previous_context_dir.is_dir():
+        if list(
+            previous_context_dir.glob(
+                f"n3_c1_n3t_previous_day_context_v1_*_{target_hhmm}_{source_run_hash}.json"
+            )
+        ):
+            return 1
+    return 3
+
+
+def _earliest_target_hhmm_first_sort_key(target_hhmm: str) -> int:
+    text = str(target_hhmm or "").replace(":", "").strip()
+    if re.fullmatch(r"[0-2][0-9][0-5][0-9]", text):
+        return int(text)
+    return 0
 
 
 def _prevctx_to_metric_context_chunk_summary(
@@ -2055,15 +4163,129 @@ def _prevctx_to_metric_context_chunk_summary(
     }
 
 
+def _metric_context_priority_requires_builder(chunk_summary: Mapping[str, Any] | None) -> bool:
+    selected = list((chunk_summary or {}).get("selected_source_runs") or [])
+    if not selected:
+        return False
+    writer_ready_reasons = {
+        "metric_context_exists",
+        "stale_n3t_writer_done_metric_context_hash_mismatch",
+    }
+    return any(str(item.get("selection_reason") or "") not in writer_ready_reasons for item in selected)
+
+
+def _n3t_writer_done_marker_path(*, output_dir: Path, planned_artifact: Mapping[str, Any]) -> Path:
+    namespace_token = str(planned_artifact.get("namespace_token") or "").strip()
+    if not namespace_token:
+        for_trade_date = str(planned_artifact.get("for_trade_date") or "unknown_trade_date")
+        target_hhmm = str(planned_artifact.get("target_hhmm") or "unknown_hhmm")
+        source_run_hash = str(planned_artifact.get("source_run_hash") or "unknown_source")
+        namespace_token = f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+    return output_dir / "n3t_writer_done" / f"n3t_writer_done_marker_v1_{namespace_token}.json"
+
+
+def _n3t_writer_done_marker_is_current(
+    *,
+    output_dir: Path,
+    planned_artifact: Mapping[str, Any],
+    metric_context_artifact: Mapping[str, Any],
+) -> bool:
+    marker_path = _n3t_writer_done_marker_path(output_dir=output_dir, planned_artifact=planned_artifact)
+    marker = _read_optional_json_artifact(str(marker_path))
+    if not marker["exists"]:
+        return False
+    payload = dict(marker.get("payload") or {})
+    marker_sha = str(payload.get("metric_context_artifact_sha256") or "").strip()
+    metric_context_sha = str(metric_context_artifact.get("sha256") or "").strip()
+    if marker_sha and metric_context_sha and marker_sha != metric_context_sha:
+        return False
+    return True
+
+
+def _write_n3t_writer_done_markers(
+    *,
+    output_dir: Path,
+    n3t_writer_inputs: Sequence[Mapping[str, Any]],
+    execute_result: Mapping[str, Any],
+    observed_at: str,
+) -> list[dict[str, Any]]:
+    if not n3t_writer_inputs:
+        return []
+    if execute_result.get("adapter_type") != "n3t_action_confirmation_metric_writer_adapter_v1":
+        return []
+    if execute_result.get("write_executed") is not True and execute_result.get("db_write_executed") is not True:
+        return []
+    marker_records: list[dict[str, Any]] = []
+    for item in n3t_writer_inputs:
+        marker_path = _n3t_writer_done_marker_path(output_dir=output_dir, planned_artifact=item)
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "artifact_type": "n3t_writer_done_marker_v1",
+            "artifact_schema_version": "v1",
+            "producer_layer": "N3_market_data",
+            "for_trade_date": str(item.get("for_trade_date") or ""),
+            "target_hhmm": str(item.get("target_hhmm") or ""),
+            "source_run_hash": str(item.get("source_run_hash") or ""),
+            "source_run_namespace": str(item.get("namespace_token") or ""),
+            "n3t_metric_run_id": str(item.get("n3t_metric_run_id") or ""),
+            "metric_context_artifact_path": str(item.get("metric_context_artifact_path") or ""),
+            "metric_context_artifact_sha256": str(item.get("metric_context_artifact_sha256") or ""),
+            "writer_adapter_type": str(execute_result.get("adapter_type") or ""),
+            "write_executed": bool(execute_result.get("write_executed")),
+            "db_write_executed": bool(execute_result.get("db_write_executed")),
+            "observed_at": observed_at,
+            "database_written": False,
+            "writes_common_event_outbox": False,
+            "writes_canonical_minute_bar_1m": False,
+            "touches_n4_n5_n6_outbox": False,
+            "full_market_fallback_used": False,
+        }
+        marker_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        marker_records.append(
+            {
+                "path": str(marker_path),
+                "sha256": hashlib.sha256(marker_path.read_bytes()).hexdigest(),
+                "target_hhmm": payload["target_hhmm"],
+                "source_run_hash": payload["source_run_hash"],
+                "artifact_type": payload["artifact_type"],
+            }
+        )
+    return marker_records
+
+
 def _find_previous_day_context_artifact(
     previous_context_dir: Path,
     *,
     target_hhmm: str,
     source_run_hash: str = "",
     staging_artifact: Mapping[str, Any] | None = None,
+    exact_only: bool = False,
 ) -> dict[str, Any] | None:
     if not previous_context_dir.exists() or not previous_context_dir.is_dir():
         return None
+    if source_run_hash:
+        for path in sorted(
+            previous_context_dir.glob(f"n3_c1_n3t_previous_day_context_v1_*_{target_hhmm}_{source_run_hash}.json")
+        ):
+            source = _read_optional_json_artifact(str(path))
+            payload = source.get("payload") or {}
+            if payload.get("artifact_type") != "n3_c1_n3t_previous_day_context_v1":
+                continue
+            payload_hhmm = str(payload.get("target_hhmm") or payload.get("target_minute_label") or "")
+            if payload_hhmm.replace(":", "") != target_hhmm:
+                continue
+            payload_hash = str(payload.get("source_run_hash") or "")
+            if payload_hash and payload_hash != source_run_hash:
+                continue
+            if _previous_day_context_covers_staging(payload, staging_artifact):
+                return source
+
+    if exact_only:
+        return None
+
     scoped_matches: list[dict[str, Any]] = []
     legacy_matches: list[dict[str, Any]] = []
     for path in sorted(previous_context_dir.glob("*.json")):
@@ -2094,10 +4316,71 @@ def _find_previous_day_context_artifact(
     return legacy_matches[0] if legacy_matches else None
 
 
+def _previous_day_context_exact_candidate_exists(
+    previous_context_dir: Path,
+    *,
+    target_hhmm: str,
+    source_run_hash: str = "",
+) -> bool:
+    if not source_run_hash or not previous_context_dir.exists() or not previous_context_dir.is_dir():
+        return False
+    return any(
+        previous_context_dir.glob(f"n3_c1_n3t_previous_day_context_v1_*_{target_hhmm}_{source_run_hash}.json")
+    )
+
+
+def _build_previous_day_context_artifact_index(previous_context_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    return _build_hhmm_artifact_index(
+        previous_context_dir,
+        artifact_type="n3_c1_n3t_previous_day_context_v1",
+    )
+
+
+def _find_previous_day_context_artifact_from_index(
+    index: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    target_hhmm: str,
+    source_run_hash: str = "",
+    staging_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    scoped_matches: list[dict[str, Any]] = []
+    legacy_matches: list[dict[str, Any]] = []
+    for source in index.get(_normal_hhmm_key(target_hhmm), []):
+        payload = source.get("payload") or {}
+        payload_hash = str(payload.get("source_run_hash") or "")
+        path_has_hash = bool(source_run_hash and source_run_hash in str(source.get("path") or ""))
+        if source_run_hash and (payload_hash or path_has_hash):
+            if payload_hash and payload_hash != source_run_hash:
+                continue
+            if not payload_hash and not path_has_hash:
+                continue
+            if not _previous_day_context_covers_staging(payload, staging_artifact):
+                continue
+            scoped_matches.append(dict(source))
+            continue
+        if _previous_day_context_covers_staging(payload, staging_artifact):
+            legacy_matches.append(dict(source))
+    if len(scoped_matches) > 1 or (not scoped_matches and len(legacy_matches) > 1):
+        raise FastlaneShellBlocked("previous_day_context_artifact_ambiguous")
+    if scoped_matches:
+        return scoped_matches[0]
+    return legacy_matches[0] if legacy_matches else None
+
+
+def _has_previous_day_context_artifact_for_hhmm_from_index(
+    index: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    target_hhmm: str,
+) -> bool:
+    return bool(index.get(_normal_hhmm_key(target_hhmm)))
+
+
 def _has_previous_day_context_artifact_for_hhmm(previous_context_dir: Path, *, target_hhmm: str) -> bool:
     if not previous_context_dir.exists() or not previous_context_dir.is_dir():
         return False
-    for path in sorted(previous_context_dir.glob("*.json")):
+    scoped_paths = sorted(previous_context_dir.glob(f"n3_c1_n3t_previous_day_context_v1_*_{target_hhmm}_*.json"))
+    paths = scoped_paths if scoped_paths else sorted(previous_context_dir.glob("*.json"))
+    for path in paths:
         source = _read_optional_json_artifact(str(path))
         payload = source.get("payload") or {}
         if payload.get("artifact_type") != "n3_c1_n3t_previous_day_context_v1":
@@ -2106,6 +4389,46 @@ def _has_previous_day_context_artifact_for_hhmm(previous_context_dir: Path, *, t
         if payload_hhmm.replace(":", "") == target_hhmm:
             return True
     return False
+
+
+def _build_hhmm_artifact_index(source_dir: Path, *, artifact_type: str) -> dict[str, list[dict[str, Any]]]:
+    index: dict[str, list[dict[str, Any]]] = {}
+    if not source_dir.exists() or not source_dir.is_dir():
+        return index
+    for path in sorted(source_dir.glob("*.json")):
+        source = _read_optional_json_artifact(str(path))
+        payload = source.get("payload") or {}
+        if payload.get("artifact_type") != artifact_type:
+            continue
+        hhmm_key = _normal_hhmm_key(str(payload.get("target_hhmm") or payload.get("target_minute_label") or ""))
+        if not hhmm_key:
+            continue
+        index.setdefault(hhmm_key, []).append(source)
+    return index
+
+
+def _matching_hhmm_hash_artifacts_from_index(
+    index: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    target_hhmm: str,
+    source_run_hash: str = "",
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for source in index.get(_normal_hhmm_key(target_hhmm), []):
+        payload = source.get("payload") or {}
+        if source_run_hash:
+            payload_hash = str(payload.get("source_run_hash") or "")
+            path_has_hash = source_run_hash in str(source.get("path") or "")
+            if payload_hash and payload_hash != source_run_hash:
+                continue
+            if not payload_hash and not path_has_hash:
+                continue
+        matches.append(dict(source))
+    return matches
+
+
+def _normal_hhmm_key(value: str) -> str:
+    return str(value or "").replace(":", "").strip()
 
 
 def _has_previous_day_context_artifact_for_source_run(
@@ -2637,26 +4960,29 @@ def _current_day_source_rows_from_provider_rows(
 
 
 def _dedupe_current_day_provider_morning_close_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    raw_1130_keys = {
+    lunch_boundary_keys = {
         _provider_morning_close_dedupe_key(row)
         for row in rows
-        if _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "11:29"
+        if _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "13:00"
         and _hhmm_to_minute_label(row.get("raw_source_label") or "") in {"11:30", "13:00"}
     }
-    if not raw_1130_keys:
+    if not lunch_boundary_keys:
         return [dict(row) for row in rows]
     deduped: list[dict[str, Any]] = []
     for row in rows:
+        row_raw_label = _hhmm_to_minute_label(row.get("raw_source_label") or "")
+        row_dedupe_key = _provider_morning_close_dedupe_key(row)
+        has_raw_1300 = any(
+            _hhmm_to_minute_label(candidate.get("physical_c1_label") or "") == "13:00"
+            and _hhmm_to_minute_label(candidate.get("raw_source_label") or "") == "13:00"
+            and _provider_morning_close_dedupe_key(candidate) == row_dedupe_key
+            for candidate in rows
+        )
         if (
-            _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "11:29"
-            and _hhmm_to_minute_label(row.get("raw_source_label") or "") == "13:00"
-            and _provider_morning_close_dedupe_key(row) in raw_1130_keys
-            and any(
-                _hhmm_to_minute_label(candidate.get("physical_c1_label") or "") == "11:29"
-                and _hhmm_to_minute_label(candidate.get("raw_source_label") or "") == "11:30"
-                and _provider_morning_close_dedupe_key(candidate) == _provider_morning_close_dedupe_key(row)
-                for candidate in rows
-            )
+            _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "13:00"
+            and row_raw_label == "11:30"
+            and row_dedupe_key in lunch_boundary_keys
+            and has_raw_1300
         ):
             continue
         deduped.append(dict(row))
@@ -2700,8 +5026,13 @@ def _normalize_provider_current_day_row(row: Mapping[str, Any], *, for_trade_dat
         physical_label = _hhmm_to_minute_label(source.get("physical_c1_label"))
         raw_label = _hhmm_to_minute_label(source.get("raw_source_label"))
         mapped = source_close_label_to_physical_start_label(for_trade_date, raw_label)
-        if mapped.get("status") != "mapped" or mapped.get("physical_c1_label") != physical_label:
+        if mapped.get("status") != "mapped":
             raise FastlaneShellBlocked("current_day_source_provider_row_label_mismatch")
+        mapped_physical_label = _hhmm_to_minute_label(mapped.get("physical_c1_label") or "")
+        if mapped_physical_label != physical_label:
+            if raw_label != physical_label:
+                raise FastlaneShellBlocked("current_day_source_provider_row_label_mismatch")
+            physical_label = mapped_physical_label
         source.update(
             {
                 "physical_c1_label": physical_label,
@@ -2782,9 +5113,7 @@ def _write_n3t_metrics_to_postgres(
     columns = list(N3T_WRITER_INSERT_COLUMNS)
     placeholders = ", ".join(["%s"] * len(columns))
     column_sql = ", ".join(columns)
-    conflict_sql = (
-        "projection_run_id, identity_key, trade_date, metric_minute_label, projection_schema_version"
-    )
+    conflict_sql = _n3t_writer_conflict_clause(columns)
     with psycopg.connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             for table, rows in rows_by_table.items():
@@ -2792,7 +5121,7 @@ def _write_n3t_metrics_to_postgres(
                     raise FastlaneShellBlocked("n3t_writer_target_table_forbidden")
                 sql = (
                     f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders}) "
-                    f"ON CONFLICT ({conflict_sql}) DO NOTHING"
+                    f"{conflict_sql}"
                 )
                 for row in rows:
                     values = [
@@ -2819,6 +5148,20 @@ def _write_n3t_metrics_to_postgres(
         "touches_n4_n5_n6_outbox": False,
         "full_market_fallback_used": False,
     }
+
+
+def _n3t_writer_conflict_clause(columns: Sequence[str]) -> str:
+    conflict_columns = (
+        "projection_run_id",
+        "identity_key",
+        "trade_date",
+        "metric_minute_label",
+        "projection_schema_version",
+    )
+    conflict_sql = ", ".join(conflict_columns)
+    update_columns = [str(column) for column in columns if str(column) not in set(conflict_columns)]
+    update_sql = ", ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
+    return f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {update_sql}"
 
 
 def _n3t_insert_rows_by_table(
@@ -2861,6 +5204,9 @@ def _n3t_insert_rows_by_table(
                     "source_artifact_sha256": source.get("sha256"),
                     "source_trigger_run_id": metric.get("source_trigger_run_id"),
                     "condition_key": metric.get("condition_key"),
+                    "object_minute_scope": bool(metric.get("object_minute_scope")),
+                    "object_minute_ref_count": int(metric.get("object_minute_ref_count") or 0),
+                    "object_minute_ref_trace": list(metric.get("object_minute_ref_trace") or []),
                 },
             )
             if not row.get("metric_ready"):
@@ -2991,6 +5337,12 @@ def _apply_activation_config(args: argparse.Namespace) -> None:
             or config.get("current_day_source_provider_max_candidates_per_invocation")
             or DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES
         )
+    if int(getattr(args, "current_day_source_provider_concurrency", 0) or 0) <= 0:
+        args.current_day_source_provider_concurrency = int(
+            config.get("n3_c1_n3t_current_day_source_provider_concurrency")
+            or config.get("current_day_source_provider_concurrency")
+            or DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY
+        )
     if int(getattr(args, "scoped_pull_plan_max_candidates_per_invocation", 0) or 0) <= 0:
         args.scoped_pull_plan_max_candidates_per_invocation = int(
             config.get("n3_c1_n3t_scoped_pull_plan_max_candidates_per_invocation")
@@ -3012,11 +5364,27 @@ def _apply_activation_config(args: argparse.Namespace) -> None:
     _apply_fastlane_worker_phase_gate(args, config)
 
 
-def _discover_requested_active_scope_artifacts(args: argparse.Namespace) -> list[dict[str, Any]]:
+def _discover_requested_active_scope_artifacts(args: argparse.Namespace, *, fanout: bool = True) -> list[dict[str, Any]]:
     path_text = str(getattr(args, "active_scope_artifact_path", "") or "").strip()
     if path_text:
-        return _discover_single_active_scope_artifact(Path(path_text))
-    return _discover_active_scope_artifacts(Path(args.active_scope_artifact_dir))
+        return _discover_single_active_scope_artifact(Path(path_text), fanout=fanout)
+    if bool(getattr(args, "scheduler_quiet", False)):
+        latest_path = _latest_active_scope_artifact_path(Path(args.active_scope_artifact_dir))
+        if latest_path is None:
+            return []
+        return _discover_single_active_scope_artifact(latest_path, fanout=fanout)
+    return _discover_active_scope_artifacts(Path(args.active_scope_artifact_dir), fanout=fanout)
+
+
+def _latest_active_scope_artifact_path(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    if not path.is_dir():
+        raise FastlaneShellBlocked("active_scope_artifact_dir_must_be_directory")
+    candidates = [item for item in path.glob(f"{INPUT_ARTIFACT_TYPE}*.json") if item.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item.stat().st_mtime_ns, item.name))
 
 
 def _apply_fastlane_worker_phase_gate(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
@@ -3055,7 +5423,7 @@ def _apply_fastlane_worker_phase_gate(args: argparse.Namespace, config: Mapping[
         raise FastlaneShellBlocked(str(decision.get("blocked_reason") or decision.get("worker_mode") or "write_not_allowed"))
 
 
-def _discover_active_scope_artifacts(path: Path) -> list[dict[str, Any]]:
+def _discover_active_scope_artifacts(path: Path, *, fanout: bool = True) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     if not path.is_dir():
@@ -3068,11 +5436,14 @@ def _discover_active_scope_artifacts(path: Path) -> list[dict[str, Any]]:
             raise FastlaneShellBlocked(f"active_scope_artifact_json_invalid:{artifact_path}") from exc
         if payload.get("artifact_type") != INPUT_ARTIFACT_TYPE:
             continue
-        artifacts.extend(_active_scope_artifact_candidates(artifact_path, payload))
+        if fanout:
+            artifacts.extend(_active_scope_artifact_candidates(artifact_path, payload))
+        else:
+            artifacts.append(_active_scope_artifact_base_candidate(artifact_path, payload))
     return artifacts
 
 
-def _discover_single_active_scope_artifact(path: Path) -> list[dict[str, Any]]:
+def _discover_single_active_scope_artifact(path: Path, *, fanout: bool = True) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     if not path.is_file():
@@ -3083,11 +5454,13 @@ def _discover_single_active_scope_artifact(path: Path) -> list[dict[str, Any]]:
         raise FastlaneShellBlocked(f"active_scope_artifact_json_invalid:{path}") from exc
     if payload.get("artifact_type") != INPUT_ARTIFACT_TYPE:
         raise FastlaneShellBlocked("active_scope_artifact_type_mismatch")
+    if not fanout:
+        return [_active_scope_artifact_base_candidate(path, payload)]
     return _active_scope_artifact_candidates(path, payload)
 
 
-def _active_scope_artifact_candidates(path: Path, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    base = {
+def _active_scope_artifact_base_candidate(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
         "path": str(path),
         "artifact_type": INPUT_ARTIFACT_TYPE,
         "for_trade_date": str(payload.get("for_trade_date") or ""),
@@ -3101,6 +5474,10 @@ def _active_scope_artifact_candidates(path: Path, payload: Mapping[str, Any]) ->
         "n3_scans_n5_internals": bool(payload.get("n3_scans_n5_internals")),
         "object_scope_ref_fanout": bool(payload.get("object_scope_ref_fanout")),
     }
+
+
+def _active_scope_artifact_candidates(path: Path, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    base = _active_scope_artifact_base_candidate(path, payload)
     if _active_scope_candidate_has_target(base):
         return [base]
     object_ref_candidates = _object_scope_ref_fanout_candidates(base, payload)
@@ -3120,7 +5497,7 @@ def _object_scope_ref_fanout_candidates(
     if not rows:
         return []
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    buckets: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         object_row = dict(row or {})
         for ref_source in object_row.get("active_tracking_refs") or []:
@@ -3128,42 +5505,72 @@ def _object_scope_ref_fanout_candidates(
             target_hhmm = _target_hhmm_from_active_ref(ref)
             if not target_hhmm:
                 continue
-            source_run_hash = str(ref.get("source_run_hash") or "").strip()
-            if not source_run_hash:
-                source_run_hash = _fallback_ref_source_run_hash(ref)
-            source_trigger_run_id = str(ref.get("source_trigger_run_id") or base.get("source_trigger_run_id") or "")
-            key = (target_hhmm, source_run_hash, source_trigger_run_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            for_trade_date = str(base.get("for_trade_date") or payload.get("for_trade_date") or "")
-            candidate = dict(base)
-            narrowed_payload = _object_scope_ref_fanout_payload(
-                payload=payload,
-                object_row=object_row,
-                active_ref=ref,
-                target_hhmm=target_hhmm,
-                source_run_hash=source_run_hash,
-                source_run_namespace=f"{for_trade_date}_{target_hhmm}_{source_run_hash}",
-                source_trigger_run_id=source_trigger_run_id,
+            key = (
+                str(ref.get("for_trade_date") or object_row.get("for_trade_date") or base.get("for_trade_date") or ""),
+                str(ref.get("asset_kind") or object_row.get("asset_kind") or ""),
+                str(ref.get("identity_key") or object_row.get("identity_key") or ""),
+                str(ref.get("direction") or ""),
+                target_hhmm,
             )
-            candidate.update(
+            bucket = buckets.setdefault(
+                key,
                 {
+                    "object_row": object_row,
                     "target_hhmm": target_hhmm,
-                    "source_trigger_run_id": source_trigger_run_id,
-                    "source_run_hash": source_run_hash,
-                    "source_run_namespace": f"{for_trade_date}_{target_hhmm}_{source_run_hash}",
-                    "scope_count": 1,
-                    "object_scope_ref_fanout": True,
-                    "_object_scope_ref_fanout_payload": narrowed_payload,
-                    "source_trigger_event_id": str(ref.get("source_trigger_event_id") or ""),
-                    "source_trigger_event_type": str(ref.get("source_trigger_event_type") or ""),
-                    "source_trigger_event_time": str(
-                        ref.get("source_trigger_event_time") or ref.get("latest_n4_event_time") or ""
-                    ),
-                }
+                    "refs": [],
+                },
             )
-            candidates.append(candidate)
+            bucket["refs"].append(ref)
+    for sequence, bucket in enumerate(buckets.values()):
+        refs = sorted(
+            (dict(ref) for ref in bucket["refs"]),
+            key=lambda ref: (
+                _hint_condition_priority(ref.get("condition_key")),
+                str(ref.get("source_trigger_event_time") or ref.get("trigger_time") or ref.get("latest_n4_event_time") or ""),
+                str(ref.get("condition_key") or ""),
+                str(ref.get("state_key") or ""),
+            ),
+        )
+        if not refs:
+            continue
+        target_hhmm = str(bucket["target_hhmm"] or "")
+        for_trade_date = str(base.get("for_trade_date") or payload.get("for_trade_date") or refs[0].get("for_trade_date") or "")
+        source_run_hash = _object_minute_source_run_hash(
+            object_row=bucket["object_row"],
+            active_refs=refs,
+            target_hhmm=target_hhmm,
+        )
+        source_trigger_run_id = _joined_source_trigger_run_ids(refs) or str(base.get("source_trigger_run_id") or "")
+        source_run_namespace = f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+        candidate = dict(base)
+        narrowed_payload = _object_scope_ref_fanout_payload(
+            payload=payload,
+            object_row=bucket["object_row"],
+            active_refs=refs,
+            target_hhmm=target_hhmm,
+            source_run_hash=source_run_hash,
+            source_run_namespace=source_run_namespace,
+            source_trigger_run_id=source_trigger_run_id,
+        )
+        candidate.update(
+            {
+                "target_hhmm": target_hhmm,
+                "source_trigger_run_id": source_trigger_run_id,
+                "source_run_hash": source_run_hash,
+                "source_run_namespace": source_run_namespace,
+                "scope_count": 1,
+                "active_tracking_ref_count": len(refs),
+                "object_scope_ref_fanout": True,
+                "_object_scope_ref_fanout_payload": narrowed_payload,
+                "source_trigger_event_id": _joined_source_trigger_event_ids(refs),
+                "source_trigger_event_type": _joined_source_trigger_event_types(refs),
+                "source_trigger_event_time": str(
+                    refs[0].get("source_trigger_event_time") or refs[0].get("latest_n4_event_time") or ""
+                ),
+                "sort_sequence": sequence,
+            }
+        )
+        candidates.append(candidate)
     return sorted(
         candidates,
         key=lambda item: (
@@ -3178,21 +5585,22 @@ def _object_scope_ref_fanout_payload(
     *,
     payload: Mapping[str, Any],
     object_row: Mapping[str, Any],
-    active_ref: Mapping[str, Any],
+    active_refs: Sequence[Mapping[str, Any]],
     target_hhmm: str,
     source_run_hash: str,
     source_run_namespace: str,
     source_trigger_run_id: str,
 ) -> dict[str, Any]:
     row = dict(object_row)
-    ref = dict(active_ref)
+    refs = [dict(ref) for ref in active_refs]
+    ref = refs[0] if refs else {}
     row.update(
         {
             "for_trade_date": str(ref.get("for_trade_date") or row.get("for_trade_date") or payload.get("for_trade_date") or ""),
             "asset_kind": str(ref.get("asset_kind") or row.get("asset_kind") or ""),
             "identity_key": str(ref.get("identity_key") or row.get("identity_key") or ""),
             "scope_status": str(ref.get("scope_status") or row.get("scope_status") or "active"),
-            "active_tracking_refs": [ref],
+            "active_tracking_refs": refs,
             "attention_event_refs": [],
         }
     )
@@ -3201,20 +5609,73 @@ def _object_scope_ref_fanout_payload(
         {
             "scope_granularity": "object",
             "scope_count": 1,
-            "active_tracking_ref_count": 1,
+            "active_tracking_ref_count": len(refs),
             "scope_rows": [row],
             "target_hhmm": target_hhmm,
             "target_minute_label": _hhmm_to_minute_label(target_hhmm),
             "source_run_hash": source_run_hash,
             "source_run_namespace": source_run_namespace,
             "source_trigger_run_id": source_trigger_run_id,
-            "source_trigger_event_id": str(ref.get("source_trigger_event_id") or ""),
-            "source_trigger_event_type": str(ref.get("source_trigger_event_type") or ""),
+            "source_trigger_event_id": _joined_source_trigger_event_ids(refs),
+            "source_trigger_event_type": _joined_source_trigger_event_types(refs),
             "source_trigger_event_time": str(ref.get("source_trigger_event_time") or ref.get("latest_n4_event_time") or ""),
             "object_scope_ref_fanout": True,
+            "object_minute_scope": True,
+            "object_minute_ref_dedupe_policy": "for_trade_date_asset_identity_direction_target_minute_v1",
         }
     )
     return narrowed
+
+
+def _object_minute_source_run_hash(
+    *,
+    object_row: Mapping[str, Any],
+    active_refs: Sequence[Mapping[str, Any]],
+    target_hhmm: str,
+) -> str:
+    ref_parts = [
+        "|".join(
+            str(ref.get(key) or "")
+            for key in (
+                "source_run_hash",
+                "state_key",
+                "condition_key",
+                "source_trigger_event_id",
+                "source_trigger_event_time",
+                "latest_n4_event_time",
+                "next_unchecked_minute_label",
+            )
+        )
+        for ref in active_refs
+    ]
+    return _short_scope_hash(
+        str(object_row.get("for_trade_date") or ""),
+        str(object_row.get("asset_kind") or ""),
+        str(object_row.get("identity_key") or ""),
+        str(active_refs[0].get("direction") if active_refs else ""),
+        str(target_hhmm or ""),
+        *sorted(ref_parts),
+    )
+
+
+def _joined_source_trigger_run_ids(active_refs: Sequence[Mapping[str, Any]]) -> str:
+    values = sorted({str(ref.get("source_trigger_run_id") or "") for ref in active_refs if ref.get("source_trigger_run_id")})
+    return ",".join(values)
+
+
+def _joined_source_trigger_event_ids(active_refs: Sequence[Mapping[str, Any]]) -> str:
+    values = sorted({str(ref.get("source_trigger_event_id") or "") for ref in active_refs if ref.get("source_trigger_event_id")})
+    return ",".join(values)
+
+
+def _joined_source_trigger_event_types(active_refs: Sequence[Mapping[str, Any]]) -> str:
+    values = sorted({str(ref.get("source_trigger_event_type") or "") for ref in active_refs if ref.get("source_trigger_event_type")})
+    return ",".join(values)
+
+
+def _hint_condition_priority(condition_key: Any) -> int:
+    text = str(condition_key or "").upper()
+    return 1 if text.startswith("BUY_HINT") or text.startswith("SELL_HINT") else 0
 
 
 def _materialize_object_scope_ref_fanout_active_scope_artifacts(
@@ -3268,6 +5729,162 @@ def _active_scope_artifacts_with_persisted_ref_fanout(
             context = _infer_scope_context(candidate)
             merged.setdefault(context["namespace_token"], dict(candidate))
     return list(merged.values())
+
+
+def _dedupe_active_scope_artifacts_by_namespace(
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for artifact in active_scope_artifacts:
+        context = _infer_scope_context(artifact)
+        merged.setdefault(context["namespace_token"], dict(artifact))
+    return list(merged.values())
+
+
+def _active_scope_artifact_trade_date(artifact: Mapping[str, Any]) -> str:
+    value = str(artifact.get("for_trade_date") or "")
+    if value:
+        return value
+    path_text = str(artifact.get("path") or "")
+    if not path_text:
+        return ""
+    source = _read_optional_json_artifact(path_text)
+    payload = source.get("payload") or {}
+    return str(payload.get("for_trade_date") or "")
+
+
+def _active_scope_artifact_current_object_key(artifact: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    asset_kind, identity_key, direction = _active_scope_artifact_object_identity(artifact)
+    return (_active_scope_artifact_trade_date(artifact), asset_kind, identity_key, direction)
+
+
+def _active_scope_artifact_current_object_keys(artifact: Mapping[str, Any]) -> set[tuple[str, str, str, str]]:
+    payload: Mapping[str, Any] = artifact
+    if artifact.get("path"):
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        payload = source.get("payload") or artifact
+    trade_date = str(payload.get("for_trade_date") or artifact.get("for_trade_date") or "")
+    keys: set[tuple[str, str, str, str]] = set()
+    for row_source in payload.get("scope_rows") or []:
+        if not isinstance(row_source, Mapping):
+            continue
+        row = dict(row_source)
+        asset_kind = str(row.get("asset_kind") or "")
+        identity_key = str(row.get("identity_key") or "")
+        row_trade_date = str(row.get("for_trade_date") or trade_date)
+        refs = [ref for ref in row.get("active_tracking_refs") or [] if isinstance(ref, Mapping)]
+        if refs:
+            for ref in refs:
+                direction = str(ref.get("direction") or row.get("direction") or "")
+                if row_trade_date and asset_kind and identity_key and direction:
+                    keys.add((row_trade_date, asset_kind, identity_key, direction))
+            continue
+        direction = str(row.get("direction") or "")
+        if row_trade_date and asset_kind and identity_key and direction:
+            keys.add((row_trade_date, asset_kind, identity_key, direction))
+    return keys
+
+
+def _active_scope_current_object_persisted_fanout_paths(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    closed_hhmm: str,
+) -> list[Path]:
+    if not re.fullmatch(r"[0-2][0-9][0-5][0-9]", str(closed_hhmm or "")):
+        return []
+    fanout_dir = output_dir / "active_scope_ref_fanout"
+    staging_dir = output_dir / "current_day_staging"
+    if not fanout_dir.exists() or not fanout_dir.is_dir():
+        return []
+    paths: set[Path] = set()
+    for artifact in active_scope_artifacts:
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        if not source["exists"]:
+            continue
+        payload = dict(source.get("payload") or {})
+        for artifact_candidate, candidate_payload in _active_a_minute_batch_payload_candidates(
+            artifact=artifact,
+            payload=payload,
+            closed_hhmm=closed_hhmm,
+        ):
+            target_hhmm = str(
+                candidate_payload.get("target_hhmm")
+                or artifact_candidate.get("target_hhmm")
+                or ""
+            )
+            source_run_hash = _active_a_minute_batch_source_run_hash(
+                candidate_payload,
+                target_hhmm=target_hhmm,
+            )
+            for_trade_date = str(
+                candidate_payload.get("for_trade_date")
+                or artifact_candidate.get("for_trade_date")
+                or ""
+            )
+            if not (for_trade_date and target_hhmm and source_run_hash):
+                continue
+            namespace_token = f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+            staging_path = staging_dir / f"n3_c1_scoped_current_day_staging_v1_{namespace_token}_fastlane.json"
+            if not staging_path.exists():
+                continue
+            fanout_path = fanout_dir / f"n5_active_scope_snapshot_v1_{namespace_token}_ref_fanout.json"
+            if fanout_path.exists():
+                paths.add(fanout_path)
+    return sorted(paths)
+
+
+def _active_scope_artifacts_with_current_object_persisted_ref_fanout(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    closed_hhmm: str = "",
+) -> list[dict[str, Any]]:
+    current_object_keys: set[tuple[str, str, str, str]] = set()
+    for artifact in active_scope_artifacts:
+        current_object_keys.update(_active_scope_artifact_current_object_keys(artifact))
+    if not current_object_keys:
+        current_object_keys = {
+            key
+            for key in (_active_scope_artifact_current_object_key(item) for item in active_scope_artifacts)
+            if key[0] and key[1] and key[2]
+        }
+    if not re.fullmatch(r"[0-2][0-9][0-5][0-9]", str(closed_hhmm or "")):
+        candidates = _active_scope_artifacts_with_persisted_ref_fanout(
+            active_scope_artifacts=active_scope_artifacts,
+            output_dir=output_dir,
+        )
+    else:
+        merged: dict[str, dict[str, Any]] = {}
+        for artifact in active_scope_artifacts:
+            context = _infer_scope_context(artifact)
+            merged[context["namespace_token"]] = dict(artifact)
+        for path in _active_scope_current_object_persisted_fanout_paths(
+            active_scope_artifacts=active_scope_artifacts,
+            output_dir=output_dir,
+            closed_hhmm=closed_hhmm,
+        ):
+            source = _read_optional_json_artifact(str(path))
+            payload = source.get("payload") or {}
+            if payload.get("artifact_type") != INPUT_ARTIFACT_TYPE:
+                continue
+            for candidate in _active_scope_artifact_candidates(path, payload):
+                if candidate.get("object_scope_ref_fanout") is not True:
+                    continue
+                key = _active_scope_artifact_current_object_key(candidate)
+                if current_object_keys and key not in current_object_keys:
+                    continue
+                context = _infer_scope_context(candidate)
+                merged.setdefault(context["namespace_token"], dict(candidate))
+        candidates = list(merged.values())
+    if not current_object_keys:
+        return candidates
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        key = _active_scope_artifact_current_object_key(candidate)
+        if key[0] and key[1] and key[2] and key in current_object_keys:
+            filtered.append(dict(candidate))
+    return filtered
 
 
 def _target_hhmm_from_active_ref(ref: Mapping[str, Any]) -> str:
@@ -3346,6 +5963,54 @@ def _fallback_ref_source_run_hash(ref: Mapping[str, Any]) -> str:
         )
     )
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _clean_fastlane_source_run_hash(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if any(
+        token in lowered
+        for token in (
+            "realtime_action_confirmation_metric",
+            "n3p",
+            "b1_",
+            "b2_",
+        )
+    ):
+        return ""
+    return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", text) else ""
+
+
+def _clean_fastlane_source_run_hash_from_namespace(value: Any) -> str:
+    text = str(value or "").strip()
+    if any(
+        token in text.lower()
+        for token in (
+            "realtime_action_confirmation_metric",
+            "n3p",
+            "b1_",
+            "b2_",
+        )
+    ):
+        return ""
+    match = re.fullmatch(r"20[0-9]{6}_[0-2][0-9][0-5][0-9]_([A-Za-z0-9][A-Za-z0-9_-]{0,63})", text)
+    return _clean_fastlane_source_run_hash(match.group(1)) if match else ""
+
+
+def _fastlane_namespace_token(
+    *,
+    for_trade_date: str,
+    target_hhmm: str,
+    source_run_hash: str,
+) -> str:
+    return f"{for_trade_date}_{target_hhmm}_{source_run_hash}"
+
+
+def _short_scope_hash(*parts: str) -> str:
+    text = "|".join(str(part or "") for part in parts if str(part or ""))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] if text else ""
 
 
 def _fanout_pull_plan_matches_active_scope(
@@ -3754,12 +6419,24 @@ def _local_component_readiness(planned_artifact: Mapping[str, Any]) -> dict[str,
     staging_needs_rebuild = bool(
         staging["exists"] and _current_day_artifact_needs_boundary_rebuild(staging.get("payload") or {})
     )
+    metric_context_open_boundary_rebuild_required = bool(
+        metric["exists"]
+        and _metric_context_artifact_needs_open_boundary_previous_period_rebuild(metric.get("payload") or {})
+    )
+    metric_context_rolling_window_rebuild_required = bool(
+        metric["exists"] and _metric_context_artifact_needs_rolling_window_rebuild(metric.get("payload") or {})
+    )
+    metric_context_needs_rebuild = (
+        metric_context_open_boundary_rebuild_required or metric_context_rolling_window_rebuild_required
+    )
     current_day_boundary_rebuild_required = pull_plan_needs_rebuild or staging_needs_rebuild
 
     if clean_noop_pull_plan:
         status = "clean_noop_skipped"
-    elif metric["exists"]:
+    elif metric["exists"] and not metric_context_needs_rebuild:
         status = "metric_context_ready_for_n3t_execute_gate"
+    elif metric_context_needs_rebuild and staging["exists"] and not staging_needs_rebuild:
+        status = "waiting_for_metric_context_artifact"
     elif staging["exists"] and not staging_needs_rebuild:
         status = "waiting_for_metric_context_artifact"
     elif not pull_plan["exists"]:
@@ -3799,16 +6476,17 @@ def _local_component_readiness(planned_artifact: Mapping[str, Any]) -> dict[str,
         for key in ("full_market_fallback_used", "database_written", "runtime_execute", "writes_n3_outbox"):
             if payload.get(key) is True:
                 violations.append(f"metric_context_{key}")
-        n3t_writer_plan_summary = _n3t_writer_plan_summary(
-            metric_payload=payload,
-            source_artifact_path=str(planned_artifact["metric_context_artifact_path"]),
-            source_artifact_hash=str(metric.get("sha256") or ""),
-        )
-        if n3t_writer_plan_summary.get("plan_status") not in {"planned", "noop"}:
-            violations.append(
-                "n3t_writer_plan:"
-                + str(n3t_writer_plan_summary.get("blocked_reason") or "contract_mismatch")
+        if not metric_context_needs_rebuild:
+            n3t_writer_plan_summary = _n3t_writer_plan_summary(
+                metric_payload=payload,
+                source_artifact_path=str(planned_artifact["metric_context_artifact_path"]),
+                source_artifact_hash=str(metric.get("sha256") or ""),
             )
+            if n3t_writer_plan_summary.get("plan_status") not in {"planned", "noop"}:
+                violations.append(
+                    "n3t_writer_plan:"
+                    + str(n3t_writer_plan_summary.get("blocked_reason") or "contract_mismatch")
+                )
 
     if violations:
         status = "blocked_local_component_contract_mismatch"
@@ -3824,6 +6502,9 @@ def _local_component_readiness(planned_artifact: Mapping[str, Any]) -> dict[str,
         "current_day_boundary_rebuild_required": current_day_boundary_rebuild_required,
         "pull_plan_boundary_rebuild_required": pull_plan_needs_rebuild,
         "staging_boundary_rebuild_required": staging_needs_rebuild,
+        "metric_context_open_boundary_rebuild_required": metric_context_open_boundary_rebuild_required,
+        "metric_context_rolling_window_rebuild_required": metric_context_rolling_window_rebuild_required,
+        "metric_context_rebuild_required": metric_context_needs_rebuild,
         "pull_plan_sha256": pull_plan.get("sha256"),
         "staging_artifact_sha256": staging.get("sha256"),
         "metric_context_artifact_sha256": metric.get("sha256"),
@@ -3886,6 +6567,8 @@ def _n3t_writer_inputs_from_plan(scoped_executor_plan: Mapping[str, Any]) -> lis
             {
                 "target_hhmm": artifact.get("target_hhmm"),
                 "for_trade_date": artifact.get("for_trade_date"),
+                "source_run_hash": artifact.get("source_run_hash"),
+                "namespace_token": artifact.get("namespace_token"),
                 "n3t_metric_run_id": artifact.get("n3t_metric_run_id"),
                 "metric_context_artifact_path": artifact.get("metric_context_artifact_path"),
                 "metric_context_artifact_sha256": readiness.get("metric_context_artifact_sha256"),
@@ -3924,17 +6607,30 @@ def _read_optional_json_artifact(path_text: str) -> dict[str, Any]:
     path = Path(path_text)
     if not path.exists():
         return {"exists": False, "path": str(path), "payload": {}}
+    stat_result = path.stat()
+    cache_key = (str(path.resolve()), int(stat_result.st_mtime_ns), int(stat_result.st_size))
+    cached = _JSON_ARTIFACT_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
     raw = path.read_bytes()
     try:
         payload = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise FastlaneShellBlocked(f"local_component_artifact_json_invalid:{path}") from exc
-    return {
+    result = {
         "exists": True,
         "path": str(path),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "payload": payload,
     }
+    if len(_JSON_ARTIFACT_CACHE) >= JSON_ARTIFACT_CACHE_MAX_ENTRIES:
+        _JSON_ARTIFACT_CACHE.clear()
+    _JSON_ARTIFACT_CACHE[cache_key] = dict(result)
+    return result
+
+
+def _clear_json_artifact_cache_for_tests() -> None:
+    _JSON_ARTIFACT_CACHE.clear()
 
 
 def _next_required_gate(status: str, target_hhmm: str) -> str:
@@ -3979,8 +6675,19 @@ def _infer_scope_context(artifact: Mapping[str, Any]) -> dict[str, str]:
         action_run_id=str(artifact.get("action_run_id") or ""),
         target_hhmm=target_hhmm,
     )
-    source_run_hash = str(artifact.get("source_run_hash") or namespace["source_run_hash"])
-    namespace_token = str(artifact.get("source_run_namespace") or namespace["token"])
+    source_run_hash = (
+        _clean_fastlane_source_run_hash(artifact.get("source_run_hash"))
+        or _clean_fastlane_source_run_hash_from_namespace(artifact.get("source_run_namespace"))
+        or str(namespace["source_run_hash"])
+    )
+    namespace_token = str(artifact.get("source_run_namespace") or "")
+    namespace_hash = _clean_fastlane_source_run_hash_from_namespace(namespace_token)
+    if namespace_hash != source_run_hash:
+        namespace_token = _fastlane_namespace_token(
+            for_trade_date=str(namespace["for_trade_date"]),
+            target_hhmm=str(namespace["target_hhmm"]),
+            source_run_hash=source_run_hash,
+        )
     return {
         "target_hhmm": namespace["target_hhmm"],
         "for_trade_date": namespace["for_trade_date"],
@@ -4091,12 +6798,15 @@ def _scheduler_compact_lane_results(manifest: Mapping[str, Any]) -> dict[str, An
         "selected_candidate_count",
         "processed_candidate_count",
         "skipped_candidate_count",
+        "failed_candidate_count",
         "remaining_candidate_count",
         "priority_candidate_count",
         "hard_blocker_count",
         "candidate_scan_bounded",
         "candidate_scan_limit",
         "total_candidate_count",
+        "oldest_pending_trigger_time",
+        "max_pending_age_seconds",
     }
     for lane_name, lane_result in lane_results.items():
         lane_summary = _compact_mapping_scalars(lane_result, allowed)

@@ -21,6 +21,8 @@ try:
 except ModuleNotFoundError:  # Imported as scripts.review_post_close_preopen_guards in tests.
     from scripts.check_condition_source_ready import DEFAULT_DSN
 
+from ashare_v3.runtime.intraday_worker_lineage import DEFAULT_LINEAGE_CONFIG_PATH
+
 
 class GuardBlocked(RuntimeError):
     """Raised when a pre-open guard fails closed."""
@@ -172,6 +174,124 @@ def build_lineage_pollution_guard_report(*, for_trade_date: str, pollution_count
         "event_ledger_touched": False,
         "worker_started": False,
     }
+
+
+def build_active_lineage_materialization_guard_report(
+    *,
+    for_trade_date: str,
+    docs_root: str | Path = "docs/post_close_fastlane",
+    lineage_config_path: str | Path = DEFAULT_LINEAGE_CONFIG_PATH,
+) -> dict[str, Any]:
+    docs_root_path = Path(docs_root)
+    latest_dir = _latest_fastlane_dir_for(docs_root_path, for_trade_date)
+    status_path = latest_dir / "00_status.json"
+    oneshot_path = latest_dir / "01_oneshot_execute_report.json"
+    status = _load_json_object(status_path)
+    oneshot = _load_json_object(oneshot_path)
+    base_report = {
+        "check": "active_lineage_materialization_guard",
+        "layer_role": "runtime_control",
+        "for_trade_date": for_trade_date,
+        "latest_fastlane_dir": str(latest_dir),
+        "lineage_config_path": str(lineage_config_path),
+        "writes_database": False,
+        "event_ledger_touched": False,
+        "worker_started": False,
+        "launchd_mutated": False,
+    }
+    if not status or not oneshot:
+        blocked = {
+            **base_report,
+            "result": "BLOCKED",
+            "blocked_reason": "BLOCKED_FASTLANE_NOT_PASS:status_or_report_missing",
+        }
+        raise GuardBlocked(str(blocked["blocked_reason"]), report=blocked)
+    if latest_dir.name != for_trade_date or str(status.get("for_trade_date") or "") != for_trade_date:
+        blocked = {
+            **base_report,
+            "result": "BLOCKED",
+            "status_result": status.get("result"),
+            "oneshot_result": oneshot.get("result"),
+            "blocked_reason": "BLOCKED_FASTLANE_NOT_PASS:latest_for_trade_date_mismatch",
+        }
+        raise GuardBlocked(str(blocked["blocked_reason"]), report=blocked)
+    if status.get("result") != "EXECUTE_PASS" or oneshot.get("result") != "EXECUTE_PASS":
+        blocked = {
+            **base_report,
+            "result": "BLOCKED",
+            "status_result": status.get("result"),
+            "oneshot_result": oneshot.get("result"),
+            "failed_step_id": status.get("failed_step_id"),
+            "blocked_reason": "BLOCKED_FASTLANE_NOT_PASS",
+        }
+        raise GuardBlocked(str(blocked["blocked_reason"]), report=blocked)
+
+    lineage = _load_json_object(Path(lineage_config_path))
+    mismatches: list[str] = []
+    if not lineage:
+        mismatches.append("lineage_config_missing_or_malformed")
+    else:
+        expected_paths = {
+            "source_status_path": status_path,
+            "source_oneshot_report_path": oneshot_path,
+        }
+        if str(lineage.get("for_trade_date") or "") != for_trade_date:
+            mismatches.append("for_trade_date")
+        if str(lineage.get("source_trade_date") or "") != str(status.get("source_trade_date") or ""):
+            mismatches.append("source_trade_date")
+        for key, expected_path in expected_paths.items():
+            if not _paths_match(lineage.get(key), expected_path):
+                mismatches.append(key)
+    if mismatches:
+        blocked = {
+            **base_report,
+            "result": "BLOCKED",
+            "status_result": status.get("result"),
+            "oneshot_result": oneshot.get("result"),
+            "blocked_reason": "BLOCKED_ACTIVE_LINEAGE_NOT_MATERIALIZED",
+            "mismatches": mismatches,
+            "active_lineage_for_trade_date": lineage.get("for_trade_date") if lineage else "",
+            "active_lineage_source_trade_date": lineage.get("source_trade_date") if lineage else "",
+        }
+        raise GuardBlocked(str(blocked["blocked_reason"]), report=blocked)
+
+    return {
+        **base_report,
+        "result": "PASS",
+        "status_result": status.get("result"),
+        "oneshot_result": oneshot.get("result"),
+        "active_lineage_for_trade_date": lineage.get("for_trade_date"),
+        "active_lineage_source_trade_date": lineage.get("source_trade_date"),
+        "active_lineage_materialized": True,
+    }
+
+
+def _latest_fastlane_dir_for(docs_root: Path, for_trade_date: str) -> Path:
+    latest_path = docs_root / "latest"
+    if latest_path.exists():
+        try:
+            return latest_path.resolve(strict=True)
+        except OSError:
+            return latest_path
+    return docs_root / for_trade_date
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _paths_match(left: Any, right: Path) -> bool:
+    if not left:
+        return False
+    left_path = Path(str(left))
+    try:
+        return left_path.resolve() == right.resolve()
+    except OSError:
+        return str(left_path) == str(right)
 
 
 def _worker_state_active(value: Any) -> bool:
@@ -629,8 +749,20 @@ def format_markdown_report(report: Mapping[str, Any]) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Review post-close pre-open guard readiness.")
-    parser.add_argument("--check", required=True, choices=["n4_context_rollback_ready", "preopen_readiness_noop", "lineage_pollution_guard", "worker_launchd_guard"])
+    parser.add_argument(
+        "--check",
+        required=True,
+        choices=[
+            "n4_context_rollback_ready",
+            "preopen_readiness_noop",
+            "lineage_pollution_guard",
+            "active_lineage_materialization_guard",
+            "worker_launchd_guard",
+        ],
+    )
     parser.add_argument("--dsn", default=os.environ.get("ASHARE_V3_POSTGRES_DSN", DEFAULT_DSN))
+    parser.add_argument("--docs-root", default="docs/post_close_fastlane")
+    parser.add_argument("--lineage-config-path", default=DEFAULT_LINEAGE_CONFIG_PATH)
     parser.add_argument("--for-trade-date", required=True)
     parser.add_argument("--source-trade-date", default="")
     parser.add_argument("--condition-run-id", default="")
@@ -666,6 +798,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.check == "lineage_pollution_guard":
             pollution_counts = fetch_lineage_pollution_counts(dsn=args.dsn, for_trade_date=args.for_trade_date)
             report = build_lineage_pollution_guard_report(for_trade_date=args.for_trade_date, pollution_counts=pollution_counts)
+        elif args.check == "active_lineage_materialization_guard":
+            report = build_active_lineage_materialization_guard_report(
+                for_trade_date=args.for_trade_date,
+                docs_root=args.docs_root,
+                lineage_config_path=args.lineage_config_path,
+            )
         else:
             report = build_worker_launchd_guard_report(for_trade_date=args.for_trade_date, worker_states=detect_worker_states())
     except GuardBlocked as exc:

@@ -23,6 +23,7 @@ KNOWN_STEP_LABELS = {
     "preopen_readiness_noop": "Pre-open readiness noop",
     "lineage_pollution_guard": "Lineage pollution guard",
     "worker_launchd_guard": "Worker/launchd guard",
+    "n5_n3t_next_trade_day_readiness_rollover": "N5/N3T next trade day readiness rollover",
 }
 
 
@@ -95,7 +96,10 @@ def read_post_close_fastlane_status(
 
     n5_n3t_readiness = dict((report or {}).get("n5_n3t_next_trade_day_readiness") or {})
     derived_n5_n3t_readiness: dict[str, Any] = {}
-    if not n5_n3t_readiness or n5_n3t_readiness_is_stale_blocked_report(n5_n3t_readiness):
+    can_derive_n5_n3t_readiness = bool(base_status or report)
+    if can_derive_n5_n3t_readiness and (
+        not n5_n3t_readiness or n5_n3t_readiness_is_stale_blocked_report(n5_n3t_readiness)
+    ):
         derived_n5_n3t_readiness = derive_n5_n3t_readiness_from_local_artifacts(
             project_root=project_root,
             selected_for_trade_date=selected_for_trade_date or for_trade_date_value,
@@ -117,6 +121,11 @@ def read_post_close_fastlane_status(
         if value:
             n5_n3t_readiness_artifacts.append(artifact_item_from_text(label, value, project_root))
 
+    sub_steps = normalize_sub_steps(report)
+    readiness_step = n5_n3t_readiness_step(n5_n3t_readiness)
+    if readiness_step:
+        sub_steps.append(readiness_step)
+
     return {
         "result": result,
         "selected_for_trade_date": selected_for_trade_date,
@@ -126,7 +135,7 @@ def read_post_close_fastlane_status(
         "docs_root": str(root),
         "run_dir": str(run_dir),
         "status": status,
-        "sub_steps": normalize_sub_steps(report),
+        "sub_steps": sub_steps,
         "n3_a1_summary": n3_a1_summary(n3_a1_report),
         "n5_n3t_next_trade_day_readiness": n5_n3t_readiness,
         "forbidden_scope_proof": dict((report or {}).get("forbidden_scope_proof") or {}),
@@ -222,6 +231,8 @@ def load_json_object(path: Path) -> dict[str, Any] | None:
 def infer_project_root(docs_root: Path) -> Path:
     if docs_root.name == "post_close_fastlane" and docs_root.parent.name == "docs":
         return docs_root.parent.parent
+    if docs_root.name == "post_close_fastlane":
+        return docs_root.parent
     if docs_root.name == "docs":
         return docs_root.parent
     return Path.cwd()
@@ -322,6 +333,46 @@ def normalize_sub_steps(report: dict[str, Any] | None) -> list[dict[str, Any]]:
             }
         )
     return normalized
+
+
+def n5_n3t_readiness_step(readiness: Mapping[str, Any]) -> dict[str, Any]:
+    if not readiness:
+        return {}
+    status = n5_n3t_readiness_step_status(readiness)
+    report_paths = [
+        str(readiness.get(key) or "")
+        for key in (
+            "report_path",
+            "stable_activation_config_path",
+            "dated_activation_config_path",
+            "active_worker_policy_review_path",
+        )
+        if str(readiness.get(key) or "")
+    ]
+    return {
+        "step_id": "n5_n3t_next_trade_day_readiness_rollover",
+        "label": KNOWN_STEP_LABELS["n5_n3t_next_trade_day_readiness_rollover"],
+        "layer_role": "runtime_control",
+        "returncode": readiness.get("returncode") if "returncode" in readiness else "—",
+        "status": status,
+        "skipped": False,
+        "skip_reason": "",
+        "report_paths": report_paths,
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def n5_n3t_readiness_step_status(readiness: Mapping[str, Any]) -> str:
+    result = str(readiness.get("result") or "").upper()
+    review_result = str(readiness.get("review_result") or "").upper()
+    if result == "PASS":
+        return "PASS"
+    if result == "WAITING" or review_result == "WAITING":
+        return "WAITING"
+    if result in {"BLOCKED", "FAILED"} or str(readiness.get("readiness_blocker") or ""):
+        return "BLOCKED"
+    return "NO_STATUS"
 
 
 def n3_a1_summary(report: dict[str, Any] | None) -> dict[str, Any]:

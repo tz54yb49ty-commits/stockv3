@@ -423,6 +423,35 @@ def _previous_day_cumulative_rows_for_first_window(identity_key="board:TDX:88100
     return rows
 
 
+def _previous_day_cumulative_rows_for_first_window_datetime_labels(identity_key="board:TDX:881001"):
+    rows = []
+    cumulative = 0
+    elapsed_index = 1
+    for label in _labels_between("09:31", "10:00"):
+        cumulative += 50
+        rows.append(
+            _cumulative_row(
+                identity_key,
+                f"2026-07-02 {label}",
+                cumulative,
+                elapsed_index=elapsed_index,
+            )
+        )
+        elapsed_index += 1
+    for label in _labels_between("14:31", "15:00"):
+        cumulative += 1
+        rows.append(
+            _cumulative_row(
+                identity_key,
+                f"2026-07-02 {label}",
+                cumulative,
+                elapsed_index=elapsed_index,
+            )
+        )
+        elapsed_index += 1
+    return rows
+
+
 def _previous_day_last_30m_entity_rows(identity_key="board:TDX:881001"):
     return [
         {
@@ -1040,6 +1069,49 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
         self.assertTrue(any("board_previous_day_minute_cumulative" in sql for sql, _params in conn.statements))
         self.assertTrue(any("board_minute_bar_1m" in sql for sql, _params in conn.statements))
 
+    def test_previous_day_reference_loader_normalizes_datetime_cumulative_labels(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            _cumulative_rows_to_1m_reference_rows,
+            _load_n3_hint_previous_day_reference_rows_with_connection,
+        )
+
+        normalized_rows = _cumulative_rows_to_1m_reference_rows(
+            [
+                _cumulative_row("board:TDX:881001", "2026-07-02 09:31", 50, elapsed_index=1),
+                _cumulative_row("board:TDX:881001", "2026-07-02T10:00:00+08:00", 100, elapsed_index=2),
+                _cumulative_row("board:TDX:881001", "2026-07-02 13:00", 125, elapsed_index=3),
+            ],
+            expected_asset_kind="board",
+        )
+
+        self.assertEqual([row["minute_label"] for row in normalized_rows], ["09:31", "10:00", "11:30"])
+        self.assertEqual(normalized_rows[0]["raw_cumulative_minute_label"], "2026-07-02 09:31")
+        self.assertEqual(normalized_rows[1]["raw_cumulative_minute_label"], "2026-07-02T10:00:00+08:00")
+        self.assertEqual(normalized_rows[2]["raw_cumulative_minute_label"], "2026-07-02 13:00")
+
+        target_run_id = (
+            "realtime_hint_projection_metric_20260703_until_0931__asset_index_board__"
+            "index_board_1m_hint_projection_v1_midday_bridge_v1__"
+            "market_data_subscription_20260703_condition_layer_20260702_source_20260702_for_20260703_v1"
+        )
+        result = _load_n3_hint_previous_day_reference_rows_with_connection(
+            conn=FakePreviousDayReferenceConnection(
+                cumulative_rows=_previous_day_cumulative_rows_for_first_window_datetime_labels(),
+                entity_rows=_previous_day_last_30m_entity_rows(),
+            ),
+            scope=_scope(index=False, stock_hint_excluded_count=0, for_trade_date="20260703"),
+            target_run_id=target_run_id,
+        )
+
+        rows_by_label = {row["minute_label"]: row for row in result["previous_day_1m_rows"]}
+        self.assertEqual(rows_by_label["09:31"]["amount"], 50)
+        self.assertEqual(rows_by_label["09:31"]["raw_cumulative_minute_label"], "2026-07-02 09:31")
+        self.assertEqual(rows_by_label["14:31"]["open"], 7)
+        self.assertEqual(rows_by_label["15:00"]["close"], 11)
+        self.assertEqual(rows_by_label["14:31"]["raw_cumulative_minute_label"], "2026-07-02 14:31")
+        self.assertEqual(result["previous_day_entity_reference_rows"], 2)
+        self.assertEqual(result["previous_day_entity_reference_rows_merged"], 2)
+
     def test_previous_day_reference_loader_does_not_invent_missing_a1_entity_open_close(self) -> None:
         from ashare_v3.market.hint_1m_projection_proof import build_index_board_1m_hint_projection_proof
         from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_previous_day_reference_rows_with_connection
@@ -1424,6 +1496,84 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
             self.assertFalse(payload["database_written"])
             self.assertFalse(payload["writes_outbox"])
             self.assertFalse(payload["touches_n4_n5_n6"])
+
+    def test_source_fetch_waits_when_target_minute_is_ahead_of_common_latest_source(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+        )
+
+        market = MarketAdapter(
+            rows_by_identity={
+                "index:SH:000001": [_raw_row("13:49")],
+                "board:TDX:881001": [_raw_row("13:50", amount=200)],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope()),
+                    market_fetcher=market,
+                    artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                )
+            )
+            payload = provider.fetch_n3_hint_frequency8_source(
+                args=_args(),
+                report=_report(),
+                dependencies=N3RealIODependencies(),
+            )
+
+            self.assertEqual(payload["result"], "BLOCKED_N3_HINT_SOURCE_LATEST_BEFORE_TARGET")
+            self.assertEqual(payload["status"], "waiting")
+            self.assertEqual(payload["execution_mode"], "noop")
+            self.assertEqual(payload["requested_target_minute_label"], "13:50")
+            self.assertEqual(payload["common_latest_available_minute_label"], "13:49")
+            self.assertEqual(payload["source_time_alignment_status"], "source_latest_before_target")
+            self.assertEqual(payload["source_time_lagging_identity_samples"][0]["identity_key"], "index:SH:000001")
+            self.assertFalse(payload["artifact_written"])
+            self.assertFalse(payload["database_written"])
+            self.assertFalse(payload["writes_outbox"])
+            self.assertFalse(payload["touches_n4_n5_n6"])
+            self.assertEqual(list(Path(tmpdir).glob("*.json")), [])
+
+    def test_source_fetch_records_common_latest_trace_when_sources_are_complete(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope()),
+                    market_fetcher=MarketAdapter(
+                        rows_by_identity={
+                            "index:SH:000001": [_raw_row("13:50")],
+                            "board:TDX:881001": [_raw_row("13:50", amount=200)],
+                        }
+                    ),
+                    artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                )
+            )
+            payload = provider.fetch_n3_hint_frequency8_source(
+                args=_args(),
+                report=_report(),
+                dependencies=N3RealIODependencies(),
+            )
+
+            self.assertEqual(payload["result"], "EXECUTE_READY_REAL_IO_CONTRACT")
+            self.assertEqual(payload["actual_until_hhmm"], "1350")
+            self.assertEqual(payload["requested_target_minute_label"], "13:50")
+            self.assertEqual(payload["common_latest_available_minute_label"], "13:50")
+            self.assertEqual(payload["source_time_alignment_status"], "source_latest_matches_target")
+            written = json.loads(Path(payload["source_artifact_path"]).read_text())
+            self.assertEqual(written["source_time_alignment_status"], "source_latest_matches_target")
 
     def test_default_backend_binds_local_artifact_writer(self) -> None:
         from scripts.n3_combined_child_real_runners import N3RealIODependencies

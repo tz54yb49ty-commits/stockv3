@@ -842,7 +842,7 @@ def post_close_fastlane_step_model(row: dict[str, Any]) -> dict[str, Any]:
         "step_id": first_text(row, "step_id"),
         "label": first_text(row, "label"),
         "layer_role": first_text(row, "layer_role"),
-        "returncode": int(row.get("returncode") or 0),
+        "returncode": first_text(row, "returncode"),
         "status": first_text(row, "status", default="UNKNOWN"),
         "skipped": bool(row.get("skipped")),
         "skip_reason": first_text(row, "skip_reason"),

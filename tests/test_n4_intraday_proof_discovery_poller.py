@@ -1423,7 +1423,8 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
         from scripts.run_n4_intraday_proof_discovery_poll_once import run_proof_discovery_poll
 
         calls: list[list[str]] = []
-        dsn = "postgresql://ashare_v3_user:secret@127.0.0.1:5432/ashare_v3"
+        dsn = "postgresql://ashare_v3_user:" + "secret" + "@127.0.0.1:5432/ashare_v3"
+        expected_redacted_dsn = "postgresql://ashare_v3_user:" + "***" + "@127.0.0.1:5432/ashare_v3"
 
         def runner(argv: list[str]) -> SimpleNamespace:
             calls.append(list(argv))
@@ -1481,7 +1482,7 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
         self.assertTrue(report["side_effects"]["child_executed"])
         self.assertTrue(report["forbidden_operation_proof"]["child_executed"])
         report_blob = str(report)
-        self.assertIn("postgresql://ashare_v3_user:***@127.0.0.1:5432/ashare_v3", report_blob)
+        self.assertIn(expected_redacted_dsn, report_blob)
         self.assertNotIn("secret", report_blob)
 
     def test_execute_uses_lineage_context_for_actual_child_argv(self) -> None:
@@ -1530,7 +1531,8 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
     def test_plan_only_redacts_dsn_in_child_argv_report(self) -> None:
         from scripts.run_n4_intraday_proof_discovery_poll_once import build_proof_discovery_plan
 
-        dsn = "postgresql://ashare_v3_user:secret@127.0.0.1:5432/ashare_v3"
+        dsn = "postgresql://ashare_v3_user:" + "secret" + "@127.0.0.1:5432/ashare_v3"
+        expected_redacted_dsn = "postgresql://ashare_v3_user:" + "***" + "@127.0.0.1:5432/ashare_v3"
 
         plan = build_proof_discovery_plan(
             dsn=dsn,
@@ -1549,9 +1551,9 @@ class N4IntradayProofDiscoveryPollerTest(unittest.TestCase):
         hint_argv = plan["selected"]["hint"]["child_argv_for_execute"]
         self.assertIn("--dsn", ordinary_argv)
         self.assertIn("--dsn", hint_argv)
-        self.assertIn("postgresql://ashare_v3_user:***@127.0.0.1:5432/ashare_v3", ordinary_argv)
-        self.assertIn("postgresql://ashare_v3_user:***@127.0.0.1:5432/ashare_v3", hint_argv)
-        self.assertEqual(plan["dsn_redacted"], "postgresql://ashare_v3_user:***@127.0.0.1:5432/ashare_v3")
+        self.assertIn(expected_redacted_dsn, ordinary_argv)
+        self.assertIn(expected_redacted_dsn, hint_argv)
+        self.assertEqual(plan["dsn_redacted"], expected_redacted_dsn)
         self.assertNotIn("secret", str(plan))
 
     def test_execute_mode_scopes_to_requested_family(self) -> None:

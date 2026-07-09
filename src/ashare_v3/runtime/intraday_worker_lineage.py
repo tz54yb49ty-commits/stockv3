@@ -24,6 +24,10 @@ REQUIRED_FIELDS = (
     "source_oneshot_report_path",
 )
 STALE_LINEAGE_BLOCKER_CODE = "BLOCKED_STALE_INTRADAY_WORKER_LINEAGE"
+LINEAGE_REFRESH_PASS = "LINEAGE_REFRESH_PASS"
+LINEAGE_REFRESH_READY = "LINEAGE_REFRESH_READY"
+LINEAGE_REFRESH_NOOP_ALREADY_CURRENT = "LINEAGE_REFRESH_NOOP_ALREADY_CURRENT"
+LINEAGE_REFRESH_BLOCKED_FASTLANE_NOT_PASS = "BLOCKED_FASTLANE_NOT_PASS"
 LINEAGE_SEMANTIC_FIELDS = (
     "enabled",
     "for_trade_date",
@@ -117,12 +121,144 @@ def write_intraday_worker_lineage_config_after_fastlane_pass(
         return None
     if status.get("result") != "EXECUTE_PASS" or report.get("result") != "EXECUTE_PASS":
         return None
+    try:
+        payload = _lineage_payload_from_fastlane_pass(
+            docs_dir=docs_dir,
+            status_path=status_path,
+            report_path=report_path,
+            status=status,
+            report=report,
+            updated_by=updated_by,
+        )
+    except LineageConfigError:
+        return None
+    _validate_lineage_payload(payload)
+    config_path = docs_root.parent / "runtime" / "current_intraday_worker_lineage.json"
+    existing_payload = _load_json(config_path)
+    if existing_payload and _lineage_semantic_payload_matches(existing_payload, payload):
+        return config_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(config_path)
+    return config_path
+
+
+def build_intraday_worker_lineage_refresh_report(
+    *,
+    docs_root: Path,
+    docs_dir: Path,
+    updated_by: str = "runtime_control_status_repair",
+    execute: bool = False,
+) -> dict[str, Any]:
+    """Build and optionally execute a repair-safe active lineage refresh report."""
+
+    status_path = docs_dir / "00_status.json"
+    report_path = docs_dir / "01_oneshot_execute_report.json"
+    config_path = docs_root.parent / "runtime" / "current_intraday_worker_lineage.json"
+    base_report: dict[str, Any] = {
+        "check": "intraday_worker_lineage_refresh_after_repair",
+        "layer_role": "runtime_control",
+        "docs_dir": str(docs_dir),
+        "lineage_config_path": str(config_path),
+        "execute": bool(execute),
+        "writes_database": False,
+        "runtime_executed": False,
+        "launchd_mutated": False,
+        "event_ledger_touched": False,
+    }
+
+    status = _load_json(status_path)
+    oneshot_report = _load_json(report_path)
+    if not status or not oneshot_report:
+        return {
+            **base_report,
+            "result": LINEAGE_REFRESH_BLOCKED_FASTLANE_NOT_PASS,
+            "blocked_reason": "fastlane_status_or_report_missing",
+        }
+    base_report.update(
+        {
+            "for_trade_date": str(status.get("for_trade_date") or ""),
+            "source_trade_date": str(status.get("source_trade_date") or ""),
+            "status_result": status.get("result"),
+            "oneshot_result": oneshot_report.get("result"),
+        }
+    )
+    if status.get("result") != "EXECUTE_PASS" or oneshot_report.get("result") != "EXECUTE_PASS":
+        return {
+            **base_report,
+            "result": LINEAGE_REFRESH_BLOCKED_FASTLANE_NOT_PASS,
+            "blocked_reason": "fastlane_not_execute_pass",
+        }
+
+    try:
+        expected_payload = _lineage_payload_from_fastlane_pass(
+            docs_dir=docs_dir,
+            status_path=status_path,
+            report_path=report_path,
+            status=status,
+            report=oneshot_report,
+            updated_by=updated_by,
+        )
+    except LineageConfigError as exc:
+        return {
+            **base_report,
+            "result": "BLOCKED_FASTLANE_LINEAGE_INVALID",
+            "blocked_reason": str(exc),
+        }
+
+    existing_payload = _load_json(config_path)
+    if existing_payload and _lineage_semantic_payload_matches(existing_payload, expected_payload):
+        return {
+            **base_report,
+            "result": LINEAGE_REFRESH_NOOP_ALREADY_CURRENT,
+            "lineage_written": False,
+            "lineage_semantic_already_current": True,
+        }
+    if not execute:
+        return {
+            **base_report,
+            "result": LINEAGE_REFRESH_READY,
+            "lineage_written": False,
+            "lineage_semantic_already_current": False,
+        }
+
+    written_path = write_intraday_worker_lineage_config_after_fastlane_pass(
+        docs_root=docs_root,
+        docs_dir=docs_dir,
+        updated_by=updated_by,
+    )
+    if written_path is None:
+        return {
+            **base_report,
+            "result": "BLOCKED_LINEAGE_REFRESH_WRITE_FAILED",
+            "lineage_written": False,
+        }
+    return {
+        **base_report,
+        "result": LINEAGE_REFRESH_PASS,
+        "lineage_written": True,
+        "lineage_semantic_already_current": False,
+    }
+
+
+def _lineage_payload_from_fastlane_pass(
+    *,
+    docs_dir: Path,
+    status_path: Path,
+    report_path: Path,
+    status: Mapping[str, Any],
+    report: Mapping[str, Any],
+    updated_by: str,
+) -> dict[str, Any]:
     for_trade_date = str(status.get("for_trade_date") or "")
     source_trade_date = str(status.get("source_trade_date") or "")
-    if for_trade_date != docs_dir.name or not _is_yyyymmdd(source_trade_date):
-        return None
+    if for_trade_date != docs_dir.name:
+        raise LineageConfigError("fastlane status for_trade_date does not match docs dir")
+    if not _is_yyyymmdd(source_trade_date):
+        raise LineageConfigError("fastlane source_trade_date must be YYYYMMDD")
     run_ids = report.get("run_ids") if isinstance(report.get("run_ids"), Mapping) else {}
-    payload = {
+    return {
         "enabled": True,
         "for_trade_date": for_trade_date,
         "source_trade_date": source_trade_date,
@@ -135,16 +271,6 @@ def write_intraday_worker_lineage_config_after_fastlane_pass(
         "source_status_path": str(status_path),
         "source_oneshot_report_path": str(report_path),
     }
-    _validate_lineage_payload(payload)
-    config_path = docs_root.parent / "runtime" / "current_intraday_worker_lineage.json"
-    existing_payload = _load_json(config_path)
-    if existing_payload and _lineage_semantic_payload_matches(existing_payload, payload):
-        return config_path
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(config_path)
-    return config_path
 
 
 def _lineage_semantic_payload_matches(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:

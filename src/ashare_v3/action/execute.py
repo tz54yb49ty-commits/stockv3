@@ -16,6 +16,7 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 import psycopg
@@ -1104,6 +1105,8 @@ def _fetch_action_confirmation_metric_rows_from_tables(
             n3t_metric_id = metric.get("n3t_action_confirmation_metric_id")
             if not metric.get("action_confirmation_metric_id") and n3t_metric_id:
                 metric["action_confirmation_metric_id"] = n3t_metric_id
+            if n3t_metric_id and not metric.get("metric_evaluation_minute_label"):
+                metric["metric_evaluation_minute_label"] = _n3t_bar_minute_label(metric)
             metric["asset_kind"] = asset_kind
             metric["_metric_table"] = table_name
             output.append(metric)
@@ -1299,6 +1302,21 @@ def _datetime_or_none(value: Any) -> datetime | None:
         return datetime.fromisoformat(text)
     except (TypeError, ValueError):
         return None
+
+
+def _n3t_bar_minute_label(metric: Mapping[str, Any]) -> str:
+    projection_run_id = str(metric.get("projection_run_id") or metric.get("source_metric_run_id") or "")
+    match = re.search(r"(?:^|_)until_([0-2][0-9][0-5][0-9])(?:_|$)", projection_run_id)
+    if match:
+        value = match.group(1)
+        return f"{value[:2]}:{value[2:]}"
+    label = str(metric.get("metric_minute_label") or "").strip()
+    if re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", label):
+        return label
+    if re.fullmatch(r"[0-2][0-9][0-5][0-9]", label):
+        return f"{label[:2]}:{label[2:]}"
+    metric_dt = _datetime_or_none(metric.get("metric_time"))
+    return metric_dt.strftime("%H:%M") if metric_dt is not None else ""
 
 
 def resolve_action_confirmation_metrics_for_execute(

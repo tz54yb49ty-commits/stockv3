@@ -39,7 +39,7 @@ from ashare_v3.market.previous_day_preload_execute import write_json, write_text
 try:
     from check_condition_source_ready import DEFAULT_DSN
 except ModuleNotFoundError:
-    DEFAULT_DSN = "postgresql://ashare_v3_user:ashare_v3_password@127.0.0.1:5432/ashare_v3"
+    DEFAULT_DSN = ""
 
 
 DEFAULT_AUTO_POLL_JSON_REPORT_PATH = "docs/N3_INTRADAY_B1_C1_B2_AUTO_POLL_REPORT.json"

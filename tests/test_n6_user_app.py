@@ -5437,6 +5437,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("preopen_readiness_noop", response.text)
         self.assertIn("lineage_pollution_guard", response.text)
         self.assertIn("worker_launchd_guard", response.text)
+        self.assertIn("n5_n3t_next_trade_day_readiness_rollover", response.text)
         self.assertIn("71280", response.text)
         self.assertIn("00_status.json", response.text)
         self.assertIn("01_oneshot_execute_report.json", response.text)
@@ -9040,7 +9041,12 @@ class N6UserAppTest(unittest.TestCase):
 
         fetch_source = inspect.getsource(PostgresN6UserRepository.fetch_app_signals)
         self.assertIn("user_realtime_monitor_scope", current_scope_sql)
+        self.assertIn("n6_default_realtime_monitor_scope_v1", current_scope_sql)
+        self.assertIn("default_seed", current_scope_sql)
+        self.assertIn("NOT EXISTS", current_scope_sql)
+        self.assertIn("deleted", current_scope_sql)
         self.assertNotIn("user_realtime_monitor_scope", historical_scope_sql)
+        self.assertNotIn("n6_default_realtime_monitor_scope_v1", historical_scope_sql)
         self.assertIn("historical_projection_mode = bool(filters.get(\"historical_projection_mode\"))", fetch_source)
         self.assertIn("include_realtime_scope=not historical_projection_mode", fetch_source)
 
@@ -11917,6 +11923,30 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
         self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
         self.assertEqual(repo.forbidden_writes["n6_virtual_pnl_snapshot"], 0)
+
+    def test_b_track_v2_my_monitor_display_json_uses_visible_field_whitelist(self) -> None:
+        repo = PostgresN6UserRepository("postgresql://example.invalid/n6")
+        columns = {
+            "for_trade_date",
+            "identity_key",
+            "display_name",
+            "display_code",
+            "buy_expected_return_pct",
+            "buy_target_price",
+            "period_trigger_baseline_json",
+            "raw_json",
+        }
+
+        with patch.object(repo, "_app_v2_filter_columns", return_value=columns):
+            expr = repo._app_v2_monitor_display_json_expr("stock", "v_n6_stock_condition_display_basis")
+
+        self.assertIn("jsonb_build_object", expr)
+        self.assertIn("'display_name', display_row.\"display_name\"", expr)
+        self.assertIn("'buy_expected_return_pct', display_row.\"buy_expected_return_pct\"", expr)
+        self.assertIn("'display_code', display_row.\"display_code\"", expr)
+        self.assertNotIn("to_jsonb(display_row)", expr)
+        self.assertNotIn("raw_json", expr)
+        self.assertNotIn("period_trigger_baseline_json", expr)
 
     def test_b_track_v2_monitor_add_bulk_add_and_soft_delete_are_principal_scoped(self) -> None:
         client, repo, _, _ = build_client()

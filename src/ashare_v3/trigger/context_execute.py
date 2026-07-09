@@ -1320,8 +1320,6 @@ def build_post_execute_checks(
     hint_match = (
         int(post_context_summary["buy_hint_row_count"]) == int(preflight["buy_hint_row_count"])
         and int(post_context_summary["sell_hint_row_count"]) == int(preflight["sell_hint_row_count"])
-        and int(post_context_summary["buy_hint_row_count"]) > 0
-        and int(post_context_summary["sell_hint_row_count"]) > 0
     )
     allowed_n4_deltas = {
         "common_trigger_run": 1,

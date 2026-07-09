@@ -15,6 +15,7 @@ C1_TRADING_MINUTE_LABEL_POLICY = "ashare_c1_start_label_session_v1"
 BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE = "BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE"
 MOOTDX_INTRADAY_1300_TO_1130_POLICY = "mootdx_intraday_1300_to_1130"
 MOOTDX_INTRADAY_1130_TO_PHYSICAL_1129_POLICY = "mootdx_intraday_1130_to_physical_1129"
+MOOTDX_INTRADAY_1130_TO_PHYSICAL_1300_POLICY = "mootdx_intraday_1130_to_physical_1300"
 MOOTDX_INTRADAY_1300_TO_PHYSICAL_1129_POLICY = "mootdx_intraday_1300_to_physical_1129"
 RAW_LUNCH_CLOSE = (13, 0)
 CANONICAL_LUNCH_CLOSE = (11, 30)
@@ -262,8 +263,8 @@ def _select_mootdx_source_close_candidate(
 ) -> tuple[str, dict[str, Any]]:
     if len(candidates) == 1:
         return candidates[0]
-    if physical_label == "11:29" and {raw for raw, _ in candidates}.issubset({"11:30", "13:00"}):
-        return sorted(candidates, key=lambda item: {"11:30": 0, "13:00": 1}.get(item[0], 9))[0]
+    if physical_label == "13:00" and {raw for raw, _ in candidates}.issubset({"11:30", "13:00"}):
+        return sorted(candidates, key=lambda item: {"13:00": 0, "11:30": 1}.get(item[0], 9))[0]
     raw_labels = ",".join(raw for raw, _ in candidates)
     raise MinuteLabelNormalizationError(
         f"duplicate-source anomaly: mootdx current-day C1 emitted duplicate physical {physical_label} from raw {raw_labels} for {identity}"
@@ -281,10 +282,8 @@ def _normalize_source_close_to_physical_start(
     physical_hour, physical_minute = (int(part) for part in physical_c1_label.split(":", 1))
     physical_dt = source_dt.replace(hour=physical_hour, minute=physical_minute, second=0, microsecond=0)
     normalization_policy = (
-        MOOTDX_INTRADAY_1130_TO_PHYSICAL_1129_POLICY
+        MOOTDX_INTRADAY_1130_TO_PHYSICAL_1300_POLICY
         if raw_source_label == "11:30"
-        else MOOTDX_INTRADAY_1300_TO_PHYSICAL_1129_POLICY
-        if raw_source_label == "13:00" and physical_c1_label == "11:29"
         else "mootdx_intraday_close_label_to_physical_start_v1"
     )
     row[key] = _format_like(row[key], physical_dt)
@@ -318,18 +317,11 @@ def _normalize_source_close_to_physical_start(
 
 
 def _c1_physical_label_for_mootdx_source_close(raw_label: str) -> str:
-    if raw_label in {"11:30", "13:00"}:
-        return "11:29"
+    if raw_label == "11:30":
+        return "13:00"
     if not re.fullmatch(r"\d{2}:\d{2}", raw_label or ""):
         return ""
-    hour_text, minute_text = raw_label.split(":", 1)
-    hour = int(hour_text)
-    minute = int(minute_text) - 1
-    if minute < 0:
-        hour -= 1
-        minute = 59
-    physical_label = f"{hour:02d}:{minute:02d}"
-    return physical_label if physical_label in _c1_label_index() else ""
+    return raw_label if raw_label in _c1_label_index() else ""
 
 
 def _row_matches(row: Mapping[str, Any], hour: int, minute: int) -> bool:

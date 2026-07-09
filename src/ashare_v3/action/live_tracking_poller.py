@@ -38,6 +38,7 @@ REQUIRED_N3T_SOURCE_BASIS = "N3T_C1_CLOSED"
 N3T_METRIC_REQUIRED_REASON = "BLOCKED_N3T_METRIC_REQUIRED"
 N3P_NOT_ACTION_PROOF_REASON = "BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF"
 N3T_POLICY_ALIGNMENT_TRACE_KEY = "n5_n3t_closed_c1_policy_alignment"
+POST_CLOSE_NO_ACTION_EXPIRED_REASON = "post_close_no_action_final_minute_checked"
 
 
 def build_live_tracking_plan(
@@ -69,6 +70,7 @@ def build_live_tracking_plan(
     consumed_n4_event_ids: list[str] = []
     consumed_n4_events: list[dict[str, Any]] = []
     attention_scope_events: list[dict[str, Any]] = []
+    active_scope_new_state_keys: set[str] = set()
     input_counter: Counter[str] = Counter()
 
     def append_consumed_n4_event(row: Mapping[str, Any]) -> None:
@@ -102,6 +104,7 @@ def build_live_tracking_plan(
             action_eligible_required = not prior or str(prior.get("planned_output_event_type") or "") != "ActionEligible"
             if action_eligible_required:
                 _replace_tracking_update(tracking_updates, planned_update_keys, state)
+                active_scope_new_state_keys.add(state_key)
                 eligible_event = _build_action_event(
                     "ActionEligible",
                     state,
@@ -138,11 +141,14 @@ def build_live_tracking_plan(
             )
             state_key = state["state_key"]
             prior = active_by_key.get(state_key) or _find_tracking_row(active_tracking_rows, state_key)
+            if _is_terminal_tracking(prior):
+                continue
             if prior and not _event_is_newer_or_equal(state.get("latest_n4_event_time"), prior.get("latest_n4_event_time")):
                 active_by_key[state_key] = _normalize_tracking_row(prior)
                 continue
             active_by_key[state_key] = state
             _replace_tracking_update(tracking_updates, planned_update_keys, state)
+            active_scope_new_state_keys.add(state_key)
 
     for row in _sort_event_rows(repair_n4_event_rows):
         if not _is_matched_trigger_state_changed_active(row):
@@ -154,6 +160,8 @@ def build_live_tracking_plan(
         )
         state_key = state["state_key"]
         prior = active_by_key.get(state_key) or _find_tracking_row(active_tracking_rows, state_key)
+        if _is_terminal_tracking(prior):
+            continue
         if (
             prior
             and _is_active_tracking(prior)
@@ -166,16 +174,37 @@ def build_live_tracking_plan(
             continue
         active_by_key[state_key] = state
         _replace_tracking_update(tracking_updates, planned_update_keys, state)
+        active_scope_new_state_keys.add(state_key)
 
     for row in active_tracking_rows:
         normalized = _normalize_tracking_row(row)
         if _is_active_tracking(normalized):
             active_by_key.setdefault(normalized["state_key"], normalized)
 
-    for state in list(active_by_key.values()):
+    active_states = [state for state in active_by_key.values() if _is_active_tracking(state)]
+    primary_state_keys = _primary_action_state_keys_by_group(active_states)
+    for state in active_states:
         if not _is_active_tracking(state):
             continue
         result = _select_confirming_metric(state, metric_index)
+        primary_key = primary_state_keys.get(_action_ref_group_key(state))
+        if primary_key and primary_key != str(state.get("state_key") or ""):
+            primary_state = active_by_key.get(primary_key) or {}
+            primary_result = _select_confirming_metric(primary_state, metric_index) if primary_state else {}
+            if _primary_ref_has_metric_evaluation(primary_result):
+                evidence_update = _superseded_tracking_evidence(state, primary_state=primary_state, result=result)
+                if _pending_tracking_evidence_unchanged(state, evidence_update):
+                    continue
+                _replace_tracking_update(tracking_updates, planned_update_keys, evidence_update)
+                continue
+            if result.get("reason") == "metric_missing":
+                if str(state.get("state_key") or "") in planned_update_keys:
+                    continue
+                evidence_update = _pending_tracking_evidence(state, result)
+                if _pending_tracking_evidence_unchanged(state, evidence_update):
+                    continue
+                _replace_tracking_update(tracking_updates, planned_update_keys, evidence_update)
+                continue
         if result["status"] == "passed":
             executed = _execute_tracking_state(state, result)
             tracking_updates.append(executed)
@@ -194,8 +223,17 @@ def build_live_tracking_plan(
             continue
         if result.get("reason") == "metric_missing" and str(state.get("state_key") or "") in planned_update_keys:
             continue
-        evidence_update = _pending_tracking_evidence(state, result)
-        if _pending_tracking_evidence_unchanged(state, evidence_update):
+        if result.get("reason") == "metric_missing" and _should_terminalize_unconfirmable_cursor(state):
+            result = _unconfirmable_cursor_no_action_result(state)
+            terminalize_no_action = True
+        else:
+            terminalize_no_action = _should_terminalize_no_action_tracking(state, result)
+        evidence_update = (
+            _terminal_no_action_tracking_evidence(state, result)
+            if terminalize_no_action
+            else _pending_tracking_evidence(state, result)
+        )
+        if not terminalize_no_action and _pending_tracking_evidence_unchanged(state, evidence_update):
             continue
         _replace_tracking_update(tracking_updates, planned_update_keys, evidence_update)
 
@@ -207,6 +245,8 @@ def build_live_tracking_plan(
         consumer_name=consumer_name,
         active_tracking_rows=active_scope_tracking_rows if active_scope_tracking_rows is not None else active_tracking_rows,
         tracking_updates=tracking_updates,
+        tracking_update_state_keys_allowed_to_enter_scope=active_scope_new_state_keys,
+        active_tracking_rows_authoritative=active_scope_tracking_rows is not None,
         attention_n4_event_rows=attention_scope_events,
     )
     return {
@@ -758,10 +798,16 @@ def _index_metric_rows(
     *,
     source_metric_run_id: str,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    allowed_run_ids = {
+        part.strip()
+        for part in str(source_metric_run_id or "").split(",")
+        if part.strip()
+    }
     indexed: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in metric_rows:
         normalized = _normalize_metric_row_for_live_tracking(row)
-        if str(normalized.get("projection_run_id") or normalized.get("source_metric_run_id") or "") != str(source_metric_run_id):
+        projection_run_id = str(normalized.get("projection_run_id") or normalized.get("source_metric_run_id") or "")
+        if allowed_run_ids and projection_run_id not in allowed_run_ids:
             continue
         asset_kind = str(normalized.get("asset_kind") or "")
         identity_key = str(normalized.get("identity_key") or "")
@@ -783,9 +829,10 @@ def _select_confirming_metric(
     trigger_dt = datetime_or_none(state.get("latest_n4_event_time"))
     latest_evaluation: dict[str, Any] | None = None
     latest_fact: dict[str, Any] | None = None
+    cursor_state = _normalize_tracking_row(state)
     for row in rows:
         fact = normalize_mapping(row)
-        if not _metric_matches_state(fact, state):
+        if not _metric_matches_state(fact, cursor_state):
             continue
         metric_dt = datetime_or_none(fact.get("metric_time"))
         if trigger_dt is not None and metric_dt is not None and metric_dt < trigger_dt:
@@ -798,19 +845,31 @@ def _select_confirming_metric(
         if guard["status"] != "valid":
             latest_evaluation = _blocked_metric_guard_evaluation(fact, metric_id, guard["reason"])
             latest_fact = fact
+            cursor_state = _pending_tracking_evidence(
+                cursor_state,
+                _pending_result_from_metric_evaluation(latest_evaluation, latest_fact),
+            )
+            continue
+        cursor_guard_reason = _metric_cursor_guard_reason(fact, cursor_state)
+        if cursor_guard_reason:
+            latest_evaluation = _blocked_metric_guard_evaluation(fact, metric_id, cursor_guard_reason)
+            latest_fact = fact
+            if cursor_guard_reason == "metric_after_next_unchecked_minute_label":
+                break
             continue
         evaluation_fact = _n3t_closed_c1_metric_for_evaluation(fact)
         evaluation = evaluate_action_confirmation_metric(
-            signal_type=str(state.get("signal_type") or ""),
+            signal_type=str(cursor_state.get("signal_type") or ""),
             source_action_confirmation_metric_id=metric_id,
             metric_fact=evaluation_fact,
             trigger_time=evaluation_fact.get("metric_time"),
             metric_required=True,
         )
+        evaluation["metric_evaluation_minute_label"] = _metric_evaluation_minute_label(evaluation_fact)
         latest_evaluation = evaluation
         latest_fact = evaluation_fact
-        if _final_confirmation_passed(str(state.get("signal_type") or ""), evaluation):
-            action_mark = derive_final_action_mark(signal_type=str(state.get("signal_type") or ""), evaluation=evaluation)
+        if _final_confirmation_passed(str(cursor_state.get("signal_type") or ""), evaluation):
+            action_mark = derive_final_action_mark(signal_type=str(cursor_state.get("signal_type") or ""), evaluation=evaluation)
             return {
                 "status": "passed",
                 "metric_fact": evaluation_fact,
@@ -818,6 +877,10 @@ def _select_confirming_metric(
                 "action_mark": action_mark["action_mark"],
                 "action_mark_reason": action_mark["action_mark_reason"],
             }
+        cursor_state = _pending_tracking_evidence(
+            cursor_state,
+            _pending_result_from_metric_evaluation(latest_evaluation, latest_fact),
+        )
     if latest_evaluation is not None:
         return {
             "status": "pending",
@@ -826,6 +889,99 @@ def _select_confirming_metric(
             "metric_evaluation": latest_evaluation,
         }
     return {"status": "pending", "reason": "metric_not_in_scope"}
+
+
+def _pending_result_from_metric_evaluation(
+    evaluation: Mapping[str, Any],
+    metric_fact: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "reason": evaluation.get("blocked_reason") or evaluation.get("metric_context_status") or "metric_not_passed",
+        "metric_fact": metric_fact or {},
+        "metric_evaluation": evaluation,
+    }
+
+
+def _metric_evaluation_minute_label(metric: Mapping[str, Any]) -> str:
+    return (
+        _metric_minute_label_from_projection_run_id(
+            metric.get("projection_run_id") or metric.get("source_metric_run_id")
+        )
+        or _minute_label_text(metric.get("metric_minute_label"))
+        or _minute_label_text(metric.get("metric_evaluation_minute_label"))
+        or _minute_label_text(metric.get("metric_time"))
+    )
+
+
+def _metric_minute_label_from_projection_run_id(projection_run_id: Any) -> str:
+    match = re.search(r"(?:^|_)until_([0-2][0-9][0-5][0-9])(?:_|$)", str(projection_run_id or ""))
+    return _minute_label_text(match.group(1)) if match else ""
+
+
+def _metric_cursor_guard_reason(metric: Mapping[str, Any], state: Mapping[str, Any]) -> str:
+    metric_label = _metric_evaluation_minute_label(metric)
+    expected_label = _expected_next_unchecked_minute_label(state)
+    if not metric_label or not expected_label:
+        return ""
+    comparison = _compare_canonical_minute_label(
+        for_trade_date=state.get("trade_date"),
+        left=metric_label,
+        right=expected_label,
+    )
+    if comparison < 0:
+        if _metric_matches_latest_metric_status(metric, state, metric_label=metric_label):
+            return ""
+        return "metric_before_next_unchecked_minute_label"
+    if comparison > 0:
+        return "metric_after_next_unchecked_minute_label"
+    return ""
+
+
+def _metric_matches_latest_metric_status(
+    metric: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    metric_label: str,
+) -> bool:
+    raw_json = normalize_mapping(state.get("raw_json") or {})
+    latest = normalize_mapping(raw_json.get("latest_metric_status") or {})
+    latest_metric_id = str(latest.get("source_action_confirmation_metric_id") or "")
+    metric_id = str(metric.get("action_confirmation_metric_id") or metric.get("metric_id") or "")
+    if latest_metric_id and metric_id and latest_metric_id != metric_id:
+        return False
+    latest_label = _minute_label_text(latest.get("metric_evaluation_minute_label")) or _minute_label_text(
+        latest.get("metric_minute_label")
+    )
+    return bool(latest_label and metric_label and latest_label == metric_label)
+
+
+def _expected_next_unchecked_minute_label(state: Mapping[str, Any]) -> str:
+    raw_json = normalize_mapping(state.get("raw_json") or {})
+    explicit_label = _minute_label_text(raw_json.get("next_unchecked_minute_label"))
+    if explicit_label:
+        return explicit_label
+    return _next_unchecked_minute_label(
+        for_trade_date=str(state.get("trade_date") or ""),
+        first_confirmation_minute_label=_first_confirmation_minute_label(
+            state.get("latest_n4_event_time") or state.get("trigger_time")
+        ),
+        last_checked_minute_label=_minute_label_text(state.get("last_checked_minute_label")),
+    )
+
+
+def _compare_canonical_minute_label(*, for_trade_date: Any, left: Any, right: Any) -> int:
+    left_label = _minute_label_text(left)
+    right_label = _minute_label_text(right)
+    if not left_label or not right_label:
+        return 0
+    trade_date = str(for_trade_date or "")
+    labels = canonical_ashare_1m_labels(trade_date) if re.fullmatch(r"\d{8}", trade_date) else []
+    if left_label in labels and right_label in labels:
+        return (labels.index(left_label) > labels.index(right_label)) - (
+            labels.index(left_label) < labels.index(right_label)
+        )
+    return (left_label > right_label) - (left_label < right_label)
 
 
 def _n3t_action_execution_metric_guard(metric: Mapping[str, Any]) -> dict[str, str]:
@@ -875,6 +1031,7 @@ def _normalize_metric_row_for_live_tracking(row: Mapping[str, Any]) -> dict[str,
 
 def _n3t_closed_c1_metric_for_evaluation(metric: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalize_metric_row_for_live_tracking(metric)
+    normalized["metric_evaluation_minute_label"] = _metric_evaluation_minute_label(normalized)
     if _metric_lineage_value(normalized, "source_basis") != REQUIRED_N3T_SOURCE_BASIS:
         return normalized
     if _metric_lineage_value(normalized, "virtual_amount_policy_version"):
@@ -905,6 +1062,7 @@ def _blocked_metric_guard_evaluation(metric: Mapping[str, Any], metric_id: str, 
         "metric_quality_status": metric.get("metric_quality_status"),
         "metric_time": metric.get("metric_time"),
         "metric_minute_label": metric.get("metric_minute_label"),
+        "metric_evaluation_minute_label": _metric_evaluation_minute_label(metric),
         "current_price": metric.get("current_price"),
         "current_30m_virtual_amount": metric.get("current_30m_virtual_amount"),
         "previous_day_same_window_amount": metric.get("previous_day_same_window_amount"),
@@ -985,6 +1143,7 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 def _execute_tracking_state(state: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
     executed = dict(_normalize_tracking_row(state))
     evaluation = normalize_mapping(result.get("metric_evaluation") or {})
+    evaluation_minute_label = _metric_evaluation_minute_label(evaluation)
     raw_json = normalize_mapping(executed.get("raw_json") or {})
     raw_json.update(
         {
@@ -992,6 +1151,7 @@ def _execute_tracking_state(state: Mapping[str, Any], result: Mapping[str, Any])
             "source_metric_run_id": evaluation.get("projection_run_id"),
             "selected_metric_time": evaluation.get("metric_time"),
             "selected_metric_minute_label": evaluation.get("metric_minute_label"),
+            "selected_metric_evaluation_minute_label": evaluation_minute_label,
             "action_mark": result.get("action_mark"),
             "action_mark_reason": result.get("action_mark_reason"),
             "confirmation_trace": evaluation,
@@ -1003,7 +1163,7 @@ def _execute_tracking_state(state: Mapping[str, Any], result: Mapping[str, Any])
             "confirmation_status": "passed",
             "tracking_status": "executed",
             "planned_output_event_type": "ActionExecuted",
-            "last_checked_minute_label": evaluation.get("metric_minute_label"),
+            "last_checked_minute_label": evaluation_minute_label or evaluation.get("metric_minute_label"),
             "raw_json": raw_json,
         }
     )
@@ -1013,6 +1173,7 @@ def _execute_tracking_state(state: Mapping[str, Any], result: Mapping[str, Any])
 def _pending_tracking_evidence(state: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
     pending = dict(_normalize_tracking_row(state))
     evaluation = normalize_mapping(result.get("metric_evaluation") or {})
+    evaluation_minute_label = _metric_evaluation_minute_label(evaluation)
     raw_json = normalize_mapping(pending.get("raw_json") or {})
     metric_status = {
         "status": result.get("status"),
@@ -1021,16 +1182,163 @@ def _pending_tracking_evidence(state: Mapping[str, Any], result: Mapping[str, An
         "projection_run_id": evaluation.get("projection_run_id"),
         "metric_context_status": evaluation.get("metric_context_status"),
         "metric_minute_label": evaluation.get("metric_minute_label"),
+        "metric_evaluation_minute_label": evaluation_minute_label,
     }
     metric_status["metric_evaluation_key"] = _pending_metric_evaluation_key(metric_status)
     raw_json["latest_metric_status"] = metric_status
+    prior_last_checked = _minute_label_text(pending.get("last_checked_minute_label"))
+    if _metric_cursor_guard_is_non_advancing(metric_status.get("reason")):
+        last_checked_minute_label = prior_last_checked or pending.get("last_checked_minute_label")
+        next_unchecked_minute_label = _minute_label_text(raw_json.get("next_unchecked_minute_label"))
+    else:
+        last_checked_minute_label = (
+            evaluation_minute_label
+            or prior_last_checked
+            or pending.get("last_checked_minute_label")
+        )
+        next_unchecked_minute_label = _next_unchecked_minute_label(
+            for_trade_date=str(pending.get("trade_date") or ""),
+            first_confirmation_minute_label=(
+                _minute_label_text(raw_json.get("first_confirmation_minute_label"))
+                or _first_confirmation_minute_label(pending.get("latest_n4_event_time") or pending.get("trigger_time"))
+            ),
+            last_checked_minute_label=_minute_label_text(last_checked_minute_label),
+        )
+    raw_json["last_checked_minute_label"] = _minute_label_text(last_checked_minute_label)
+    raw_json["next_unchecked_minute_label"] = next_unchecked_minute_label
     pending.update(
         {
             "action_state": "eligible",
             "confirmation_status": "pending",
             "tracking_status": "tracking",
             "planned_output_event_type": pending.get("planned_output_event_type"),
-            "last_checked_minute_label": evaluation.get("metric_minute_label") or pending.get("last_checked_minute_label"),
+            "last_checked_minute_label": last_checked_minute_label,
+            "raw_json": raw_json,
+        }
+    )
+    return pending
+
+
+def _terminal_no_action_tracking_evidence(state: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    terminal = _pending_tracking_evidence(state, result)
+    evaluation = normalize_mapping(result.get("metric_evaluation") or {})
+    raw_json = normalize_mapping(terminal.get("raw_json") or {})
+    raw_json["terminal_no_action_trace"] = {
+        "reason": POST_CLOSE_NO_ACTION_EXPIRED_REASON,
+        "latest_metric_status": normalize_mapping(raw_json.get("latest_metric_status") or {}),
+    }
+    terminal.update(
+        {
+            "action_state": "expired",
+            "confirmation_status": "expired",
+            "tracking_status": "expired",
+            "planned_output_event_type": None,
+            "expired_reason": POST_CLOSE_NO_ACTION_EXPIRED_REASON,
+            "expired_at": evaluation.get("metric_time") or state.get("latest_n4_event_time"),
+            "raw_json": raw_json,
+        }
+    )
+    return terminal
+
+
+def _should_terminalize_no_action_tracking(state: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    if result.get("status") == "passed":
+        return False
+    if _metric_cursor_guard_is_non_advancing(result.get("reason")):
+        return False
+    evaluation = normalize_mapping(result.get("metric_evaluation") or {})
+    if _metric_cursor_guard_is_non_advancing(evaluation.get("blocked_reason")):
+        return False
+    metric_minute_label = _metric_evaluation_minute_label(evaluation)
+    if not metric_minute_label:
+        metric_minute_label = _minute_label_text(state.get("last_checked_minute_label"))
+    if not metric_minute_label:
+        return False
+    return _is_final_canonical_minute_label(state.get("trade_date"), metric_minute_label)
+
+
+def _should_terminalize_unconfirmable_cursor(state: Mapping[str, Any]) -> bool:
+    trade_date = str(state.get("trade_date") or "")
+    if not re.fullmatch(r"\d{8}", trade_date):
+        return False
+    labels = canonical_ashare_1m_labels(trade_date)
+    if not labels:
+        return False
+    expected_label = _expected_next_unchecked_minute_label(state)
+    if not expected_label or expected_label in labels:
+        return False
+    return _compare_canonical_minute_label(for_trade_date=trade_date, left=expected_label, right=labels[-1]) > 0
+
+
+def _unconfirmable_cursor_no_action_result(state: Mapping[str, Any]) -> dict[str, Any]:
+    expected_label = _expected_next_unchecked_minute_label(state)
+    return {
+        "status": "pending",
+        "reason": "post_close_no_confirmable_minute",
+        "metric_fact": {},
+        "metric_evaluation": {
+            "blocked_reason": "post_close_no_confirmable_minute",
+            "metric_context_status": "post_close_no_confirmable_minute",
+            "metric_minute_label": expected_label,
+            "metric_evaluation_minute_label": expected_label,
+            "metric_time": state.get("latest_n4_event_time") or state.get("trigger_time"),
+            "projection_run_id": "",
+            "source_action_confirmation_metric_id": "",
+        },
+    }
+
+
+def _is_final_canonical_minute_label(for_trade_date: Any, minute_label: Any) -> bool:
+    trade_date = str(for_trade_date or "")
+    label = _minute_label_text(minute_label)
+    if not re.fullmatch(r"\d{8}", trade_date) or not label:
+        return False
+    labels = canonical_ashare_1m_labels(trade_date)
+    return bool(labels) and label == labels[-1]
+
+
+def _metric_cursor_guard_is_non_advancing(reason: Any) -> bool:
+    return str(reason or "") in {
+        "metric_before_next_unchecked_minute_label",
+        "metric_after_next_unchecked_minute_label",
+    }
+
+
+def _superseded_tracking_evidence(
+    state: Mapping[str, Any],
+    *,
+    primary_state: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    pending = dict(_normalize_tracking_row(state))
+    evaluation = normalize_mapping(result.get("metric_evaluation") or {})
+    evaluation_minute_label = _metric_evaluation_minute_label(evaluation)
+    raw_json = normalize_mapping(pending.get("raw_json") or {})
+    metric_status = {
+        "status": "pending",
+        "reason": "superseded_by_primary_action_ref",
+        "source_action_confirmation_metric_id": evaluation.get("source_action_confirmation_metric_id"),
+        "projection_run_id": evaluation.get("projection_run_id"),
+        "metric_context_status": evaluation.get("metric_context_status"),
+        "metric_minute_label": evaluation.get("metric_minute_label"),
+        "metric_evaluation_minute_label": evaluation_minute_label,
+        "primary_action_state_key": primary_state.get("state_key"),
+        "primary_condition_key": primary_state.get("condition_key"),
+    }
+    metric_status["metric_evaluation_key"] = _pending_metric_evaluation_key(metric_status)
+    raw_json["latest_metric_status"] = metric_status
+    raw_json["superseded_by_primary_action_ref"] = {
+        "primary_action_state_key": primary_state.get("state_key"),
+        "primary_condition_key": primary_state.get("condition_key"),
+        "primary_source_trigger_event_id": primary_state.get("source_trigger_event_id"),
+    }
+    pending.update(
+        {
+            "action_state": "eligible",
+            "confirmation_status": "pending",
+            "tracking_status": "tracking",
+            "planned_output_event_type": pending.get("planned_output_event_type"),
+            "last_checked_minute_label": evaluation_minute_label or evaluation.get("metric_minute_label") or pending.get("last_checked_minute_label"),
             "raw_json": raw_json,
         }
     )
@@ -1047,8 +1355,54 @@ def _pending_metric_evaluation_key(metric_status: Mapping[str, Any]) -> str:
             "projection_run_id",
             "metric_context_status",
             "metric_minute_label",
+            "metric_evaluation_minute_label",
         )
     )
+
+
+def _primary_action_state_keys_by_group(states: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str, str, str, str], str]:
+    grouped: dict[tuple[str, str, str, str, str], list[Mapping[str, Any]]] = {}
+    for state in states:
+        grouped.setdefault(_action_ref_group_key(state), []).append(state)
+    output: dict[tuple[str, str, str, str, str], str] = {}
+    for group_key, group_states in grouped.items():
+        primary = sorted(group_states, key=_action_ref_primary_sort_key)[0]
+        output[group_key] = str(primary.get("state_key") or "")
+    return output
+
+
+def _primary_ref_has_metric_evaluation(result: Mapping[str, Any]) -> bool:
+    if result.get("status") == "passed":
+        return True
+    if result.get("metric_evaluation"):
+        return str(result.get("reason") or "") not in {"metric_missing", "metric_not_in_scope"}
+    return False
+
+
+def _action_ref_group_key(state: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(state.get("trade_date") or ""),
+        str(state.get("asset_kind") or ""),
+        str(state.get("identity_key") or ""),
+        str(state.get("direction") or ""),
+        str(state.get("signal_type") or ""),
+    )
+
+
+def _action_ref_primary_sort_key(state: Mapping[str, Any]) -> tuple[int, float, str, str]:
+    trigger_dt = datetime_or_none(state.get("latest_n4_event_time"))
+    trigger_ts = trigger_dt.timestamp() if trigger_dt is not None else 0.0
+    return (
+        1 if _is_hint_condition_key(state.get("condition_key")) else 0,
+        -trigger_ts,
+        str(state.get("condition_key") or ""),
+        str(state.get("state_key") or ""),
+    )
+
+
+def _is_hint_condition_key(condition_key: Any) -> bool:
+    text = str(condition_key or "").strip().upper()
+    return text.startswith("BUY_HINT") or text.startswith("SELL_HINT")
 
 
 def _pending_tracking_evidence_unchanged(state: Mapping[str, Any], update: Mapping[str, Any]) -> bool:
@@ -1094,6 +1448,7 @@ def _build_action_event(
     raw_json = normalize_mapping(state.get("raw_json") or {})
     source_n4_payload = normalize_mapping(raw_json.get("source_n4_payload") or {})
     source_trigger_event_time = _scope_time_text(state.get("latest_n4_event_time"))
+    selected_source_metric_run_id = str(raw_json.get("source_metric_run_id") or source_metric_run_id)
     payload = {
         "run_id": action_run_id,
         "source_trigger_event_id": state.get("source_trigger_event_id"),
@@ -1102,7 +1457,7 @@ def _build_action_event(
         "source_trigger_run_id": state.get("source_trigger_run_id") or source_trigger_run_id,
         "source_trigger_state_id": state.get("source_trigger_state_id"),
         "source_trigger_match_id": state.get("source_trigger_match_id"),
-        "source_metric_run_id": source_metric_run_id,
+        "source_metric_run_id": selected_source_metric_run_id,
         "action_key": state_key,
         "dedup_key": dedup_key,
         "identity_key": state.get("identity_key"),
@@ -1188,9 +1543,12 @@ def _build_active_scope_snapshot_artifact(
     consumer_name: str,
     active_tracking_rows: Sequence[Mapping[str, Any]],
     tracking_updates: Sequence[Mapping[str, Any]],
+    tracking_update_state_keys_allowed_to_enter_scope: set[str] | Sequence[str] | None = None,
+    active_tracking_rows_authoritative: bool = False,
     attention_n4_event_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     final_states: dict[str, dict[str, Any]] = {}
+    allowed_new_state_keys = {str(key) for key in (tracking_update_state_keys_allowed_to_enter_scope or set()) if str(key)}
     for row in active_tracking_rows:
         normalized = _normalize_tracking_row(row)
         if _state_in_trade_date(normalized, for_trade_date):
@@ -1198,7 +1556,13 @@ def _build_active_scope_snapshot_artifact(
     for row in tracking_updates:
         normalized = _normalize_tracking_row(row)
         if _state_in_trade_date(normalized, for_trade_date):
-            final_states[normalized["state_key"]] = normalized
+            state_key = str(normalized.get("state_key") or "")
+            if (
+                not active_tracking_rows_authoritative
+                or state_key in final_states
+                or state_key in allowed_new_state_keys
+            ):
+                final_states[state_key] = normalized
 
     object_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
     for state in final_states.values():

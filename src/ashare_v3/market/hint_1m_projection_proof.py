@@ -128,7 +128,9 @@ def build_index_board_1m_hint_projection_proof(
     previous_completed_labels = _labels_between(str(previous_start), str(previous_end))
     missing_current = [label for label in elapsed_labels if label not in current_by_label]
     if missing_current:
-        blocked_reasons.append("missing_current_day_1m_rows")
+        base["missing_current_day_elapsed_labels"] = missing_current
+        base["current_day_available_latest_minute_label"] = max(current_by_label) if current_by_label else None
+        blocked_reasons.append("missing_current_day_elapsed_1m_rows")
     previous_reference_by_label = previous_by_label if previous_source == "previous_trade_date_last_30m" else current_by_label
     if previous_completed_labels[0] not in previous_reference_by_label or previous_completed_labels[-1] not in previous_reference_by_label:
         if previous_source == "previous_trade_date_last_30m":

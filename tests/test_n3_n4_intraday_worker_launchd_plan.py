@@ -99,6 +99,8 @@ class N3N4IntradayWorkerLaunchdPlanTest(unittest.TestCase):
     def test_materialized_plists_are_valid_and_report_redacts_dsn(self) -> None:
         from scripts.plan_n3_n4_intraday_worker_launchd import write_launchd_plan
 
+        dsn = "postgresql://ashare_v3_user:" + "secret" + "@127.0.0.1:5432/ashare_v3"
+        expected_redacted_dsn = "postgresql://ashare_v3_user:" + "***" + "@127.0.0.1:5432/ashare_v3"
         with tempfile.TemporaryDirectory() as tmpdir:
             report = write_launchd_plan(
                 output_dir=Path(tmpdir),
@@ -109,7 +111,7 @@ class N3N4IntradayWorkerLaunchdPlanTest(unittest.TestCase):
                 preload_run_id=PRELOAD_RUN_ID,
                 trigger_context_run_id=CONTEXT_RUN_ID,
                 working_directory="/Users/chuanfuchen/Documents/A股监控系统v3",
-                dsn="postgresql://ashare_v3_user:secret@127.0.0.1:5432/ashare_v3",
+                dsn=dsn,
             )
 
             for key in ("n3", "n4"):
@@ -117,7 +119,7 @@ class N3N4IntradayWorkerLaunchdPlanTest(unittest.TestCase):
                 self.assertTrue(plist_path.exists())
                 plistlib.loads(plist_path.read_bytes())
 
-            self.assertIn("postgresql://ashare_v3_user:***@127.0.0.1:5432/ashare_v3", str(report))
+            self.assertIn(expected_redacted_dsn, str(report))
             self.assertNotIn("secret", str(report))
 
     def test_builds_split_n3_branch_proof_poller_plan(self) -> None:

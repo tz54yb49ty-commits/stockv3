@@ -71,6 +71,7 @@ from ashare_v3.web.n6_app_v1 import (
     app_signals_model,
     app_status_monitor_model,
     app_watchlist_model,
+    V2_FILTER_VISIBLE_FIELDS_BY_ASSET,
 )
 from ashare_v3.web.n6_ui_v1 import (
     artifacts_model,
@@ -142,6 +143,12 @@ N5_LEGACY_EVENT_TYPES = ("ActionEvent", "HintEvent", "RiskEvent", "PositionEvent
 N5_ALL_EVENT_TYPES = N5_STANDARD_EVENT_TYPES + N5_LEGACY_EVENT_TYPES
 N5_ACTION_DISPLAY_EVENT_TYPES = ("ActionExecuted", "ActionEligible")
 N5_MESSAGE_DEFAULT_LIMIT = 200
+
+
+def _sql_text_literal(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 B_TRACK_BUY_SIGNAL_ACTION_TYPES = ("buy", "sell", "all")
 V3_20260612_ACTIVE_N4_SOURCE_RUN_ID = "v3_n4_trigger_replay_20260612_after_trigger_period_baseline_fix_v1"
 V3_20260612_ACTIVE_N5_SOURCE_RUN_ID = "v3_n5_action_replay_20260612_after_n4_trigger_period_baseline_fix_v1"
@@ -4684,6 +4691,13 @@ class PostgresN6UserRepository:
 
     def _app_v1_realtime_scope_select(self) -> str:
         return f"""
+          {self._app_v1_explicit_realtime_scope_select()}
+          UNION ALL
+          {self._app_v1_default_realtime_scope_seed_select()}
+        """
+
+    def _app_v1_explicit_realtime_scope_select(self) -> str:
+        return f"""
           SELECT s.realtime_scope_id AS monitor_id,
                  s.principal_id,
                  s.principal_type,
@@ -4707,6 +4721,57 @@ class PostgresN6UserRepository:
             AND s.user_id = %(user_id)s
             AND s.status = 'active'
             AND NULLIF(%(trade_date)s, '') IS NOT NULL
+        """
+
+    def _app_v1_default_realtime_scope_seed_select(self) -> str:
+        values_sql = ",\n                 ".join(
+            f"({_sql_text_literal(item['asset_kind'])}, {_sql_text_literal(item['identity_key'])}, {_sql_text_literal(item['display_name'])})"
+            for item in DEFAULT_REALTIME_SCOPE_INDEXES
+        )
+        return f"""
+          SELECT NULL::bigint AS monitor_id,
+                 %(principal_id)s::bigint AS principal_id,
+                 %(principal_type)s::text AS principal_type,
+                 d.asset_kind,
+                 d.identity_key,
+                 NULL::text AS direction,
+                 NULL::text AS valid_source_trade_date,
+                 %(trade_date)s::text AS valid_for_trade_date,
+                 NULL::text AS valid_source_run_id,
+                 'default_seed'::text AS source_type_raw,
+                 'realtime_scope'::text AS source_type,
+                 '实时监控范围'::text AS source_type_label,
+                 'none'::text AS source_object_kind,
+                 NULL::text AS source_object_identity_key,
+                 NULL::text AS source_object_code,
+                 NULL::text AS source_object_name,
+                 NULL::text AS membership_relation_date
+          FROM (
+                 VALUES
+                 {values_sql}
+          ) AS d(asset_kind, identity_key, display_name)
+          WHERE NULLIF(%(trade_date)s, '') IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM {APP_REALTIME_SCOPE_TABLE} deleted_scope
+              WHERE deleted_scope.principal_id = %(principal_id)s
+                AND deleted_scope.principal_type = %(principal_type)s
+                AND deleted_scope.user_id = %(user_id)s
+                AND deleted_scope.asset_kind = d.asset_kind
+                AND deleted_scope.identity_key = d.identity_key
+                AND deleted_scope.status = 'deleted'
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM {APP_REALTIME_SCOPE_TABLE} active_scope
+              WHERE active_scope.principal_id = %(principal_id)s
+                AND active_scope.principal_type = %(principal_type)s
+                AND active_scope.user_id = %(user_id)s
+                AND active_scope.asset_kind = d.asset_kind
+                AND active_scope.identity_key = d.identity_key
+                AND active_scope.status = 'active'
+            )
+            -- n6_default_realtime_monitor_scope_v1
         """
 
     def _app_v1_all_monitor_scope_select(self, *, asset_kind: str, table_name: str) -> str:
@@ -5806,7 +5871,7 @@ class PostgresN6UserRepository:
                   ON display_row.identity_key = monitor_base.identity_key
                  AND display_row.for_trade_date::text = %(selected_for_trade_date)s
                 """
-                display_json_expr = "COALESCE(to_jsonb(display_row), '{}'::jsonb)"
+                display_json_expr = self._app_v2_monitor_display_json_expr(kind, display_table)
             valid_source_trade_expr = (
                 "COALESCE(monitor_base.valid_source_trade_date, monitor_base.source_snapshot_json->>'source_trade_date')"
                 if "valid_source_trade_date" in columns
@@ -5906,6 +5971,31 @@ class PostgresN6UserRepository:
             "available_for_trade_dates": available_for_trade_dates,
             "status_counts": status_counts,
         }
+
+    def _app_v2_monitor_display_json_expr(self, asset_kind: str, display_table: str) -> str:
+        columns = self._app_v2_filter_columns(display_table)
+        fields: list[str] = []
+        for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ()):
+            if field in columns and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field):
+                fields.append(field)
+        for field in (
+            "asset_kind",
+            "source_display_basis_id",
+            "run_id",
+            "for_trade_date",
+            "source_trade_date",
+            "identity_key",
+            "display_code",
+            "display_name",
+            "code",
+            "name",
+        ):
+            if field in columns and field not in fields and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field):
+                fields.append(field)
+        if not fields:
+            return "'{}'::jsonb"
+        pairs = ", ".join(f"'{field}', display_row.\"{field}\"" for field in fields)
+        return f"COALESCE(jsonb_strip_nulls(jsonb_build_object({pairs})), '{{}}'::jsonb)"
 
     def _app_v2_monitor_columns(self, table_name: str) -> set[str]:
         if table_name not in set(APP_V2_MONITOR_TABLE_BY_ASSET.values()):

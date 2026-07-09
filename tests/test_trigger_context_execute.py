@@ -363,6 +363,114 @@ class TriggerContextExecuteTest(unittest.TestCase):
 
         self.assertTrue(all(checks.values()), checks)
 
+    def test_post_checks_accept_buy_hint_only_when_counts_match_preflight(self) -> None:
+        preflight = {
+            **sample_preflight(),
+            "direction_distribution": {"buy": 3},
+            "condition_key_counts": {"BUY_HINT": 2, "BUY:Y,Q,M,W,D": 1},
+            "buy_hint_row_count": 2,
+            "sell_hint_row_count": 0,
+        }
+        before = sample_snapshot()
+        after = sample_snapshot()
+        after["row_counts"]["common_trigger_run"]["row_count"] = 1
+        after["row_counts"]["common_trigger_quality_item"]["row_count"] = 5
+        after["row_counts"]["stock_trigger_context_snapshot"]["row_count"] = 2
+        after["row_counts"]["index_trigger_context_snapshot"]["row_count"] = 1
+        inserted = sample_inserted_counts()
+        summary = {
+            "row_count": 3,
+            "row_count_by_asset_kind": {"stock": 2, "index": 1, "board": 0},
+            "direction_distribution": {"buy": 3},
+            "condition_key_counts": {"BUY_HINT": 2, "BUY:Y,Q,M,W,D": 1},
+            "buy_hint_row_count": 2,
+            "sell_hint_row_count": 0,
+            "source_condition_run_ids": ["condition_layer_20260522_to_20260525_test_execute"],
+            "trigger_run": sample_trigger_run(),
+        }
+
+        checks = build_post_execute_checks(
+            preflight=preflight,
+            before_snapshot=before,
+            after_snapshot=after,
+            inserted_counts=inserted,
+            post_context_summary=summary,
+            run_id="trigger_context_snapshot_test",
+            condition_run_id="condition_layer_20260522_to_20260525_test_execute",
+        )
+
+        self.assertTrue(checks["buy_hint_and_sell_hint_present"], checks)
+
+    def test_post_checks_accept_sell_hint_only_when_counts_match_preflight(self) -> None:
+        preflight = {
+            **sample_preflight(),
+            "direction_distribution": {"sell": 3},
+            "condition_key_counts": {"SELL_HINT": 2, "SELL:Y,Q,M,W,D": 1},
+            "buy_hint_row_count": 0,
+            "sell_hint_row_count": 2,
+        }
+        before = sample_snapshot()
+        after = sample_snapshot()
+        after["row_counts"]["common_trigger_run"]["row_count"] = 1
+        after["row_counts"]["common_trigger_quality_item"]["row_count"] = 5
+        after["row_counts"]["stock_trigger_context_snapshot"]["row_count"] = 2
+        after["row_counts"]["index_trigger_context_snapshot"]["row_count"] = 1
+        inserted = sample_inserted_counts()
+        summary = {
+            "row_count": 3,
+            "row_count_by_asset_kind": {"stock": 2, "index": 1, "board": 0},
+            "direction_distribution": {"sell": 3},
+            "condition_key_counts": {"SELL_HINT": 2, "SELL:Y,Q,M,W,D": 1},
+            "buy_hint_row_count": 0,
+            "sell_hint_row_count": 2,
+            "source_condition_run_ids": ["condition_layer_20260522_to_20260525_test_execute"],
+            "trigger_run": sample_trigger_run(),
+        }
+
+        checks = build_post_execute_checks(
+            preflight=preflight,
+            before_snapshot=before,
+            after_snapshot=after,
+            inserted_counts=inserted,
+            post_context_summary=summary,
+            run_id="trigger_context_snapshot_test",
+            condition_run_id="condition_layer_20260522_to_20260525_test_execute",
+        )
+
+        self.assertTrue(checks["buy_hint_and_sell_hint_present"], checks)
+
+    def test_post_checks_fail_when_hint_counts_do_not_match_preflight(self) -> None:
+        preflight = sample_preflight()
+        before = sample_snapshot()
+        after = sample_snapshot()
+        after["row_counts"]["common_trigger_run"]["row_count"] = 1
+        after["row_counts"]["common_trigger_quality_item"]["row_count"] = 5
+        after["row_counts"]["stock_trigger_context_snapshot"]["row_count"] = 2
+        after["row_counts"]["index_trigger_context_snapshot"]["row_count"] = 1
+        inserted = sample_inserted_counts()
+        summary = {
+            "row_count": 3,
+            "row_count_by_asset_kind": {"stock": 2, "index": 1, "board": 0},
+            "direction_distribution": {"buy": 2, "sell": 1},
+            "condition_key_counts": {"BUY_HINT": 1, "SELL_HINT": 1, "BUY:Y,Q,M,W,D": 1},
+            "buy_hint_row_count": 1,
+            "sell_hint_row_count": 0,
+            "source_condition_run_ids": ["condition_layer_20260522_to_20260525_test_execute"],
+            "trigger_run": sample_trigger_run(),
+        }
+
+        checks = build_post_execute_checks(
+            preflight=preflight,
+            before_snapshot=before,
+            after_snapshot=after,
+            inserted_counts=inserted,
+            post_context_summary=summary,
+            run_id="trigger_context_snapshot_test",
+            condition_run_id="condition_layer_20260522_to_20260525_test_execute",
+        )
+
+        self.assertFalse(checks["buy_hint_and_sell_hint_present"])
+
     def test_post_checks_fail_when_outbox_changes(self) -> None:
         preflight = sample_preflight()
         before = sample_snapshot()
@@ -503,6 +611,30 @@ def sample_preflight() -> dict[str, object]:
         "condition_key_counts": {"BUY_HINT": 1, "SELL_HINT": 1, "BUY:Y,Q,M,W,D": 1},
         "buy_hint_row_count": 1,
         "sell_hint_row_count": 1,
+    }
+
+
+def sample_inserted_counts() -> dict[str, int]:
+    return {
+        "common_trigger_run": 1,
+        "common_trigger_quality_item": 5,
+        "stock_trigger_context_snapshot": 2,
+        "index_trigger_context_snapshot": 1,
+        "board_trigger_context_snapshot": 0,
+        "common_trigger_state": 0,
+        "common_trigger_match": 0,
+        "common_event_outbox": 0,
+        "context_snapshot_total": 3,
+    }
+
+
+def sample_trigger_run() -> dict[str, object]:
+    return {
+        "run_id": "trigger_context_snapshot_test",
+        "status": "passed",
+        "trigger_state_row_count": 0,
+        "trigger_match_row_count": 0,
+        "trigger_event_outbox_count": 0,
     }
 
 

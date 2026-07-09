@@ -27,6 +27,7 @@ HINT_SOURCE_FETCHER_BLOCKER = "BLOCKED_N3_HINT_SOURCE_MARKET_FETCHER"
 HINT_SOURCE_ARTIFACT_BLOCKER = "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER"
 HINT_SOURCE_PAYLOAD_BLOCKER = "BLOCKED_N3_HINT_SOURCE_PAYLOAD_INVALID"
 HINT_SOURCE_PROOF_KIND_BLOCKER = "BLOCKED_HINT_PROOF_KIND"
+HINT_SOURCE_WAITING_RESULT = "BLOCKED_N3_HINT_SOURCE_LATEST_BEFORE_TARGET"
 HINT_PROOF_PREFLIGHT_BLOCKER = "BLOCKED_N3_HINT_PROOF_PREFLIGHT"
 HINT_PROOF_PREFLIGHT_ARTIFACT_MATERIALIZATION_BLOCKER = "BLOCKED_N3_HINT_PREFLIGHT_ARTIFACT_MATERIALIZATION"
 HINT_PROOF_PREFLIGHT_ARTIFACT_CONTRACT_BLOCKER = "BLOCKED_HINT_CONTRACT_CONTENT_MISMATCH"
@@ -90,6 +91,18 @@ class N3HintFrequency8SourceProvider:
         if _is_blocked(fetched):
             return fetched
         payload = _build_source_payload(args=args, scope=scope, fetched=fetched)
+        source_time_alignment = _hint_source_time_alignment_trace(scope=scope, payload=payload)
+        payload.update(source_time_alignment["trace"])
+        if source_time_alignment["should_wait"]:
+            return _blocked(
+                HINT_SOURCE_WAITING_RESULT,
+                "hint_source_latest_before_target_minute",
+                **source_time_alignment["trace"],
+                status="waiting",
+                execution_mode="noop",
+                market_data_pulled=True,
+                artifact_written=False,
+            )
         validation = validate_n3_hint_frequency8_payload(payload)
         if not validation["valid"]:
             return _blocked(
@@ -1786,6 +1799,10 @@ def _fetch_report_from_payload(*, scope: Mapping[str, Any], payload: Mapping[str
         "source_payload_counts": payload.get("source_payload_counts"),
         "source_object_counts": payload.get("source_object_counts"),
         "stock_excluded_count": payload.get("stock_excluded_count"),
+        "requested_target_minute_label": payload.get("requested_target_minute_label"),
+        "common_latest_available_minute_label": payload.get("common_latest_available_minute_label"),
+        "source_time_alignment_status": payload.get("source_time_alignment_status"),
+        "source_time_lagging_identity_samples": payload.get("source_time_lagging_identity_samples"),
         "normalization_trace": payload.get("normalization_trace"),
         "source_scope_policy": scope.get("source_scope_policy") or HINT_SOURCE_SCOPE_POLICY,
         "validation_result": {"valid": True, "blocked_reasons": []},
@@ -1883,6 +1900,80 @@ def _expected_payload_object_keys(payload: Mapping[str, Any]) -> set[tuple[str, 
             identities = []
         expected.update((asset_kind, str(identity)) for identity in identities if str(identity or ""))
     return expected
+
+
+def _hint_source_time_alignment_trace(*, scope: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    target_label = _label_from_hhmm(str(payload.get("actual_until_hhmm") or ""))
+    required_objects = [
+        *[(str(obj.get("asset_kind") or ""), str(obj.get("identity_key") or "")) for obj in _rows(scope, "index_1m_objects")],
+        *[(str(obj.get("asset_kind") or ""), str(obj.get("identity_key") or "")) for obj in _rows(scope, "board_1m_objects")],
+    ]
+    rows_by_object: dict[tuple[str, str], list[str]] = {key: [] for key in required_objects if key[0] and key[1]}
+    for row in _rows(payload, "index_board_1m_rows"):
+        key = (str(row.get("asset_kind") or ""), str(row.get("identity_key") or ""))
+        if key not in rows_by_object:
+            continue
+        label = _row_minute_label(row)
+        if re.fullmatch(r"\d{2}:\d{2}", label):
+            rows_by_object[key].append(label)
+
+    latest_by_object: dict[str, str] = {}
+    missing_objects: list[dict[str, str]] = []
+    for key, labels in sorted(rows_by_object.items()):
+        trace_key = f"{key[0]}:{key[1]}"
+        if labels:
+            latest_by_object[trace_key] = max(labels)
+        else:
+            latest_by_object[trace_key] = ""
+            missing_objects.append({"asset_kind": key[0], "identity_key": key[1], "latest_available_minute_label": ""})
+
+    available_latest = [value for value in latest_by_object.values() if value]
+    common_latest = min(available_latest) if available_latest and not missing_objects else ""
+    lagging_samples: list[dict[str, str]] = []
+    if target_label:
+        for key, labels in sorted(rows_by_object.items()):
+            latest = max(labels) if labels else ""
+            if not latest or latest < target_label:
+                lagging_samples.append(
+                    {
+                        "asset_kind": key[0],
+                        "identity_key": key[1],
+                        "latest_available_minute_label": latest,
+                        "requested_target_minute_label": target_label,
+                    }
+                )
+                if len(lagging_samples) >= 10:
+                    break
+
+    if not target_label or not common_latest:
+        status = "source_latest_unavailable"
+        should_wait = False
+    elif common_latest < target_label:
+        status = "source_latest_before_target"
+        should_wait = True
+    elif common_latest == target_label:
+        status = "source_latest_matches_target"
+        should_wait = False
+    else:
+        status = "source_latest_after_target"
+        should_wait = False
+
+    return {
+        "should_wait": should_wait,
+        "trace": {
+            "requested_target_minute_label": target_label,
+            "common_latest_available_minute_label": common_latest,
+            "source_time_alignment_status": status,
+            "source_time_latest_by_identity": latest_by_object,
+            "source_time_missing_identity_samples": missing_objects[:10],
+            "source_time_lagging_identity_samples": lagging_samples,
+        },
+    }
+
+
+def _label_from_hhmm(value: str) -> str:
+    match = re.fullmatch(r"(\d{2})(\d{2})", str(value or ""))
+    return f"{match.group(1)}:{match.group(2)}" if match else ""
 
 
 def _normalize_index_board_row(*, raw: Mapping[str, Any], obj: Mapping[str, Any], for_trade_date: str) -> dict[str, Any] | None:
@@ -2130,7 +2221,8 @@ def _cumulative_rows_to_1m_reference_rows(rows: Sequence[Any], *, expected_asset
         previous = previous_cumulative_by_identity.get(identity_key, 0.0)
         previous_cumulative_by_identity[identity_key] = cumulative
         label = str(row.get("canonical_minute_label") or "")
-        logical_label = "11:30" if label == "13:00" else label
+        canonical_label = _canonical_cumulative_minute_label(label)
+        logical_label = "11:30" if canonical_label == "13:00" else canonical_label
         output.append(
             {
                 "asset_kind": asset_kind,
@@ -2146,6 +2238,19 @@ def _cumulative_rows_to_1m_reference_rows(rows: Sequence[Any], *, expected_asset
             }
         )
     return output
+
+
+def _canonical_cumulative_minute_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = _parse_dt(raw)
+    if parsed is not None:
+        return _ensure_shanghai_tz(parsed).strftime("%H:%M")
+    match = re.search(r"(\d{1,2}):(\d{2})", raw)
+    if match:
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
+    return raw
 
 
 def _fetch_previous_day_last_30m_entity_reference_rows(

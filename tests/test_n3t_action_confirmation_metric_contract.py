@@ -282,6 +282,17 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
                 "120m": "previous_trade_date_last_period",
             },
         )
+        for field in (
+            "previous_1m_period_source",
+            "previous_5m_period_source",
+            "previous_30m_period_source",
+            "previous_120m_period_source",
+            "is_first_30m_of_day",
+            "is_first_120m_of_day",
+            "boundary_policy_version",
+        ):
+            self.assertIn(field, row["raw_json"])
+            self.assertIn(field, row["trace_json"])
         self.assertEqual(
             row["trace_json"]["alias_relationships"],
             {
@@ -317,6 +328,25 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
         self.assertFalse(row["not_n5_final_proof"])
         self.assertEqual(row["trace_json"]["candidate_trace"]["metric_role"], "trigger_proof")
         self.assertEqual(row["trace_json"]["candidate_trace_authority"], "trace_only_not_authoritative")
+
+    def test_fastlane_hash_suffix_ending_b1_or_b2_is_not_legacy_lineage(self) -> None:
+        accepted = parse_n3t_metric_run_id(
+            "n3t_action_confirmation_metric_20260708_until_1421__"
+            "fastlane_sr_987410fc8bb2_raw_prevday_c1_amount_v1"
+        )
+
+        self.assertEqual(accepted["trade_date"], "20260708")
+        self.assertEqual(accepted["until_hhmm"], "1421")
+
+    def test_legacy_b1_b2_lineage_tokens_remain_forbidden(self) -> None:
+        with self.assertRaisesRegex(
+            N3TMetricContractError,
+            "n3t_must_not_reuse_n3p_b1_b2_or_legacy_realtime_metric_lineage",
+        ):
+            parse_n3t_metric_run_id(
+                "n3t_action_confirmation_metric_20260708_until_1421__"
+                "asset_all__b2_source_returned_snapshot_amount_chain_v2"
+            )
 
     def test_writer_draft_plan_targets_only_n3t_tables_and_preserves_n5_aliases(self) -> None:
         plan = build_n3t_action_confirmation_metric_writer_draft_plan(

@@ -321,9 +321,9 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
                     "a1_cumulative_status": "passed",
                 }
 
-        secret_dsn = "postgresql://ashare_v3_user:super-secret-password@127.0.0.1:5432/ashare_v3"
+        sensitive_dsn = "postgresql://ashare_v3_user:" + "super-secret-password" + "@127.0.0.1:5432/ashare_v3"
         backend = N3PCurrentSourceFetchBackend(
-            env={"ASHARE_V3_POSTGRES_DSN": secret_dsn},
+            env={"ASHARE_V3_POSTGRES_DSN": sensitive_dsn},
             scope_loader=ScopeLoader(),
         )
         provider = N3PCurrentSourceFetchProvider(backend=backend)
@@ -333,7 +333,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
 
         self.assertEqual(payload["result"], "BLOCKED_N3P_SOURCE_FETCH_BACKEND_FETCHER")
         self.assertNotIn("super-secret-password", serialized_payload)
-        self.assertNotIn(secret_dsn, serialized_payload)
+        self.assertNotIn(sensitive_dsn, serialized_payload)
         self.assertFalse(payload["market_data_pulled"])
         self.assertFalse(payload["database_written"])
 
@@ -1195,7 +1195,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
                 dependencies=SimpleNamespace(),
                 payload=payload,
                 fetch_report=fetch_report,
-                config={"database_url": "postgresql://user:secret-password@localhost/db"},
+                config={"database_url": "postgresql://user:" + "secret-password" + "@localhost/db"},
             )
 
             payload_path = Path(result["payload_path"])

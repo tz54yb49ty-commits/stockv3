@@ -424,6 +424,9 @@ def build_n3t_scoped_metric_from_c1_artifact_plan(
                 "previous_day_minute_refs": context["previous_day_minute_refs"],
                 "metric_values": context["metric_values"],
                 "deterministic_derivation_inputs": context["deterministic_derivation_inputs"],
+                "object_minute_scope": bool(context.get("object_minute_scope")),
+                "object_minute_ref_count": int(context.get("object_minute_ref_count") or 0),
+                "object_minute_ref_trace": list(context.get("object_minute_ref_trace") or []),
             }
         )
     if set(metric_context_by_key) != scope_keys:
@@ -506,6 +509,28 @@ def build_n3t_action_confirmation_metric_row(
         blocked_reasons.append("BLOCKED_N3T_METRIC_FIELDS_INCOMPLETE")
 
     metric_ready = not blocked_reasons
+    trace_payload = {
+        "source_basis": N3T_SOURCE_BASIS,
+        "metric_role": N3T_METRIC_ROLE,
+        "proof_consumer": N3T_PROOF_CONSUMER,
+        "not_n5_final_proof": False,
+        "candidate_trace": dict(candidate_trace or {}),
+        "candidate_trace_authority": "trace_only_not_authoritative",
+        "closed_minute_contract": "bar_label_HHMM_is_usable_after_HHMM_plus_1",
+        "alias_relationships": dict(N3T_N5_COMPATIBILITY_ALIASES),
+        "boundary_policy": boundary_trace,
+        "previous_period_sources": previous_period_sources,
+        **boundary_trace,
+    }
+    raw_payload = {
+        "blocked_reasons": blocked_reasons,
+        "source_closed_minute_bar_ids": closed_refs,
+        "previous_day_minute_refs": previous_refs,
+        "boundary_policy": boundary_trace,
+        "previous_period_sources": previous_period_sources,
+        **boundary_trace,
+    }
+
     row = {
         "projection_run_id": projection_run_id,
         "projection_schema_version": N3T_SCHEMA_VERSION,
@@ -525,25 +550,8 @@ def build_n3t_action_confirmation_metric_row(
         "source_closed_minute_bar_ids": closed_refs,
         "source_minute_refs": closed_refs,
         "previous_day_minute_refs": previous_refs,
-        "trace_json": {
-            "source_basis": N3T_SOURCE_BASIS,
-            "metric_role": N3T_METRIC_ROLE,
-            "proof_consumer": N3T_PROOF_CONSUMER,
-            "not_n5_final_proof": False,
-            "candidate_trace": dict(candidate_trace or {}),
-            "candidate_trace_authority": "trace_only_not_authoritative",
-            "closed_minute_contract": "bar_label_HHMM_is_usable_after_HHMM_plus_1",
-            "alias_relationships": dict(N3T_N5_COMPATIBILITY_ALIASES),
-            "boundary_policy": boundary_trace,
-            "previous_period_sources": previous_period_sources,
-        },
-        "raw_json": {
-            "blocked_reasons": blocked_reasons,
-            "source_closed_minute_bar_ids": closed_refs,
-            "previous_day_minute_refs": previous_refs,
-            "boundary_policy": boundary_trace,
-            "previous_period_sources": previous_period_sources,
-        },
+        "trace_json": trace_payload,
+        "raw_json": raw_payload,
     }
     for field in N3T_NUMERIC_OUTPUT_FIELDS:
         row[field] = values.get(field)
@@ -598,7 +606,11 @@ def _column_ddl(field: str) -> str:
 
 def _reject_forbidden_lineage(value: str) -> None:
     lowered = str(value or "").lower()
-    if any(token in lowered for token in FORBIDDEN_LINEAGE_TOKENS):
+    if (
+        "realtime_action_confirmation_metric" in lowered
+        or re.search(r"(?:^|_)n3p(?:_|$)", lowered)
+        or re.search(r"(?:^|_)b[12]_", lowered)
+    ):
         raise N3TMetricContractError("n3t_must_not_reuse_n3p_b1_b2_or_legacy_realtime_metric_lineage")
 
 
@@ -739,6 +751,9 @@ def _normalize_metric_context_row(row: Any) -> dict[str, Any]:
         "previous_day_minute_refs": list(source.get("previous_day_minute_refs") or []),
         "metric_values": dict(source.get("metric_values") or {}),
         "deterministic_derivation_inputs": dict(source.get("deterministic_derivation_inputs") or {}),
+        "object_minute_scope": bool(source.get("object_minute_scope")),
+        "object_minute_ref_count": int(source.get("object_minute_ref_count") or 0),
+        "object_minute_ref_trace": list(source.get("object_minute_ref_trace") or []),
     }
 
 
