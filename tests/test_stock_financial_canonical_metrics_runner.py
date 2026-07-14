@@ -10,7 +10,11 @@ from pathlib import Path
 from ashare_v3.ingestion.stock_financial_canonical_metrics import (
     ALLOWED_FUTURE_WRITE_TABLES,
     BATCH_ID,
+    DAILY_BASIC_MISSING_WARNING,
+    EFFECTIVE_SCORE_MAX,
     FINANCIAL_METRIC_VERSION,
+    FINANCIAL_NULL_WARNING_CODE,
+    FINANCIAL_SOURCE_POLICY_VERSION,
     SOURCE_TDX,
     SOURCE_TUSHARE_FALLBACK,
     SOURCE_VERSION,
@@ -20,12 +24,16 @@ from ashare_v3.ingestion.stock_financial_canonical_metrics import (
     build_execute_preflight_report,
     calculate_canonical_financial_metrics,
     execute_commit_transaction,
+    identity_keys_sha256,
     json_safe,
     snapshot_payload_to_metrics_snapshot,
     stock_financial_jsonb_row,
     validate_commit_preconditions,
     validate_dry_run_request,
     validate_execute_request,
+)
+from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
+    build_financial_null_warning_row,
 )
 
 
@@ -128,6 +136,62 @@ def one_row_snapshot() -> dict:
         },
         "source_probe": {"mock": True, "writes_performed": False},
     }
+
+
+def affair_source_probe(*, warning_identity_keys=()) -> dict:
+    warning_keys = sorted(str(key) for key in warning_identity_keys)
+    return {
+        "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+        "financial_degraded_but_fastlane_allowed": True,
+        "forecast_disabled": True,
+        "financial_null_warning_identity_keys": warning_keys,
+        "financial_null_warning_identity_count": len(warning_keys),
+        "financial_null_warning_identity_sha256": identity_keys_sha256(warning_keys),
+    }
+
+
+def affair_cumulative_rows(
+    *,
+    identity_key: str = "stock:SH:600000",
+    include_prior_q1: bool = True,
+) -> list[dict]:
+    period_values = [
+        ("20260331", "180", "90", "4", "6", "8", "10", "3", "100"),
+        ("20251231", "520", "260", "12", "20", "25", "32", "11", "290"),
+        ("20250930", "360", "180", "8", "14", "18", "22", "8", "200"),
+        ("20250630", "220", "110", "5", "8", "11", "14", "5", "120"),
+        ("20250331", "100", "50", "2", "3", "5", "6", "2", "55"),
+    ]
+    if not include_prior_q1:
+        period_values = period_values[:4]
+    return [
+        quarter_row(
+            period,
+            identity_key=identity_key,
+            source_type="mootdx_affair",
+            announcement_date="20260425",
+            revenue=revenue,
+            operating_cost=operating_cost,
+            taxes=taxes,
+            selling=selling,
+            admin=admin,
+            rd=rd,
+            interest=interest,
+            operating_cashflow=cashflow,
+            forecast_type="预增",
+        )
+        for (
+            period,
+            revenue,
+            operating_cost,
+            taxes,
+            selling,
+            admin,
+            rd,
+            interest,
+            cashflow,
+        ) in period_values
+    ]
 
 
 class RecordingCursor:
@@ -245,6 +309,122 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
         self.assertEqual(row["forecast_score"], Decimal("3"))
         self.assertLessEqual(row["score"], Decimal("100"))
         self.assertEqual(row["quality_status"], "passed")
+        self.assertNotIn("financial_source_policy_version", result)
+        self.assertNotIn("effective_score_max", result)
+
+    def test_affair_policy_disables_forecast_and_caps_effective_score_at_97(self) -> None:
+        result = calculate_canonical_financial_metrics(
+            financial_rows=affair_cumulative_rows(),
+            daily_basic_rows=[
+                {
+                    "stock_identity_key": "stock:SH:600000",
+                    "total_mv": "1000",
+                }
+            ],
+            source_trade_date="20260529",
+            expected_identity_keys=["stock:SH:600000"],
+            source_probe=affair_source_probe(),
+        )
+
+        self.assertEqual(result["result"], "DRY_RUN_PASS")
+        self.assertEqual(result["financial_source_policy_version"], FINANCIAL_SOURCE_POLICY_VERSION)
+        self.assertEqual(result["effective_score_max"], str(EFFECTIVE_SCORE_MAX))
+        self.assertTrue(result["forecast_disabled"])
+        row = result["rows"][0]
+        self.assertIsNone(row["forecast_type"])
+        self.assertIsNone(row["forecast_score"])
+        self.assertEqual(row["score_breakdown_json"]["forecast_score"], "0")
+        self.assertIsNotNone(row["score"])
+        self.assertLessEqual(row["score"], EFFECTIVE_SCORE_MAX)
+        self.assertEqual(result["summary"]["forecast_coverage_count"], 0)
+
+    def test_affair_warning_only_row_is_p1_and_preserves_identity_with_null_metrics(self) -> None:
+        identity_key = "stock:SH:600001"
+        warning_row = build_financial_null_warning_row(
+            identity_key,
+            source_trade_date="20260529",
+            reason="affair_source_unavailable",
+        )
+        result = calculate_canonical_financial_metrics(
+            financial_rows=[warning_row],
+            daily_basic_rows=[
+                {"stock_identity_key": identity_key, "total_mv": "1000"}
+            ],
+            source_trade_date="20260529",
+            expected_identity_keys=[identity_key],
+            source_probe=affair_source_probe(warning_identity_keys=[identity_key]),
+        )
+
+        self.assertEqual(result["result"], "DRY_RUN_PASS")
+        self.assertEqual(result["quality"]["p0_count"], 0)
+        self.assertGreaterEqual(result["quality"]["p1_count"], 1)
+        self.assertEqual(result["row_counts"]["stock_financial_metrics_fact"], 1)
+        row = result["rows"][0]
+        for field in (
+            "cash_realization_rate",
+            "pe_core",
+            "revenue_yoy_pct",
+            "core_profit_yoy_pct",
+            "core_profit_ttm",
+            "score",
+            "forecast_type",
+            "forecast_score",
+        ):
+            self.assertIsNone(row[field], field)
+        self.assertIn(FINANCIAL_NULL_WARNING_CODE, row["financial_warning_json"]["warnings"])
+
+    def test_affair_incomplete_four_quarter_chain_nulls_history_dependent_metrics(self) -> None:
+        result = calculate_canonical_financial_metrics(
+            financial_rows=affair_cumulative_rows(include_prior_q1=False),
+            daily_basic_rows=[
+                {
+                    "stock_identity_key": "stock:SH:600000",
+                    "total_mv": "1000",
+                }
+            ],
+            source_trade_date="20260529",
+            expected_identity_keys=["stock:SH:600000"],
+            source_probe=affair_source_probe(),
+        )
+
+        self.assertEqual(result["result"], "DRY_RUN_PASS")
+        self.assertEqual(result["quality"]["p0_count"], 0)
+        row = result["rows"][0]
+        for field in (
+            "core_profit_ttm",
+            "pe_core",
+            "revenue_yoy_pct",
+            "core_profit_yoy_pct",
+            "core_gt_revenue_yoy",
+            "revenue_growth_streak_q",
+            "core_growth_streak_q",
+            "core_gt_revenue_streak_q",
+            "score",
+        ):
+            self.assertIsNone(row[field], field)
+        self.assertIn(
+            "financial_history_incomplete_metrics_null",
+            row["financial_warning_json"]["warnings"],
+        )
+
+    def test_affair_missing_daily_basic_is_p1_and_only_nulls_pe_and_score(self) -> None:
+        result = calculate_canonical_financial_metrics(
+            financial_rows=affair_cumulative_rows(),
+            daily_basic_rows=[],
+            source_trade_date="20260529",
+            expected_identity_keys=["stock:SH:600000"],
+            source_probe=affair_source_probe(),
+        )
+
+        self.assertEqual(result["result"], "DRY_RUN_PASS")
+        self.assertEqual(result["quality"]["p0_count"], 0)
+        self.assertGreaterEqual(result["quality"]["p1_count"], 1)
+        row = result["rows"][0]
+        self.assertIsNone(row["pe_core"])
+        self.assertIsNone(row["score"])
+        self.assertIsNotNone(row["report_core_profit"])
+        self.assertIsNotNone(row["core_profit_ttm"])
+        self.assertIn(DAILY_BASIC_MISSING_WARNING, row["financial_warning_json"]["warnings"])
 
     def test_interest_missing_uses_finance_expense_and_writes_warning(self) -> None:
         rows = [

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -28,6 +29,12 @@ BATCH_ID = "stock_financial_canonical_20260529_v1"
 SOURCE_VERSION = "stock_financial_20260529_v2"
 PREVIOUS_SOURCE_VERSION = "stock_financial_20260529_v1"
 FINANCIAL_METRIC_VERSION = "financial_metric_v1"
+FINANCIAL_SOURCE_POLICY_VERSION = "affair_authoritative_no_forecast_v1"
+FINANCIAL_AUTHORITY = "mootdx_affair"
+EFFECTIVE_SCORE_MAX = Decimal("97")
+FINANCIAL_NULL_WARNING_CODE = "financial_source_unavailable_null_metrics"
+FINANCIAL_HISTORY_INCOMPLETE_WARNING = "financial_history_incomplete_metrics_null"
+DAILY_BASIC_MISSING_WARNING = "daily_basic_total_mv_missing_pe_core_score_null"
 SOURCE_TDX = "tdx_mootdx_finance"
 SOURCE_TUSHARE_FALLBACK = "tushare_fallback"
 
@@ -136,6 +143,71 @@ class StockFinancialCanonicalBlocked(Exception):
     """Raised when dry-run/future execute guard blocks."""
 
 
+def identity_keys_sha256(identity_keys: Sequence[str]) -> str:
+    payload = json.dumps(
+        sorted({str(key) for key in identity_keys if key}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def is_financial_warning_only_row(row: Mapping[str, Any]) -> bool:
+    raw_payload = row.get("raw_payload")
+    warning_payload = row.get("financial_warning_json")
+    return bool(
+        isinstance(raw_payload, Mapping)
+        and raw_payload.get("financial_warning_only") is True
+        and raw_payload.get("financial_values_fabricated") is False
+        and isinstance(warning_payload, Mapping)
+        and FINANCIAL_NULL_WARNING_CODE in {
+            str(code) for code in warning_payload.get("warnings") or [] if code
+        }
+    )
+
+
+def financial_warning_only_contract(
+    *,
+    financial_rows: Sequence[Mapping[str, Any]],
+    expected_identity_keys: Sequence[str],
+    source_probe: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    warning_rows = [dict(row) for row in financial_rows if is_financial_warning_only_row(row)]
+    warning_by_identity: dict[str, dict[str, Any]] = {}
+    duplicate_keys: list[str] = []
+    for row in warning_rows:
+        identity_key = str(row.get("stock_identity_key") or "")
+        if not identity_key or identity_key in warning_by_identity:
+            duplicate_keys.append(identity_key)
+            continue
+        warning_by_identity[identity_key] = row
+
+    actual_keys = sorted(warning_by_identity)
+    expected_set = set(str(key) for key in expected_identity_keys)
+    declared_keys = sorted(
+        {str(key) for key in source_probe.get("financial_null_warning_identity_keys") or [] if key}
+    )
+    errors: list[str] = []
+    if duplicate_keys:
+        errors.append("financial_null_warning_duplicate_identity")
+    if source_probe.get("financial_degraded_but_fastlane_allowed") is not True and actual_keys:
+        errors.append("financial_null_warning_degraded_flag_missing")
+    if declared_keys != actual_keys:
+        errors.append("financial_null_warning_identity_keys_mismatch")
+    try:
+        declared_count = int(source_probe.get("financial_null_warning_identity_count"))
+    except (TypeError, ValueError):
+        declared_count = -1
+    if declared_count != len(actual_keys):
+        errors.append("financial_null_warning_identity_count_mismatch")
+    if source_probe.get("financial_null_warning_identity_sha256") != identity_keys_sha256(actual_keys):
+        errors.append("financial_null_warning_identity_sha256_mismatch")
+    if not set(actual_keys).issubset(expected_set):
+        errors.append("financial_null_warning_identity_outside_universe")
+    return warning_by_identity, sorted(set(errors))
+
+
 def validate_dry_run_request(*, execute_requested: bool) -> None:
     if execute_requested:
         raise StockFinancialCanonicalBlocked("this runner is dry-run/preflight only; execute is not implemented in this gate")
@@ -161,15 +233,33 @@ def calculate_canonical_financial_metrics(
     daily_basic_rows: Sequence[Mapping[str, Any]],
     source_trade_date: str,
     expected_identity_keys: Sequence[str],
+    source_probe: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_trade_date = require_yyyymmdd(source_trade_date, "source_trade_date")
     expected_keys = sorted({str(key) for key in expected_identity_keys})
+    probe = dict(source_probe or {})
+    affair_policy = (
+        probe.get("financial_source_policy_version")
+        == FINANCIAL_SOURCE_POLICY_VERSION
+    )
+    warning_by_identity: dict[str, dict[str, Any]] = {}
+    warning_contract_errors: list[str] = []
+    source_financial_rows = list(financial_rows)
+    if affair_policy:
+        warning_by_identity, warning_contract_errors = financial_warning_only_contract(
+            financial_rows=financial_rows,
+            expected_identity_keys=expected_keys,
+            source_probe=probe,
+        )
+        source_financial_rows = [
+            row for row in financial_rows if not is_financial_warning_only_row(row)
+        ]
     daily_basic_by_key = {
         str(row.get("stock_identity_key")): dict(row)
         for row in daily_basic_rows
         if row.get("stock_identity_key")
     }
-    filtered, asof_counts = filter_asof_safe_rows(financial_rows, source_trade_date)
+    filtered, asof_counts = filter_asof_safe_rows(source_financial_rows, source_trade_date)
     chosen_rows = choose_source_rows(filtered)
     rows_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
     source_counts: Counter[str] = Counter()
@@ -179,6 +269,9 @@ def calculate_canonical_financial_metrics(
             continue
         rows_by_identity[identity_key].append(row)
         source_counts[str(row.get("source_type") or SOURCE_TDX)] += 1
+    if affair_policy and set(warning_by_identity).intersection(rows_by_identity):
+        warning_contract_errors.append("financial_null_warning_has_financial_rows")
+        warning_contract_errors = sorted(set(warning_contract_errors))
 
     canonical_rows: list[dict[str, Any]] = []
     warnings: Counter[str] = Counter()
@@ -189,6 +282,20 @@ def calculate_canonical_financial_metrics(
     for identity_key in expected_keys:
         source_rows = rows_by_identity.get(identity_key, [])
         if not source_rows:
+            if (
+                affair_policy
+                and not warning_contract_errors
+                and identity_key in warning_by_identity
+            ):
+                row, row_warnings = build_financial_warning_only_canonical_row(
+                    identity_key=identity_key,
+                    source_row=warning_by_identity[identity_key],
+                    daily_basic=daily_basic_by_key.get(identity_key) or {},
+                    source_trade_date=source_trade_date,
+                )
+                canonical_rows.append(row)
+                warnings.update(row_warnings)
+                continue
             missing_core_inputs.append(identity_key)
             warnings["canonical_core_line_items_missing"] += 1
             continue
@@ -197,6 +304,7 @@ def calculate_canonical_financial_metrics(
             rows=source_rows,
             daily_basic=daily_basic_by_key.get(identity_key) or {},
             source_trade_date=source_trade_date,
+            affair_policy=affair_policy,
         )
         if row is None:
             missing_core_inputs.append(identity_key)
@@ -217,6 +325,7 @@ def calculate_canonical_financial_metrics(
         blockers.append("duplicate_identity_key")
     if missing_expected:
         blockers.append("expected_identity_missing")
+    blockers.extend(warning_contract_errors)
 
     p0_items = []
     if missing_core_inputs:
@@ -227,6 +336,28 @@ def calculate_canonical_financial_metrics(
         p0_items.append(quality_item("duplicate_identity_key", "P0", "failed", "0", str(duplicate_count), {}))
     else:
         p0_items.append(quality_item("duplicate_identity_key", "P0", "passed", "0", "0", {}))
+    if warning_contract_errors:
+        p0_items.append(
+            quality_item(
+                "financial_null_warning_lineage",
+                "P0",
+                "failed",
+                "valid count/hash/identity binding",
+                str(len(warning_contract_errors)),
+                {"errors": warning_contract_errors},
+            )
+        )
+    elif affair_policy:
+        p0_items.append(
+            quality_item(
+                "financial_null_warning_lineage",
+                "P0",
+                "passed",
+                "valid count/hash/identity binding",
+                str(len(warning_by_identity)),
+                {},
+            )
+        )
 
     p1_items = []
     if source_counts[SOURCE_TUSHARE_FALLBACK]:
@@ -268,6 +399,42 @@ def calculate_canonical_financial_metrics(
                 "warning",
                 "0",
                 str(warnings[LATEST_CORE_LINE_ITEMS_MISSING_FALLBACK_WARNING]),
+                {},
+            )
+        )
+    if warnings[FINANCIAL_NULL_WARNING_CODE]:
+        p1_items.append(
+            quality_item(
+                FINANCIAL_NULL_WARNING_CODE,
+                "P1",
+                "warning",
+                "0",
+                str(warnings[FINANCIAL_NULL_WARNING_CODE]),
+                {
+                    "identity_keys": sorted(warning_by_identity),
+                    "financial_degraded_but_fastlane_allowed": True,
+                },
+            )
+        )
+    if warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING]:
+        p1_items.append(
+            quality_item(
+                FINANCIAL_HISTORY_INCOMPLETE_WARNING,
+                "P1",
+                "warning",
+                "0",
+                str(warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING]),
+                {},
+            )
+        )
+    if warnings[DAILY_BASIC_MISSING_WARNING]:
+        p1_items.append(
+            quality_item(
+                DAILY_BASIC_MISSING_WARNING,
+                "P1",
+                "warning",
+                "0",
+                str(warnings[DAILY_BASIC_MISSING_WARNING]),
                 {},
             )
         )
@@ -318,6 +485,15 @@ def calculate_canonical_financial_metrics(
         "source_version": SOURCE_VERSION,
         "previous_source_version": PREVIOUS_SOURCE_VERSION,
         "financial_metric_version": FINANCIAL_METRIC_VERSION,
+        **(
+            {
+                "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+                "forecast_disabled": True,
+                "effective_score_max": str(EFFECTIVE_SCORE_MAX),
+            }
+            if affair_policy
+            else {}
+        ),
         "row_counts": {"stock_financial_metrics_fact": len(canonical_rows)},
         "expected_rows": len(expected_keys),
         "rows": canonical_rows,
@@ -331,6 +507,16 @@ def calculate_canonical_financial_metrics(
             "interest_expense_missing_fallback_count": int(warnings["interest_expense_missing_finance_expense_used"]),
             "ttm_annualized_count": ttm_annualized_count,
             "forecast_coverage_count": forecast_coverage_count,
+            **(
+                {
+                    "financial_null_warning_identity_count": len(warning_by_identity),
+                    "financial_degraded_but_fastlane_allowed": bool(
+                        probe.get("financial_degraded_but_fastlane_allowed")
+                    ),
+                }
+                if affair_policy
+                else {}
+            ),
             "score_distribution": score_distribution(canonical_rows),
             "warning_distribution": dict(sorted(warnings.items())),
         },
@@ -371,16 +557,72 @@ def choose_source_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     return list(by_key.values())
 
 
+AFFAIR_CUMULATIVE_FIELDS = (
+    "revenue",
+    "operating_revenue",
+    "operating_cost",
+    "taxes_and_surcharges",
+    "selling_expense",
+    "admin_expense",
+    "rd_expense",
+    "interest_expense",
+    "finance_expense",
+    "operating_cashflow",
+)
+
+
+def affair_cumulative_to_single_quarter(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """Convert Affair cumulative values to single-quarter values without fabricating predecessors."""
+
+    by_period = {str(row.get("report_period") or ""): dict(row) for row in rows}
+    warnings: Counter[str] = Counter()
+    converted: list[dict[str, Any]] = []
+    for report_period in sorted(by_period):
+        row = by_period[report_period]
+        suffix = report_period[4:] if len(report_period) == 8 else ""
+        predecessor_suffix = {"0630": "0331", "0930": "0630", "1231": "0930"}.get(suffix)
+        predecessor = by_period.get(report_period[:4] + predecessor_suffix) if predecessor_suffix else None
+        item = dict(row)
+        for field in AFFAIR_CUMULATIVE_FIELDS:
+            current = decimal_or_none(row.get(field))
+            if current is None:
+                item[field] = None
+                continue
+            if suffix == "0331":
+                item[field] = current
+                continue
+            if predecessor_suffix is None:
+                item[field] = None
+                warnings["cumulative_report_period_invalid"] += 1
+                continue
+            previous = decimal_or_none((predecessor or {}).get(field))
+            if previous is None:
+                item[field] = None
+                warnings["cumulative_predecessor_missing"] += 1
+            else:
+                item[field] = current - previous
+        item["financial_period_basis"] = "single_quarter"
+        converted.append(item)
+    return sorted(converted, key=lambda row: str(row.get("report_period") or ""), reverse=True), warnings
+
+
 def build_canonical_row(
     *,
     identity_key: str,
     rows: Sequence[Mapping[str, Any]],
     daily_basic: Mapping[str, Any],
     source_trade_date: str,
+    affair_policy: bool = False,
 ) -> tuple[dict[str, Any] | None, Counter[str]]:
-    ordered = sorted((dict(row) for row in rows), key=lambda row: str(row.get("report_period") or ""), reverse=True)
+    raw_ordered = sorted((dict(row) for row in rows), key=lambda row: str(row.get("report_period") or ""), reverse=True)
+    ordered = raw_ordered
     computed_quarters: list[dict[str, Any]] = []
     warnings: Counter[str] = Counter()
+    if affair_policy:
+        ordered, cumulative_warnings = affair_cumulative_to_single_quarter(ordered)
+        warnings.update(cumulative_warnings)
     policy_warning = canonical_policy_warning_code(identity_key=identity_key, rows=ordered, daily_basic=daily_basic)
     if policy_warning:
         return build_policy_canonical_row(
@@ -389,6 +631,7 @@ def build_canonical_row(
             daily_basic=daily_basic,
             source_trade_date=source_trade_date,
             warning_code=policy_warning,
+            affair_policy=affair_policy,
         )
     for row in ordered:
         warnings.update(existing_financial_warnings(row))
@@ -416,6 +659,15 @@ def build_canonical_row(
             }
         )
     if not computed_quarters:
+        if affair_policy:
+            warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING] += 1
+            return build_incomplete_financial_canonical_row(
+                identity_key=identity_key,
+                latest_source=raw_ordered[0] if raw_ordered else {},
+                daily_basic=daily_basic,
+                source_trade_date=source_trade_date,
+                warnings=warnings,
+            )
         warnings["canonical_core_line_items_missing"] = 1
         return None, warnings
 
@@ -423,34 +675,90 @@ def build_canonical_row(
     if source_type(latest) == SOURCE_TUSHARE_FALLBACK:
         warnings["tushare_fallback_used"] += 1
     latest_period = str(latest["report_period"])
-    ttm_rows = computed_quarters[:4]
+    ttm_rows = contiguous_quarter_rows(computed_quarters, limit=4) if affair_policy else computed_quarters[:4]
+    complete_four_quarter_chain = len(ttm_rows) == 4
     core_profit_ttm = sum_decimal(row["report_core_profit"] for row in ttm_rows)
     annualized = False
-    if 0 < len(ttm_rows) < 4:
+    if affair_policy and not complete_four_quarter_chain:
+        core_profit_ttm = None
+        warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING] += 1
+    elif 0 < len(ttm_rows) < 4:
         core_profit_ttm = (core_profit_ttm * Decimal("4")) / Decimal(str(len(ttm_rows)))
         annualized = True
         warnings["ttm_annualized"] += 1
-    cash_realization_rate = safe_divide(latest.get("operating_cashflow"), latest.get("report_core_profit"))
+    latest_core_profit = decimal_or_none(latest.get("report_core_profit"))
+    cash_realization_rate = (
+        safe_divide(latest.get("operating_cashflow"), latest_core_profit)
+        if not affair_policy or (latest_core_profit is not None and latest_core_profit > 0)
+        else None
+    )
+    if affair_policy and latest_core_profit is not None and latest_core_profit <= 0:
+        warnings["cash_realization_rate_nonpositive_core_profit"] += 1
     if cash_realization_rate is None:
         warnings["cash_realization_rate_unavailable"] += 1
-    revenue_yoy_pct = first_decimal(latest, "revenue_yoy_pct", "revenue_yoy", "or_yoy")
-    if revenue_yoy_pct is None:
-        revenue_yoy_pct = calculate_yoy(latest, computed_quarters, "report_core_revenue")
-    core_profit_yoy_pct = first_decimal(latest, "core_profit_yoy_pct", "profit_yoy", "netprofit_yoy")
-    if core_profit_yoy_pct is None:
-        core_profit_yoy_pct = calculate_yoy(latest, computed_quarters, "report_core_profit")
+    if affair_policy:
+        revenue_yoy_pct = (
+            calculate_yoy(latest, computed_quarters, "report_core_revenue")
+            if complete_four_quarter_chain
+            else None
+        )
+        core_profit_yoy_pct = (
+            calculate_yoy(latest, computed_quarters, "report_core_profit")
+            if complete_four_quarter_chain
+            else None
+        )
+    else:
+        revenue_yoy_pct = first_decimal(latest, "revenue_yoy_pct", "revenue_yoy", "or_yoy")
+        if revenue_yoy_pct is None:
+            revenue_yoy_pct = calculate_yoy(latest, computed_quarters, "report_core_revenue")
+        core_profit_yoy_pct = first_decimal(latest, "core_profit_yoy_pct", "profit_yoy", "netprofit_yoy")
+        if core_profit_yoy_pct is None:
+            core_profit_yoy_pct = calculate_yoy(latest, computed_quarters, "report_core_profit")
     core_gt_revenue_yoy = (
         bool(core_profit_yoy_pct > revenue_yoy_pct)
         if revenue_yoy_pct is not None and core_profit_yoy_pct is not None
         else None
     )
-    total_mv = first_decimal(daily_basic, "total_mv") or first_decimal(latest, "total_mv")
-    circ_mv = first_decimal(daily_basic, "circ_mv") or first_decimal(latest, "circ_mv")
-    pe_core = safe_divide(total_mv, core_profit_ttm) if core_profit_ttm not in (None, Decimal("0")) else None
-    forecast_type = optional_text(latest.get("forecast_type"))
-    forecast_score = forecast_score_for(forecast_type)
-    if not forecast_type:
+    if affair_policy:
+        total_mv = first_decimal(daily_basic, "total_mv")
+        circ_mv = first_decimal(daily_basic, "circ_mv")
+    else:
+        total_mv = first_decimal(daily_basic, "total_mv") or first_decimal(latest, "total_mv")
+        circ_mv = first_decimal(daily_basic, "circ_mv") or first_decimal(latest, "circ_mv")
+    if affair_policy and total_mv is None:
+        warnings[DAILY_BASIC_MISSING_WARNING] += 1
+    if affair_policy and daily_basic.get("daily_basic_carried_forward") is True:
+        warnings["daily_basic_total_mv_carried_forward"] += 1
+    pe_core = None
+    if total_mv is not None and core_profit_ttm not in (None, Decimal("0")):
+        pe_core = safe_divide(
+            total_mv * Decimal("10000") if affair_policy else total_mv,
+            core_profit_ttm,
+        )
+    forecast_type = None if affair_policy else optional_text(latest.get("forecast_type"))
+    forecast_score = None if affair_policy else forecast_score_for(forecast_type)
+    if not affair_policy and not forecast_type:
         warnings["forecast_missing"] += 1
+    if affair_policy:
+        revenue_growth_streak_q = (
+            affair_yoy_streak(computed_quarters, "report_core_revenue")
+            if complete_four_quarter_chain
+            else None
+        )
+        core_growth_streak_q = (
+            affair_yoy_streak(computed_quarters, "report_core_profit")
+            if complete_four_quarter_chain
+            else None
+        )
+        core_gt_revenue_streak_q = (
+            affair_core_gt_streak(computed_quarters)
+            if complete_four_quarter_chain
+            else None
+        )
+    else:
+        revenue_growth_streak_q = streak(computed_quarters, "revenue_yoy_pct", positive=True)
+        core_growth_streak_q = streak(computed_quarters, "core_profit_yoy_pct", positive=True)
+        core_gt_revenue_streak_q = core_gt_streak(computed_quarters)
     breakdown = score_breakdown(
         report_core_profit=latest["report_core_profit"],
         cash_realization_rate=cash_realization_rate,
@@ -458,12 +766,16 @@ def build_canonical_row(
         revenue_yoy_pct=revenue_yoy_pct,
         core_profit_yoy_pct=core_profit_yoy_pct,
         core_gt_revenue_yoy=core_gt_revenue_yoy,
-        revenue_growth_streak_q=streak(computed_quarters, "revenue_yoy_pct", positive=True),
-        core_growth_streak_q=streak(computed_quarters, "core_profit_yoy_pct", positive=True),
-        core_gt_revenue_streak_q=core_gt_streak(computed_quarters),
+        revenue_growth_streak_q=revenue_growth_streak_q,
+        core_growth_streak_q=core_growth_streak_q,
+        core_gt_revenue_streak_q=core_gt_revenue_streak_q,
         forecast_score=forecast_score,
     )
-    score = min(Decimal("100"), sum_decimal(breakdown.values()))
+    score = (
+        None
+        if affair_policy and (not complete_four_quarter_chain or total_mv is None)
+        else min(EFFECTIVE_SCORE_MAX if affair_policy else Decimal("100"), sum_decimal(breakdown.values()))
+    )
     warning_json = {"warnings": sorted(warnings.keys()), "ttm_annualized": annualized}
     exchange, code = parse_identity(identity_key)
     return {
@@ -496,18 +808,30 @@ def build_canonical_row(
         "report_core_profit": latest.get("report_core_profit"),
         "core_profit_ttm": quantize_decimal(core_profit_ttm),
         "core_gt_revenue_yoy": core_gt_revenue_yoy,
-        "revenue_growth_streak_q": streak(computed_quarters, "revenue_yoy_pct", positive=True),
-        "core_growth_streak_q": streak(computed_quarters, "core_profit_yoy_pct", positive=True),
-        "core_gt_revenue_streak_q": core_gt_streak(computed_quarters),
+        "revenue_growth_streak_q": revenue_growth_streak_q,
+        "core_growth_streak_q": core_growth_streak_q,
+        "core_gt_revenue_streak_q": core_gt_revenue_streak_q,
         "forecast_type": forecast_type,
         "forecast_score": forecast_score,
         "score_breakdown_json": {key: str(value) for key, value in breakdown.items()},
         "financial_warning_json": warning_json,
         "financial_metric_version": FINANCIAL_METRIC_VERSION,
-        "source": "stock_financial_canonical.tdx_mootdx_first.tushare_fallback",
+        **({"financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION} if affair_policy else {}),
+        "source": FINANCIAL_AUTHORITY if affair_policy else "stock_financial_canonical.tdx_mootdx_first.tushare_fallback",
         "source_batch_id": BATCH_ID,
         "source_version": SOURCE_VERSION,
-        "raw_payload": {"latest_source": json_safe(latest), "quarter_count": len(computed_quarters)},
+        "raw_payload": {
+            "latest_source": json_safe(latest),
+            "quarter_count": len(computed_quarters),
+            **(
+                {
+                    "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+                    "complete_four_quarter_chain": complete_four_quarter_chain,
+                }
+                if affair_policy
+                else {}
+            ),
+        },
     }, warnings
 
 
@@ -534,6 +858,7 @@ def build_policy_canonical_row(
     daily_basic: Mapping[str, Any],
     source_trade_date: str,
     warning_code: str,
+    affair_policy: bool = False,
 ) -> tuple[dict[str, Any], Counter[str]]:
     latest = dict(rows[0] if rows else {})
     warnings = Counter({warning_code: 1})
@@ -543,11 +868,19 @@ def build_policy_canonical_row(
                 warnings[code] += 1
     industry = canonical_industry(latest, daily_basic)
     exchange, code = parse_identity(identity_key)
-    total_mv = first_decimal(daily_basic, "total_mv") or first_decimal(latest, "total_mv")
-    circ_mv = first_decimal(daily_basic, "circ_mv") or first_decimal(latest, "circ_mv")
-    forecast_type = optional_text(latest.get("forecast_type"))
-    forecast_score = forecast_score_for(forecast_type)
-    if not forecast_type:
+    if affair_policy:
+        total_mv = first_decimal(daily_basic, "total_mv")
+        circ_mv = first_decimal(daily_basic, "circ_mv")
+    else:
+        total_mv = first_decimal(daily_basic, "total_mv") or first_decimal(latest, "total_mv")
+        circ_mv = first_decimal(daily_basic, "circ_mv") or first_decimal(latest, "circ_mv")
+    if affair_policy and total_mv is None:
+        warnings[DAILY_BASIC_MISSING_WARNING] += 1
+    if affair_policy and daily_basic.get("daily_basic_carried_forward") is True:
+        warnings["daily_basic_total_mv_carried_forward"] += 1
+    forecast_type = None if affair_policy else optional_text(latest.get("forecast_type"))
+    forecast_score = None if affair_policy else forecast_score_for(forecast_type)
+    if not affair_policy and not forecast_type:
         warnings["forecast_missing"] += 1
     warning_json = {
         "warnings": sorted(warnings.keys()),
@@ -595,14 +928,197 @@ def build_policy_canonical_row(
             "policy": "disabled",
             "reason": warning_code,
             "disabled_components": list(POLICY_DISABLED_COMPONENTS),
+            **({"forecast_score": "0"} if affair_policy else {}),
         },
         "financial_warning_json": warning_json,
         "financial_metric_version": FINANCIAL_METRIC_VERSION,
-        "source": "stock_financial_canonical.policy_v1",
+        **({"financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION} if affair_policy else {}),
+        "source": FINANCIAL_AUTHORITY if affair_policy else "stock_financial_canonical.policy_v1",
         "source_batch_id": BATCH_ID,
         "source_version": SOURCE_VERSION,
-        "raw_payload": {"latest_source": json_safe(latest), "quarter_count": len(rows), "sector_policy": warning_code},
+        "raw_payload": {
+            "latest_source": json_safe(latest),
+            "quarter_count": len(rows),
+            "sector_policy": warning_code,
+            **(
+                {"financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION}
+                if affair_policy
+                else {}
+            ),
+        },
     }, warnings
+
+
+def build_financial_warning_only_canonical_row(
+    *,
+    identity_key: str,
+    source_row: Mapping[str, Any],
+    daily_basic: Mapping[str, Any],
+    source_trade_date: str,
+) -> tuple[dict[str, Any], Counter[str]]:
+    if not is_financial_warning_only_row(source_row):
+        raise StockFinancialCanonicalBlocked("financial_null_warning_row_not_authorized")
+    exchange, code = parse_identity(identity_key)
+    warnings = Counter({FINANCIAL_NULL_WARNING_CODE: 1})
+    total_mv = first_decimal(daily_basic, "total_mv")
+    circ_mv = first_decimal(daily_basic, "circ_mv")
+    if total_mv is None:
+        warnings[DAILY_BASIC_MISSING_WARNING] += 1
+    warning_payload = source_row.get("financial_warning_json")
+    warning_reason = (
+        warning_payload.get("reason")
+        if isinstance(warning_payload, Mapping)
+        else None
+    )
+    warning_json = {
+        "warnings": sorted(warnings),
+        "severity": "P1",
+        "reason": warning_reason or "financial_source_unavailable",
+        "financial_degraded_but_fastlane_allowed": True,
+    }
+    return {
+        "stock_identity_key": identity_key,
+        "asof_date": source_trade_date,
+        "source_trade_date": source_trade_date,
+        "announcement_date": None,
+        "report_period": None,
+        "ts_code": str(source_row.get("ts_code") or f"{code}.{exchange}"),
+        "code": code,
+        "exchange": exchange,
+        "roe": None,
+        "revenue_yoy": None,
+        "profit_yoy": None,
+        "total_revenue": None,
+        "net_profit": None,
+        "net_assets": None,
+        "eps": None,
+        "bps": None,
+        "pe_core": None,
+        "total_mv": total_mv,
+        "circ_mv": circ_mv,
+        "score": None,
+        "warning": ";".join(warning_json["warnings"]),
+        "quality_status": "warning",
+        "cash_realization_rate": None,
+        "revenue_yoy_pct": None,
+        "core_profit_yoy_pct": None,
+        "report_core_revenue": None,
+        "report_core_profit": None,
+        "core_profit_ttm": None,
+        "core_gt_revenue_yoy": None,
+        "revenue_growth_streak_q": None,
+        "core_growth_streak_q": None,
+        "core_gt_revenue_streak_q": None,
+        "forecast_type": None,
+        "forecast_score": None,
+        "score_breakdown_json": {
+            "policy": "financial_warning_only",
+            "reason": FINANCIAL_NULL_WARNING_CODE,
+            "forecast_score": "0",
+        },
+        "financial_warning_json": warning_json,
+        "financial_metric_version": FINANCIAL_METRIC_VERSION,
+        "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+        "source": FINANCIAL_AUTHORITY,
+        "source_batch_id": BATCH_ID,
+        "source_version": SOURCE_VERSION,
+        "raw_payload": {
+            "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+            "financial_warning_only": True,
+            "financial_values_fabricated": False,
+            "warning_code": FINANCIAL_NULL_WARNING_CODE,
+            "reason": warning_json["reason"],
+        },
+    }, warnings
+
+
+def build_incomplete_financial_canonical_row(
+    *,
+    identity_key: str,
+    latest_source: Mapping[str, Any],
+    daily_basic: Mapping[str, Any],
+    source_trade_date: str,
+    warnings: Counter[str],
+) -> tuple[dict[str, Any], Counter[str]]:
+    """Keep an Affair identity without claiming metrics that need a provable single quarter."""
+
+    exchange, code = parse_identity(identity_key)
+    row_warnings = Counter(warnings)
+    for code_to_remove in (
+        "canonical_core_line_items_missing",
+        "interest_expense_missing_finance_expense_used",
+        LATEST_CORE_LINE_ITEMS_MISSING_FALLBACK_WARNING,
+        HISTORICAL_CORE_LINE_ITEMS_MISSING_WARNING,
+        *ZERO_FALLBACK_WARNING_CODES,
+    ):
+        row_warnings.pop(code_to_remove, None)
+    row_warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING] = max(
+        1,
+        row_warnings[FINANCIAL_HISTORY_INCOMPLETE_WARNING],
+    )
+    total_mv = first_decimal(daily_basic, "total_mv")
+    circ_mv = first_decimal(daily_basic, "circ_mv")
+    if total_mv is None:
+        row_warnings[DAILY_BASIC_MISSING_WARNING] += 1
+    warning_json = {
+        "warnings": sorted(row_warnings),
+        "severity": "P1",
+        "reason": FINANCIAL_HISTORY_INCOMPLETE_WARNING,
+        "financial_degraded_but_fastlane_allowed": True,
+    }
+    return {
+        "stock_identity_key": identity_key,
+        "asof_date": source_trade_date,
+        "source_trade_date": source_trade_date,
+        "announcement_date": latest_source.get("announcement_date"),
+        "report_period": latest_source.get("report_period"),
+        "ts_code": str(latest_source.get("ts_code") or f"{code}.{exchange}"),
+        "code": code,
+        "exchange": exchange,
+        "roe": first_decimal(latest_source, "roe"),
+        "revenue_yoy": None,
+        "profit_yoy": None,
+        "total_revenue": None,
+        "net_profit": first_decimal(latest_source, "net_profit"),
+        "net_assets": first_decimal(latest_source, "net_assets"),
+        "eps": first_decimal(latest_source, "eps"),
+        "bps": first_decimal(latest_source, "bps"),
+        "pe_core": None,
+        "total_mv": total_mv,
+        "circ_mv": circ_mv,
+        "score": None,
+        "warning": FINANCIAL_HISTORY_INCOMPLETE_WARNING,
+        "quality_status": "warning",
+        "cash_realization_rate": None,
+        "revenue_yoy_pct": None,
+        "core_profit_yoy_pct": None,
+        "report_core_revenue": None,
+        "report_core_profit": None,
+        "core_profit_ttm": None,
+        "core_gt_revenue_yoy": None,
+        "revenue_growth_streak_q": None,
+        "core_growth_streak_q": None,
+        "core_gt_revenue_streak_q": None,
+        "forecast_type": None,
+        "forecast_score": None,
+        "score_breakdown_json": {
+            "policy": "financial_history_incomplete",
+            "reason": FINANCIAL_HISTORY_INCOMPLETE_WARNING,
+            "forecast_score": "0",
+        },
+        "financial_warning_json": warning_json,
+        "financial_metric_version": FINANCIAL_METRIC_VERSION,
+        "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+        "source": FINANCIAL_AUTHORITY,
+        "source_batch_id": BATCH_ID,
+        "source_version": SOURCE_VERSION,
+        "raw_payload": {
+            "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+            "financial_history_incomplete": True,
+            "financial_values_fabricated": False,
+            "latest_source": json_safe(latest_source),
+        },
+    }, row_warnings
 
 
 def compute_core_profit(row: Mapping[str, Any]) -> tuple[Decimal | None, Counter[str]]:
@@ -898,6 +1414,7 @@ def build_dry_run_report(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         daily_basic_rows=snapshot.get("daily_basic_rows") or [],
         source_trade_date=str(snapshot.get("source_trade_date") or TRADE_DATE),
         expected_identity_keys=snapshot.get("expected_identity_keys") or [],
+        source_probe=snapshot.get("source_probe") or {},
     )
     baseline = snapshot.get("baseline") or {}
     return json_safe(
@@ -916,6 +1433,8 @@ def build_dry_run_report(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 def build_execute_contract(snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]) -> dict[str, Any]:
     conflicts = ((snapshot.get("baseline") or {}).get("conflicts") or {})
+    source_probe = snapshot.get("source_probe") if isinstance(snapshot.get("source_probe"), Mapping) else {}
+    affair_policy = source_probe.get("financial_source_policy_version") == FINANCIAL_SOURCE_POLICY_VERSION
     blockers = list(dry_run.get("blockers") or [])
     for name, count in conflicts.items():
         if int(count or 0) != 0:
@@ -932,11 +1451,22 @@ def build_execute_contract(snapshot: Mapping[str, Any], dry_run: Mapping[str, An
             "source_version": SOURCE_VERSION,
             "previous_source_version": snapshot.get("active_source_version") or PREVIOUS_SOURCE_VERSION,
             "financial_metric_version": FINANCIAL_METRIC_VERSION,
+            **(
+                {
+                    "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+                    "financial_authority": FINANCIAL_AUTHORITY,
+                    "tushare_allowed_endpoints": ["daily_basic"],
+                    "forecast_disabled": True,
+                    "effective_score_max": str(EFFECTIVE_SCORE_MAX),
+                }
+                if affair_policy
+                else {}
+            ),
             "expected_rows": dry_run.get("expected_rows"),
             "dry_run_result": dry_run.get("result"),
             "allowed_future_write_tables": list(ALLOWED_FUTURE_WRITE_TABLES),
             "forbidden_scope": list(FORBIDDEN_SCOPE),
-            "source_priority": [SOURCE_TDX, SOURCE_TUSHARE_FALLBACK],
+            "source_priority": [FINANCIAL_AUTHORITY] if affair_policy else [SOURCE_TDX, SOURCE_TUSHARE_FALLBACK],
             "asof_guard": "announcement_date <= source_trade_date; unproven missing announcement_date excluded",
             "line_item_fallback_policy": {
                 "rd_expense": {
@@ -1005,6 +1535,8 @@ def build_execute_contract(snapshot: Mapping[str, Any], dry_run: Mapping[str, An
 
 def build_execute_preflight_report(snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]) -> dict[str, Any]:
     conflicts = ((snapshot.get("baseline") or {}).get("conflicts") or {})
+    source_probe = snapshot.get("source_probe") if isinstance(snapshot.get("source_probe"), Mapping) else {}
+    affair_policy = source_probe.get("financial_source_policy_version") == FINANCIAL_SOURCE_POLICY_VERSION
     blockers = list(dry_run.get("blockers") or [])
     for name, count in conflicts.items():
         if int(count or 0) != 0:
@@ -1023,6 +1555,17 @@ def build_execute_preflight_report(snapshot: Mapping[str, Any], dry_run: Mapping
             "source_batch_id": BATCH_ID,
             "source_version": SOURCE_VERSION,
             "previous_source_version": snapshot.get("active_source_version") or PREVIOUS_SOURCE_VERSION,
+            **(
+                {
+                    "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+                    "financial_authority": FINANCIAL_AUTHORITY,
+                    "tushare_allowed_endpoints": ["daily_basic"],
+                    "forecast_disabled": True,
+                    "effective_score_max": str(EFFECTIVE_SCORE_MAX),
+                }
+                if affair_policy
+                else {}
+            ),
             "runner_readiness": "ready_for_final_gate" if not blockers else "blocked",
             "execute_runner_implemented": True,
             "execute_authorized": False,
@@ -1079,6 +1622,7 @@ def build_commit_plan(*, snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]
             daily_basic_rows=snapshot.get("daily_basic_rows") or [],
             source_trade_date=str(snapshot.get("source_trade_date") or TRADE_DATE),
             expected_identity_keys=snapshot.get("expected_identity_keys") or [],
+            source_probe=snapshot.get("source_probe") or {},
         )
         rows = list(calc.get("rows") or [])
     expected_rows = int((dry_run.get("row_counts") or {}).get("stock_financial_metrics_fact") or 0)
@@ -1428,6 +1972,39 @@ def same_quarter_prior_year(report_period: str) -> str:
     return f"{int(report_period[:4]) - 1}{report_period[4:]}"
 
 
+def previous_quarter_period(report_period: str) -> str | None:
+    if len(report_period) != 8 or not report_period.isdigit():
+        return None
+    year = int(report_period[:4])
+    suffix = report_period[4:]
+    return {
+        "0331": f"{year - 1}1231",
+        "0630": f"{year}0331",
+        "0930": f"{year}0630",
+        "1231": f"{year}0930",
+    }.get(suffix)
+
+
+def contiguous_quarter_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> list[Mapping[str, Any]]:
+    contiguous: list[Mapping[str, Any]] = []
+    expected_period: str | None = None
+    for row in rows:
+        report_period = str(row.get("report_period") or "")
+        if expected_period is not None and report_period != expected_period:
+            break
+        contiguous.append(row)
+        if len(contiguous) >= limit:
+            break
+        expected_period = previous_quarter_period(report_period)
+        if expected_period is None:
+            break
+    return contiguous
+
+
 def calculate_yoy(latest: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], field: str) -> Decimal | None:
     latest_value = decimal_or_none(latest.get(field))
     if latest_value is None:
@@ -1450,6 +2027,37 @@ def streak(rows: Sequence[Mapping[str, Any]], field: str, *, positive: bool) -> 
             count += 1
         else:
             break
+    return count
+
+
+def affair_yoy_streak(rows: Sequence[Mapping[str, Any]], field: str) -> int:
+    count = 0
+    expected_period: str | None = None
+    for row in rows:
+        report_period = str(row.get("report_period") or "")
+        if expected_period is not None and report_period != expected_period:
+            break
+        value = calculate_yoy(row, rows, field)
+        if value is None or value <= 0:
+            break
+        count += 1
+        expected_period = previous_quarter_period(report_period)
+    return count
+
+
+def affair_core_gt_streak(rows: Sequence[Mapping[str, Any]]) -> int:
+    count = 0
+    expected_period: str | None = None
+    for row in rows:
+        report_period = str(row.get("report_period") or "")
+        if expected_period is not None and report_period != expected_period:
+            break
+        revenue_yoy = calculate_yoy(row, rows, "report_core_revenue")
+        core_yoy = calculate_yoy(row, rows, "report_core_profit")
+        if revenue_yoy is None or core_yoy is None or core_yoy <= revenue_yoy:
+            break
+        count += 1
+        expected_period = previous_quarter_period(report_period)
     return count
 
 
@@ -1489,9 +2097,9 @@ def score_breakdown(
     revenue_yoy_pct: Decimal | None,
     core_profit_yoy_pct: Decimal | None,
     core_gt_revenue_yoy: bool | None,
-    revenue_growth_streak_q: int,
-    core_growth_streak_q: int,
-    core_gt_revenue_streak_q: int,
+    revenue_growth_streak_q: int | None,
+    core_growth_streak_q: int | None,
+    core_gt_revenue_streak_q: int | None,
     forecast_score: Decimal | None,
 ) -> dict[str, Decimal]:
     return {
@@ -1501,9 +2109,9 @@ def score_breakdown(
         "revenue_yoy_pct": min(Decimal("10"), max(Decimal("0"), (revenue_yoy_pct or Decimal("0")) / Decimal("5"))),
         "core_profit_yoy_pct": min(Decimal("15"), max(Decimal("0"), (core_profit_yoy_pct or Decimal("0")) / Decimal("5"))),
         "core_gt_revenue_yoy": Decimal("10") if core_gt_revenue_yoy else Decimal("0"),
-        "revenue_growth_streak_q": min(Decimal("5"), Decimal(str(revenue_growth_streak_q))),
-        "core_growth_streak_q": min(Decimal("8"), Decimal(str(core_growth_streak_q * 2))),
-        "core_gt_revenue_streak_q": min(Decimal("4"), Decimal(str(core_gt_revenue_streak_q))),
+        "revenue_growth_streak_q": min(Decimal("5"), Decimal(str(revenue_growth_streak_q or 0))),
+        "core_growth_streak_q": min(Decimal("8"), Decimal(str((core_growth_streak_q or 0) * 2))),
+        "core_gt_revenue_streak_q": min(Decimal("4"), Decimal(str(core_gt_revenue_streak_q or 0))),
         "forecast_score": forecast_score or Decimal("0"),
     }
 

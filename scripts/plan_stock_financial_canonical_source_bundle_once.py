@@ -27,6 +27,7 @@ import ashare_v3.ingestion.stock_financial_canonical_source_bundle as source_bun
 
 
 DEFAULT_DSN = "postgresql://ashare_v3_user@127.0.0.1:5432/ashare_v3"
+DEFAULT_AFFAIR_CACHE_DIR = Path.home() / ".cache" / "ashare_v3" / "mootdx_affair"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -46,6 +47,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rate-limit-ms", type=int, default=300, help="Milliseconds to wait between Tushare requests when source fetch is enabled.")
     parser.add_argument("--tushare-concurrency", type=int, default=1, help="Bounded worker count for per-symbol Tushare source fetches.")
     parser.add_argument("--full-fetch-confirmed", action="store_true", help="Allow unbounded source probe when --max-symbols 0 is also supplied.")
+    parser.add_argument("--financial-only", action="store_true", default=True, help="Use the all-market Mootdx affair financial package and Tushare daily_basic only (the canonical path).")
+    parser.add_argument(
+        "--affair-cache-dir",
+        default=str(DEFAULT_AFFAIR_CACHE_DIR),
+        help="Local directory for the 10 usable Mootdx Affair packages; defaults outside the repository.",
+    )
     parser.add_argument("--dry-run-json")
     parser.add_argument("--dry-run-md")
     parser.add_argument("--contract-json")
@@ -104,7 +111,13 @@ def main(argv: list[str] | None = None, *, dependencies: Mapping[str, Any] | Non
             full_rebuild_confirmed=args.full_rebuild_confirmed,
             use_tdx_source=not args.tushare_only,
             tushare_concurrency=args.tushare_concurrency,
-            tushare_token=load_tushare_token(),
+            tushare_token=(
+                load_tushare_token()
+                if args.source_fetch_enabled and not args.financial_only
+                else None
+            ),
+            financial_only=args.financial_only,
+            affair_cache_dir=args.affair_cache_dir,
         )
     except source_bundle.StockFinancialCanonicalSourceBundleBlocked as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)
@@ -121,7 +134,7 @@ def main(argv: list[str] | None = None, *, dependencies: Mapping[str, Any] | Non
     )
     contract = source_bundle.build_contract(report)
     preflight = source_bundle.build_preflight(report)
-    if args.snapshot_cache_path:
+    if args.snapshot_cache_path and report.get("result") == "PASS":
         financial_snapshot = source_bundle.build_financial_canonical_snapshot_v1(
             source_trade_date=source_trade_date,
             active_source_version=(snapshot.get("baseline") or {}).get("active_stock_financial_source_version"),

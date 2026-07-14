@@ -26,7 +26,7 @@ from psycopg.rows import dict_row
 
 from ashare_v3.ingestion.tushare_env import load_tushare_token
 from ashare_v3.ingestion.common import require_yyyymmdd
-from ashare_v3.ingestion.mootdx_financial_source import MootdxFinancialSource
+from ashare_v3.ingestion.mootdx_financial_source import MootdxAffairFinancialSource
 from ashare_v3.ingestion.stock_financial import StockFinancialSymbol
 from ashare_v3.ingestion.stock_financial_canonical_metrics import (
     BATCH_ID,
@@ -51,6 +51,16 @@ FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION = "financial_canonical_snapshot_v1"
 DEFAULT_SMALL_SAMPLE_SIZE = 10
 INCREMENTAL_DELTA_FULL_FETCH_GUARD_RATIO = 0.20
 DEFAULT_TUSHARE_CACHE_PATH = Path("tmp/N1_stock_financial_canonical_source_bundle_20260529_tushare_cache.json")
+SOURCE_MOOTDX_AFFAIR = "mootdx_affair"
+FINANCIAL_SOURCE_POLICY_VERSION = "affair_authoritative_no_forecast_v1"
+FINANCIAL_NULL_WARNING_CODE = "financial_source_unavailable_null_metrics"
+FINANCIAL_FRESH_COVERAGE_MIN_RATIO = Decimal("0.90")
+LEGACY_FINANCIAL_UNAVAILABLE_WARNING_CODES = frozenset(
+    {
+        "emergency_previous_snapshot_financial_missing",
+        "current_only_financial_unavailable",
+    }
+)
 
 DEFAULT_PATHS = {
     "dry_run_json": Path("docs/N1_stock_financial_canonical_source_bundle_20260529_dry_run_report.json"),
@@ -261,6 +271,409 @@ def group_rows_by_identity_key(rows: Sequence[Mapping[str, Any]]) -> dict[str, l
     return grouped
 
 
+def canonical_payload_sha256(value: Any) -> str:
+    raw = json.dumps(json_strict_safe(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def identity_keys_sha256(identity_keys: Sequence[str]) -> str:
+    return canonical_payload_sha256(sorted({str(key) for key in identity_keys if key}))
+
+
+def is_financial_null_warning_row(row: Mapping[str, Any]) -> bool:
+    raw_payload = row.get("raw_payload")
+    return bool(
+        isinstance(raw_payload, Mapping)
+        and raw_payload.get("financial_warning_only") is True
+        and raw_payload.get("financial_values_fabricated") is False
+        and raw_payload.get("warning_code") == FINANCIAL_NULL_WARNING_CODE
+    )
+
+
+def is_legacy_financial_unavailable_row(row: Mapping[str, Any]) -> bool:
+    warning_payload = row.get("financial_warning_json")
+    warnings = (
+        warning_payload.get("warnings")
+        if isinstance(warning_payload, Mapping)
+        else []
+    ) or []
+    return bool(
+        LEGACY_FINANCIAL_UNAVAILABLE_WARNING_CODES.intersection(
+            str(code) for code in warnings if code
+        )
+    )
+
+
+def build_financial_null_warning_row(
+    identity_key: str,
+    *,
+    source_trade_date: str,
+    reason: str,
+) -> dict[str, Any]:
+    parts = str(identity_key).split(":", 2)
+    if len(parts) != 3 or parts[0] != "stock" or not parts[1] or not parts[2]:
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_null_warning_identity_invalid")
+    _, exchange, code = parts
+    return {
+        "stock_identity_key": identity_key,
+        "ts_code": f"{code}.{exchange}",
+        "code": code,
+        "exchange": exchange,
+        "source_type": SOURCE_MOOTDX_AFFAIR,
+        "source_trade_date": source_trade_date,
+        "report_period": None,
+        "announcement_date": None,
+        "forecast_type": None,
+        "forecast_score": None,
+        "financial_warning_json": {
+            "warnings": [FINANCIAL_NULL_WARNING_CODE],
+            "reason": reason,
+            "severity": "P1",
+        },
+        "raw_payload": {
+            "financial_warning_only": True,
+            "financial_values_fabricated": False,
+            "warning_code": FINANCIAL_NULL_WARNING_CODE,
+            "reason": reason,
+        },
+    }
+
+
+def dedupe_exact_financial_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Drop byte-equivalent canonical rows while preserving first-seen order."""
+
+    unique_rows: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    dropped_hashes: list[str] = []
+    for row in rows:
+        row_dict = dict(row)
+        row_hash = canonical_payload_sha256(row_dict)
+        if row_hash in seen_hashes:
+            dropped_hashes.append(row_hash)
+            continue
+        seen_hashes.add(row_hash)
+        unique_rows.append(row_dict)
+    return unique_rows, dropped_hashes
+
+
+def resolve_legacy_carry_grain_conflicts(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Preserve the first immutable snapshot row for legacy grain conflicts.
+
+    Fresh Affair rows never use this compatibility path; a same-grain payload
+    conflict in fresh data therefore remains a P0 integrity failure.
+    """
+
+    selected_rows: list[dict[str, Any]] = []
+    selected_by_grain: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+    conflicts: list[dict[str, str]] = []
+    for row in rows:
+        row_dict = dict(row)
+        if is_financial_null_warning_row(row_dict) or is_legacy_financial_unavailable_row(row_dict):
+            selected_rows.append(row_dict)
+            continue
+        grain = (
+            str(row_dict.get("stock_identity_key") or ""),
+            str(row_dict.get("report_period") or ""),
+            str(row_dict.get("announcement_date") or ""),
+        )
+        row_hash = canonical_payload_sha256(row_dict)
+        selected = selected_by_grain.get(grain)
+        if selected is None:
+            selected_by_grain[grain] = (row_hash, row_dict)
+            selected_rows.append(row_dict)
+            continue
+        selected_hash, _ = selected
+        if row_hash == selected_hash:
+            selected_rows.append(row_dict)
+            continue
+        conflicts.append(
+            {
+                "stock_identity_key": grain[0],
+                "report_period": grain[1],
+                "announcement_date": grain[2],
+                "selected_row_sha256": selected_hash,
+                "rejected_row_sha256": row_hash,
+            }
+        )
+    return selected_rows, conflicts
+
+
+def merge_financial_only_rows(
+    *,
+    expected_identity_keys: Sequence[str],
+    refreshed_rows: Sequence[Mapping[str, Any]],
+    previous_snapshot: Mapping[str, Any] | None = None,
+    source_trade_date: str = TRADE_DATE,
+    force_full_fallback: bool = False,
+    fallback_reason: str | None = None,
+    carry_limit: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Merge Affair rows without allowing financial availability to stop Fast Lane.
+
+    Data-integrity failures remain fail-closed. Source availability and coverage
+    failures are converted into a fully reconciled previous-snapshot fallback,
+    with explicit NULL warning rows for identities that have no prior history.
+    """
+
+    source_trade_date = require_yyyymmdd(source_trade_date, "source_trade_date")
+    raw_expected = [str(key) for key in expected_identity_keys]
+    expected = sorted(set(raw_expected))
+    if not expected or len(expected) != len(raw_expected) or any(not key for key in raw_expected):
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_frozen_universe_duplicate_or_empty")
+    expected_set = set(expected)
+    refreshed_unknown = sorted(
+        {
+            str(row.get("stock_identity_key") or "")
+            for row in refreshed_rows
+            if str(row.get("stock_identity_key") or "") not in expected_set
+        }
+    )
+    if refreshed_unknown:
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_refreshed_identity_outside_frozen_universe")
+    refreshed: list[dict[str, Any]] = []
+    refreshed_missing_announcement_count = 0
+    refreshed_future_announcement_count = 0
+    refreshed_invalid_report_period_count = 0
+    for row in refreshed_rows:
+        try:
+            announcement_date = optional_date_text(
+                row.get("announcement_date") or row.get("ann_date")
+            )
+        except (TypeError, ValueError):
+            announcement_date = None
+        try:
+            report_period = optional_date_text(
+                row.get("report_period") or row.get("end_date")
+            )
+        except (TypeError, ValueError):
+            report_period = None
+        if not announcement_date:
+            refreshed_missing_announcement_count += 1
+            continue
+        if announcement_date > source_trade_date:
+            refreshed_future_announcement_count += 1
+            continue
+        if not report_period:
+            refreshed_invalid_report_period_count += 1
+            continue
+        refreshed.append(
+            {
+                **dict(row),
+                "announcement_date": announcement_date,
+                "report_period": report_period,
+                "forecast_type": None,
+                "forecast_score": None,
+            }
+        )
+    current_by_key = group_rows_by_identity_key(refreshed)
+    previous_rows = [
+        {**dict(row), "forecast_type": None, "forecast_score": None}
+        for row in snapshot_financial_rows(previous_snapshot or {})
+        if str(row.get("stock_identity_key") or "") in expected_set
+    ]
+    previous_by_key = group_rows_by_identity_key(previous_rows)
+    missing = sorted(expected_set - set(current_by_key))
+    incomplete = sorted(
+        key for key, rows in current_by_key.items()
+        if not any(not missing_p0_line_items(row) for row in rows)
+    )
+    fresh_identity_keys = sorted(
+        key
+        for key, rows in current_by_key.items()
+        if any(not missing_p0_line_items(row) for row in rows)
+    )
+    fresh_count = len(fresh_identity_keys)
+    fresh_ratio = Decimal(fresh_count) / Decimal(len(expected))
+    threshold_count = (len(expected) * 9 + 9) // 10
+    bounded_carry_limit = len(expected) - threshold_count if carry_limit is None else int(carry_limit)
+    use_full_fallback = bool(force_full_fallback or fresh_count < threshold_count)
+    requested_carry_keys = expected if use_full_fallback else sorted(set(missing) | set(incomplete))
+    final_rows: list[dict[str, Any]] = []
+    carried_keys: list[str] = []
+    null_warning_keys: list[str] = []
+    legacy_grain_conflicts: list[dict[str, str]] = []
+    for key in expected:
+        if key in requested_carry_keys:
+            previous_for_key = previous_by_key.get(key) or []
+            previous_is_unavailable_warning = bool(
+                previous_for_key
+                and all(
+                    is_financial_null_warning_row(row)
+                    or is_legacy_financial_unavailable_row(row)
+                    for row in previous_for_key
+                )
+            )
+            if previous_for_key and not previous_is_unavailable_warning:
+                resolved_previous, identity_conflicts = (
+                    resolve_legacy_carry_grain_conflicts(previous_for_key)
+                )
+                final_rows.extend(resolved_previous)
+                legacy_grain_conflicts.extend(identity_conflicts)
+                carried_keys.append(key)
+            else:
+                reason = fallback_reason or (
+                    "fresh_coverage_below_90pct"
+                    if use_full_fallback and not force_full_fallback
+                    else "financial_source_unavailable"
+                    if use_full_fallback
+                    else "financial_identity_missing_or_incomplete"
+                )
+                final_rows.append(
+                    build_financial_null_warning_row(
+                        key,
+                        source_trade_date=source_trade_date,
+                        reason=reason,
+                    )
+                )
+                null_warning_keys.append(key)
+        else:
+            selected = current_by_key.get(key) or []
+            if not selected:
+                raise StockFinancialCanonicalSourceBundleBlocked("financial_merge_selected_identity_missing")
+            final_rows.extend(selected)
+
+    final_by_key = group_rows_by_identity_key(final_rows)
+    final_keys = sorted(final_by_key)
+    if final_keys != expected:
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_final_identity_exact_equality_failed")
+    if len(final_keys) != len(expected):
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_final_identity_count_mismatch")
+
+    pre_dedup_rows = [
+        {**dict(row), "forecast_type": None, "forecast_score": None}
+        for row in final_rows
+    ]
+    final_rows_normalized, dropped_exact_row_hashes = (
+        dedupe_exact_financial_rows(pre_dedup_rows)
+    )
+    final_identity_sha256 = identity_keys_sha256(final_keys)
+    null_warning_sha256 = identity_keys_sha256(null_warning_keys)
+    effective_fallback_reason = fallback_reason or (
+        "fresh_coverage_below_90pct"
+        if use_full_fallback and not force_full_fallback
+        else None
+    )
+    lineage = {
+        "financial_only": True,
+        "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+        "financial_authority": SOURCE_MOOTDX_AFFAIR,
+        "forecast_disabled": True,
+        "financial_degraded_but_fastlane_allowed": True,
+        "financial_refresh_mode": (
+            "previous_snapshot_full_carry_forward" if use_full_fallback else "affair_fresh_90pct"
+        ),
+        "financial_fallback_reason": effective_fallback_reason,
+        "expected_identity_count": len(expected),
+        "expected_identity_sha256": identity_keys_sha256(expected),
+        "financial_fresh_coverage_min_ratio": str(FINANCIAL_FRESH_COVERAGE_MIN_RATIO),
+        "financial_fresh_coverage_threshold_count": threshold_count,
+        "financial_fresh_coverage_count": fresh_count,
+        "financial_fresh_coverage_ratio": str(fresh_ratio),
+        "financial_fresh_identity_keys": fresh_identity_keys,
+        "financial_fresh_identity_sha256": identity_keys_sha256(fresh_identity_keys),
+        "refreshed_financial_row_count": len(refreshed),
+        "refreshed_missing_announcement_count": refreshed_missing_announcement_count,
+        "refreshed_future_announcement_count": refreshed_future_announcement_count,
+        "refreshed_invalid_report_period_count": refreshed_invalid_report_period_count,
+        "refreshed_financial_identity_count": len(current_by_key),
+        "refreshed_financial_identity_keys": sorted(current_by_key),
+        "financial_refreshed_missing_identity_keys": missing,
+        "financial_refreshed_incomplete_identity_keys": incomplete,
+        "financial_requested_carry_identity_keys": requested_carry_keys,
+        "financial_carry_limit": bounded_carry_limit,
+        "financial_carried_forward_identity_keys": carried_keys,
+        "financial_carried_forward_count": len(carried_keys),
+        "financial_carried_forward_identity_sha256": identity_keys_sha256(carried_keys),
+        "financial_null_warning_identity_keys": null_warning_keys,
+        "financial_null_warning_identity_count": len(null_warning_keys),
+        "financial_null_warning_identity_sha256": null_warning_sha256,
+        "financial_pre_dedup_row_count": len(pre_dedup_rows),
+        "financial_exact_duplicate_dropped_count": len(
+            dropped_exact_row_hashes
+        ),
+        "financial_exact_duplicate_dropped_row_hashes_sha256": (
+            canonical_payload_sha256(sorted(dropped_exact_row_hashes))
+        ),
+        "financial_exact_duplicate_dropped_row_hash_samples": sorted(
+            set(dropped_exact_row_hashes)
+        )[:20],
+        "financial_legacy_grain_conflict_resolved_count": len(
+            legacy_grain_conflicts
+        ),
+        "financial_legacy_grain_conflict_manifest_sha256": (
+            canonical_payload_sha256(legacy_grain_conflicts)
+        ),
+        "financial_legacy_grain_conflict_samples": (
+            legacy_grain_conflicts[:20]
+        ),
+        "financial_before_legacy_resolution_row_count": (
+            len(pre_dedup_rows)
+            + len(legacy_grain_conflicts)
+        ),
+        "financial_final_row_count": len(final_rows_normalized),
+        "financial_final_rows_sha256": canonical_payload_sha256(final_rows_normalized),
+        "financial_final_identity_count": len(final_keys),
+        "financial_final_identity_sha256": final_identity_sha256,
+    }
+    return final_rows_normalized, lineage
+
+
+def merge_financial_only_daily_basic_rows(
+    *,
+    expected_identity_keys: Sequence[str],
+    current_rows: Sequence[Mapping[str, Any]],
+    previous_snapshot: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    expected = sorted({str(key) for key in expected_identity_keys})
+    expected_set = set(expected)
+
+    def unique_by_key(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, dict[str, Any]]:
+        output: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = str(row.get("stock_identity_key") or "")
+            if not key or key not in expected_set:
+                continue
+            if key in output:
+                raise StockFinancialCanonicalSourceBundleBlocked(
+                    f"{label}_daily_basic_duplicate_identity"
+                )
+            output[key] = dict(row)
+        return output
+
+    current_by_key = unique_by_key(current_rows, "current")
+    previous_rows = [
+        dict(row)
+        for row in (previous_snapshot or {}).get("daily_basic_rows") or []
+        if isinstance(row, Mapping)
+    ]
+    previous_by_key = unique_by_key(previous_rows, "previous")
+    final_rows: list[dict[str, Any]] = []
+    carried_keys: list[str] = []
+    missing_keys: list[str] = []
+    for key in expected:
+        row = current_by_key.get(key)
+        if row is not None:
+            final_rows.append(row)
+            continue
+        row = previous_by_key.get(key)
+        if row is not None:
+            final_rows.append({**row, "daily_basic_carried_forward": True})
+            carried_keys.append(key)
+        else:
+            missing_keys.append(key)
+    return final_rows, {
+        "daily_basic_identity_count": len(current_by_key),
+        "daily_basic_carried_forward_identity_keys": carried_keys,
+        "daily_basic_carried_forward_count": len(carried_keys),
+        "daily_basic_missing_identity_keys": missing_keys,
+        "daily_basic_missing_identity_count": len(missing_keys),
+    }
+
+
 def load_financial_canonical_snapshot_v1(path: str | Path | None) -> dict[str, Any] | None:
     if not path:
         return None
@@ -274,6 +687,32 @@ def load_financial_canonical_snapshot_v1(path: str | Path | None) -> dict[str, A
     if not isinstance(payload, Mapping):
         return None
     if payload.get("schema_version") != FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    expected_raw = [str(key) for key in payload.get("expected_identity_keys") or []]
+    expected = sorted(set(expected_raw))
+    rows_by_identity = payload.get("rows_by_identity")
+    if (
+        not expected
+        or len(expected) != len(expected_raw)
+        or not isinstance(rows_by_identity, Mapping)
+        or sorted(str(key) for key in rows_by_identity) != expected
+    ):
+        return None
+    financial_rows = [
+        dict(row)
+        for row in payload.get("financial_rows") or []
+        if isinstance(row, Mapping)
+    ]
+    if any(
+        str(row.get("stock_identity_key") or "") not in set(expected)
+        for row in financial_rows
+    ):
+        return None
+    declared_count = payload.get("expected_identity_count")
+    declared_hash = payload.get("expected_identity_sha256")
+    if declared_count is not None and int(declared_count) != len(expected):
+        return None
+    if declared_hash is not None and str(declared_hash) != identity_keys_sha256(expected):
         return None
     return dict(payload)
 
@@ -464,7 +903,10 @@ def build_financial_canonical_snapshot_v1(
         "source_trade_date": source_trade_date,
         "active_source_version": active_source_version,
         "expected_identity_keys": sorted({str(key) for key in expected_identity_keys}),
+        "expected_identity_count": len(sorted({str(key) for key in expected_identity_keys})),
+        "expected_identity_sha256": identity_keys_sha256(expected_identity_keys),
         "financial_rows": json_strict_safe(list(financial_rows)),
+        "financial_rows_sha256": canonical_payload_sha256(list(financial_rows)),
         "forecast_rows": json_strict_safe(list(forecast_rows)),
         "daily_basic_rows": json_strict_safe(list(daily_basic_rows)),
         "rows_by_identity": rows_by_identity,
@@ -480,10 +922,7 @@ def write_financial_canonical_snapshot_v1(path: str | Path | None, payload: Mapp
     target.write_text(json.dumps(json_strict_safe(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 ALLOWED_FUTURE_READ_SOURCES = (
-    "tdx_mootdx.finance",
-    "tushare.income",
-    "tushare.cashflow",
-    "tushare.forecast",
+    "mootdx.affair",
     "tushare.daily_basic",
 )
 
@@ -620,15 +1059,144 @@ def build_source_bundle_report(
     source_probe: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_trade_date = require_yyyymmdd(source_trade_date, "source_trade_date")
-    expected = sorted({str(key) for key in expected_identity_keys})
+    raw_expected = [str(key) for key in expected_identity_keys]
+    expected = sorted(set(raw_expected))
+    probe = dict(source_probe or {})
+    financial_only = bool(probe.get("financial_only"))
+    affair_policy = bool(
+        financial_only
+        and probe.get("financial_source_policy_version") == FINANCIAL_SOURCE_POLICY_VERSION
+        and probe.get("forecast_disabled") is True
+    )
+    financial_source_name = SOURCE_MOOTDX_AFFAIR if financial_only else SOURCE_TUSHARE_FALLBACK
+    financial_integrity_errors: list[str] = []
+    if affair_policy:
+        all_financial_rows = [*tdx_rows, *tushare_rows]
+        computed_final_keys = sorted(group_rows_by_identity_key(all_financial_rows))
+        final_row_hashes = [
+            canonical_payload_sha256(dict(row))
+            for row in all_financial_rows
+        ]
+        financial_grains = [
+            (
+                str(row.get("stock_identity_key") or ""),
+                str(row.get("report_period") or ""),
+                str(row.get("announcement_date") or ""),
+            )
+            for row in all_financial_rows
+        ]
+        computed_warning_keys = sorted(
+            str(row.get("stock_identity_key") or "")
+            for row in all_financial_rows
+            if is_financial_null_warning_row(row)
+        )
+        registered_warning_keys = sorted(
+            str(key) for key in probe.get("financial_null_warning_identity_keys") or []
+        )
+        registered_fresh_keys = sorted(
+            str(key) for key in probe.get("financial_fresh_identity_keys") or []
+        )
+        registered_carried_keys = sorted(
+            str(key) for key in probe.get("financial_carried_forward_identity_keys") or []
+        )
+        exact_duplicate_dropped_count = int(
+            probe.get("financial_exact_duplicate_dropped_count") or 0
+        )
+        exact_duplicate_dropped_samples = [
+            str(value)
+            for value in probe.get(
+                "financial_exact_duplicate_dropped_row_hash_samples"
+            )
+            or []
+        ]
+        exact_duplicate_dropped_hash = str(
+            probe.get(
+                "financial_exact_duplicate_dropped_row_hashes_sha256"
+            )
+            or ""
+        )
+        legacy_conflict_count = int(
+            probe.get("financial_legacy_grain_conflict_resolved_count")
+            or 0
+        )
+        legacy_conflict_manifest_sha256 = str(
+            probe.get("financial_legacy_grain_conflict_manifest_sha256")
+            or ""
+        )
+        legacy_conflict_samples = list(
+            probe.get("financial_legacy_grain_conflict_samples") or []
+        )
+        package_manifest = probe.get("package_manifest") or probe.get("affair_file_manifest") or []
+        package_manifest_valid = True
+        if package_manifest:
+            package_manifest_valid = bool(
+                isinstance(package_manifest, Sequence)
+                and not isinstance(package_manifest, (str, bytes, bytearray))
+                and len(package_manifest) == 10
+                and int(probe.get("package_count") or len(package_manifest)) == len(package_manifest)
+                and str(
+                    probe.get("package_manifest_sha256")
+                    or probe.get("affair_file_manifest_sha256")
+                    or ""
+                )
+                == canonical_payload_sha256(list(package_manifest))
+                and len(
+                    {
+                        str(item.get("filename") or "")
+                        for item in package_manifest
+                        if isinstance(item, Mapping)
+                    }
+                )
+                == len(package_manifest)
+            )
+        checks = {
+            "expected_identity_unique": len(raw_expected) == len(expected) and bool(expected),
+            "registered_expected_count": int(probe.get("expected_identity_count") or -1) == len(expected),
+            "registered_expected_hash": str(probe.get("expected_identity_sha256") or "") == identity_keys_sha256(expected),
+            "final_identity_exact": computed_final_keys == expected,
+            "registered_final_count": int(probe.get("financial_final_identity_count") or -1) == len(computed_final_keys),
+            "registered_final_hash": str(probe.get("financial_final_identity_sha256") or "") == identity_keys_sha256(computed_final_keys),
+            "registered_final_row_count": int(probe.get("financial_final_row_count") or -1) == len(all_financial_rows),
+            "registered_final_rows_hash": str(probe.get("financial_final_rows_sha256") or "") == canonical_payload_sha256(all_financial_rows),
+            "final_exact_rows_unique": len(final_row_hashes) == len(set(final_row_hashes)),
+            "financial_grain_unique": len(financial_grains) == len(set(financial_grains)),
+            "exact_duplicate_count_nonnegative": exact_duplicate_dropped_count >= 0,
+            "pre_dedup_row_count": int(probe.get("financial_pre_dedup_row_count") or -1) == len(all_financial_rows) + exact_duplicate_dropped_count,
+            "exact_duplicate_hash_present": len(exact_duplicate_dropped_hash) == 64,
+            "exact_duplicate_samples_bounded": len(exact_duplicate_dropped_samples) <= min(20, exact_duplicate_dropped_count),
+            "exact_duplicate_sample_hashes_valid": all(len(value) == 64 for value in exact_duplicate_dropped_samples),
+            "legacy_conflict_count_nonnegative": legacy_conflict_count >= 0,
+            "before_legacy_resolution_row_count": int(probe.get("financial_before_legacy_resolution_row_count") or -1) == len(all_financial_rows) + exact_duplicate_dropped_count + legacy_conflict_count,
+            "legacy_conflict_manifest_hash_present": len(legacy_conflict_manifest_sha256) == 64,
+            "legacy_conflict_samples_bounded": len(legacy_conflict_samples) <= min(20, legacy_conflict_count),
+            "legacy_conflict_sample_shape": all(
+                isinstance(item, Mapping)
+                and str(item.get("stock_identity_key") or "") in set(expected)
+                and len(str(item.get("selected_row_sha256") or "")) == 64
+                and len(str(item.get("rejected_row_sha256") or "")) == 64
+                for item in legacy_conflict_samples
+            ),
+            "fresh_count": int(probe.get("financial_fresh_coverage_count") or 0) == len(registered_fresh_keys),
+            "fresh_hash": str(probe.get("financial_fresh_identity_sha256") or "") == identity_keys_sha256(registered_fresh_keys),
+            "fresh_subset": set(registered_fresh_keys).issubset(set(expected)),
+            "carried_count": int(probe.get("financial_carried_forward_count") or 0) == len(registered_carried_keys),
+            "carried_hash": str(probe.get("financial_carried_forward_identity_sha256") or "") == identity_keys_sha256(registered_carried_keys),
+            "carried_subset": set(registered_carried_keys).issubset(set(expected)),
+            "warning_keys_unique": len(computed_warning_keys) == len(set(computed_warning_keys)),
+            "warning_keys_exact": computed_warning_keys == registered_warning_keys,
+            "warning_count": int(probe.get("financial_null_warning_identity_count") or 0) == len(computed_warning_keys),
+            "warning_hash": str(probe.get("financial_null_warning_identity_sha256") or "") == identity_keys_sha256(computed_warning_keys),
+            "package_manifest": package_manifest_valid,
+        }
+        financial_integrity_errors = sorted(name for name, passed in checks.items() if not passed)
     tdx_valid, tdx_exclusions = asof_filter_rows(tdx_rows, source_trade_date, SOURCE_TDX)
-    tushare_valid, tushare_exclusions = asof_filter_rows(tushare_rows, source_trade_date, SOURCE_TUSHARE_FALLBACK)
-    forecast_valid, forecast_exclusions = asof_filter_rows(forecast_rows, source_trade_date, "tushare.forecast")
+    tushare_valid, tushare_exclusions = asof_filter_rows(tushare_rows, source_trade_date, financial_source_name)
+    forecast_valid, forecast_exclusions = asof_filter_rows(forecast_rows, source_trade_date, "tushare.forecast") if not financial_only else ([], Counter())
     daily_basic_by_key = {str(row.get("stock_identity_key")): dict(row) for row in daily_basic_rows if row.get("stock_identity_key")}
     forecast_by_key = latest_forecast_by_identity(forecast_valid)
 
     tdx_by_key = group_rows_by_identity(normalize_source_rows(tdx_valid, SOURCE_TDX))
-    tushare_by_key = group_rows_by_identity(normalize_source_rows(tushare_valid, SOURCE_TUSHARE_FALLBACK))
+    tushare_by_key = group_rows_by_identity(normalize_source_rows(tushare_valid, financial_source_name))
     selected_bundle_rows: list[dict[str, Any]] = []
     missing_line_items: list[dict[str, Any]] = []
     missing_source_identities: list[str] = []
@@ -647,7 +1215,11 @@ def build_source_bundle_report(
     pre_revenue_samples: list[dict[str, Any]] = []
 
     for identity_key in expected:
-        selected_source, selected_rows = select_identity_rows(tdx_by_key.get(identity_key) or [], tushare_by_key.get(identity_key) or [])
+        selected_source, selected_rows = select_identity_rows(
+            tdx_by_key.get(identity_key) or [],
+            tushare_by_key.get(identity_key) or [],
+            preferred_fallback_source=financial_source_name,
+        )
         if not selected_rows:
             missing_source_identities.append(identity_key)
             missing_line_items.append({"stock_identity_key": identity_key, "missing": ["source_rows"]})
@@ -658,6 +1230,33 @@ def build_source_bundle_report(
         daily_basic = daily_basic_by_key.get(identity_key) or {}
         if first_decimal(daily_basic, "total_mv") is None:
             missing_daily_basic_total_mv.append(identity_key)
+        warning_rows = [row for row in selected_rows if is_financial_null_warning_row(row)]
+        if warning_rows:
+            if len(warning_rows) != 1 or len(selected_rows) != 1:
+                financial_integrity_errors.append("financial_null_warning_row_not_singleton")
+                continue
+            warning_distribution.update([FINANCIAL_NULL_WARNING_CODE])
+            warning_row = dict(warning_rows[0])
+            raw_payload = dict(warning_row.get("raw_payload") or {})
+            raw_payload["daily_basic"] = json_safe(daily_basic)
+            warning_row.update(
+                {
+                    "source_trade_date": source_trade_date,
+                    "industry": canonical_industry(warning_row, daily_basic),
+                    "forecast_type": None,
+                    "forecast_score": None,
+                    "total_mv": daily_basic.get("total_mv"),
+                    "circ_mv": daily_basic.get("circ_mv"),
+                    "raw_payload": raw_payload,
+                    "financial_warning_json": {
+                        "warnings": [FINANCIAL_NULL_WARNING_CODE],
+                        "reason": raw_payload.get("reason"),
+                        "severity": "P1",
+                    },
+                }
+            )
+            selected_bundle_rows.append(warning_row)
+            continue
         forecast_type = forecast_by_key.get(identity_key, {}).get("forecast_type")
         if forecast_type:
             forecast_covered += 1
@@ -750,7 +1349,6 @@ def build_source_bundle_report(
     duplicate_count = len({row.get("stock_identity_key") for row in selected_bundle_rows}) - len(expected) if selected_bundle_rows else 0
     duplicate_count = max(0, duplicate_count)
 
-    probe = dict(source_probe or {})
     tushare_stats = dict(probe.get("tushare_stats") or {})
 
     def probe_int(name: str, default: int = 0) -> int:
@@ -761,12 +1359,27 @@ def build_source_bundle_report(
 
     quality_items = [
         quality_item(
-            "canonical_source_line_items",
+            "financial_degraded_lineage_integrity",
             "P0",
-            "passed" if not missing_line_items else "failed",
+            "passed" if not financial_integrity_errors else "failed",
+            "all lineage checks pass",
+            str(len(financial_integrity_errors)),
+            {"failed_checks": sorted(set(financial_integrity_errors))},
+        ),
+        quality_item(
+            "canonical_source_line_items",
+            "P1" if affair_policy else "P0",
+            "passed" if not missing_line_items else ("warning" if affair_policy else "failed"),
             "0 missing",
             str(len(missing_line_items)),
-            {"samples": missing_line_items[:20]},
+            {
+                "samples": missing_line_items[:20],
+                "policy": (
+                    "incomplete Affair metrics become NULL/P1 without blocking Fast Lane"
+                    if affair_policy
+                    else None
+                ),
+            },
         ),
         quality_item(
             "canonical_source_missing_identity",
@@ -778,8 +1391,8 @@ def build_source_bundle_report(
         ),
         quality_item(
             "daily_basic_total_mv_coverage",
-            "P0",
-            "passed" if not missing_daily_basic_total_mv else "failed",
+            "P1" if financial_only else "P0",
+            "passed" if not missing_daily_basic_total_mv else ("warning" if financial_only else "failed"),
             "0 missing",
             str(len(missing_daily_basic_total_mv)),
             {"samples": missing_daily_basic_total_mv[:20]},
@@ -793,11 +1406,73 @@ def build_source_bundle_report(
             {},
         ),
     ]
+    if financial_only and probe_int("financial_null_warning_identity_count"):
+        quality_items.append(
+            quality_item(
+                FINANCIAL_NULL_WARNING_CODE,
+                "P1",
+                "warning",
+                "0",
+                str(probe_int("financial_null_warning_identity_count")),
+                {
+                    "samples": list(probe.get("financial_null_warning_identity_keys") or [])[:20],
+                    "policy": "preserve frozen-universe identity with NULL financial metrics",
+                },
+            )
+        )
+    if financial_only and probe_int("financial_exact_duplicate_dropped_count"):
+        quality_items.append(
+            quality_item(
+                "financial_exact_duplicate_rows_dropped",
+                "P1",
+                "warning",
+                "0",
+                str(probe_int("financial_exact_duplicate_dropped_count")),
+                {
+                    "row_hash_manifest_sha256": probe.get(
+                        "financial_exact_duplicate_dropped_row_hashes_sha256"
+                    ),
+                    "samples": list(
+                        probe.get(
+                            "financial_exact_duplicate_dropped_row_hash_samples"
+                        )
+                        or []
+                    )[:20],
+                    "policy": "exact canonical duplicates are removed; same-grain payload conflicts remain P0",
+                },
+            )
+        )
+    if financial_only and probe_int("financial_legacy_grain_conflict_resolved_count"):
+        quality_items.append(
+            quality_item(
+                "financial_legacy_snapshot_grain_conflict_resolved",
+                "P1",
+                "warning",
+                "0",
+                str(
+                    probe_int(
+                        "financial_legacy_grain_conflict_resolved_count"
+                    )
+                ),
+                {
+                    "manifest_sha256": probe.get(
+                        "financial_legacy_grain_conflict_manifest_sha256"
+                    ),
+                    "samples": list(
+                        probe.get(
+                            "financial_legacy_grain_conflict_samples"
+                        )
+                        or []
+                    )[:20],
+                    "policy": "immutable previous snapshot keeps its first row; fresh Affair same-grain conflicts remain P0",
+                },
+            )
+        )
     if source_counts[SOURCE_TUSHARE_FALLBACK]:
         quality_items.append(
             quality_item("tushare_fallback_used", "P1", "warning", "0", str(source_counts[SOURCE_TUSHARE_FALLBACK]), {})
         )
-    if forecast_covered < len(expected):
+    if not financial_only and forecast_covered < len(expected):
         quality_items.append(
             quality_item(
                 "forecast_type_coverage",
@@ -806,6 +1481,17 @@ def build_source_bundle_report(
                 str(len(expected)),
                 str(forecast_covered),
                 {"missing_count": len(expected) - forecast_covered},
+            )
+        )
+    if financial_only and probe_int("announcement_date_unverified_count"):
+        quality_items.append(
+            quality_item(
+                "affair_announcement_date_unverified",
+                "P1",
+                "warning",
+                "0",
+                str(probe_int("announcement_date_unverified_count")),
+                {"policy": "carry_previous_snapshot_when_cutoff_cannot_be_proven"},
             )
         )
     if interest_fallback_count:
@@ -881,7 +1567,19 @@ def build_source_bundle_report(
     )
     if probe.get("source_fetch_enabled") is False:
         quality_items.append(
-            quality_item("source_fetch_enabled", "P0", "failed", "true", "false", {"reason": "external source probe was not enabled"})
+            quality_item(
+                "source_fetch_enabled",
+                "P1" if financial_only else "P0",
+                "warning" if financial_only else "failed",
+                "true",
+                "false",
+                {
+                    "reason": "financial source probe was not enabled; previous snapshot/NULL fallback used",
+                    "financial_degraded_but_fastlane_allowed": bool(
+                        probe.get("financial_degraded_but_fastlane_allowed")
+                    ),
+                },
+            )
         )
     if probe.get("incremental_delta_guard_blocked"):
         quality_items.append(
@@ -899,30 +1597,48 @@ def build_source_bundle_report(
                 },
             )
         )
+    financial_only_p1_errors = {"announcement_date_unverified"}
     for error in probe.get("source_errors") or []:
+        error_code = str(error.get("error") or "")
+        recovered_financial_error = bool(
+            financial_only
+            and probe.get("financial_degraded_but_fastlane_allowed") is True
+            and not financial_integrity_errors
+        )
+        severity = "P1" if financial_only and (error_code in financial_only_p1_errors or recovered_financial_error) else "P0"
         quality_items.append(
-            quality_item("source_error", "P0", "failed", "0", "1", {"source": error.get("source"), "error": error.get("error")})
+            quality_item("source_error", severity, "warning" if severity == "P1" else "failed", "0", "1", {"source": error.get("source"), "error": error_code})
         )
 
     blockers = []
-    if missing_line_items:
+    if missing_line_items and not affair_policy:
         blockers.append("canonical_source_line_items_missing")
     if missing_source_identities:
         blockers.append("canonical_source_missing_identity")
     if missing_daily_basic_total_mv:
-        blockers.append("daily_basic_total_mv_missing")
+        if not financial_only:
+            blockers.append("daily_basic_total_mv_missing")
     if duplicate_count:
         blockers.append("duplicate_identity_key")
+    if financial_integrity_errors:
+        blockers.append("financial_degraded_lineage_integrity_failed")
     conflicts = ((baseline or {}).get("conflicts") or {})
     for name, count in conflicts.items():
         if int(count or 0) != 0:
             blockers.append(name)
-    if probe.get("source_fetch_enabled") is False:
+    if probe.get("source_fetch_enabled") is False and not financial_only:
         blockers.append("source_fetch_not_enabled")
     if probe.get("incremental_delta_guard_blocked"):
         blockers.append("incremental_delta_full_fetch_guard")
     for error in probe.get("source_errors") or []:
-        blockers.append(f"source_error:{error.get('source')}")
+        error_code = str(error.get("error") or "")
+        recovered_financial_error = bool(
+            financial_only
+            and probe.get("financial_degraded_but_fastlane_allowed") is True
+            and not financial_integrity_errors
+        )
+        if not (financial_only and (error_code in financial_only_p1_errors or recovered_financial_error)):
+            blockers.append(f"source_error:{error.get('source')}")
 
     quality = summarize_quality(quality_items)
     result = "PASS" if quality["P0"] == 0 and not blockers else "BLOCKED"
@@ -936,12 +1652,21 @@ def build_source_bundle_report(
             "target_source_version": SOURCE_VERSION,
             "previous_source_version": PREVIOUS_SOURCE_VERSION,
             "financial_metric_version": FINANCIAL_METRIC_VERSION,
+            "financial_source_policy_version": (
+                FINANCIAL_SOURCE_POLICY_VERSION if affair_policy else None
+            ),
+            "financial_authority": SOURCE_MOOTDX_AFFAIR if affair_policy else None,
+            "forecast_disabled": bool(affair_policy),
+            "financial_degraded_but_fastlane_allowed": bool(
+                probe.get("financial_degraded_but_fastlane_allowed")
+            ),
             "expected_rows": len(expected),
             "source_bundle_rows": len(selected_bundle_rows),
             "source_coverage": {
                 "active_universe_count": probe_int("active_universe_count", len(expected)),
                 "selected_symbol_count": probe_int("selected_symbol_count", len(expected)),
                 "tdx_primary_count": int(source_counts[SOURCE_TDX]),
+                "mootdx_affair_count": int(source_counts[SOURCE_MOOTDX_AFFAIR]),
                 "tushare_fallback_count": int(source_counts[SOURCE_TUSHARE_FALLBACK]),
                 "tushare_income_ok_count": int(tushare_stats.get("tushare_income_ok_count") or 0),
                 "tushare_cashflow_ok_count": int(tushare_stats.get("tushare_cashflow_ok_count") or 0),
@@ -965,6 +1690,16 @@ def build_source_bundle_report(
                 "interest_expense_missing_finance_expense_used_count": interest_fallback_count,
                 "daily_basic_total_mv_missing_count": len(missing_daily_basic_total_mv),
                 "source_errors": probe.get("source_errors") or [],
+                "financial_refresh_mode": probe.get("financial_refresh_mode"),
+                "financial_fresh_coverage_count": probe_int("financial_fresh_coverage_count"),
+                "financial_fresh_coverage_ratio": probe.get("financial_fresh_coverage_ratio"),
+                "financial_carried_forward_count": probe_int("financial_carried_forward_count"),
+                "financial_null_warning_identity_count": probe_int("financial_null_warning_identity_count"),
+                "financial_final_identity_count": probe_int("financial_final_identity_count"),
+                "financial_final_identity_sha256": probe.get("financial_final_identity_sha256"),
+                "financial_degraded_but_fastlane_allowed": bool(
+                    probe.get("financial_degraded_but_fastlane_allowed")
+                ),
                 "delta_symbol_count": int(probe.get("delta_symbol_count") or 0),
                 "delta_reason_distribution": probe.get("delta_reason_distribution") or {},
                 "incremental_delta_ratio": probe.get("incremental_delta_ratio"),
@@ -984,6 +1719,10 @@ def asof_filter_rows(rows: Sequence[Mapping[str, Any]], source_trade_date: str, 
     accepted: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     for row in rows:
+        if is_financial_null_warning_row(row):
+            accepted.append({**dict(row), "source_type": source_type_or_default(row, default_source)})
+            counts["financial_null_warning"] += 1
+            continue
         ann = optional_date_text(row.get("announcement_date") or row.get("ann_date"))
         if not ann:
             if row.get("asof_safe"):
@@ -999,6 +1738,9 @@ def asof_filter_rows(rows: Sequence[Mapping[str, Any]], source_trade_date: str, 
 
 
 def source_type_or_default(row: Mapping[str, Any], default: str) -> str:
+    raw_source = str(row.get("source_type") or row.get("source") or "").lower()
+    if "affair" in raw_source:
+        return SOURCE_MOOTDX_AFFAIR
     if row.get("source_type") or row.get("source"):
         return source_type(row)
     return default
@@ -1038,6 +1780,9 @@ def group_rows_by_identity(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         identity_key = row.get("stock_identity_key")
+        if identity_key and is_financial_null_warning_row(row):
+            grouped[str(identity_key)].append(dict(row))
+            continue
         report_period = optional_date_text(row.get("report_period") or row.get("end_date"))
         if not identity_key or not report_period:
             continue
@@ -1045,11 +1790,18 @@ def group_rows_by_identity(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[
     return {key: sorted(value, key=lambda row: str(row.get("report_period") or ""), reverse=True) for key, value in grouped.items()}
 
 
-def select_identity_rows(tdx_rows: Sequence[Mapping[str, Any]], tushare_rows: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def select_identity_rows(
+    tdx_rows: Sequence[Mapping[str, Any]],
+    tushare_rows: Sequence[Mapping[str, Any]],
+    *,
+    preferred_fallback_source: str = SOURCE_TUSHARE_FALLBACK,
+) -> tuple[str, list[dict[str, Any]]]:
     if tdx_rows and not all_rows_missing_required_line_items(tdx_rows):
+        if any("affair" in str(row.get("source_type") or row.get("source") or "").lower() for row in tdx_rows):
+            return SOURCE_MOOTDX_AFFAIR, [dict(row) for row in tdx_rows]
         return SOURCE_TDX, [dict(row) for row in tdx_rows]
     if tushare_rows:
-        return SOURCE_TUSHARE_FALLBACK, [dict(row) for row in tushare_rows]
+        return preferred_fallback_source, [dict(row) for row in tushare_rows]
     if tdx_rows:
         return SOURCE_TDX, [dict(row) for row in tdx_rows]
     return SOURCE_TDX, []
@@ -1198,6 +1950,8 @@ def build_snapshot_from_db(
     use_tdx_source: bool = True,
     tushare_concurrency: int = 1,
     tushare_token: str | None = None,
+    financial_only: bool = True,
+    affair_cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     source_trade_date = require_yyyymmdd(source_trade_date, "source_trade_date")
     with psycopg.connect(dsn, options="-c default_transaction_read_only=on", row_factory=dict_row) as conn:
@@ -1251,6 +2005,28 @@ def build_snapshot_from_db(
                 (source_trade_date, daily_basic_active.get("source_version")),
             )
             daily_basic_rows = [dict(row) for row in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT source_version
+                FROM common_active_source_version
+                WHERE data_domain='stock' AND data_type='stock_daily' AND scope_key=%s
+                """,
+                (source_trade_date,),
+            )
+            stock_daily_active = dict(cur.fetchone() or {})
+            cur.execute(
+                """
+                SELECT stock_identity_key
+                FROM stock_daily_bar_fact
+                WHERE trade_date=%s AND source_version=%s
+                ORDER BY stock_identity_key
+                """,
+                (source_trade_date, stock_daily_active.get("source_version")),
+            )
+            frozen_stock_identity_keys = [
+                str(row.get("stock_identity_key") or "")
+                for row in cur.fetchall()
+            ]
 
             def count(sql: str, params: Sequence[Any] = ()) -> int:
                 cur.execute(sql, params)
@@ -1261,6 +2037,8 @@ def build_snapshot_from_db(
                 "active_stock_financial_rows": len(active_rows),
                 "active_stock_daily_basic_source_version": daily_basic_active.get("source_version"),
                 "active_stock_daily_basic_rows": len(daily_basic_rows),
+                "active_stock_daily_source_version": stock_daily_active.get("source_version"),
+                "frozen_stock_universe_rows": len(frozen_stock_identity_keys),
                 "conflicts": {
                     "batch_conflict": count("SELECT count(*) AS value FROM common_ingest_batch WHERE batch_id=%s", (BATCH_ID,)),
                     "quality_conflict": count("SELECT count(*) AS value FROM common_quality_gate_result WHERE source_batch_id=%s", (BATCH_ID,)),
@@ -1284,8 +2062,102 @@ def build_snapshot_from_db(
                 },
             }
 
+    previous_snapshot = load_financial_canonical_snapshot_v1(previous_snapshot_path) if (incremental_enabled or financial_only) else None
+    if financial_only:
+        expected_identity_keys = list(frozen_stock_identity_keys)
+        if (
+            not expected_identity_keys
+            or any(not key for key in expected_identity_keys)
+            or len(expected_identity_keys) != len(set(expected_identity_keys))
+        ):
+            raise StockFinancialCanonicalSourceBundleBlocked(
+                "financial_frozen_universe_daily_basic_duplicate_or_empty"
+            )
+        affair_lineage: dict[str, Any] = {}
+        source_errors: list[dict[str, str]] = []
+        refreshed_rows: list[dict[str, Any]] = []
+        selected_financial_only_daily_basic_rows = list(daily_basic_rows)
+        force_full_fallback = not source_fetch_enabled
+        fallback_reason: str | None = "financial_source_fetch_disabled" if not source_fetch_enabled else None
+        if source_fetch_enabled:
+            try:
+                affair_source = MootdxAffairFinancialSource(cache_dir=affair_cache_dir)
+                refreshed_rows = affair_source.fetch_all_financial_metrics(
+                    expected_identity_keys=expected_identity_keys,
+                    source_trade_date=source_trade_date,
+                    previous_snapshot=previous_snapshot,
+                    cutoff_date=source_trade_date,
+                    source_batch_id=source_bundle_batch_id_for(source_trade_date),
+                    source_version=f"stock_financial_{source_trade_date}_affair_v1",
+                )
+                affair_lineage = dict(affair_source.last_lineage)
+                if affair_lineage.get("announcement_date_unverified_count"):
+                    source_errors.append({"source": SOURCE_MOOTDX_AFFAIR, "error": "announcement_date_unverified"})
+                warning_codes = [
+                    str(code)
+                    for code in affair_lineage.get("warning_codes") or []
+                    if code
+                ]
+                for warning_code in warning_codes:
+                    source_errors.append(
+                        {"source": SOURCE_MOOTDX_AFFAIR, "error": warning_code, "recovered": "true"}
+                    )
+            except Exception as exc:  # pragma: no cover - live source availability varies.
+                source_errors.append({"source": SOURCE_MOOTDX_AFFAIR, "error": exc.__class__.__name__})
+                force_full_fallback = True
+                fallback_reason = f"affair_source_error:{exc.__class__.__name__}"
+        else:
+            refreshed_rows = []
+            affair_lineage = {
+                "source": SOURCE_MOOTDX_AFFAIR,
+                "source_fetch_enabled": False,
+                "announcement_date_unverified_count": 0,
+            }
+        final_rows, financial_lineage = merge_financial_only_rows(
+            expected_identity_keys=expected_identity_keys,
+            refreshed_rows=refreshed_rows,
+            previous_snapshot=previous_snapshot,
+            source_trade_date=source_trade_date,
+            force_full_fallback=force_full_fallback,
+            fallback_reason=fallback_reason,
+        )
+        selected_financial_only_daily_basic_rows, daily_basic_lineage = (
+            merge_financial_only_daily_basic_rows(
+                expected_identity_keys=expected_identity_keys,
+                current_rows=selected_financial_only_daily_basic_rows,
+                previous_snapshot=previous_snapshot,
+            )
+        )
+        return {
+            "source_trade_date": source_trade_date,
+            "expected_identity_keys": expected_identity_keys,
+            "tdx_rows": [],
+            "tushare_rows": final_rows,
+            "forecast_rows": [],
+            "daily_basic_rows": selected_financial_only_daily_basic_rows,
+            "current_signature_rows": active_rows,
+            "baseline": baseline,
+            "source_probe": {
+                "financial_only": True,
+                "financial_source_policy_version": FINANCIAL_SOURCE_POLICY_VERSION,
+                "financial_authority": SOURCE_MOOTDX_AFFAIR,
+                "source_fetch_enabled": source_fetch_enabled,
+                "use_tdx_source": False,
+                "forecast_disabled": True,
+                "forecast_type": None,
+                "forecast_score": None,
+                "tushare_financial_call_count": 0,
+                "forecast_call_count": 0,
+                "daily_basic_source": "stock_daily_basic_read_only",
+                "daily_basic_external_call_count": 0,
+                "source_errors": source_errors,
+                "writes_performed": False,
+                **affair_lineage,
+                **financial_lineage,
+                **daily_basic_lineage,
+            },
+        }
     all_symbols = [symbol_from_active_row(row) for row in active_rows]
-    previous_snapshot = load_financial_canonical_snapshot_v1(previous_snapshot_path) if incremental_enabled else None
     delta_identity_keys: list[str] = []
     delta_reason_distribution: dict[str, int] = {}
     delta_guard = incremental_delta_guard_probe(
@@ -1454,7 +2326,11 @@ def merge_daily_basic_metadata(
 
 
 def fetch_tdx_mootdx_rows(*, symbols: Sequence[StockFinancialSymbol], source_trade_date: str) -> Sequence[Mapping[str, Any]]:
-    return MootdxFinancialSource().fetch_stock_financial_metrics(symbols=symbols, asof_date=source_trade_date)
+    return MootdxAffairFinancialSource().fetch_all_financial_metrics(
+        expected_identity_keys=[symbol.stock_identity_key for symbol in symbols],
+        source_trade_date=source_trade_date,
+        cutoff_date=source_trade_date,
+    )
 
 
 def fetch_tushare_rows(
@@ -1480,6 +2356,63 @@ def fetch_tushare_rows(
         rate_limit_ms=rate_limit_ms,
         announcement_dates=announcement_dates,
         tushare_concurrency=tushare_concurrency,
+    )
+
+
+def fetch_tushare_daily_basic_rows_from_client(
+    *,
+    pro: Any,
+    source_trade_date: str,
+    expected_identity_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Fetch only daily_basic for the financial-only path; never forecast or per-symbol finance."""
+
+    frame = pro.daily_basic(
+        trade_date=require_yyyymmdd(source_trade_date, "source_trade_date"),
+        fields="ts_code,trade_date,total_mv,circ_mv,pe,pe_ttm,pb",
+    )
+    records = frame.to_dict(orient="records") if hasattr(frame, "to_dict") else frame
+    expected = set(str(key) for key in expected_identity_keys)
+    rows: list[dict[str, Any]] = []
+    for raw in records or []:
+        item = dict(raw)
+        ts_code = str(item.get("ts_code") or "")
+        if "." not in ts_code:
+            continue
+        code, exchange = ts_code.split(".", 1)
+        identity_key = f"stock:{exchange.upper()}:{code.zfill(6)}"
+        if identity_key not in expected:
+            continue
+        rows.append(
+            {
+                **item,
+                "stock_identity_key": identity_key,
+                "ts_code": f"{code.zfill(6)}.{exchange.upper()}",
+                "total_mv": item.get("total_mv"),
+                "circ_mv": item.get("circ_mv"),
+                "pe_core": item.get("pe_ttm") if item.get("pe_ttm") is not None else item.get("pe"),
+                "source": "tushare.daily_basic",
+                "source_type": "tushare.daily_basic",
+                "source_trade_date": source_trade_date,
+            }
+        )
+    return rows
+
+
+def fetch_tushare_daily_basic_rows(
+    *,
+    token: str | None,
+    source_trade_date: str,
+    expected_identity_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    token = token or load_tushare_token()
+    if not token:
+        raise StockFinancialCanonicalSourceBundleBlocked("TUSHARE_TOKEN is required for daily_basic")
+    module = importlib.import_module("tushare")
+    return fetch_tushare_daily_basic_rows_from_client(
+        pro=module.pro_api(token),
+        source_trade_date=source_trade_date,
+        expected_identity_keys=expected_identity_keys,
     )
 
 

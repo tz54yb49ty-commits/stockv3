@@ -1,11 +1,14 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
 
 from ashare_v3.ingestion.stock_financial_canonical_metrics import SOURCE_TDX, SOURCE_TUSHARE_FALLBACK
 from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
     StockFinancialCanonicalSourceBundleBlocked,
     build_source_bundle_report,
+    canonical_payload_sha256,
     cached_tushare_symbol_entry,
     compute_financial_canonical_delta,
     compute_financial_canonical_delta_identity_keys,
@@ -15,12 +18,63 @@ from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
     parse_symbol_shard,
     select_probe_symbols,
     validate_source_bundle_request,
+    merge_financial_only_rows,
+    SOURCE_MOOTDX_AFFAIR,
+)
+from ashare_v3.ingestion.mootdx_financial_source import (
+    MootdxAffairFinancialSource,
+    MootdxFinancialSource,
+    MootdxFinancialSourceError,
+    normalize_affair_date,
+    normalize_affair_record,
 )
 from ashare_v3.ingestion.stock_financial import StockFinancialSymbol
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "plan_stock_financial_canonical_source_bundle_20260529.py"
+AFFAIR_TEST_PERIODS = (
+    "20231231",
+    "20240331",
+    "20240630",
+    "20240930",
+    "20241231",
+    "20250331",
+    "20250630",
+    "20250930",
+    "20251231",
+    "20260331",
+)
+
+
+def write_valid_affair_zip(root: Path, report_period: str) -> Path:
+    path = root / f"gpcw{report_period}.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            f"gpcw{report_period}.dat",
+            bytes(range(256)) * 8,
+        )
+    return path
+
+
+def affair_raw_row(
+    code: str = "600000",
+    *,
+    announcement_date: object = 10428.0,
+) -> dict:
+    return {
+        "code": code,
+        "col74": "1000",
+        "col75": "600",
+        "col76": "10",
+        "col77": "20",
+        "col78": "30",
+        "col80": "11",
+        "col107": "580",
+        "col304": "40",
+        "col305": "10",
+        "col314": announcement_date,
+    }
 
 
 def load_runner_module():
@@ -854,6 +908,418 @@ class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
         self.assertEqual(report["result"], "BLOCKED")
         self.assertEqual(report["source_coverage"]["missing_announcement_date_excluded_count"], 1)
         self.assertIn("canonical_source_missing_identity", report["blockers"])
+
+    def test_affair_normalization_maps_fields_and_invalid_sentinels_to_null(self) -> None:
+        row = normalize_affair_record(
+            {
+                "code": "600000",
+                "report_date": "20260331",
+                "col74": "1000",
+                "col75": -999999,
+                "col76": "10",
+                "col78": "30",
+                "col80": "-",
+                "col107": "580",
+                "col314": 10428.0,
+            },
+            source_trade_date="20260710",
+        )
+        assert row is not None
+        self.assertEqual(row["stock_identity_key"], "stock:SH:600000")
+        self.assertEqual(row["operating_revenue"], "1000")
+        self.assertIsNone(row["operating_cost"])
+        self.assertIsNone(row["interest_expense"])
+        self.assertEqual(row["announcement_date"], "20010428")
+        self.assertEqual(normalize_affair_date(10428.0), "20010428")
+
+    def test_per_symbol_finance_endpoint_is_disabled(self) -> None:
+        calls = []
+
+        class Client:
+            def finance(self, **kwargs):
+                calls.append(kwargs)
+                return []
+
+        with self.assertRaises(MootdxFinancialSourceError):
+            MootdxFinancialSource(client=Client()).fetch_stock_financial_metrics(
+                symbols=[StockFinancialSymbol(code="600000", exchange="SH")],
+                asof_date="20260710",
+            )
+        self.assertEqual(calls, [])
+
+    def test_affair_source_uses_latest_ten_local_packages_without_manifest_or_download(self) -> None:
+        parse_calls = []
+        manifest_calls = []
+        download_calls = []
+
+        def files_fn():
+            manifest_calls.append(True)
+            raise AssertionError("local cache must not request the remote manifest")
+
+        def download_fn(_item):
+            download_calls.append(True)
+            raise AssertionError("local cache must not download packages")
+
+        def parse_fn(**kwargs):
+            parse_calls.append(kwargs)
+            return [affair_raw_row()]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            for report_period in AFFAIR_TEST_PERIODS:
+                write_valid_affair_zip(cache_dir, report_period)
+            (cache_dir / "gpcw20260630.zip").write_bytes(b"x" * 164)
+            write_valid_affair_zip(cache_dir, "20260930")
+            source = MootdxAffairFinancialSource(
+                files_fn=files_fn,
+                parse_fn=parse_fn,
+                download_fn=download_fn,
+                cache_dir=cache_dir,
+            )
+
+            rows = source.fetch_all_financial_metrics(
+                expected_identity_keys=["stock:SH:600000"],
+                source_trade_date="20260710",
+            )
+
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(manifest_calls, [])
+        self.assertEqual(download_calls, [])
+        self.assertEqual(len(parse_calls), 10)
+        self.assertTrue(all(call["header"] == "raw" for call in parse_calls))
+        self.assertTrue(all(row["announcement_date"] == "20010428" for row in rows))
+        self.assertEqual(source.last_lineage["package_count"], 10)
+        self.assertEqual(source.last_lineage["manifest_request_count"], 0)
+        self.assertEqual(source.last_lineage["package_download_count"], 0)
+        self.assertTrue(source.last_lineage["local_cache_used"])
+        self.assertEqual(source.last_lineage["placeholder_filenames"], ["gpcw20260630.zip"])
+        self.assertNotIn(
+            "gpcw20260930.zip",
+            [item["filename"] for item in source.last_lineage["package_manifest"]],
+        )
+
+    def test_affair_source_parses_changed_file_and_excludes_unverified_or_future_rows(self) -> None:
+        parse_calls = []
+
+        def parse_fn(**kwargs):
+            parse_calls.append(kwargs)
+            return [
+                affair_raw_row("600000", announcement_date="20260711"),
+                affair_raw_row("600001", announcement_date=None),
+            ]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            for report_period in AFFAIR_TEST_PERIODS:
+                write_valid_affair_zip(cache_dir, report_period)
+            source = MootdxAffairFinancialSource(
+                files_fn=lambda: self.fail("manifest must not be called"),
+                parse_fn=parse_fn,
+                cache_dir=cache_dir,
+            )
+            rows = source.fetch_all_financial_metrics(
+                expected_identity_keys=["stock:SH:600000", "stock:SH:600001"],
+                source_trade_date="20260710",
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(len(parse_calls), 10)
+        self.assertTrue(all(call["header"] == "raw" for call in parse_calls))
+        self.assertEqual(source.last_lineage["future_announcement_excluded_count"], 10)
+        self.assertEqual(source.last_lineage["announcement_date_unverified_count"], 10)
+
+    def test_financial_only_merge_bounded_carry_and_no_forecast_semantics(self) -> None:
+        expected = [f"stock:SH:{600000 + index:06d}" for index in range(10)]
+        refreshed = [
+            {
+                **tdx_row(identity_key),
+                "source_type": SOURCE_MOOTDX_AFFAIR,
+                "source": SOURCE_MOOTDX_AFFAIR,
+            }
+            for identity_key in expected[:9]
+        ]
+        previous = [tdx_row(identity_key) for identity_key in expected]
+        final_rows, lineage = merge_financial_only_rows(
+            expected_identity_keys=expected,
+            refreshed_rows=refreshed,
+            previous_snapshot={"financial_rows": previous},
+        )
+        self.assertEqual(len(final_rows), 10)
+        self.assertTrue(all(row.get("forecast_type") is None and row.get("forecast_score") is None for row in final_rows))
+        self.assertEqual(lineage["financial_refresh_mode"], "affair_fresh_90pct")
+        self.assertEqual(lineage["financial_fresh_coverage_threshold_count"], 9)
+        self.assertEqual(lineage["financial_fresh_coverage_count"], 9)
+        self.assertEqual(lineage["financial_fresh_coverage_ratio"], "0.9")
+        self.assertEqual(lineage["financial_carried_forward_identity_keys"], [expected[-1]])
+        self.assertEqual(lineage["financial_final_identity_count"], 10)
+
+        current = refreshed[0]
+        report = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=["stock:SH:600000"],
+            tdx_rows=[],
+            tushare_rows=[current],
+            daily_basic_rows=[{"stock_identity_key": "stock:SH:600000", "total_mv": "1000"}],
+            forecast_rows=[{"stock_identity_key": "stock:SH:600000", "forecast_type": "预增", "report_period": "20260331", "announcement_date": "20260425"}],
+            source_probe={"financial_only": True},
+            baseline={"conflicts": {"batch_conflict": 0, "quality_conflict": 0, "active_conflict": 0, "target_source_version_rows": 0}},
+        )
+        self.assertEqual(report["source_coverage"]["forecast_coverage_count"], 0)
+        self.assertEqual(report["rows_sample"][0]["source_type"], SOURCE_MOOTDX_AFFAIR)
+        self.assertNotIn("forecast_type_coverage", [item["gate_name"] for item in report["quality"]["items"]])
+
+    def test_financial_only_merge_below_ninety_percent_uses_full_previous_snapshot(self) -> None:
+        expected = [f"stock:SH:{600000 + index:06d}" for index in range(10)]
+        refreshed = [
+            {**tdx_row(identity_key), "operating_revenue": "9999"}
+            for identity_key in expected[:8]
+        ]
+        previous = [tdx_row(identity_key) for identity_key in expected]
+
+        final_rows, lineage = merge_financial_only_rows(
+            expected_identity_keys=expected,
+            refreshed_rows=refreshed,
+            previous_snapshot={"financial_rows": previous},
+        )
+
+        self.assertEqual(lineage["financial_refresh_mode"], "previous_snapshot_full_carry_forward")
+        self.assertEqual(lineage["financial_fresh_coverage_count"], 8)
+        self.assertEqual(lineage["financial_carried_forward_identity_keys"], expected)
+        self.assertEqual(
+            {row["stock_identity_key"]: row["operating_revenue"] for row in final_rows},
+            {row["stock_identity_key"]: "1000" for row in previous},
+        )
+
+    def test_financial_source_error_reconciles_current_only_to_null_and_drops_previous_only(self) -> None:
+        expected = ["stock:SH:600000", "stock:SH:600001"]
+        previous = [
+            tdx_row("stock:SH:600000"),
+            tdx_row("stock:SH:600099"),
+        ]
+
+        final_rows, lineage = merge_financial_only_rows(
+            expected_identity_keys=expected,
+            refreshed_rows=[],
+            previous_snapshot={"financial_rows": previous},
+            force_full_fallback=True,
+            fallback_reason="affair_tls_failure",
+        )
+
+        self.assertEqual(
+            sorted(row["stock_identity_key"] for row in final_rows),
+            expected,
+        )
+        self.assertNotIn("stock:SH:600099", {row["stock_identity_key"] for row in final_rows})
+        self.assertEqual(lineage["financial_carried_forward_identity_keys"], ["stock:SH:600000"])
+        self.assertEqual(lineage["financial_null_warning_identity_keys"], ["stock:SH:600001"])
+        warning_row = next(row for row in final_rows if row["stock_identity_key"] == "stock:SH:600001")
+        self.assertTrue(warning_row["raw_payload"]["financial_warning_only"])
+        self.assertEqual(warning_row["raw_payload"]["reason"], "affair_tls_failure")
+
+    def test_financial_fallback_drops_exact_duplicates_but_blocks_same_grain_conflict(self) -> None:
+        identity_key = "stock:SH:600000"
+        previous_row = tdx_row(identity_key)
+        final_rows, lineage = merge_financial_only_rows(
+            expected_identity_keys=[identity_key],
+            refreshed_rows=[],
+            previous_snapshot={
+                "financial_rows": [previous_row, dict(previous_row)]
+            },
+            force_full_fallback=True,
+            fallback_reason="affair_tls_failure",
+        )
+        self.assertEqual(len(final_rows), 1)
+        self.assertEqual(
+            lineage["financial_exact_duplicate_dropped_count"], 1
+        )
+        report = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=[identity_key],
+            tdx_rows=[],
+            tushare_rows=final_rows,
+            daily_basic_rows=[
+                {"stock_identity_key": identity_key, "total_mv": "1000"}
+            ],
+            forecast_rows=[],
+            source_probe=lineage,
+            baseline={
+                "conflicts": {
+                    "batch_conflict": 0,
+                    "quality_conflict": 0,
+                    "active_conflict": 0,
+                    "target_source_version_rows": 0,
+                }
+            },
+        )
+        self.assertEqual(report["result"], "PASS")
+        duplicate_item = next(
+            item
+            for item in report["quality"]["items"]
+            if item["gate_name"] == "financial_exact_duplicate_rows_dropped"
+        )
+        self.assertEqual(duplicate_item["severity"], "P1")
+
+        legacy_conflict = {
+            **previous_row,
+            "operating_revenue": "9999",
+        }
+        carried_rows, carried_lineage = merge_financial_only_rows(
+            expected_identity_keys=[identity_key],
+            refreshed_rows=[],
+            previous_snapshot={
+                "financial_rows": [previous_row, legacy_conflict]
+            },
+            force_full_fallback=True,
+            fallback_reason="affair_tls_failure",
+        )
+        self.assertEqual(
+            carried_rows,
+            [
+                {
+                    **previous_row,
+                    "forecast_type": None,
+                    "forecast_score": None,
+                }
+            ],
+        )
+        self.assertEqual(
+            carried_lineage[
+                "financial_legacy_grain_conflict_resolved_count"
+            ],
+            1,
+        )
+        carried_report = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=[identity_key],
+            tdx_rows=[],
+            tushare_rows=carried_rows,
+            daily_basic_rows=[
+                {"stock_identity_key": identity_key, "total_mv": "1000"}
+            ],
+            forecast_rows=[],
+            source_probe=carried_lineage,
+            baseline={
+                "conflicts": {
+                    "batch_conflict": 0,
+                    "quality_conflict": 0,
+                    "active_conflict": 0,
+                    "target_source_version_rows": 0,
+                }
+            },
+        )
+        self.assertEqual(carried_report["result"], "PASS")
+
+        conflicting = {
+            **previous_row,
+            "operating_revenue": "9999",
+        }
+        blocked = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=[identity_key],
+            tdx_rows=[],
+            tushare_rows=[previous_row, conflicting],
+            daily_basic_rows=[
+                {"stock_identity_key": identity_key, "total_mv": "1000"}
+            ],
+            forecast_rows=[],
+            source_probe={
+                **lineage,
+                "financial_pre_dedup_row_count": 2,
+                "financial_exact_duplicate_dropped_count": 0,
+                "financial_exact_duplicate_dropped_row_hashes_sha256": canonical_payload_sha256([]),
+                "financial_exact_duplicate_dropped_row_hash_samples": [],
+                "financial_final_row_count": 2,
+                "financial_final_rows_sha256": canonical_payload_sha256(
+                    [previous_row, conflicting]
+                ),
+            },
+            baseline={
+                "conflicts": {
+                    "batch_conflict": 0,
+                    "quality_conflict": 0,
+                    "active_conflict": 0,
+                    "target_source_version_rows": 0,
+                }
+            },
+        )
+        self.assertEqual(blocked["result"], "BLOCKED")
+        self.assertIn(
+            "financial_degraded_lineage_integrity_failed",
+            blocked["blockers"],
+        )
+
+    def test_financial_degraded_lineage_hash_tamper_and_duplicate_universe_are_p0(self) -> None:
+        expected = [f"stock:SH:{600000 + index:06d}" for index in range(10)]
+        refreshed = [tdx_row(identity_key) for identity_key in expected[:9]]
+        final_rows, lineage = merge_financial_only_rows(
+            expected_identity_keys=expected,
+            refreshed_rows=refreshed,
+            previous_snapshot={"financial_rows": [tdx_row(identity_key) for identity_key in expected]},
+        )
+        daily_basic = [
+            {"stock_identity_key": identity_key, "total_mv": "1000"}
+            for identity_key in expected
+        ]
+        baseline = {
+            "conflicts": {
+                "batch_conflict": 0,
+                "quality_conflict": 0,
+                "active_conflict": 0,
+                "target_source_version_rows": 0,
+            }
+        }
+
+        valid_report = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=expected,
+            tdx_rows=[],
+            tushare_rows=final_rows,
+            daily_basic_rows=daily_basic,
+            forecast_rows=[],
+            source_probe=lineage,
+            baseline=baseline,
+        )
+        self.assertEqual(valid_report["quality"]["p0_count"], 0)
+
+        for field in ("financial_final_identity_sha256", "financial_final_rows_sha256"):
+            with self.subTest(field=field):
+                tampered_report = build_source_bundle_report(
+                    source_trade_date="20260529",
+                    expected_identity_keys=expected,
+                    tdx_rows=[],
+                    tushare_rows=final_rows,
+                    daily_basic_rows=daily_basic,
+                    forecast_rows=[],
+                    source_probe={**lineage, field: "0" * 64},
+                    baseline=baseline,
+                )
+                self.assertEqual(tampered_report["result"], "BLOCKED")
+                self.assertIn("financial_degraded_lineage_integrity_failed", tampered_report["blockers"])
+
+        with self.assertRaisesRegex(
+            StockFinancialCanonicalSourceBundleBlocked,
+            "financial_frozen_universe_duplicate_or_empty",
+        ):
+            merge_financial_only_rows(
+                expected_identity_keys=[expected[0], expected[0]],
+                refreshed_rows=[],
+                previous_snapshot={"financial_rows": []},
+            )
+
+    def test_financial_only_unverified_announcement_is_p1_not_p0(self) -> None:
+        row = {**tdx_row("stock:SH:600000"), "source_type": SOURCE_MOOTDX_AFFAIR, "source": SOURCE_MOOTDX_AFFAIR}
+        report = build_source_bundle_report(
+            source_trade_date="20260529",
+            expected_identity_keys=["stock:SH:600000"],
+            tdx_rows=[],
+            tushare_rows=[row],
+            daily_basic_rows=[{"stock_identity_key": "stock:SH:600000", "total_mv": "1000"}],
+            forecast_rows=[],
+            source_probe={"financial_only": True, "announcement_date_unverified_count": 1, "source_errors": [{"source": SOURCE_MOOTDX_AFFAIR, "error": "announcement_date_unverified"}]},
+            baseline={"conflicts": {"batch_conflict": 0, "quality_conflict": 0, "active_conflict": 0, "target_source_version_rows": 0}},
+        )
+        self.assertEqual(report["quality"]["p0_count"], 0)
+        self.assertGreaterEqual(report["quality"]["p1_count"], 1)
 
     def test_execute_flag_is_rejected(self) -> None:
         with self.assertRaises(StockFinancialCanonicalSourceBundleBlocked):
