@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import date
 from typing import Any, Mapping, Sequence
 
 from ashare_v3.events.ids import stable_hash
@@ -21,6 +22,14 @@ from ashare_v3.trigger.action_confirmation_metric_matcher import (
 )
 from ashare_v3.trigger.projection_matcher import normalize_context_row
 from ashare_v3.trigger.rule_v4_matcher import (
+    CURRENT_PERIOD_AVG_FIELD_BY_PERIOD,
+    LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS,
+    ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+    ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+    PERIOD_ESCALATION_CONTEXT_VERSION,
+    PERIOD_ESCALATION_DIRECTION_TRANSITIONS,
+    PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE,
+    PERIOD_ESCALATION_REQUIREMENTS,
     TRIGGER_RULE_POLICY_HASH,
     TRIGGER_RULE_SPEC_VERSION,
     condition_signal_type_for_condition_key,
@@ -31,6 +40,8 @@ from ashare_v3.trigger.rule_v4_matcher import (
 SOURCE_METRIC_KIND = "realtime_action_confirmation_metric"
 ORDINARY_CONDITION_SIGNAL_TYPES = {"BUY", "SELL", "BUY:FULL", "SELL:FULL"}
 HINT_CONDITION_KEYS = {"BUY_HINT", "SELL_HINT"}
+PERIOD_PRIORITY = ("Y", "Q", "M", "W", "D")
+SAME_DAY_FORMAL_EVIDENCE_SOURCE = "current_same_day_formal_pass"
 SIDE_EFFECT_GUARD = {
     "db_written": False,
     "outbox_written": False,
@@ -433,6 +444,10 @@ def build_provisional_ordinary_plan(
     rule_plan: Mapping[str, Any],
 ) -> dict[str, Any]:
     matched = rule_plan.get("output_event_type") == "TriggerMatched"
+    assert_same_day_period_escalation_output_contract(
+        rule_plan,
+        contract_scope="raw_rule_plan",
+    )
     selected_time = str(metric.get("metric_time") or metric.get("metric_time_label") or "")
     source_mode, c1_dependency = source_mode_and_c1_dependency(metric)
     signal_type = str(rule_plan.get("signal_type") or "")
@@ -468,11 +483,22 @@ def build_provisional_ordinary_plan(
         "identity_key": identity_key,
         "display_name": metric.get("name") or context.get("name") or identity_key,
         "condition_key": condition_key,
+        "direction": rule_plan.get("direction"),
         "signal_type": signal_type,
         "trigger_type": trigger_type,
         "trigger_mark_candidate": rule_plan.get("trigger_mark_candidate") or "normal",
         "trigger_period": rule_plan.get("trigger_period") if matched else None,
-        "triggered_periods": list(rule_plan.get("triggered_periods") or []) if matched else [],
+        "triggered_periods": list(rule_plan.get("triggered_periods") or []),
+        "all_trigger_periods": list(rule_plan.get("all_trigger_periods") or []),
+        "primary_trigger_period": rule_plan.get("primary_trigger_period"),
+        "prerequisite_periods": list(rule_plan.get("prerequisite_periods") or []),
+        "period_escalation_trace": dict(rule_plan.get("period_escalation_trace") or {}),
+        "ordinary_period_escalation_policy_version": rule_plan.get(
+            "ordinary_period_escalation_policy_version"
+        ),
+        "ordinary_period_escalation_policy_hash": rule_plan.get(
+            "ordinary_period_escalation_policy_hash"
+        ),
         "candidate_trigger_identity_key": candidate_key,
         "rule_eval_result": {
             "trigger_rule_spec_version": rule_plan.get("trigger_rule_spec_version"),
@@ -481,6 +507,16 @@ def build_provisional_ordinary_plan(
             "output_event_type": rule_plan.get("output_event_type"),
             "trigger_live": bool(rule_plan.get("trigger_live")),
             "triggered_periods": list(rule_plan.get("triggered_periods") or []),
+            "all_trigger_periods": list(rule_plan.get("all_trigger_periods") or []),
+            "primary_trigger_period": rule_plan.get("primary_trigger_period"),
+            "prerequisite_periods": list(rule_plan.get("prerequisite_periods") or []),
+            "period_escalation_trace": dict(rule_plan.get("period_escalation_trace") or {}),
+            "ordinary_period_escalation_policy_version": rule_plan.get(
+                "ordinary_period_escalation_policy_version"
+            ),
+            "ordinary_period_escalation_policy_hash": rule_plan.get(
+                "ordinary_period_escalation_policy_hash"
+            ),
             "pending_reasons": list(rule_plan.get("pending_reasons") or []),
             "quality_reasons": list(rule_plan.get("quality_reasons") or []),
             "blocked_reason": rule_plan.get("blocked_reason"),
@@ -500,6 +536,13 @@ def build_provisional_ordinary_plan(
             },
             "period_evaluation_details": list(rule_plan.get("period_evaluation_details") or []),
             "triggered_period_details": list(rule_plan.get("triggered_period_details") or []),
+            "period_escalation_trace": dict(rule_plan.get("period_escalation_trace") or {}),
+            "ordinary_period_escalation_policy_version": rule_plan.get(
+                "ordinary_period_escalation_policy_version"
+            ),
+            "ordinary_period_escalation_policy_hash": rule_plan.get(
+                "ordinary_period_escalation_policy_hash"
+            ),
         },
         "trace": {
             "trigger_context_run_id": context.get("run_id"),
@@ -511,6 +554,930 @@ def build_provisional_ordinary_plan(
             "c1_dependency": c1_dependency,
         },
     }
+
+
+def assert_same_day_period_escalation_output_contract(
+    rule_plan: Mapping[str, Any],
+    *,
+    contract_scope: str = "production_provisional",
+) -> None:
+    def fail(reason: str) -> None:
+        raise ValueError(f"same-day period escalation output contract blocked: {reason}")
+
+    def canonical_formal_detail_passes(
+        candidate_direction: str,
+        period: str,
+        detail: Mapping[str, Any],
+        *,
+        require_effective_trigger: bool = True,
+    ) -> bool:
+        if candidate_direction not in PERIOD_ESCALATION_DIRECTION_TRANSITIONS:
+            return False
+        if period not in CURRENT_PERIOD_AVG_FIELD_BY_PERIOD:
+            return False
+        expected_transition = PERIOD_ESCALATION_DIRECTION_TRANSITIONS[candidate_direction]
+        expected_amount_field = CURRENT_PERIOD_AVG_FIELD_BY_PERIOD[period]
+        expected_chain_pass: bool | str = "not_applicable" if period == "Y" else True
+        amount_unit_status = detail.get("amount_unit_status")
+        amount_source_status = detail.get("amount_source_status")
+        if (
+            detail.get("period") != period
+            or detail.get("current_transition") != expected_transition
+            or detail.get("previous_transition") in {None, expected_transition}
+            or detail.get("transition_amount_pass") is not True
+            or detail.get("trigger_amount_chain_pass") != expected_chain_pass
+            or detail.get("transition_amount_field") != expected_amount_field
+            or detail.get("amount_metric") != expected_amount_field
+            or detail.get("used_for_period") != period
+            or detail.get("compare_to") != f"previous_avg_amount[{period}]"
+            or detail.get("current_price_or_close") is None
+            or detail.get("current_amount_metric") is None
+            or detail.get("transition_amount_value") != detail.get("current_amount_metric")
+            or detail.get("previous_amount_baseline") is None
+            or detail.get("trigger_previous_entity_high") is None
+            or detail.get("trigger_previous_entity_low") is None
+            or not isinstance(amount_unit_status, Mapping)
+            or amount_unit_status.get("status") != "matched"
+            or not isinstance(amount_source_status, Mapping)
+            or amount_source_status.get("status") != "matched"
+        ):
+            return False
+        has_existing_formal_state = (
+            "existing_formal_classification" in detail or "existing_formal_pass" in detail
+        )
+        if require_effective_trigger:
+            if detail.get("classification") != "triggered" or detail.get("reason") is not None:
+                return False
+            if has_existing_formal_state and (
+                detail.get("existing_formal_classification") != "triggered"
+                or detail.get("existing_formal_pass") is not True
+            ):
+                return False
+            if (
+                "period_escalation_gate_pass" in detail
+                and detail.get("period_escalation_gate_pass") is not True
+            ):
+                return False
+        elif has_existing_formal_state:
+            if (
+                detail.get("existing_formal_classification") != "triggered"
+                or detail.get("existing_formal_pass") is not True
+            ):
+                return False
+        elif detail.get("classification") != "triggered" or detail.get("reason") is not None:
+            return False
+        return True
+
+    if contract_scope not in {"raw_rule_plan", "production_provisional"}:
+        fail("contract_scope_invalid")
+
+    top_level_required_fields = {
+        "condition_key",
+        "direction",
+        "signal_type",
+        "output_event_type",
+        "triggered_periods",
+        "all_trigger_periods",
+        "primary_trigger_period",
+        "prerequisite_periods",
+        "period_escalation_trace",
+        "ordinary_period_escalation_policy_version",
+        "ordinary_period_escalation_policy_hash",
+    }
+    rule_proof_required_fields = {
+        "rule_reused",
+        "trigger_rule_spec_version",
+        "trigger_rule_policy_hash",
+        "selected_metric",
+        "period_evaluation_details",
+        "triggered_period_details",
+        "period_escalation_trace",
+        "ordinary_period_escalation_policy_version",
+        "ordinary_period_escalation_policy_hash",
+    }
+    rule_eval_required_fields = {
+        "trigger_rule_spec_version",
+        "trigger_rule_policy_hash",
+        "outcome_classification",
+        "output_event_type",
+        "trigger_live",
+        "triggered_periods",
+        "all_trigger_periods",
+        "primary_trigger_period",
+        "prerequisite_periods",
+        "period_escalation_trace",
+        "ordinary_period_escalation_policy_version",
+        "ordinary_period_escalation_policy_hash",
+        "pending_reasons",
+        "quality_reasons",
+        "blocked_reason",
+    }
+    top_level_trace_fields = {
+        "policy_version",
+        "policy_hash",
+        "context_contract_version",
+        "context_hash",
+        "direction",
+        "legacy_replay",
+        "same_day_formal_evidence",
+        "periods",
+    }
+
+    def require_fields(source_name: str, source: Mapping[str, Any], manifest: set[str]) -> None:
+        missing = sorted(manifest - set(source))
+        if missing:
+            fail(f"source_required_fields_missing:{source_name}:{','.join(missing)}")
+
+    raw_rule_proof = rule_plan.get("rule_proof")
+    raw_rule_eval_result = rule_plan.get("rule_eval_result")
+    if contract_scope == "production_provisional":
+        require_fields("top_level", rule_plan, top_level_required_fields)
+        if not isinstance(raw_rule_proof, Mapping) or not raw_rule_proof:
+            fail("rule_proof_missing_empty_or_not_mapping")
+        if not isinstance(raw_rule_eval_result, Mapping) or not raw_rule_eval_result:
+            fail("rule_eval_result_missing_empty_or_not_mapping")
+        require_fields("rule_proof", raw_rule_proof, rule_proof_required_fields)
+        require_fields("rule_eval_result", raw_rule_eval_result, rule_eval_required_fields)
+    else:
+        if "rule_proof" in rule_plan:
+            if not isinstance(raw_rule_proof, Mapping) or not raw_rule_proof:
+                fail("rule_proof_missing_empty_or_not_mapping")
+            require_fields("rule_proof", raw_rule_proof, rule_proof_required_fields)
+        if "rule_eval_result" in rule_plan:
+            if not isinstance(raw_rule_eval_result, Mapping) or not raw_rule_eval_result:
+                fail("rule_eval_result_missing_empty_or_not_mapping")
+            require_fields("rule_eval_result", raw_rule_eval_result, rule_eval_required_fields)
+
+    rule_proof = raw_rule_proof if isinstance(raw_rule_proof, Mapping) else {}
+    rule_eval_result = raw_rule_eval_result if isinstance(raw_rule_eval_result, Mapping) else {}
+    sources = (
+        ("top_level", rule_plan),
+        ("rule_proof", rule_proof),
+        ("rule_eval_result", rule_eval_result),
+    )
+
+    def source_has_same_day_marker(value: Any) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        candidate_trace = value.get("period_escalation_trace")
+        if isinstance(candidate_trace, Mapping):
+            if candidate_trace.get("same_day_formal_evidence") is True:
+                return True
+            candidate_periods = candidate_trace.get("periods")
+            if isinstance(candidate_periods, Mapping) and any(
+                isinstance(period_trace, Mapping)
+                and period_trace.get("evidence_source") == SAME_DAY_FORMAL_EVIDENCE_SOURCE
+                for period_trace in candidate_periods.values()
+            ):
+                return True
+        for detail_field in ("triggered_period_details", "period_evaluation_details"):
+            details = value.get(detail_field)
+            if isinstance(details, list) and any(
+                isinstance(detail, Mapping)
+                and isinstance(detail.get("period_escalation_trace"), Mapping)
+                and detail["period_escalation_trace"].get("evidence_source")
+                == SAME_DAY_FORMAL_EVIDENCE_SOURCE
+                for detail in details
+            ):
+                return True
+        return False
+
+    def source_has_same_day_candidate_shape(value: Any) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        all_trigger_periods = value.get("all_trigger_periods")
+        if isinstance(all_trigger_periods, list):
+            all_period_set = {str(period or "") for period in all_trigger_periods}
+            if any(
+                target_period in all_period_set
+                and requirement["prerequisite_period"] in all_period_set
+                for target_period, requirement in PERIOD_ESCALATION_REQUIREMENTS.items()
+            ):
+                return True
+        candidate_trace = value.get("period_escalation_trace")
+        if isinstance(candidate_trace, Mapping):
+            if candidate_trace.get("legacy_replay") is True:
+                return True
+            trace_periods = candidate_trace.get("periods")
+            if isinstance(trace_periods, Mapping) and any(
+                isinstance(period_trace, Mapping)
+                and "current_formal_pass_periods" in period_trace
+                for period_trace in trace_periods.values()
+            ):
+                return True
+        return False
+
+    source_candidates = tuple(value for _, value in sources)
+    candidate_identified = any(
+        source_has_same_day_marker(value) or source_has_same_day_candidate_shape(value)
+        for value in source_candidates
+    )
+
+    def is_exact_raw_legacy_input() -> bool:
+        if contract_scope != "raw_rule_plan" or rule_proof or rule_eval_result:
+            return False
+        context_run_id = str(rule_plan.get("context_run_id") or "")
+        if context_run_id not in LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS:
+            return False
+        raw_trace = rule_plan.get("period_escalation_trace")
+        if not isinstance(raw_trace, Mapping) or set(raw_trace) != top_level_trace_fields:
+            return False
+        if (
+            raw_trace.get("policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION
+            or raw_trace.get("policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH
+            or raw_trace.get("context_contract_version") is not None
+            or raw_trace.get("context_hash") is not None
+            or raw_trace.get("direction") != rule_plan.get("direction")
+            or raw_trace.get("legacy_replay") is not True
+            or raw_trace.get("same_day_formal_evidence") is not False
+        ):
+            return False
+        legacy_trace_fields = {
+            "policy_version",
+            "policy_hash",
+            "target_period",
+            "prerequisite_period",
+            "direction",
+            "expected_window_kind",
+            "expected_window_key",
+            "expected_required_transition",
+            "context_contract_version",
+            "context_generation_mode",
+            "context_hash",
+            "evidence_source",
+            "gate_pass",
+            "evidence_ready",
+            "gate_status",
+            "legacy_context_run_id",
+            "reason",
+        }
+        raw_periods = raw_trace.get("periods")
+        if not isinstance(raw_periods, Mapping) or not raw_periods:
+            return False
+        for period, period_trace in raw_periods.items():
+            if period not in PERIOD_ESCALATION_REQUIREMENTS or not isinstance(period_trace, Mapping):
+                return False
+            requirement = PERIOD_ESCALATION_REQUIREMENTS[period]
+            if set(period_trace) != legacy_trace_fields or (
+                period_trace.get("policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION
+                or period_trace.get("policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH
+                or period_trace.get("target_period") != period
+                or period_trace.get("prerequisite_period") != requirement["prerequisite_period"]
+                or period_trace.get("direction") != rule_plan.get("direction")
+                or period_trace.get("expected_window_kind") != requirement["window_kind"]
+                or period_trace.get("expected_required_transition")
+                != PERIOD_ESCALATION_DIRECTION_TRANSITIONS.get(str(rule_plan.get("direction") or ""))
+                or period_trace.get("context_contract_version") is not None
+                or period_trace.get("context_generation_mode") is not None
+                or period_trace.get("context_hash") is not None
+                or period_trace.get("evidence_source") != "n2_period_escalation_context"
+                or period_trace.get("gate_status") != "legacy_replay"
+                or period_trace.get("gate_pass") is not True
+                or period_trace.get("evidence_ready") is not True
+                or period_trace.get("legacy_context_run_id") != context_run_id
+                or period_trace.get("reason") != "frozen_legacy_period_rule_replay"
+            ):
+                return False
+        return True
+
+    if candidate_identified and is_exact_raw_legacy_input():
+        return
+    if not candidate_identified:
+        return
+
+    require_fields("top_level", rule_plan, top_level_required_fields)
+    if contract_scope == "raw_rule_plan":
+        require_fields(
+            "top_level",
+            rule_plan,
+            {"period_evaluation_details", "triggered_period_details"},
+        )
+
+    for source_index, (source_name, source) in enumerate(sources):
+        for other_name, other_source in sources[source_index + 1 :]:
+            for field in set(source) & set(other_source):
+                if source[field] != other_source[field]:
+                    fail(f"source_field_conflicting:{source_name}:{other_name}:{field}")
+
+    top_level_trace = rule_plan.get("period_escalation_trace")
+    if not isinstance(top_level_trace, Mapping):
+        fail("period_escalation_trace_missing")
+    trace = top_level_trace
+    raw_rule_plan_audit_compatibility = (
+        contract_scope == "raw_rule_plan"
+        and not rule_proof
+        and not rule_eval_result
+        and trace.get("audit_note") == "dedup_must_ignore_optional_trace"
+    )
+    accepted_top_level_trace_fields = set(top_level_trace_fields)
+    if raw_rule_plan_audit_compatibility:
+        accepted_top_level_trace_fields.add("audit_note")
+    if set(trace) != accepted_top_level_trace_fields:
+        fail("top_level_trace_fields_conflicting")
+    if trace.get("legacy_replay") is not False:
+        fail("top_level_trace_legacy_replay_conflicting")
+    raw_period_traces = trace.get("periods")
+    if not isinstance(raw_period_traces, Mapping):
+        fail("period_escalation_trace_periods_not_mapping")
+    period_traces: dict[str, Mapping[str, Any]] = {}
+    for raw_period, period_trace in raw_period_traces.items():
+        if not isinstance(raw_period, str) or raw_period not in PERIOD_ESCALATION_REQUIREMENTS:
+            fail("period_escalation_trace_period_invalid")
+        if not isinstance(period_trace, Mapping):
+            fail("period_escalation_trace_entry_not_mapping")
+        period_traces[raw_period] = period_trace
+    same_day_targets = {
+        period
+        for period, period_trace in period_traces.items()
+        if period_trace.get("evidence_source") == SAME_DAY_FORMAL_EVIDENCE_SOURCE
+    }
+    if trace.get("same_day_formal_evidence") is not True or not same_day_targets:
+        fail("same_day_trace_entries_missing")
+    if rule_plan.get("ordinary_period_escalation_policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION:
+        fail("policy_version_missing_or_conflicting")
+    if rule_plan.get("ordinary_period_escalation_policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH:
+        fail("policy_hash_missing_or_conflicting")
+    if trace.get("policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION:
+        fail("trace_policy_version_missing_or_conflicting")
+    if trace.get("policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH:
+        fail("trace_policy_hash_missing_or_conflicting")
+
+    required_lists: dict[str, list[str]] = {}
+    for field in ("triggered_periods", "all_trigger_periods", "prerequisite_periods"):
+        value = rule_plan.get(field)
+        if not isinstance(value, list) or not value:
+            fail(f"{field}_missing")
+        periods = [str(period) for period in value]
+        if periods != [period for period in PERIOD_PRIORITY if period in set(periods)]:
+            fail(f"{field}_order_or_value_invalid")
+        required_lists[field] = periods
+
+    triggered_periods = required_lists["triggered_periods"]
+    all_trigger_periods = required_lists["all_trigger_periods"]
+    prerequisite_periods = required_lists["prerequisite_periods"]
+    primary_trigger_period = str(rule_plan.get("primary_trigger_period") or "")
+    if primary_trigger_period != triggered_periods[0]:
+        fail("primary_trigger_period_conflicting")
+
+    direction = str(rule_plan.get("direction") or "")
+    if direction not in {"buy", "sell"} or trace.get("direction") != direction:
+        fail("direction_missing_or_conflicting")
+
+    def source_value(field: str) -> Any:
+        for _, source in sources:
+            if field in source:
+                return source[field]
+        fail(f"{field}_missing")
+
+    triggered_details = source_value("triggered_period_details")
+    period_evaluation_details = source_value("period_evaluation_details")
+    if not isinstance(triggered_details, list):
+        fail("triggered_period_details_not_list")
+    if not isinstance(period_evaluation_details, list):
+        fail("period_evaluation_details_not_list")
+
+    def index_details(
+        details: list[Any],
+        *,
+        invalid_reason: str,
+        duplicate_reason: str,
+    ) -> tuple[list[str], dict[str, Mapping[str, Any]]]:
+        ordered_periods: list[str] = []
+        indexed: dict[str, Mapping[str, Any]] = {}
+        for detail in details:
+            if not isinstance(detail, Mapping):
+                fail(invalid_reason)
+            period = detail.get("period")
+            if not isinstance(period, str) or period not in PERIOD_PRIORITY:
+                fail(invalid_reason)
+            if period in indexed:
+                fail(duplicate_reason)
+            ordered_periods.append(period)
+            indexed[period] = detail
+        return ordered_periods, indexed
+
+    triggered_detail_periods, triggered_details_by_period = index_details(
+        triggered_details,
+        invalid_reason="triggered_period_detail_invalid",
+        duplicate_reason="triggered_period_details_duplicate",
+    )
+    evaluation_detail_periods, evaluation_details_by_period = index_details(
+        period_evaluation_details,
+        invalid_reason="period_evaluation_detail_invalid",
+        duplicate_reason="period_evaluation_details_duplicate",
+    )
+    if triggered_detail_periods != triggered_periods:
+        fail("triggered_period_details_order_or_scope_conflicting")
+    for period, detail in triggered_details_by_period.items():
+        if detail.get("classification") != "triggered":
+            fail("triggered_period_detail_classification_conflicting")
+        if dict(detail) != dict(evaluation_details_by_period.get(period) or {}):
+            fail("triggered_period_detail_evaluation_conflicting")
+
+    condition_key = str(rule_plan.get("condition_key") or "")
+    expected_prefix = "BUY" if direction == "buy" else "SELL"
+    if not condition_key.startswith(f"{expected_prefix}:"):
+        fail("condition_key_direction_or_periods_invalid")
+    raw_condition_periods = [period.strip() for period in condition_key.split(":", 1)[1].split(",")]
+    if (
+        not raw_condition_periods
+        or any(period not in PERIOD_PRIORITY for period in raw_condition_periods)
+        or len(raw_condition_periods) != len(set(raw_condition_periods))
+        or raw_condition_periods
+        != [period for period in PERIOD_PRIORITY if period in set(raw_condition_periods)]
+    ):
+        fail("condition_key_direction_or_periods_invalid")
+    if evaluation_detail_periods != raw_condition_periods:
+        fail("period_evaluation_details_order_or_scope_conflicting")
+
+    canonical_formal_periods = [
+        period
+        for period in evaluation_detail_periods
+        if canonical_formal_detail_passes(
+            direction,
+            period,
+            evaluation_details_by_period[period],
+            require_effective_trigger=False,
+        )
+    ]
+
+    evaluation_trace_periods: dict[str, Mapping[str, Any]] = {}
+    for period, detail in evaluation_details_by_period.items():
+        if "period_escalation_trace" not in detail:
+            continue
+        detail_trace = detail.get("period_escalation_trace")
+        if not isinstance(detail_trace, Mapping):
+            fail("period_evaluation_trace_not_mapping")
+        evaluation_trace_periods[period] = detail_trace
+    if set(period_traces) != set(evaluation_trace_periods):
+        fail("period_escalation_trace_scope_conflicting")
+    for period, period_trace in period_traces.items():
+        if dict(period_trace) != dict(evaluation_trace_periods[period]):
+            fail("period_escalation_trace_evaluation_conflicting")
+
+    same_day_prerequisite_by_target: dict[str, str] = {}
+    formal_pass_period_sets: set[tuple[str, ...]] = set()
+    same_day_trace_fields = {
+        "policy_version",
+        "policy_hash",
+        "target_period",
+        "prerequisite_period",
+        "direction",
+        "expected_window_kind",
+        "expected_required_transition",
+        "context_contract_version",
+        "context_hash",
+        "evidence_source",
+        "current_formal_pass_periods",
+        "gate_status",
+        "gate_pass",
+        "evidence_ready",
+        "reason",
+    }
+    n2_context_trace_fields = {
+        "policy_version",
+        "policy_hash",
+        "target_period",
+        "prerequisite_period",
+        "direction",
+        "expected_window_kind",
+        "expected_window_key",
+        "expected_required_transition",
+        "context_contract_version",
+        "context_generation_mode",
+        "context_hash",
+        "evidence_source",
+        "gate_pass",
+        "evidence_ready",
+        "source_entry",
+        "status",
+        "coverage_status",
+        "seen",
+        "gate_status",
+        "reason",
+    }
+    n2_source_entry_fields = {
+        "target_period",
+        "prerequisite_period",
+        "window_kind",
+        "window_key",
+        "window_start",
+        "required_transition",
+        "reset_for_trade_date",
+        "state_epoch_trade_date",
+        "observation_end",
+        "expected_source_trade_date_count",
+        "observed_source_trade_date_count",
+        "missing_source_trade_dates",
+        "observation_count",
+        "previous_incremental_state_used",
+        "first_source_trade_date",
+        "last_source_trade_date",
+        "status",
+        "coverage_status",
+        "seen",
+        "latest_source_basis_ref",
+        "latest_source_condition_run_id",
+        "entry_hash",
+    }
+
+    def n2_context_trace_is_valid(period: str, period_trace: Mapping[str, Any]) -> bool:
+        requirement = PERIOD_ESCALATION_REQUIREMENTS[period]
+        source_entry = period_trace.get("source_entry")
+        if set(period_trace) != n2_context_trace_fields or not isinstance(source_entry, Mapping):
+            return False
+        if set(source_entry) != n2_source_entry_fields:
+            return False
+        generation_mode = period_trace.get("context_generation_mode")
+        if generation_mode not in {None, PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE}:
+            return False
+        if (
+            period_trace.get("policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION
+            or period_trace.get("policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH
+            or period_trace.get("target_period") != period
+            or period_trace.get("prerequisite_period") != requirement["prerequisite_period"]
+            or period_trace.get("direction") != direction
+            or period_trace.get("expected_window_kind") != requirement["window_kind"]
+            or period_trace.get("expected_required_transition")
+            != PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction]
+            or period_trace.get("context_contract_version") != PERIOD_ESCALATION_CONTEXT_VERSION
+            or not isinstance(period_trace.get("context_hash"), str)
+            or not period_trace.get("context_hash")
+            or trace.get("context_contract_version") != period_trace.get("context_contract_version")
+            or trace.get("context_hash") != period_trace.get("context_hash")
+            or period_trace.get("evidence_source") != "n2_period_escalation_context"
+        ):
+            return False
+        if (
+            source_entry.get("target_period") != period
+            or source_entry.get("prerequisite_period") != requirement["prerequisite_period"]
+            or source_entry.get("window_kind") != requirement["window_kind"]
+            or source_entry.get("window_key") != period_trace.get("expected_window_key")
+            or source_entry.get("required_transition") != PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction]
+            or period_trace.get("status") != source_entry.get("status")
+            or source_entry.get("coverage_status") != period_trace.get("coverage_status")
+            or period_trace.get("seen") is not source_entry.get("seen")
+            or not isinstance(source_entry.get("reset_for_trade_date"), bool)
+        ):
+            return False
+        expected_count = source_entry.get("expected_source_trade_date_count")
+        observed_count = source_entry.get("observed_source_trade_date_count")
+        observation_count = source_entry.get("observation_count")
+        previous_incremental_state_used = source_entry.get("previous_incremental_state_used")
+        missing_dates = source_entry.get("missing_source_trade_dates")
+        if (
+            not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or not isinstance(observed_count, int)
+            or isinstance(observed_count, bool)
+            or not isinstance(observation_count, int)
+            or isinstance(observation_count, bool)
+            or type(previous_incremental_state_used) is not bool
+            or not isinstance(missing_dates, list)
+            or expected_count < 0
+            or observed_count < 0
+            or observation_count < 0
+            or observation_count > observed_count
+            or observed_count + len(missing_dates) != expected_count
+            or previous_incremental_state_used != (observed_count > 1)
+            or any(
+                not isinstance(value, str) or len(value) != 8 or not value.isdigit()
+                for value in missing_dates
+            )
+        ):
+            return False
+        expected_entry_hash = str(source_entry.get("entry_hash") or "")
+        entry_payload = dict(source_entry)
+        entry_payload.pop("entry_hash", None)
+        actual_entry_hash = stable_hash(
+            json.dumps(
+                entry_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ),
+            length=64,
+        )
+        if expected_entry_hash != actual_entry_hash:
+            return False
+
+        status = source_entry.get("status")
+        coverage_status = source_entry.get("coverage_status")
+        seen = source_entry.get("seen")
+        reset_for_trade_date = source_entry.get("reset_for_trade_date")
+        first_source_trade_date = source_entry.get("first_source_trade_date")
+        last_source_trade_date = source_entry.get("last_source_trade_date")
+
+        def is_trade_date(value: Any) -> bool:
+            return isinstance(value, str) and len(value) == 8 and value.isdigit()
+
+        def parse_trade_date(value: Any) -> date | None:
+            if not is_trade_date(value):
+                return None
+            try:
+                return date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+            except ValueError:
+                return None
+
+        def period_key_for_day(candidate_period: str, value: date) -> str:
+            if candidate_period == "Y":
+                return f"{value.year:04d}"
+            if candidate_period == "Q":
+                return f"{value.year:04d}Q{((value.month - 1) // 3) + 1}"
+            if candidate_period == "M":
+                return f"{value.year:04d}{value.month:02d}"
+            iso_year, iso_week, _ = value.isocalendar()
+            return f"{iso_year:04d}W{iso_week:02d}"
+
+        window_start = parse_trade_date(source_entry.get("window_start"))
+        observation_end = parse_trade_date(source_entry.get("observation_end"))
+        state_epoch_trade_date = parse_trade_date(source_entry.get("state_epoch_trade_date"))
+        parsed_missing_dates = [parse_trade_date(value) for value in missing_dates]
+        if window_start is None or observation_end is None:
+            return False
+        if (
+            (period == "Y" and (window_start.month, window_start.day) != (1, 1))
+            or (period == "Q" and (window_start.month not in {1, 4, 7, 10} or window_start.day != 1))
+            or (period == "M" and window_start.day != 1)
+            or (period == "W" and window_start.isoweekday() != 1)
+            or period_key_for_day(period, window_start) != period_trace.get("expected_window_key")
+            or (not reset_for_trade_date and period_key_for_day(period, observation_end) != period_trace.get("expected_window_key"))
+            or (reset_for_trade_date and observation_end >= window_start)
+            or (not reset_for_trade_date and observation_end < window_start)
+            or any(value is None for value in parsed_missing_dates)
+            or missing_dates != sorted(set(missing_dates))
+            or any(
+                value is not None and not (window_start <= value <= observation_end)
+                for value in parsed_missing_dates
+            )
+        ):
+            return False
+        if observed_count == 0:
+            if source_entry.get("state_epoch_trade_date") is not None:
+                return False
+        elif (
+            state_epoch_trade_date is None
+            or not (window_start <= state_epoch_trade_date <= observation_end)
+            or source_entry.get("state_epoch_trade_date") in missing_dates
+            or (
+                previous_incremental_state_used is False
+                and state_epoch_trade_date != observation_end
+            )
+        ):
+            return False
+
+        if status == "ready":
+            coverage_valid = (
+                coverage_status == "passed"
+                and not missing_dates
+                and observed_count == expected_count
+            ) or (
+                generation_mode == PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE
+                and coverage_status == "incomplete"
+                and bool(missing_dates)
+                and observed_count < expected_count
+                and len(set(missing_dates)) == len(missing_dates)
+                and len(missing_dates) == expected_count - observed_count
+            )
+            first_source_date = parse_trade_date(first_source_trade_date)
+            last_source_date = parse_trade_date(last_source_trade_date)
+            latest_source_basis_ref = source_entry.get("latest_source_basis_ref")
+            return (
+                coverage_valid
+                and seen is True
+                and observation_count >= 1
+                and first_source_date is not None
+                and last_source_date is not None
+                and state_epoch_trade_date is not None
+                and state_epoch_trade_date <= first_source_date <= last_source_date <= observation_end
+                and first_source_trade_date not in missing_dates
+                and last_source_trade_date not in missing_dates
+                and isinstance(latest_source_basis_ref, str)
+                and latest_source_basis_ref.endswith(f":{last_source_trade_date}")
+                and (
+                    source_entry.get("latest_source_condition_run_id") is None
+                    or isinstance(source_entry.get("latest_source_condition_run_id"), str)
+                )
+                and period_trace.get("gate_status") == "passed"
+                and period_trace.get("gate_pass") is True
+                and period_trace.get("evidence_ready") is True
+                and period_trace.get("reason") is None
+            )
+
+        if status == "not_seen":
+            expected_coverage = "not_applicable" if reset_for_trade_date else "passed"
+            return (
+                coverage_status == expected_coverage
+                and seen is False
+                and not missing_dates
+                and observed_count == expected_count
+                and observation_count == 0
+                and first_source_trade_date is None
+                and last_source_trade_date is None
+                and (
+                    not reset_for_trade_date
+                    or (expected_count == 0 and observed_count == 0)
+                )
+                and period_trace.get("gate_status") == "not_seen"
+                and period_trace.get("gate_pass") is False
+                and period_trace.get("evidence_ready") is True
+                and period_trace.get("reason")
+                == f"period_escalation_prerequisite_not_seen:{period}"
+            )
+
+        if status == "not_ready":
+            return (
+                coverage_status == "incomplete"
+                and seen is False
+                and bool(missing_dates)
+                and observed_count < expected_count
+                and len(set(missing_dates)) == len(missing_dates)
+                and len(missing_dates) == expected_count - observed_count
+                and observation_count == 0
+                and first_source_trade_date is None
+                and last_source_trade_date is None
+                and source_entry.get("latest_source_basis_ref") is None
+                and source_entry.get("latest_source_condition_run_id") is None
+                and period_trace.get("gate_status") == "not_ready"
+                and period_trace.get("gate_pass") is False
+                and period_trace.get("evidence_ready") is False
+                and period_trace.get("reason")
+                == f"period_escalation_prerequisite_not_ready:{period}"
+            )
+
+        return False
+
+    def n2_context_trace_is_complete(period: str, period_trace: Mapping[str, Any]) -> bool:
+        return (
+            n2_context_trace_is_valid(period, period_trace)
+            and period_trace.get("status") == "ready"
+        )
+
+    n2_context_identities: set[tuple[str, str]] = set()
+    for period, period_trace in period_traces.items():
+        evidence_source = period_trace.get("evidence_source")
+        if evidence_source == SAME_DAY_FORMAL_EVIDENCE_SOURCE:
+            continue
+        # A valid negative trace on an untriggered higher period is audit data;
+        # it must not suppress a lower period that already satisfied its rule.
+        if evidence_source != "n2_period_escalation_context" or not n2_context_trace_is_valid(
+            period,
+            period_trace,
+        ):
+            fail("non_same_day_period_trace_proof_invalid")
+        n2_context_identities.add(
+            (
+                str(period_trace.get("context_contract_version") or ""),
+                str(period_trace.get("context_hash") or ""),
+            )
+        )
+    if len(n2_context_identities) > 1:
+        fail("top_level_trace_context_conflicting")
+    expected_top_context = next(iter(n2_context_identities), ("", ""))
+    actual_top_context = (
+        str(trace.get("context_contract_version") or ""),
+        str(trace.get("context_hash") or ""),
+    )
+    if actual_top_context != expected_top_context:
+        fail("top_level_trace_context_conflicting")
+
+    for target_period in same_day_targets:
+        if target_period not in PERIOD_ESCALATION_REQUIREMENTS:
+            fail("same_day_target_invalid")
+        requirement = PERIOD_ESCALATION_REQUIREMENTS[target_period]
+        expected_prerequisite = requirement["prerequisite_period"]
+        same_day_prerequisite_by_target[target_period] = expected_prerequisite
+        period_trace = period_traces[target_period]
+        if set(period_trace) != same_day_trace_fields:
+            fail("same_day_trace_fields_conflicting")
+        if period_trace.get("policy_version") != ORDINARY_PERIOD_ESCALATION_POLICY_VERSION:
+            fail("same_day_trace_policy_version_conflicting")
+        if period_trace.get("policy_hash") != ORDINARY_PERIOD_ESCALATION_POLICY_HASH:
+            fail("same_day_trace_policy_hash_conflicting")
+        if period_trace.get("direction") != direction:
+            fail("same_day_trace_direction_conflicting")
+        if period_trace.get("target_period") != target_period:
+            fail("same_day_trace_target_conflicting")
+        if period_trace.get("prerequisite_period") != expected_prerequisite:
+            fail("same_day_prerequisite_conflicting")
+        if period_trace.get("expected_window_kind") != requirement["window_kind"]:
+            fail("same_day_trace_window_conflicting")
+        if period_trace.get("expected_required_transition") != PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction]:
+            fail("same_day_trace_transition_conflicting")
+        if period_trace.get("context_contract_version") is not None or period_trace.get("context_hash") is not None:
+            fail("same_day_trace_context_not_null")
+        if period_trace.get("evidence_source") != SAME_DAY_FORMAL_EVIDENCE_SOURCE:
+            fail("same_day_trace_evidence_conflicting")
+        if (
+            period_trace.get("gate_status") != "passed"
+            or period_trace.get("gate_pass") is not True
+            or period_trace.get("evidence_ready") is not True
+            or period_trace.get("reason") is not None
+        ):
+            fail("same_day_trace_gate_conflicting")
+        current_formal_pass_value = period_trace.get("current_formal_pass_periods")
+        if not isinstance(current_formal_pass_value, list) or not current_formal_pass_value:
+            fail("same_day_formal_pass_periods_missing")
+        current_formal_pass_periods = [str(period) for period in current_formal_pass_value]
+        if current_formal_pass_periods != [
+            period for period in PERIOD_PRIORITY if period in set(current_formal_pass_periods)
+        ]:
+            fail("same_day_formal_pass_periods_order_or_value_invalid")
+        formal_pass_period_sets.add(tuple(current_formal_pass_periods))
+        if target_period not in current_formal_pass_periods or expected_prerequisite not in current_formal_pass_periods:
+            fail("same_day_formal_pass_pair_missing")
+        evaluation_detail = evaluation_details_by_period.get(target_period)
+        if (
+            not isinstance(evaluation_detail, Mapping)
+            or evaluation_detail.get("classification") != "triggered"
+            or evaluation_detail.get("existing_formal_classification") != "triggered"
+            or evaluation_detail.get("existing_formal_pass") is not True
+            or evaluation_detail.get("period_escalation_gate_pass") is not True
+        ):
+            fail("period_evaluation_same_day_formal_state_conflicting")
+        if list(evaluation_detail.get("prerequisite_periods") or []) != [expected_prerequisite]:
+            fail("period_evaluation_prerequisite_missing_or_conflicting")
+
+    if len(formal_pass_period_sets) != 1:
+        fail("same_day_formal_pass_periods_conflicting")
+    ordered_formal_pass_periods = list(next(iter(formal_pass_period_sets)))
+    formal_pass_periods = set(ordered_formal_pass_periods)
+    if ordered_formal_pass_periods != canonical_formal_periods:
+        fail("current_formal_pass_periods_not_proven_by_canonical_evaluation")
+    expected_same_day_targets = {
+        target_period
+        for target_period, requirement in PERIOD_ESCALATION_REQUIREMENTS.items()
+        if target_period in formal_pass_periods
+        and requirement["prerequisite_period"] in formal_pass_periods
+    }
+    if same_day_targets != expected_same_day_targets:
+        fail("same_day_trace_target_set_conflicting")
+
+    compressed_same_day_targets = same_day_targets & set(same_day_prerequisite_by_target.values())
+    final_same_day_targets = same_day_targets - compressed_same_day_targets
+    if not final_same_day_targets:
+        fail("same_day_final_target_missing")
+    if set(triggered_periods) & same_day_targets != final_same_day_targets:
+        fail("same_day_target_compression_conflicting")
+    compressed_by_same_day_targets = set(same_day_prerequisite_by_target.values())
+    if set(triggered_periods) & compressed_by_same_day_targets:
+        fail("compressed_prerequisite_reintroduced")
+
+    independent_triggered_periods = set(triggered_periods) - same_day_targets
+    for period in independent_triggered_periods:
+        detail = evaluation_details_by_period.get(period)
+        detail_trace = detail.get("period_escalation_trace") if isinstance(detail, Mapping) else None
+        # Only a period that is actually emitted as a target needs positive
+        # ready/seen N2 proof; not_seen/not_ready can never authorize that target.
+        if (
+            period not in PERIOD_ESCALATION_REQUIREMENTS
+            or not isinstance(detail, Mapping)
+            or not canonical_formal_detail_passes(direction, period, detail)
+            or not isinstance(detail_trace, Mapping)
+            or not n2_context_trace_is_complete(period, detail_trace)
+        ):
+            fail("independent_triggered_period_n2_proof_invalid")
+
+    final_same_day_prerequisites = {
+        same_day_prerequisite_by_target[target_period]
+        for target_period in final_same_day_targets
+    }
+    for target_period in final_same_day_targets:
+        expected_prerequisite = same_day_prerequisite_by_target[target_period]
+        detail = triggered_details_by_period[target_period]
+        detail_trace = detail.get("period_escalation_trace")
+        if not isinstance(detail_trace, Mapping) or dict(detail_trace) != dict(period_traces[target_period]):
+            fail("triggered_detail_same_day_trace_missing_or_conflicting")
+        if list(detail.get("prerequisite_periods") or []) != [expected_prerequisite]:
+            fail("triggered_detail_prerequisite_missing_or_conflicting")
+
+    expected_all = [
+        period
+        for period in PERIOD_PRIORITY
+        if period in set(triggered_periods) | final_same_day_prerequisites
+    ]
+    if all_trigger_periods != expected_all:
+        fail("all_trigger_periods_missing_or_conflicting")
+
+    expected_prerequisite_periods_set: set[str] = set()
+    for detail in triggered_details:
+        if not isinstance(detail, Mapping):
+            continue
+        detail_prerequisites = detail.get("prerequisite_periods") or []
+        if not isinstance(detail_prerequisites, list):
+            fail("triggered_detail_prerequisite_value_invalid")
+        detail_prerequisite_periods = [str(period) for period in detail_prerequisites]
+        if detail_prerequisite_periods != [
+            period for period in PERIOD_PRIORITY if period in set(detail_prerequisite_periods)
+        ]:
+            fail("triggered_detail_prerequisite_order_or_value_invalid")
+        expected_prerequisite_periods_set.update(detail_prerequisite_periods)
+    expected_prerequisite_periods = [
+        period for period in PERIOD_PRIORITY if period in expected_prerequisite_periods_set
+    ]
+    if prerequisite_periods != expected_prerequisite_periods:
+        fail("prerequisite_periods_missing_or_conflicting")
 
 
 def build_provisional_ordinary_matcher_dry_run_report(

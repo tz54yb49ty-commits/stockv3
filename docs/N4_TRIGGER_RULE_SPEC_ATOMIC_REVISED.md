@@ -730,6 +730,204 @@ projection_30m_type
 projection_30m_flag
 ```
 
+### 4.5 Ordinary period escalation prerequisite v2
+
+N4 ordinary `BUY` / `SELL` uses the versioned N2 prerequisite context at:
+
+```text
+period_trigger_baseline_json.period_escalation_context
+contract_version = N2-period-escalation-context-v1
+generation_mode = N2-period-escalation-daily-incremental-v1  # new incremental evidence
+```
+
+The N4 policy trace is:
+
+```text
+ordinary_period_escalation_policy_version = N4-ordinary-period-escalation-v2
+ordinary_period_escalation_policy_hash = stable hash of the N4 policy
+```
+
+This gate applies only to ordinary W/M/Q/Y periods:
+
+```text
+W <- D  directions[direction].W  window_kind=week
+M <- W  directions[direction].M  window_kind=month
+Q <- M  directions[direction].Q  window_kind=quarter
+Y <- Q  directions[direction].Y  window_kind=year
+```
+
+`window_kind` is canonical. `window_type` is not an accepted alias.
+
+N4 must validate the frozen N2 context without recomputing it. Validation includes:
+
+```text
+contract_version
+source_layer = N2_condition
+asset_kind
+identity_key
+for_trade_date
+source_trade_date
+direction
+target_period
+prerequisite_period
+window_kind
+window_key
+window_start
+observation_end
+reset_for_trade_date
+required_transition
+status
+coverage_status
+seen
+coverage counts and missing dates
+entry_hash
+context_hash
+```
+
+Direction transitions are fixed:
+
+```text
+buy  -> volume_up
+sell -> low_volume_down
+```
+
+For P in W/M/Q/Y, N4 first computes the current same-direction formal-pass
+period set from the current localized context plus the current N3 formal period
+metrics. A condition key naming a period is not evidence that the period passed.
+
+The same-day direct rules are:
+
+```text
+W = current W formal pass AND current D formal pass
+M = current M formal pass AND current W formal pass
+Q = current Q formal pass AND current M formal pass
+Y = current Y formal pass AND current Q formal pass
+```
+
+This direct path does not use previous trigger state or historical N2 evidence.
+It records:
+
+```text
+evidence_source = current_same_day_formal_pass
+triggered_periods = [target period]
+all_trigger_periods = [target period, prerequisite period]
+primary_trigger_period = target period
+prerequisite_periods = [prerequisite period]
+```
+
+Therefore `[D,W]`, `[W,M]`, `[M,Q]`, and `[Q,Y]` upgrade to W, M, Q,
+and Y respectively. When several adjacent periods pass, a period used as the
+same-day prerequisite of a higher target is not duplicated in
+`triggered_periods`; it remains visible in `all_trigger_periods` and the audit
+trace.
+
+The production provisional ordinary adapter must preserve the matcher output
+without recomputing or narrowing it. The matcher plan, lifecycle plan,
+`common_trigger_match.raw_json`, and N4 outbox payload must carry the same:
+
+```text
+triggered_periods
+all_trigger_periods
+primary_trigger_period
+prerequisite_periods
+period_escalation_trace
+ordinary_period_escalation_policy_version
+ordinary_period_escalation_policy_hash
+```
+
+For v2 `current_same_day_formal_pass`, missing fields, reversed period order,
+direction conflicts, policy/hash conflicts, or a target/prerequisite pair not
+present in the current formal-pass evidence must fail closed. The adapter must
+not replace missing `all_trigger_periods` with `triggered_periods`, infer the
+direction from `condition_key`, or treat a condition-key period as formal-pass
+evidence. This forwarding rule changes no event ID, dedup key, lifecycle state
+identity, or N5 intake boundary.
+
+When the same-day direct rule is not proven, N4 falls back to the frozen N2
+context. For P in W/M/Q/Y:
+
+```text
+ordinary_formal_pass_v2[P] =
+  existing_formal_pass[P]
+  AND prerequisite_gate_pass[P]
+
+prerequisite_gate_pass[P] =
+  status = ready
+  AND seen = true
+  AND (
+    coverage_status = passed with complete coverage
+    OR generation_mode = N2-period-escalation-daily-incremental-v1
+       AND coverage_status = incomplete with exact missing-date accounting
+  )
+  AND all contract and integrity checks pass
+```
+
+Status semantics:
+
+```text
+ready:
+  prerequisite observed; exact complete or incomplete coverage proof is retained
+  and the gate may pass
+
+not_seen:
+  complete coverage and prerequisite not observed; deterministic no-op
+
+not_ready:
+  incomplete coverage; quality-blocked and not equivalent to not_seen
+
+missing / malformed / wrong version / wrong direction / wrong window / hash mismatch:
+  quality-blocked for that high period
+```
+
+D does not use this prerequisite gate. `BUY:FULL`, `SELL:FULL`, `BUY_HINT`, and
+`SELL_HINT` keep their separate rule branches and must not read this context.
+
+Current formal periods and N2 prerequisites remain separate on the fallback
+path:
+
+```text
+triggered_periods = periods that pass the current realtime formal rule and prerequisite gate
+all_trigger_periods = triggered_periods, plus only same-day formal prerequisites
+primary_trigger_period = highest current formal period
+prerequisite_periods = prerequisite periods used by triggered high periods
+period_escalation_trace = optional audit trace of every requested high-period gate
+```
+
+`all_trigger_periods` must not union `previous_all_trigger_periods` and must not
+contain an N2 historical prerequisite unless that period also passes its own
+current formal rule. The v4 plan exposes the aggregate trace directly. The provisional
+ordinary event path preserves the same evidence under
+`rule_proof.period_evaluation_details[*]` and
+`rule_proof.triggered_period_details[*]` without changing event schema v1.
+
+Lifecycle identity and dedup keys do not include the prerequisite audit trace:
+
+```text
+inactive -> matched: TriggerMatched only
+matched -> matched unchanged: no-op
+matched -> matched with current period-set change: TriggerStateChanged only
+not_ready with no other ready formal evidence: preserve the existing live state
+```
+
+If same-day formal evidence is absent, new-policy runs require the v1 context.
+`not_ready`, malformed context, a wrong direction/window/version, or a hash
+mismatch blocks only that high-period rule. D, `BUY:FULL`, `SELL:FULL`,
+`BUY_HINT`, and `SELL_HINT` do not use this gate and remain unchanged.
+
+The only in-code legacy exception is the explicitly frozen historical replay
+lineage:
+
+```text
+trigger_context_snapshot_20260525_condition_layer_20260522_to_20260525_20260525102249_execute
+```
+
+That lineage is marked `legacy_replay`, uses its frozen old period rule, and does
+not create prerequisite facts. Its frozen output may retain the old previous-set
+union; the v2 path must never do so. Other missing contexts fail closed unless
+the current same-day formal pair is proven. Historical runs are never backfilled
+or rewritten. This contract changes no lifecycle rule, event schema, event ID,
+dedup key, N5 intake boundary, physical column, or DDL migration.
+
 ## 5. Ordinary BUY Rules
 
 Applicable to:
