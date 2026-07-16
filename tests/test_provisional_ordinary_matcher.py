@@ -1,12 +1,24 @@
+import copy
+import hashlib
 import inspect
+import json
 import unittest
 
 from ashare_v3.trigger import provisional_projection_matcher
 from ashare_v3.trigger.provisional_ordinary_matcher import (
     adapt_n3p_metric_row_for_rule_v4,
+    assert_same_day_period_escalation_output_contract,
     build_provisional_ordinary_matcher_dry_run_report,
     build_provisional_ordinary_matcher_plans,
     summarize_provisional_ordinary_matcher_plans,
+)
+from ashare_v3.trigger.rule_v4_matcher import (
+    LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS,
+    ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+    ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+    PERIOD_ESCALATION_CONTEXT_VERSION,
+    PERIOD_ESCALATION_DIRECTION_TRANSITIONS,
+    PERIOD_ESCALATION_REQUIREMENTS,
 )
 from tests.test_trigger_projection_matcher import CONTEXT_RUN_ID, context_row, stable_int
 
@@ -15,9 +27,1101 @@ N3P_RUN_ID = (
     "realtime_action_confirmation_metric_20260624_until_1352__asset_all__"
     "market_data_subscription_20260624_condition_layer_20260623_source_20260623_for_20260624_v1"
 )
+SAME_DAY_CONTEXT_RUN_ID = (
+    "trigger_context_snapshot_20260714_condition_layer_20260713_"
+    "source_20260713_for_20260714_v1__atomic_rule_v1"
+)
+PRODUCTION_20260714_SOURCE_CONDITION_RUN_ID = (
+    "condition_layer_20260713_source_20260713_for_20260714_v1"
+)
+PRODUCTION_20260714_1322_METRIC_RUN_ID = (
+    "realtime_action_confirmation_metric_20260714_until_1322__asset_all__"
+    "b1_source_returned_snapshot_amount_chain_v2_asset_unit_fix_v1_current_period_avg_v1__"
+    "market_data_subscription_20260714_condition_layer_20260713_source_20260713_for_20260714_v1"
+)
+PRODUCTION_20260714_1322_FALSE_POSITIVE_CASES = (
+    ("stock", "stock:SH:600018", "buy", "BUY:Y,Q,M", ("Q", "M"), {"Y": "not_ready"}, ["Q"], ["Q", "M"], ["M"]),
+    ("stock", "stock:SH:600161", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready", "Q": "not_seen", "M": "not_seen"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SH:600350", "buy", "BUY:Y,M,W,D", ("M", "W"), {"Y": "not_ready"}, ["M"], ["M", "W"], ["W"]),
+    ("stock", "stock:SH:600380", "buy", "BUY:Y,Q,W,D", ("W", "D"), {"Y": "not_ready"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SH:600895", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:000661", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready", "Q": "not_seen"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:002223", "buy", "BUY:Y,Q,M,W,D", ("M", "W"), {"Y": "not_ready"}, ["M"], ["M", "W"], ["W"]),
+    ("stock", "stock:SZ:002532", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready", "Q": "not_seen"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:002675", "buy", "BUY:Y,Q,W,D", ("W", "D"), {"Y": "not_ready"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:300308", "buy", "BUY:M,W,D", ("W", "D"), {"M": "not_seen"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:301207", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready"}, ["W"], ["W", "D"], ["D"]),
+    ("stock", "stock:SZ:301267", "buy", "BUY:Y,Q,M,W,D", ("W", "D"), {"Y": "not_ready", "Q": "not_seen", "M": "not_seen"}, ["W"], ["W", "D"], ["D"]),
+    ("board", "board:TDX:881177", "sell", "SELL:Y,M,W,D", ("M", "W"), {"Y": "not_ready"}, ["M"], ["M", "W"], ["W"]),
+)
+
+
+def same_day_fail_closed_mutations(
+    multi_valid: dict[str, object],
+    disjoint_valid: dict[str, object],
+) -> list[dict[str, object]]:
+    invalid_plans: list[dict[str, object]] = []
+
+    def trace_sources(plan: dict[str, object]) -> tuple[dict[str, object], ...]:
+        return (plan, plan["rule_proof"], plan["rule_eval_result"])
+
+    def tamper_compressed_trace(field: str, value: object) -> dict[str, object]:
+        invalid = copy.deepcopy(multi_valid)
+        for source in trace_sources(invalid):
+            source["period_escalation_trace"]["periods"]["W"][field] = value
+        for detail in invalid["rule_proof"]["period_evaluation_details"]:
+            if detail["period"] == "W":
+                detail["period_escalation_trace"][field] = value
+        return invalid
+
+    invalid_plans.extend(
+        (
+            tamper_compressed_trace("current_formal_pass_periods", ["M", "W"]),
+            tamper_compressed_trace("evidence_source", "tampered_trace"),
+            tamper_compressed_trace("direction", "sell"),
+            tamper_compressed_trace("policy_version", "tampered_policy"),
+            tamper_compressed_trace("policy_hash", "tampered_hash"),
+            tamper_compressed_trace("target_period", "Q"),
+            tamper_compressed_trace("expected_window_kind", "quarter"),
+            tamper_compressed_trace("expected_required_transition", "low_volume_down"),
+            tamper_compressed_trace("context_contract_version", "unexpected_context"),
+            tamper_compressed_trace("context_hash", "unexpected_hash"),
+            tamper_compressed_trace("gate_status", "not_ready"),
+            tamper_compressed_trace("gate_pass", False),
+            tamper_compressed_trace("evidence_ready", False),
+            tamper_compressed_trace("reason", "unexpected_reason"),
+            tamper_compressed_trace("extra_frozen_field", True),
+        )
+    )
+
+    triggered_order = copy.deepcopy(disjoint_valid)
+    triggered_order["rule_proof"]["triggered_period_details"].reverse()
+    invalid_plans.append(triggered_order)
+    triggered_classification = copy.deepcopy(multi_valid)
+    triggered_classification["rule_proof"]["triggered_period_details"][0]["classification"] = "no_op"
+    invalid_plans.append(triggered_classification)
+    triggered_evaluation_mismatch = copy.deepcopy(multi_valid)
+    triggered_evaluation_mismatch["rule_proof"]["triggered_period_details"][0]["reason"] = "tampered"
+    invalid_plans.append(triggered_evaluation_mismatch)
+
+    trace_self_proof = copy.deepcopy(multi_valid)
+    for detail in trace_self_proof["rule_proof"]["period_evaluation_details"]:
+        if detail["period"] == "D":
+            detail["classification"] = "no_op"
+    invalid_plans.append(trace_self_proof)
+
+    non_mapping_triggered_detail = copy.deepcopy(multi_valid)
+    non_mapping_triggered_detail["rule_proof"]["triggered_period_details"][0] = None
+    invalid_plans.append(non_mapping_triggered_detail)
+    empty_period_detail = copy.deepcopy(multi_valid)
+    empty_period_detail["rule_proof"]["period_evaluation_details"][-1]["period"] = ""
+    invalid_plans.append(empty_period_detail)
+    unknown_period_detail = copy.deepcopy(multi_valid)
+    unknown_period_detail["rule_proof"]["period_evaluation_details"][-1]["period"] = "Z"
+    invalid_plans.append(unknown_period_detail)
+    extra_evaluation_detail = copy.deepcopy(multi_valid)
+    extra_detail = copy.deepcopy(extra_evaluation_detail["rule_proof"]["period_evaluation_details"][-1])
+    extra_detail["period"] = "Q"
+    extra_evaluation_detail["rule_proof"]["period_evaluation_details"].append(extra_detail)
+    invalid_plans.append(extra_evaluation_detail)
+    extra_triggered_detail = copy.deepcopy(multi_valid)
+    extra_triggered_detail["rule_proof"]["triggered_period_details"].append(
+        copy.deepcopy(extra_triggered_detail["rule_proof"]["period_evaluation_details"][1])
+    )
+    invalid_plans.append(extra_triggered_detail)
+
+    non_mapping_trace = copy.deepcopy(multi_valid)
+    for source in trace_sources(non_mapping_trace):
+        source["period_escalation_trace"]["periods"]["W"] = "not-a-mapping"
+    for detail in non_mapping_trace["rule_proof"]["period_evaluation_details"]:
+        if detail["period"] == "W":
+            detail["period_escalation_trace"] = "not-a-mapping"
+    invalid_plans.append(non_mapping_trace)
+    extra_trace = copy.deepcopy(multi_valid)
+    extra_trace_value = copy.deepcopy(extra_trace["period_escalation_trace"]["periods"]["W"])
+    extra_trace_value["target_period"] = "Z"
+    for source in trace_sources(extra_trace):
+        source["period_escalation_trace"]["periods"]["Z"] = copy.deepcopy(extra_trace_value)
+    invalid_plans.append(extra_trace)
+
+    source_conflict = copy.deepcopy(multi_valid)
+    source_conflict["rule_eval_result"]["all_trigger_periods"] = ["M", "W", "D"]
+    invalid_plans.append(source_conflict)
+    proof_source_conflict = copy.deepcopy(multi_valid)
+    proof_source_conflict["rule_proof"]["ordinary_period_escalation_policy_hash"] = "conflicting_hash"
+    invalid_plans.append(proof_source_conflict)
+    non_mapping_source = copy.deepcopy(multi_valid)
+    non_mapping_source["rule_eval_result"] = "not-a-mapping"
+    invalid_plans.append(non_mapping_source)
+
+    markerless_missing_contract = copy.deepcopy(multi_valid)
+    for source in trace_sources(markerless_missing_contract):
+        source["period_escalation_trace"].pop("same_day_formal_evidence", None)
+        for period_trace in source["period_escalation_trace"]["periods"].values():
+            period_trace.pop("evidence_source", None)
+    for detail_field in ("period_evaluation_details", "triggered_period_details"):
+        for detail in markerless_missing_contract["rule_proof"][detail_field]:
+            detail_trace = detail.get("period_escalation_trace")
+            if isinstance(detail_trace, dict):
+                detail_trace.pop("evidence_source", None)
+    for source in (markerless_missing_contract, markerless_missing_contract["rule_eval_result"]):
+        source.pop("all_trigger_periods", None)
+        source.pop("prerequisite_periods", None)
+    invalid_plans.append(markerless_missing_contract)
+
+    markerless_damaged_missing_output = copy.deepcopy(multi_valid)
+    for source in trace_sources(markerless_damaged_missing_output):
+        source["period_escalation_trace"].pop("same_day_formal_evidence", None)
+        for period_trace in source["period_escalation_trace"]["periods"].values():
+            period_trace.pop("evidence_source", None)
+    for detail_field in ("period_evaluation_details", "triggered_period_details"):
+        for detail in markerless_damaged_missing_output["rule_proof"][detail_field]:
+            detail_trace = detail.get("period_escalation_trace")
+            if isinstance(detail_trace, dict):
+                detail_trace.pop("evidence_source", None)
+            detail["classification"] = "no_op"
+            detail["reason"] = "tampered_formal_detail"
+    for source in (
+        markerless_damaged_missing_output,
+        markerless_damaged_missing_output["rule_eval_result"],
+    ):
+        source.pop("all_trigger_periods", None)
+        source.pop("prerequisite_periods", None)
+    invalid_plans.append(markerless_damaged_missing_output)
+
+    production_forged_legacy_run_id = copy.deepcopy(multi_valid)
+    for source in trace_sources(production_forged_legacy_run_id):
+        source["period_escalation_trace"].pop("same_day_formal_evidence", None)
+        for period_trace in source["period_escalation_trace"]["periods"].values():
+            period_trace.pop("evidence_source", None)
+    for detail_field in ("period_evaluation_details", "triggered_period_details"):
+        for detail in production_forged_legacy_run_id["rule_proof"][detail_field]:
+            detail_trace = detail.get("period_escalation_trace")
+            if isinstance(detail_trace, dict):
+                detail_trace.pop("evidence_source", None)
+    production_forged_legacy_run_id["trace"]["trigger_context_run_id"] = next(
+        iter(LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS)
+    )
+    invalid_plans.append(production_forged_legacy_run_id)
+
+    provisional_downgrade_empty_eval = copy.deepcopy(multi_valid)
+    provisional_downgrade_empty_eval["provisional"] = False
+    provisional_downgrade_empty_eval["rule_eval_result"] = {}
+    invalid_plans.append(provisional_downgrade_empty_eval)
+
+    terminal_d_reintroduced = copy.deepcopy(multi_valid)
+    terminal_d_detail = next(
+        detail
+        for detail in terminal_d_reintroduced["rule_proof"]["period_evaluation_details"]
+        if detail["period"] == "D"
+    )
+    terminal_d_reintroduced["rule_proof"]["triggered_period_details"].append(
+        copy.deepcopy(terminal_d_detail)
+    )
+    for source in (terminal_d_reintroduced, terminal_d_reintroduced["rule_eval_result"]):
+        source["triggered_periods"] = ["M", "D"]
+        source["all_trigger_periods"] = ["M", "W", "D"]
+    invalid_plans.append(terminal_d_reintroduced)
+
+    synchronized_extra_d_trace = copy.deepcopy(multi_valid)
+    synchronized_d_value = copy.deepcopy(
+        synchronized_extra_d_trace["period_escalation_trace"]["periods"]["W"]
+    )
+    synchronized_d_value["target_period"] = "D"
+    synchronized_d_value["prerequisite_period"] = ""
+    for source in trace_sources(synchronized_extra_d_trace):
+        source["period_escalation_trace"]["periods"]["D"] = copy.deepcopy(
+            synchronized_d_value
+        )
+    for detail in synchronized_extra_d_trace["rule_proof"]["period_evaluation_details"]:
+        if detail["period"] == "D":
+            detail["period_escalation_trace"] = copy.deepcopy(synchronized_d_value)
+    invalid_plans.append(synchronized_extra_d_trace)
+
+    missing_proof_required_field = copy.deepcopy(multi_valid)
+    del missing_proof_required_field["rule_proof"]["period_evaluation_details"]
+    invalid_plans.append(missing_proof_required_field)
+    missing_rule_eval_result = copy.deepcopy(multi_valid)
+    del missing_rule_eval_result["rule_eval_result"]
+    invalid_plans.append(missing_rule_eval_result)
+
+    for field, value in (
+        ("existing_formal_pass", False),
+        ("reason", "tampered_formal_reason"),
+        ("transition_amount_pass", False),
+        ("trigger_amount_chain_pass", False),
+    ):
+        prerequisite_formal_conflict = copy.deepcopy(multi_valid)
+        for detail in prerequisite_formal_conflict["rule_proof"]["period_evaluation_details"]:
+            if detail["period"] == "D":
+                detail[field] = value
+        invalid_plans.append(prerequisite_formal_conflict)
+
+    for field, value in (
+        ("legacy_replay", True),
+        ("context_contract_version", "unexpected_context"),
+        ("context_hash", "unexpected_hash"),
+        ("extra_top_trace_field", True),
+    ):
+        top_trace_tamper = copy.deepcopy(multi_valid)
+        for source in trace_sources(top_trace_tamper):
+            source["period_escalation_trace"][field] = value
+        invalid_plans.append(top_trace_tamper)
+
+    extra_d_trace = copy.deepcopy(multi_valid)
+    injected_d_trace = copy.deepcopy(extra_d_trace["period_escalation_trace"]["periods"]["W"])
+    injected_d_trace["target_period"] = "D"
+    injected_d_trace["prerequisite_period"] = ""
+    for source in trace_sources(extra_d_trace):
+        source["period_escalation_trace"]["periods"]["D"] = copy.deepcopy(injected_d_trace)
+    invalid_plans.append(extra_d_trace)
+
+    compressed_target_reintroduced = copy.deepcopy(multi_valid)
+    compressed_target_reintroduced["triggered_periods"] = ["M", "W"]
+    invalid_plans.append(compressed_target_reintroduced)
+    multi_wrong_all = copy.deepcopy(multi_valid)
+    multi_wrong_all["all_trigger_periods"] = ["M", "W", "D"]
+    invalid_plans.append(multi_wrong_all)
+    multi_wrong_primary = copy.deepcopy(multi_valid)
+    multi_wrong_primary["primary_trigger_period"] = "W"
+    invalid_plans.append(multi_wrong_primary)
+    multi_wrong_prerequisite = copy.deepcopy(multi_valid)
+    multi_wrong_prerequisite["prerequisite_periods"] = ["W", "D"]
+    invalid_plans.append(multi_wrong_prerequisite)
+    return invalid_plans
+
+
+def _period_escalation_contract_hash(value: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _production_period_escalation_entry(
+    *,
+    period: str,
+    direction: str,
+    status: str,
+    exact_stock_300308_m: bool = False,
+) -> dict[str, object]:
+    requirement = PERIOD_ESCALATION_REQUIREMENTS[period]
+    expected_count = {"W": 1, "M": 9, "Q": 9, "Y": 125}[period]
+    window_start = {"W": "20260713", "M": "20260701", "Q": "20260701", "Y": "20260101"}[period]
+    entry: dict[str, object] = {
+        "target_period": period,
+        "prerequisite_period": requirement["prerequisite_period"],
+        "window_kind": requirement["window_kind"],
+        "window_key": {"W": "2026W29", "M": "202607", "Q": "2026Q3", "Y": "2026"}[period],
+        "window_start": window_start,
+        "required_transition": PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction],
+        "reset_for_trade_date": False,
+        "state_epoch_trade_date": window_start,
+        "observation_end": "20260713",
+        "expected_source_trade_date_count": expected_count,
+        "observed_source_trade_date_count": expected_count,
+        "missing_source_trade_dates": [],
+        "observation_count": 1,
+        "previous_incremental_state_used": expected_count > 1,
+        "first_source_trade_date": window_start,
+        "last_source_trade_date": "20260713",
+        "status": "ready",
+        "coverage_status": "passed",
+        "seen": True,
+        "latest_source_basis_ref": f"fixture:{period}:{direction}:20260713",
+        "latest_source_condition_run_id": PRODUCTION_20260714_SOURCE_CONDITION_RUN_ID,
+    }
+    if status == "not_seen":
+        entry.update(
+            {
+                "observation_count": 0,
+                "first_source_trade_date": None,
+                "last_source_trade_date": None,
+                "status": "not_seen",
+                "seen": False,
+                "latest_source_basis_ref": None,
+                "latest_source_condition_run_id": None,
+            }
+        )
+    elif status == "not_ready":
+        missing_date = window_start
+        observed_count = expected_count - 1
+        entry.update(
+            {
+                "observed_source_trade_date_count": observed_count,
+                "missing_source_trade_dates": [missing_date],
+                "observation_count": 0,
+                "status": "not_ready",
+                "coverage_status": "incomplete",
+                "seen": False,
+                "state_epoch_trade_date": (
+                    None
+                    if observed_count == 0
+                    else {"M": "20260702", "Q": "20260702", "Y": "20260102"}[period]
+                ),
+                "previous_incremental_state_used": observed_count > 1,
+                "first_source_trade_date": None,
+                "last_source_trade_date": None,
+                "latest_source_basis_ref": None,
+                "latest_source_condition_run_id": None,
+            }
+        )
+    elif status != "ready":
+        raise AssertionError(f"unsupported fixture status: {status}")
+
+    if exact_stock_300308_m:
+        entry.update(
+            {
+                "target_period": "M",
+                "prerequisite_period": "W",
+                "window_kind": "month",
+                "window_key": "202607",
+                "window_start": "20260701",
+                "required_transition": "volume_up",
+                "reset_for_trade_date": False,
+                "state_epoch_trade_date": "20260701",
+                "observation_end": "20260713",
+                "expected_source_trade_date_count": 9,
+                "observed_source_trade_date_count": 9,
+                "missing_source_trade_dates": [],
+                "observation_count": 0,
+                "previous_incremental_state_used": True,
+                "first_source_trade_date": None,
+                "last_source_trade_date": None,
+                "status": "not_seen",
+                "coverage_status": "passed",
+                "seen": False,
+                "latest_source_basis_ref": None,
+                "latest_source_condition_run_id": None,
+            }
+        )
+    entry["entry_hash"] = _period_escalation_contract_hash(entry)
+    return entry
+
+
+def production_20260714_1322_negative_evidence_fixture(
+    *,
+    asset_kind: str,
+    identity_key: str,
+    direction: str,
+    condition_key: str,
+    formal_periods: tuple[str, ...],
+    negative_statuses: dict[str, str],
+) -> tuple[dict[str, object], dict[str, object]]:
+    prefix = "BUY" if direction == "buy" else "SELL"
+    context = context_row(
+        identity_key,
+        direction,
+        condition_key,
+        [prefix],
+        asset_kind=asset_kind,
+        run_id=SAME_DAY_CONTEXT_RUN_ID,
+    )
+    context.update(
+        {
+            "source_condition_run_id": PRODUCTION_20260714_SOURCE_CONDITION_RUN_ID,
+            "for_trade_date": "20260714",
+            "source_trade_date": "20260713",
+            "prev_trade_date": "20260713",
+            "condition_periods": condition_key.split(":", 1)[1].split(","),
+        }
+    )
+    if identity_key == "stock:SZ:300308":
+        context.update(
+            {
+                "source_condition_pool_id": 236323,
+                "source_condition_basis_id": 338608,
+                "source_minute_target_scope_id": 224715,
+            }
+        )
+
+    baseline = context["period_trigger_baseline_json"]
+    current_keys = {"Y": "2026", "Q": "2026Q3", "M": "202607", "W": "2026W29", "D": "20260713"}
+    for period, period_baseline in baseline["periods"].items():
+        period_baseline.update(
+            {
+                "period_key_current": current_keys[period],
+                "previous_avg_amount_unit": "yuan",
+                "trigger_previous_amount_baseline_unit": "yuan",
+                "amount_metric": "amount" if period == "D" else "avg_amount",
+            }
+        )
+        isolated_negative_formal_period = (
+            identity_key == "stock:SZ:301207" and period == "Y"
+        )
+        if period not in formal_periods and not isolated_negative_formal_period:
+            if direction == "buy":
+                period_baseline["trigger_previous_entity_high"] = "12"
+            else:
+                period_baseline["trigger_previous_entity_low"] = "8"
+    if identity_key == "stock:SZ:300308":
+        baseline["periods"]["D"].update(
+            {
+                "previous_transition": "flat",
+                "trigger_previous_entity_high": "1108",
+                "trigger_previous_entity_low": "1100.01",
+                "previous_avg_amount": "38390820848.000",
+            }
+        )
+        baseline["periods"]["W"].update(
+            {
+                "previous_transition": "flat",
+                "trigger_previous_entity_high": "1136.54",
+                "trigger_previous_entity_low": "1093.98",
+                "previous_avg_amount": "38874708605.14000",
+            }
+        )
+        baseline["periods"]["M"].update(
+            {
+                "previous_transition": "low_volume_down",
+                "trigger_previous_entity_high": "1270",
+                "trigger_previous_entity_low": "1161",
+                "previous_avg_amount": "38121200575.352380952000",
+            }
+        )
+
+    direction_entries = {
+        period: _production_period_escalation_entry(
+            period=period,
+            direction=direction,
+            status=negative_statuses.get(period, "ready"),
+            exact_stock_300308_m=(identity_key == "stock:SZ:300308" and period == "M"),
+        )
+        for period in PERIOD_ESCALATION_REQUIREMENTS
+    }
+    escalation_context: dict[str, object] = {
+        "contract_version": PERIOD_ESCALATION_CONTEXT_VERSION,
+        "source_layer": "N2_condition",
+        "asset_kind": asset_kind,
+        "identity_key": identity_key,
+        "for_trade_date": "20260714",
+        "source_trade_date": "20260713",
+        "directions": {direction: direction_entries},
+    }
+    escalation_context["context_hash"] = _period_escalation_contract_hash(escalation_context)
+    baseline["period_escalation_context"] = escalation_context
+
+    amount_value = 150.0 if direction == "buy" else 50.0
+    formal_proof = formal_period_amount_proof_factory(
+        periods=formal_periods,
+        amount_unit="yuan",
+        source_kind="N3_standard_period_metric",
+        amount_pass=True,
+        amount_value=amount_value,
+    )
+    price: object = "10.50" if direction == "buy" else "9.50"
+    amount: object = amount_value
+    if identity_key == "stock:SZ:300308":
+        price = "1186.01"
+        amount = "34009447460.848"
+        formal_proof["amount_chain_metrics"].update(
+            {
+                "today_virt_amount": 47531495564.42243,
+                "weekly_avg_with_today": 42961158206.21121,
+                "monthly_avg_with_today": 38897576558.64224,
+                "quarterly_avg_with_today": 38897576558.64224,
+                "yearly_avg_with_today": 25549359753.321606,
+            }
+        )
+    metric = n3p_metric_row(
+        asset_kind,
+        identity_key,
+        direction=direction,
+        formal_period_amount_proof=formal_proof,
+        price=price,
+        amount=amount,
+    )
+    metric.update(
+        {
+            "projection_run_id": PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            "source_condition_run_id": PRODUCTION_20260714_SOURCE_CONDITION_RUN_ID,
+            "for_trade_date": "20260714",
+            "trade_date": "20260714",
+            "metric_time": "2026-07-14T13:22:00+08:00",
+            "metric_time_label": "2026-07-14 13:22",
+            "metric_minute_label": "13:22",
+        }
+    )
+    metric["raw_json"]["closed_minute_proof"]["selected_metric_time"] = (
+        "2026-07-14T13:22:00+08:00"
+    )
+    if identity_key == "stock:SZ:300308":
+        metric["action_confirmation_metric_id"] = 10514379
+    add_condition_grain_lineage(metric, context)
+    return context, metric
+
+
+def production_20260714_1322_stock_300308_non_same_day_not_seen(
+) -> tuple[dict[str, object], dict[str, object]]:
+    return production_20260714_1322_negative_evidence_fixture(
+        asset_kind="stock",
+        identity_key="stock:SZ:300308",
+        direction="buy",
+        condition_key="BUY:M,W,D",
+        formal_periods=("W", "D"),
+        negative_statuses={"M": "not_seen"},
+    )
 
 
 class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
+    def test_production_20260714_1322_stock_300308_non_same_day_not_seen(self) -> None:
+        context, metric = production_20260714_1322_stock_300308_non_same_day_not_seen()
+
+        plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+
+        assert_same_day_period_escalation_output_contract(plan)
+        self.assertEqual(plan["triggered_periods"], ["W"])
+        self.assertEqual(plan["all_trigger_periods"], ["W", "D"])
+        self.assertEqual(plan["primary_trigger_period"], "W")
+        self.assertEqual(plan["prerequisite_periods"], ["D"])
+        traces = plan["period_escalation_trace"]["periods"]
+        self.assertEqual(traces["M"]["gate_status"], "not_seen")
+        self.assertFalse(traces["M"]["gate_pass"])
+        self.assertTrue(traces["M"]["evidence_ready"])
+        self.assertEqual(
+            traces["M"]["source_entry"]["entry_hash"],
+            "51bb67f8524412758c8f2cf5f59641194f8f3e6612b839a9245daf41dadd04ed",
+        )
+        self.assertEqual(traces["W"]["evidence_source"], "current_same_day_formal_pass")
+        self.assertEqual(traces["W"]["current_formal_pass_periods"], ["W", "D"])
+
+    def test_20260715_stock_600480_sell_q_same_day_pair_keeps_exact_output_contract(self) -> None:
+        context, metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SH:600480",
+            direction="sell",
+            condition_key="SELL:Y,Q,M",
+            formal_periods=("Q", "M"),
+            negative_statuses={"Y": "not_ready"},
+        )
+
+        plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+
+        assert_same_day_period_escalation_output_contract(plan)
+        self.assertEqual(plan["triggered_periods"], ["Q"])
+        self.assertEqual(plan["all_trigger_periods"], ["Q", "M"])
+        self.assertEqual(plan["primary_trigger_period"], "Q")
+        self.assertEqual(plan["prerequisite_periods"], ["M"])
+        traces = plan["period_escalation_trace"]["periods"]
+        self.assertEqual(traces["Y"]["gate_status"], "not_ready")
+        self.assertEqual(traces["Q"]["evidence_source"], "current_same_day_formal_pass")
+
+    def test_20260715_1017_mixed_same_day_and_n2_context_keeps_terminal_contract(self) -> None:
+        cases = (
+            (
+                "stock:SH:688321",
+                "BUY:Y,Q,W",
+                ("Y", "Q", "W"),
+                ["Y", "W"],
+                ["Y", "Q", "W"],
+                "Y",
+                ["Q", "D"],
+                "Y",
+                True,
+            ),
+            (
+                "stock:SH:688336",
+                "BUY:Q,M,W",
+                ("Q", "M"),
+                ["Q"],
+                ["Q", "M"],
+                "Q",
+                ["M"],
+                "Q",
+                False,
+            ),
+        )
+        for (
+            identity_key,
+            condition_key,
+            formal_periods,
+            expected_triggered,
+            expected_all,
+            expected_primary,
+            expected_prerequisites,
+            same_day_period,
+            w_triggered,
+        ) in cases:
+            with self.subTest(identity_key=identity_key):
+                context, metric = production_20260714_1322_negative_evidence_fixture(
+                    asset_kind="stock",
+                    identity_key=identity_key,
+                    direction="buy",
+                    condition_key=condition_key,
+                    formal_periods=formal_periods,
+                    negative_statuses={},
+                )
+
+                plan = build_provisional_ordinary_matcher_plans(
+                    trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+                    source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+                    context_rows=[context],
+                    metric_rows=[metric],
+                )[0]
+
+                assert_same_day_period_escalation_output_contract(plan)
+                self.assertEqual(plan["triggered_periods"], expected_triggered)
+                self.assertEqual(plan["all_trigger_periods"], expected_all)
+                self.assertEqual(plan["primary_trigger_period"], expected_primary)
+                self.assertEqual(plan["prerequisite_periods"], expected_prerequisites)
+                traces = plan["period_escalation_trace"]["periods"]
+                self.assertEqual(
+                    traces[same_day_period]["evidence_source"],
+                    "current_same_day_formal_pass",
+                )
+                self.assertIsNone(traces[same_day_period]["context_contract_version"])
+                self.assertIsNone(traces[same_day_period]["context_hash"])
+                self.assertEqual(traces["W"]["evidence_source"], "n2_period_escalation_context")
+                self.assertEqual(
+                    plan["period_escalation_trace"]["context_contract_version"],
+                    traces["W"]["context_contract_version"],
+                )
+                self.assertEqual(
+                    plan["period_escalation_trace"]["context_hash"],
+                    traces["W"]["context_hash"],
+                )
+                self.assertEqual("W" in plan["triggered_periods"], w_triggered)
+
+    def test_ready_not_seen_and_not_ready_are_valid_untriggered_audit_states(self) -> None:
+        expected_gate_status = {
+            "ready": "passed",
+            "not_seen": "not_seen",
+            "not_ready": "not_ready",
+        }
+        for status in ("ready", "not_seen", "not_ready"):
+            with self.subTest(status=status):
+                context, metric = production_20260714_1322_negative_evidence_fixture(
+                    asset_kind="stock",
+                    identity_key="stock:SH:600480",
+                    direction="sell",
+                    condition_key="SELL:Y,Q,M",
+                    formal_periods=("Q", "M"),
+                    negative_statuses={} if status == "ready" else {"Y": status},
+                )
+                plan = build_provisional_ordinary_matcher_plans(
+                    trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+                    source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+                    context_rows=[context],
+                    metric_rows=[metric],
+                )[0]
+
+                assert_same_day_period_escalation_output_contract(plan)
+                self.assertEqual(plan["triggered_periods"], ["Q"])
+                self.assertEqual(plan["all_trigger_periods"], ["Q", "M"])
+                self.assertEqual(plan["primary_trigger_period"], "Q")
+                self.assertEqual(plan["prerequisite_periods"], ["M"])
+                self.assertEqual(
+                    plan["period_escalation_trace"]["periods"]["Y"]["gate_status"],
+                    expected_gate_status[status],
+                )
+
+    def test_20260714_1322_false_positive_state_combinations_keep_terminal_targets(self) -> None:
+        for (
+            asset_kind,
+            identity_key,
+            direction,
+            condition_key,
+            formal_periods,
+            negative_statuses,
+            expected_triggered,
+            expected_all,
+            expected_prerequisites,
+        ) in PRODUCTION_20260714_1322_FALSE_POSITIVE_CASES:
+            with self.subTest(identity_key=identity_key, condition_key=condition_key):
+                context, metric = production_20260714_1322_negative_evidence_fixture(
+                    asset_kind=asset_kind,
+                    identity_key=identity_key,
+                    direction=direction,
+                    condition_key=condition_key,
+                    formal_periods=formal_periods,
+                    negative_statuses=negative_statuses,
+                )
+                plan = build_provisional_ordinary_matcher_plans(
+                    trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+                    source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+                    context_rows=[context],
+                    metric_rows=[metric],
+                )[0]
+
+                assert_same_day_period_escalation_output_contract(plan)
+                self.assertEqual(plan["triggered_periods"], expected_triggered)
+                self.assertEqual(plan["all_trigger_periods"], expected_all)
+                self.assertEqual(plan["primary_trigger_period"], expected_triggered[0])
+                self.assertEqual(plan["prerequisite_periods"], expected_prerequisites)
+                traces = plan["period_escalation_trace"]["periods"]
+                self.assertEqual(
+                    {period: traces[period]["gate_status"] for period in negative_statuses},
+                    negative_statuses,
+                )
+                if identity_key == "stock:SZ:301207":
+                    self.assertEqual(
+                        traces["W"]["current_formal_pass_periods"],
+                        ["Y", "W", "D"],
+                    )
+                    y_detail = next(
+                        detail
+                        for detail in plan["rule_proof"]["period_evaluation_details"]
+                        if detail["period"] == "Y"
+                    )
+                    self.assertTrue(y_detail["existing_formal_pass"])
+                    self.assertEqual(y_detail["classification"], "quality_blocked")
+
+    def test_negative_evidence_state_and_hash_tampering_stays_fail_closed(self) -> None:
+        context, metric = production_20260714_1322_stock_300308_non_same_day_not_seen()
+        valid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+
+        def mutate_m_trace(plan: dict[str, object], mutation) -> None:
+            traces = [
+                plan["period_escalation_trace"]["periods"]["M"],
+                plan["rule_proof"]["period_escalation_trace"]["periods"]["M"],
+                plan["rule_eval_result"]["period_escalation_trace"]["periods"]["M"],
+            ]
+            traces.extend(
+                detail["period_escalation_trace"]
+                for detail in plan["rule_proof"]["period_evaluation_details"]
+                if detail["period"] == "M"
+            )
+            for trace in traces:
+                mutation(trace)
+
+        def mutate_entry(field: str, value: object, *, rehash: bool = True):
+            def mutation(trace: dict[str, object]) -> None:
+                trace["source_entry"][field] = value
+                if rehash:
+                    entry = trace["source_entry"]
+                    entry.pop("entry_hash", None)
+                    entry["entry_hash"] = _period_escalation_contract_hash(entry)
+
+            return mutation
+
+        invalid_plans: list[dict[str, object]] = []
+        entry_hash = copy.deepcopy(valid)
+        mutate_m_trace(entry_hash, mutate_entry("entry_hash", "tampered", rehash=False))
+        invalid_plans.append(entry_hash)
+
+        for field, value in (
+            ("status", "ready"),
+            ("seen", True),
+            ("coverage_status", "incomplete"),
+            ("observation_count", 1),
+            ("expected_source_trade_date_count", 10),
+            ("target_period", "Q"),
+            ("window_kind", "quarter"),
+            ("window_key", "2026Q3"),
+            ("state_epoch_trade_date", "20260630"),
+            ("previous_incremental_state_used", False),
+            ("previous_incremental_state_used", 1),
+        ):
+            invalid = copy.deepcopy(valid)
+            mutate_m_trace(invalid, mutate_entry(field, value))
+            if field in {"status", "seen", "coverage_status", "target_period"}:
+                mutate_m_trace(invalid, lambda trace, field=field, value=value: trace.__setitem__(field, value))
+            if field == "window_kind":
+                mutate_m_trace(invalid, lambda trace: trace.__setitem__("expected_window_kind", "quarter"))
+            if field == "window_key":
+                mutate_m_trace(invalid, lambda trace: trace.__setitem__("expected_window_key", "2026Q3"))
+            invalid_plans.append(invalid)
+
+        for field in ("state_epoch_trade_date", "previous_incremental_state_used"):
+            invalid = copy.deepcopy(valid)
+
+            def remove_field(trace: dict[str, object], field: str = field) -> None:
+                entry = trace["source_entry"]
+                entry.pop(field, None)
+                entry.pop("entry_hash", None)
+                entry["entry_hash"] = _period_escalation_contract_hash(entry)
+
+            mutate_m_trace(invalid, remove_field)
+            invalid_plans.append(invalid)
+
+        for field, value in (
+            ("gate_pass", True),
+            ("gate_status", "passed"),
+            ("evidence_ready", False),
+            ("reason", None),
+            ("direction", "sell"),
+            ("target_period", "Q"),
+            ("expected_window_kind", "quarter"),
+            ("expected_window_key", "2026Q3"),
+        ):
+            invalid = copy.deepcopy(valid)
+            mutate_m_trace(invalid, lambda trace, field=field, value=value: trace.__setitem__(field, value))
+            invalid_plans.append(invalid)
+
+        context_hash = copy.deepcopy(valid)
+        context_hash["rule_eval_result"]["period_escalation_trace"]["context_hash"] = "tampered"
+        invalid_plans.append(context_hash)
+
+        primary_injection = copy.deepcopy(valid)
+        primary_injection["primary_trigger_period"] = "M"
+        primary_injection["rule_eval_result"]["primary_trigger_period"] = "M"
+        invalid_plans.append(primary_injection)
+
+        for invalid in invalid_plans:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    assert_same_day_period_escalation_output_contract(invalid)
+
+    def test_not_ready_period_cannot_be_injected_as_independent_trigger(self) -> None:
+        context, metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SZ:301207",
+            direction="buy",
+            condition_key="BUY:Y,Q,M,W,D",
+            formal_periods=("W", "D"),
+            negative_statuses={"Y": "not_ready"},
+        )
+        invalid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+        evaluation_details = invalid["rule_proof"]["period_evaluation_details"]
+        w_detail = next(detail for detail in evaluation_details if detail["period"] == "W")
+        y_trace = next(
+            detail["period_escalation_trace"]
+            for detail in evaluation_details
+            if detail["period"] == "Y"
+        )
+        y_detail = copy.deepcopy(w_detail)
+        y_detail.update(
+            {
+                "period": "Y",
+                "transition_amount_field": "yearly_avg_with_today",
+                "amount_metric": "yearly_avg_with_today",
+                "used_for_period": "Y",
+                "compare_to": "previous_avg_amount[Y]",
+                "trigger_amount_chain_pass": "not_applicable",
+                "period_escalation_trace": copy.deepcopy(y_trace),
+                "prerequisite_periods": [],
+            }
+        )
+        evaluation_details[0] = y_detail
+        invalid["rule_proof"]["triggered_period_details"] = [
+            copy.deepcopy(y_detail),
+            copy.deepcopy(w_detail),
+        ]
+        for source in (invalid, invalid["rule_eval_result"]):
+            source["triggered_periods"] = ["Y", "W"]
+            source["all_trigger_periods"] = ["Y", "W", "D"]
+            source["primary_trigger_period"] = "Y"
+
+        with self.assertRaises(ValueError):
+            assert_same_day_period_escalation_output_contract(invalid)
+
+    def test_same_day_v2_fields_forward_for_all_assets_directions_and_period_chains(self) -> None:
+        assets = (
+            ("stock", "stock:SH:600000"),
+            ("index", "index:SH:000300"),
+            ("board", "board:TDX:881001"),
+        )
+        period_chains = (
+            (("W", "D"), ["W"], ["W", "D"], ["D"]),
+            (("M", "W"), ["M"], ["M", "W"], ["W"]),
+            (("Q", "M"), ["Q"], ["Q", "M"], ["M"]),
+            (("Y", "Q"), ["Y"], ["Y", "Q"], ["Q"]),
+            (("M", "W", "D"), ["M"], ["M", "W"], ["W"]),
+            (("Y", "Q", "M", "W", "D"), ["Y"], ["Y", "Q"], ["Q"]),
+            (("Y", "Q", "W", "D"), ["Y", "W"], ["Y", "Q", "W", "D"], ["Q", "D"]),
+        )
+        prerequisite_by_target = {"W": "D", "M": "W", "Q": "M", "Y": "Q"}
+
+        for asset_kind, identity_key in assets:
+            for direction in ("buy", "sell"):
+                for formal_periods, expected_triggered, expected_all, expected_prerequisites in period_chains:
+                    with self.subTest(
+                        asset_kind=asset_kind,
+                        direction=direction,
+                        formal_periods=formal_periods,
+                    ):
+                        prefix = "BUY" if direction == "buy" else "SELL"
+                        context = context_row(
+                            identity_key,
+                            direction,
+                            f"{prefix}:{','.join(formal_periods)}",
+                            [prefix],
+                            asset_kind=asset_kind,
+                            run_id=SAME_DAY_CONTEXT_RUN_ID,
+                        )
+                        amount_value = 150000.0 if asset_kind == "stock" and direction == "buy" else (
+                            50.0 if asset_kind == "stock" else (150.0 if direction == "buy" else 50.0)
+                        )
+                        metric = n3p_metric_row(
+                            asset_kind,
+                            identity_key,
+                            direction=direction,
+                            formal_period_amount_proof=formal_period_amount_proof_factory(
+                                periods=formal_periods,
+                                amount_unit="yuan",
+                                source_kind="N3_standard_period_metric",
+                                amount_pass=True,
+                                amount_value=amount_value,
+                            ),
+                        )
+
+                        plan = build_provisional_ordinary_matcher_plans(
+                            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+                            source_metric_run_id=N3P_RUN_ID,
+                            context_rows=[context],
+                            metric_rows=[metric],
+                        )[0]
+
+                        self.assertEqual(plan["triggered_periods"], expected_triggered)
+                        self.assertEqual(plan["all_trigger_periods"], expected_all)
+                        self.assertEqual(plan["primary_trigger_period"], expected_triggered[0])
+                        self.assertEqual(plan["prerequisite_periods"], expected_prerequisites)
+                        self.assertEqual(
+                            plan["ordinary_period_escalation_policy_version"],
+                            ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+                        )
+                        self.assertEqual(
+                            plan["ordinary_period_escalation_policy_hash"],
+                            ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+                        )
+                        expected_trace_targets = {
+                            candidate
+                            for candidate, required_period in prerequisite_by_target.items()
+                            if candidate in formal_periods and required_period in formal_periods
+                        }
+                        self.assertEqual(
+                            {
+                                period
+                                for period, trace in plan["period_escalation_trace"]["periods"].items()
+                                if trace.get("evidence_source") == "current_same_day_formal_pass"
+                            },
+                            expected_trace_targets,
+                        )
+                        self.assertEqual(
+                            plan["rule_eval_result"]["prerequisite_periods"],
+                            expected_prerequisites,
+                        )
+
+    def test_same_day_v2_output_contract_fails_closed_for_missing_or_conflicting_fields(self) -> None:
+        context = context_row(
+            "stock:SH:600000",
+            "buy",
+            "BUY:W,D",
+            ["BUY"],
+            run_id=SAME_DAY_CONTEXT_RUN_ID,
+        )
+        metric = n3p_metric_row(
+            "stock",
+            "stock:SH:600000",
+            direction="buy",
+            formal_period_amount_proof=formal_period_amount_proof_factory(
+                periods=("W", "D"),
+                amount_unit="yuan",
+                source_kind="N3_standard_period_metric",
+                amount_pass=True,
+                amount_value=150000.0,
+            ),
+        )
+        valid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+        invalid_plans = []
+        for field in (
+            "all_trigger_periods",
+            "primary_trigger_period",
+            "prerequisite_periods",
+            "period_escalation_trace",
+            "ordinary_period_escalation_policy_version",
+            "ordinary_period_escalation_policy_hash",
+        ):
+            invalid = copy.deepcopy(valid)
+            invalid.pop(field)
+            invalid_plans.append(invalid)
+        wrong_order = copy.deepcopy(valid)
+        wrong_order["all_trigger_periods"] = ["D", "W"]
+        invalid_plans.append(wrong_order)
+        wrong_direction = copy.deepcopy(valid)
+        wrong_direction["direction"] = "sell"
+        invalid_plans.append(wrong_direction)
+        missing_formal_pair = copy.deepcopy(valid)
+        missing_formal_pair["period_escalation_trace"]["periods"]["W"]["current_formal_pass_periods"] = ["W"]
+        invalid_plans.append(missing_formal_pair)
+
+        multi_context = context_row(
+            "stock:SH:600000",
+            "buy",
+            "BUY:M,W,D",
+            ["BUY"],
+            run_id=SAME_DAY_CONTEXT_RUN_ID,
+        )
+        multi_metric = n3p_metric_row(
+            "stock",
+            "stock:SH:600000",
+            direction="buy",
+            formal_period_amount_proof=formal_period_amount_proof_factory(
+                periods=("M", "W", "D"),
+                amount_unit="yuan",
+                source_kind="N3_standard_period_metric",
+                amount_pass=True,
+                amount_value=150000.0,
+            ),
+        )
+        multi_valid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[multi_context],
+            metric_rows=[multi_metric],
+        )[0]
+        disjoint_context = context_row(
+            "stock:SH:600000",
+            "buy",
+            "BUY:Y,Q,W,D",
+            ["BUY"],
+            run_id=SAME_DAY_CONTEXT_RUN_ID,
+        )
+        disjoint_metric = n3p_metric_row(
+            "stock",
+            "stock:SH:600000",
+            direction="buy",
+            formal_period_amount_proof=formal_period_amount_proof_factory(
+                periods=("Y", "Q", "W", "D"),
+                amount_unit="yuan",
+                source_kind="N3_standard_period_metric",
+                amount_pass=True,
+                amount_value=150000.0,
+            ),
+        )
+        disjoint_valid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[disjoint_context],
+            metric_rows=[disjoint_metric],
+        )[0]
+        invalid_plans.extend(same_day_fail_closed_mutations(multi_valid, disjoint_valid))
+
+        for invalid in invalid_plans:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    assert_same_day_period_escalation_output_contract(invalid)
+
     def test_buy_sell_and_full_conditions_match_from_n3p_metric_rows(self) -> None:
         context_rows = [
             context_row("stock:SH:600000", "buy", "BUY:D", ["BUY"]),
@@ -272,6 +1376,7 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
                 amount_unit="yuan",
                 source_kind="N3_standard_period_metric",
                 amount_pass=True,
+                amount_value=150000.0,
             ),
         )
 
@@ -308,6 +1413,11 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
         self.assertFalse(report["side_effect_guard"]["n6_written"])
         self.assertFalse(report["side_effect_guard"]["sim_trade_virtual_written"])
 
+
+
+
+
+
     def test_rule_reuse_and_b2_hint_module_isolation_static_guard(self) -> None:
         import ashare_v3.trigger.provisional_ordinary_matcher as ordinary_matcher
 
@@ -322,6 +1432,16 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
         self.assertNotIn("common_event_inbox", module_source)
         self.assertIn("build_provisional_projection_matcher_plans", b2_module_source)
 
+    def test_period_escalation_policy_is_versioned_v2(self) -> None:
+        self.assertEqual(
+            ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+            "N4-ordinary-period-escalation-v2",
+        )
+        self.assertEqual(
+            ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+            "3a0aa136ff3393c7",
+        )
+
 
 def n3p_metric_row(
     asset_kind: str,
@@ -334,9 +1454,12 @@ def n3p_metric_row(
     include_amount_unit_fields: bool = True,
     source_mode: str | None = None,
     c1_dependency: bool | None = None,
+    price: object | None = None,
+    amount: object | None = None,
 ) -> dict[str, object]:
-    price = "10.50" if direction == "buy" else "9.50"
-    amount = "150" if direction == "buy" else "50"
+    price = price if price is not None else ("10.50" if direction == "buy" else "9.50")
+    if amount is None:
+        amount = "150" if direction == "buy" else "50"
     if trigger_amount_chain_pass is None and formal_period_amount_proof is None:
         trigger_amount_chain_pass = {"D": True}
         formal_period_amount_proof = formal_period_amount_proof_factory(

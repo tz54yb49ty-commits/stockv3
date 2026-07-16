@@ -21,6 +21,8 @@ def plan(
     trigger_price: str = "10.00",
     primary_trigger_period: str | None = None,
     all_trigger_periods: list[str] | None = None,
+    prerequisite_periods: list[str] | None = None,
+    period_escalation_trace: dict[str, object] | None = None,
 ) -> dict[str, object]:
     matched = status == "matched"
     return {
@@ -47,6 +49,8 @@ def plan(
         "trigger_price": trigger_price,
         "primary_trigger_period": primary_trigger_period or trigger_period,
         "all_trigger_periods": all_trigger_periods or [trigger_period],
+        "prerequisite_periods": prerequisite_periods or [],
+        "period_escalation_trace": period_escalation_trace or {},
         "event_time": "2026-06-25T11:29:00+08:00",
     }
 
@@ -56,6 +60,7 @@ def previous_state(current: dict[str, object], *, status: str = "matched") -> di
         "for_trade_date": current["for_trade_date"],
         "asset_kind": current["asset_kind"],
         "identity_key": current["identity_key"],
+        "direction": current["direction"],
         "signal_type": current["signal_type"],
         "condition_key": current["condition_key"],
         "trigger_period": "30m",
@@ -134,6 +139,46 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         self.assertFalse(outputs[0]["writes_trigger_match"])
         self.assertFalse(outputs[0]["n5_entry_allowed"])
 
+    def test_same_day_v2_fields_survive_lifecycle_annotation_without_fallback(self) -> None:
+        trace = {
+            "policy_version": "N4-ordinary-period-escalation-v2",
+            "policy_hash": "policy-hash",
+            "direction": "buy",
+            "same_day_formal_evidence": True,
+            "periods": {
+                "W": {
+                    "evidence_source": "current_same_day_formal_pass",
+                    "target_period": "W",
+                    "prerequisite_period": "D",
+                }
+            },
+        }
+        current = plan(
+            condition_key="BUY:W,D",
+            signal_type="B_BUY",
+            trigger_type="BUY",
+            trigger_period="W",
+            triggered_periods=["W"],
+            primary_trigger_period="W",
+            all_trigger_periods=["W", "D"],
+            prerequisite_periods=["D"],
+            period_escalation_trace=trace,
+        )
+        current["ordinary_period_escalation_policy_version"] = "N4-ordinary-period-escalation-v2"
+        current["ordinary_period_escalation_policy_hash"] = "policy-hash"
+
+        outputs = build_lifecycle_output_plans([current], previous_states=[])
+
+        self.assertEqual(outputs[0]["triggered_periods"], ["W"])
+        self.assertEqual(outputs[0]["all_trigger_periods"], ["W", "D"])
+        self.assertEqual(outputs[0]["primary_trigger_period"], "W")
+        self.assertEqual(outputs[0]["prerequisite_periods"], ["D"])
+        self.assertEqual(outputs[0]["period_escalation_trace"], trace)
+        self.assertEqual(
+            outputs[0]["ordinary_period_escalation_policy_version"],
+            "N4-ordinary-period-escalation-v2",
+        )
+
     def test_matched_to_inactive_outputs_state_changed_only(self) -> None:
         current = plan(status="no_op")
 
@@ -144,6 +189,10 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         self.assertEqual(outputs[0]["current_status"], "inactive")
         self.assertFalse(outputs[0]["trigger_live"])
         self.assertFalse(outputs[0]["writes_trigger_match"])
+        self.assertEqual(outputs[0]["state_change_reason"], "matched_to_inactive")
+        self.assertEqual(outputs[0]["lifecycle_output_reason"], "matched_to_inactive")
+
+
 
     def test_inactive_to_inactive_drops_plan(self) -> None:
         outputs = build_lifecycle_output_plans([plan(status="no_op")], previous_states=[])

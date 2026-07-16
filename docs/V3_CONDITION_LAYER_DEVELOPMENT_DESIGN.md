@@ -500,6 +500,47 @@ previous_entity_low = min(previous_open, previous_close)。
 condition_basis -> condition_pool -> minute_target_scope -> N4 trigger_context_snapshot
 ```
 
+#### 3.3.3 ordinary 周期升级前置上下文
+
+`period_trigger_baseline_json` 还承载版本化子对象：
+
+```text
+period_escalation_context
+contract_version = N2-period-escalation-context-v1
+generation_mode = N2-period-escalation-daily-incremental-v1
+```
+
+它只服务 N4 ordinary `BUY:*` / `SELL:*` 的 W/M/Q/Y 周期升级，不改变 D、`BUY:FULL` / `SELL:FULL` 或 HINT。
+
+```text
+W <- D：本周 D 已出现同方向 transition
+M <- W：本月 W 已出现同方向 transition
+Q <- M：本季 M 已出现同方向 transition
+Y <- Q：本年 Q 已出现同方向 transition
+
+buy  只认 volume_up
+sell 只认 low_volume_down
+```
+
+窗口以 `for_trade_date` 定义，观察日期使用 `source_trade_date`；若服务日进入下一周/月/季/年，对应窗口在生成该日 context 前重置。每个方向和目标周期必须保存 `status`（`ready` / `not_seen` / `not_ready`）、`seen`、窗口 key、覆盖状态、缺失交易日、first/last source date、latest source run/basis ref、计数和稳定 hash。
+
+N2 采用前一交易日增量状态与当日 D/W/M/Q transition 合并，不扫描或回算窗口内历史 condition rows。前态必须来自精确前一交易日 `passed_active` run，且 generation mode、日期链路、identity、窗口和 context/entry hash 全部有效；没有 generation mode 的旧 context 只能只读兼容，不得作为增量前态。
+
+状态语义固定为：
+
+```text
+previous_seen OR today_match = true
+-> status=ready, seen=true
+
+没有正向证据且 coverage 完整
+-> status=not_seen, seen=false
+
+没有正向证据且 coverage 不完整
+-> status=not_ready, seen=false
+```
+
+正向存在性证据不依赖完整负向覆盖：`ready + seen=true` 可以同时保留 `coverage_status=incomplete` 和缺失交易日用于审计。后续未命中日必须保留首次/最近命中日期及 latest source ref；负向结论只有覆盖完整时才允许成为 `not_seen`。N2 禁止从 N3/N4/N5 状态累积或反推，N4 只能消费该冻结 JSON 或本地化副本，不得回查 N1 或自行重算。
+
 
 不允许事项：
 

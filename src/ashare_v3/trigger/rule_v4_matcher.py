@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Mapping
 
 
@@ -24,6 +24,53 @@ TRIGGER_RULE_POLICY_HASH = hashlib.sha1(
         sort_keys=True,
     ).encode("utf-8")
 ).hexdigest()[:16]
+
+ORDINARY_PERIOD_ESCALATION_POLICY_VERSION = "N4-ordinary-period-escalation-v2"
+ORDINARY_PERIOD_ESCALATION_POLICY_HASH = hashlib.sha1(
+    json.dumps(
+        {
+            "policy_version": ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+            "context_contract_version": "N2-period-escalation-context-v1",
+            "incremental_generation_mode": "N2-period-escalation-daily-incremental-v1",
+            "requirements": {
+                "W": {"prerequisite_period": "D", "window_kind": "week"},
+                "M": {"prerequisite_period": "W", "window_kind": "month"},
+                "Q": {"prerequisite_period": "M", "window_kind": "quarter"},
+                "Y": {"prerequisite_period": "Q", "window_kind": "year"},
+            },
+            "same_day_formal_evidence": {
+                "enabled": True,
+                "evidence_source": "current_same_day_formal_pass",
+                "requires_target_and_prerequisite_formal_pass": True,
+                "frozen_legacy_replay_excluded": True,
+            },
+            "n2_ready_coverage_statuses": ["passed", "incomplete"],
+            "all_trigger_periods": "current_targets_plus_same_day_formal_prerequisites",
+            "legacy_replay_context_run_ids": [
+                "trigger_context_snapshot_20260525_condition_layer_20260522_to_20260525_20260525102249_execute",
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()[:16]
+PERIOD_ESCALATION_CONTEXT_VERSION = "N2-period-escalation-context-v1"
+PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE = "N2-period-escalation-daily-incremental-v1"
+PERIOD_ESCALATION_REQUIREMENTS = {
+    "W": {"prerequisite_period": "D", "window_kind": "week"},
+    "M": {"prerequisite_period": "W", "window_kind": "month"},
+    "Q": {"prerequisite_period": "M", "window_kind": "quarter"},
+    "Y": {"prerequisite_period": "Q", "window_kind": "year"},
+}
+PERIOD_ESCALATION_DIRECTION_TRANSITIONS = {
+    "buy": "volume_up",
+    "sell": "low_volume_down",
+}
+LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS = frozenset(
+    {
+        "trigger_context_snapshot_20260525_condition_layer_20260522_to_20260525_20260525102249_execute",
+    }
+)
 
 PERIOD_PRIORITY = ("Y", "Q", "M", "W", "D")
 ROLLOVER_GUARDED_PERIODS = {"Y", "Q", "M", "W"}
@@ -94,6 +141,7 @@ def evaluate_v4_plan(
     )
     for_trade_date = context_for_trade_date or projection_for_trade_date
     period_baselines = _extract_period_baselines(context_row)
+    period_escalation_context = _extract_period_escalation_context(context_row)
     projection_30m_type = projection.get("projection_30m_type") or "none"
     projection_30m_flag = bool(projection.get("projection_30m_flag") or False)
     projection_30m_volume_up_flag, projection_30m_shrink_down_flag = projection_30m_flags(
@@ -187,11 +235,19 @@ def evaluate_v4_plan(
     if condition_family == "hint":
         return _evaluate_hint(base_plan, direction, projection)
 
+    base_plan.update(
+        {
+            "ordinary_period_escalation_policy_version": ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+            "ordinary_period_escalation_policy_hash": ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+            "context_run_id": context_row.get("run_id"),
+        }
+    )
     return _evaluate_ordinary(
         base_plan,
         direction,
         periods,
         period_baselines,
+        period_escalation_context,
         projection,
         for_trade_date=for_trade_date,
         projection_for_trade_date=projection_for_trade_date,
@@ -274,6 +330,7 @@ def _evaluate_ordinary(
     direction: str,
     periods: list[str],
     period_baselines: Mapping[str, Any],
+    period_escalation_context: Mapping[str, Any],
     projection: Mapping[str, Any],
     *,
     for_trade_date: str | None,
@@ -305,14 +362,9 @@ def _evaluate_ordinary(
             quality_reasons=[quality_reason],
         )
 
-    triggered_periods: list[str] = []
-    details: list[dict[str, Any]] = []
-    pending_reasons: list[str] = []
-    quality_reasons: list[str] = []
     target_transition = "volume_up" if direction == "buy" else "low_volume_down"
-
-    for period in periods:
-        detail = _evaluate_period(
+    raw_details = [
+        _evaluate_period(
             period,
             direction,
             target_transition,
@@ -321,6 +373,54 @@ def _evaluate_ordinary(
             for_trade_date=for_trade_date,
             projection_for_trade_date=projection_for_trade_date,
         )
+        for period in periods
+    ]
+    current_formal_pass_periods = {
+        str(detail.get("period"))
+        for detail in raw_details
+        if detail.get("classification") == "triggered"
+    }
+    triggered_periods: list[str] = []
+    details: list[dict[str, Any]] = []
+    pending_reasons: list[str] = []
+    quality_reasons: list[str] = []
+    frozen_legacy_replay = (
+        str(base_plan.get("context_run_id") or "")
+        in LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS
+    )
+    same_day_target_periods = {
+        period
+        for period, requirement in PERIOD_ESCALATION_REQUIREMENTS.items()
+        if not frozen_legacy_replay
+        and period in current_formal_pass_periods
+        and requirement["prerequisite_period"] in current_formal_pass_periods
+    }
+    same_day_prerequisite_periods = {
+        PERIOD_ESCALATION_REQUIREMENTS[period]["prerequisite_period"]
+        for period in same_day_target_periods
+    }
+    for raw_detail in raw_details:
+        detail = dict(raw_detail)
+        period = str(detail.get("period") or "")
+        if period in PERIOD_ESCALATION_REQUIREMENTS:
+            if period in same_day_target_periods:
+                gate = _same_day_formal_period_escalation_gate(
+                    period=period,
+                    direction=direction,
+                    current_formal_pass_periods=current_formal_pass_periods,
+                )
+                detail = _apply_period_escalation_gate(detail, gate)
+            elif period not in same_day_prerequisite_periods:
+                gate = _evaluate_period_escalation_gate(
+                    period=period,
+                    direction=direction,
+                    context=period_escalation_context,
+                    asset_kind=str(base_plan.get("asset_kind") or ""),
+                    identity_key=str(base_plan.get("identity_key") or ""),
+                    for_trade_date=for_trade_date,
+                    context_run_id=str(base_plan.get("context_run_id") or ""),
+                )
+                detail = _apply_period_escalation_gate(detail, gate)
         details.append(detail)
         if detail["classification"] == "triggered":
             triggered_periods.append(period)
@@ -329,12 +429,20 @@ def _evaluate_ordinary(
         elif detail["classification"] == "quality_blocked":
             quality_reasons.append(detail["reason"])
 
+    triggered_periods = [
+        period
+        for period in triggered_periods
+        if period not in same_day_prerequisite_periods
+    ]
+
     if triggered_periods:
         return _finalize_plan(
             base_plan,
             outcome="matched",
             triggered_periods=triggered_periods,
             details=details,
+            pending_reasons=sorted(set(pending_reasons)),
+            quality_reasons=sorted(set(quality_reasons)),
         )
     if pending_reasons:
         return _finalize_plan(
@@ -498,9 +606,14 @@ def _evaluate_period(
     amount = _to_float(projection.get(transition_amount_field))
     entity_high = _to_float(baseline.get("trigger_previous_entity_high"))
     entity_low = _to_float(baseline.get("trigger_previous_entity_low"))
-    amount_baseline = _to_float(_selected_previous_avg_amount(baseline))
+    amount_baseline_field, amount_baseline_value = _selected_previous_avg_amount(baseline)
+    amount_baseline = _to_float(amount_baseline_value)
     chain_pass = _chain_pass_for_period(projection, period)
-    amount_unit_status = _amount_unit_status(baseline, projection)
+    amount_unit_status = _amount_unit_status(
+        baseline,
+        projection,
+        amount_baseline_field=amount_baseline_field,
+    )
     amount_source_status = _formal_amount_source_status(projection)
 
     missing_fields = [
@@ -539,6 +652,7 @@ def _evaluate_period(
             "transition_amount_value": amount,
             "used_for_period": period,
             "compare_to": f"previous_avg_amount[{period}]",
+            "previous_amount_source_field": amount_baseline_field,
             "previous_amount_baseline": amount_baseline,
             "trigger_previous_entity_high": entity_high,
             "trigger_previous_entity_low": entity_low,
@@ -549,7 +663,7 @@ def _evaluate_period(
             "amount_source_status": amount_source_status,
             "amount_metric": transition_amount_field,
             "amount_rule": "price_break_plus_current_period_avg_with_today_vs_previous_avg_amount",
-            "source_field_trace": _source_field_trace(period),
+            "source_field_trace": _source_field_trace(period, amount_baseline_field),
             **_period_rollover_trace(
                 period,
                 baseline,
@@ -596,6 +710,7 @@ def _evaluate_period(
         "transition_amount_value": amount,
         "used_for_period": period,
         "compare_to": f"previous_avg_amount[{period}]",
+        "previous_amount_source_field": amount_baseline_field,
         "previous_amount_baseline": amount_baseline,
         "trigger_previous_entity_high": entity_high,
         "trigger_previous_entity_low": entity_low,
@@ -606,7 +721,7 @@ def _evaluate_period(
         "amount_source_status": amount_source_status,
         "amount_metric": transition_amount_field,
         "amount_rule": "price_break_plus_current_period_avg_with_today_vs_previous_avg_amount",
-        "source_field_trace": _source_field_trace(period),
+        "source_field_trace": _source_field_trace(period, amount_baseline_field),
         **_period_rollover_trace(
             period,
             baseline,
@@ -634,6 +749,25 @@ def _evaluate_full_period(
     return detail
 
 
+def _resolve_period_escalation_context_identity(
+    escalation_traces: Mapping[str, Mapping[str, Any]],
+) -> tuple[str | None, str | None]:
+    identities = {
+        (context_contract_version, context_hash)
+        for trace in escalation_traces.values()
+        if trace.get("evidence_source") == "n2_period_escalation_context"
+        and isinstance((context_contract_version := trace.get("context_contract_version")), str)
+        and context_contract_version
+        and isinstance((context_hash := trace.get("context_hash")), str)
+        and context_hash
+    }
+    if len(identities) > 1:
+        raise ValueError("period escalation context identity conflicting")
+    if identities:
+        return next(iter(identities))
+    return None, None
+
+
 def _finalize_plan(
     plan: dict[str, Any],
     *,
@@ -645,8 +779,33 @@ def _finalize_plan(
     quality_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     ordered_triggered = [period for period in PERIOD_PRIORITY if period in set(triggered_periods)]
-    previous_all = list(plan.get("previous_all_trigger_periods") or [])
-    all_periods = [period for period in PERIOD_PRIORITY if period in set(previous_all + ordered_triggered)]
+    ordered_triggered_set = set(ordered_triggered)
+    triggered_details = [
+        dict(detail)
+        for detail in details
+        if detail.get("classification") == "triggered"
+        and detail.get("period") in ordered_triggered_set
+    ]
+    same_day_prerequisites = {
+        str(prerequisite_period)
+        for detail in triggered_details
+        if (detail.get("period_escalation_trace") or {}).get("evidence_source")
+        == "current_same_day_formal_pass"
+        for prerequisite_period in list(detail.get("prerequisite_periods") or [])
+    }
+    legacy_period_replay = any(
+        (detail.get("period_escalation_trace") or {}).get("gate_status") == "legacy_replay"
+        for detail in details
+    )
+    if legacy_period_replay:
+        previous_all = list(plan.get("previous_all_trigger_periods") or [])
+        all_periods = [period for period in PERIOD_PRIORITY if period in set(previous_all + ordered_triggered)]
+    else:
+        all_periods = [
+            period
+            for period in PERIOD_PRIORITY
+            if period in ordered_triggered_set or period in same_day_prerequisites
+        ]
     event_type = OUTCOME_TO_EVENT_TYPE[outcome]
     trigger_live = outcome == "matched"
     current_status = "matched" if outcome == "matched" else outcome
@@ -666,15 +825,41 @@ def _finalize_plan(
             "triggered_periods": ordered_triggered,
             "all_trigger_periods": all_periods,
             "primary_trigger_period": _primary_period(all_periods),
-            "triggered_period_details": [
-                dict(detail) for detail in details if detail.get("classification") == "triggered"
-            ],
+            "triggered_period_details": triggered_details,
             "period_evaluation_details": [dict(detail) for detail in details],
             "blocked_reason": blocked_reason,
             "pending_reasons": list(pending_reasons or []),
             "quality_reasons": list(quality_reasons or []),
         }
     )
+    if plan.get("ordinary_period_escalation_policy_version"):
+        escalation_traces = {
+            str(detail.get("period")): dict(detail.get("period_escalation_trace") or {})
+            for detail in details
+            if detail.get("period_escalation_trace")
+        }
+        prerequisite_periods = [
+            period
+            for period in PERIOD_PRIORITY
+            if any(
+                period in list(detail.get("prerequisite_periods") or [])
+                for detail in plan["triggered_period_details"]
+            )
+        ]
+        context_contract_version, context_hash = _resolve_period_escalation_context_identity(
+            escalation_traces
+        )
+        plan["prerequisite_periods"] = prerequisite_periods
+        plan["period_escalation_trace"] = {
+            "policy_version": plan.get("ordinary_period_escalation_policy_version"),
+            "policy_hash": plan.get("ordinary_period_escalation_policy_hash"),
+            "context_contract_version": context_contract_version,
+            "context_hash": context_hash,
+            "direction": plan.get("direction"),
+            "legacy_replay": legacy_period_replay,
+            "same_day_formal_evidence": bool(same_day_prerequisites),
+            "periods": escalation_traces,
+        }
     plan["n5_entry_allowed"] = (
         event_type == "TriggerMatched"
         and plan.get("signal_type") in RUNTIME_SIGNAL_TYPES
@@ -769,6 +954,304 @@ def _extract_period_baselines(context_row: Mapping[str, Any]) -> Mapping[str, An
     return {}
 
 
+def _extract_period_escalation_context(context_row: Mapping[str, Any]) -> Mapping[str, Any]:
+    baseline_json = _json_object(context_row.get("period_trigger_baseline_json"))
+    context = baseline_json.get("period_escalation_context")
+    return dict(context) if isinstance(context, Mapping) else {}
+
+
+def _evaluate_period_escalation_gate(
+    *,
+    period: str,
+    direction: str,
+    context: Mapping[str, Any],
+    asset_kind: str,
+    identity_key: str,
+    for_trade_date: str | None,
+    context_run_id: str,
+) -> dict[str, Any]:
+    requirement = PERIOD_ESCALATION_REQUIREMENTS[period]
+    prerequisite_period = requirement["prerequisite_period"]
+    expected_transition = PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction]
+    trace: dict[str, Any] = {
+        "policy_version": ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+        "policy_hash": ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+        "target_period": period,
+        "prerequisite_period": prerequisite_period,
+        "direction": direction,
+        "expected_window_kind": requirement["window_kind"],
+        "expected_window_key": expected_period_key_current(for_trade_date, period),
+        "expected_required_transition": expected_transition,
+        "context_contract_version": context.get("contract_version"),
+        "context_generation_mode": context.get("generation_mode"),
+        "context_hash": context.get("context_hash"),
+        "evidence_source": "n2_period_escalation_context",
+        "gate_pass": False,
+        "evidence_ready": False,
+    }
+
+    def fail(reason: str, *, gate_status: str = "invalid") -> dict[str, Any]:
+        return {
+            **trace,
+            "gate_status": gate_status,
+            "reason": f"{reason}:{period}",
+        }
+
+    if not context and context_run_id in LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS:
+        return {
+            **trace,
+            "gate_status": "legacy_replay",
+            "gate_pass": True,
+            "evidence_ready": True,
+            "legacy_context_run_id": context_run_id,
+            "reason": "frozen_legacy_period_rule_replay",
+        }
+    if not context:
+        return fail("period_escalation_context_missing")
+    if context.get("contract_version") != PERIOD_ESCALATION_CONTEXT_VERSION:
+        return fail("period_escalation_contract_version_mismatch")
+    generation_mode = context.get("generation_mode")
+    if generation_mode not in {None, PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE}:
+        return fail("period_escalation_generation_mode_mismatch")
+    if context.get("source_layer") != "N2_condition":
+        return fail("period_escalation_source_layer_mismatch")
+    if str(context.get("asset_kind") or "") != asset_kind:
+        return fail("period_escalation_asset_kind_mismatch")
+    if str(context.get("identity_key") or "") != identity_key:
+        return fail("period_escalation_identity_key_mismatch")
+    normalized_for_trade_date = _normalize_trade_date(for_trade_date)
+    if not normalized_for_trade_date or _normalize_trade_date(context.get("for_trade_date")) != normalized_for_trade_date:
+        return fail("period_escalation_for_trade_date_mismatch")
+    source_trade_date = _normalize_trade_date(context.get("source_trade_date"))
+    if not source_trade_date or source_trade_date > normalized_for_trade_date:
+        return fail("period_escalation_source_trade_date_invalid")
+    if not _contract_hash_matches(context, "context_hash"):
+        return fail("period_escalation_context_hash_mismatch")
+
+    directions = context.get("directions")
+    if not isinstance(directions, Mapping):
+        return fail("period_escalation_directions_missing")
+    direction_context = directions.get(direction)
+    if not isinstance(direction_context, Mapping):
+        return fail("period_escalation_direction_missing")
+    entry = direction_context.get(period)
+    if not isinstance(entry, Mapping):
+        return fail("period_escalation_entry_missing")
+    entry = dict(entry)
+    trace["source_entry"] = entry
+
+    if entry.get("target_period") != period:
+        return fail("period_escalation_target_period_mismatch")
+    if entry.get("prerequisite_period") != prerequisite_period:
+        return fail("period_escalation_prerequisite_period_mismatch")
+    if "window_type" in entry:
+        return fail("period_escalation_window_type_alias_forbidden")
+    if entry.get("window_kind") != requirement["window_kind"]:
+        return fail("period_escalation_window_kind_mismatch")
+    if entry.get("window_key") != trace["expected_window_key"]:
+        return fail("period_escalation_window_key_mismatch")
+    if entry.get("required_transition") != expected_transition:
+        return fail("period_escalation_required_transition_mismatch")
+    if not _contract_hash_matches(entry, "entry_hash"):
+        return fail("period_escalation_entry_hash_mismatch")
+
+    expected_window_start = _period_escalation_window_start(normalized_for_trade_date, period)
+    if entry.get("window_start") != expected_window_start:
+        return fail("period_escalation_window_start_mismatch")
+    if _normalize_trade_date(entry.get("observation_end")) != source_trade_date:
+        return fail("period_escalation_observation_end_mismatch")
+    reset_for_trade_date = entry.get("reset_for_trade_date")
+    source_day = _parse_trade_date(source_trade_date)
+    window_start_day = _parse_trade_date(expected_window_start)
+    if not isinstance(reset_for_trade_date, bool) or not source_day or not window_start_day:
+        return fail("period_escalation_reset_invalid")
+    if reset_for_trade_date != (source_day < window_start_day):
+        return fail("period_escalation_reset_mismatch")
+
+    count_fields = {
+        key: entry.get(key)
+        for key in (
+            "expected_source_trade_date_count",
+            "observed_source_trade_date_count",
+            "observation_count",
+        )
+    }
+    if any(not _is_nonnegative_int(value) for value in count_fields.values()):
+        return fail("period_escalation_count_invalid")
+    expected_count = int(count_fields["expected_source_trade_date_count"])
+    observed_count = int(count_fields["observed_source_trade_date_count"])
+    observation_count = int(count_fields["observation_count"])
+    missing_dates = entry.get("missing_source_trade_dates")
+    if not isinstance(missing_dates, list) or any(_normalize_trade_date(value) is None for value in missing_dates):
+        return fail("period_escalation_missing_dates_invalid")
+
+    status = str(entry.get("status") or "")
+    coverage_status = str(entry.get("coverage_status") or "")
+    seen = entry.get("seen")
+    if not isinstance(seen, bool):
+        return fail("period_escalation_seen_invalid")
+    trace.update(
+        {
+            "status": status,
+            "coverage_status": coverage_status,
+            "seen": seen,
+        }
+    )
+
+    if status == "ready":
+        coverage_valid = (
+            coverage_status == "passed"
+            and not missing_dates
+            and observed_count == expected_count
+        ) or (
+            generation_mode == PERIOD_ESCALATION_INCREMENTAL_GENERATION_MODE
+            and coverage_status == "incomplete"
+            and bool(missing_dates)
+            and observed_count < expected_count
+            and len(set(missing_dates)) == len(missing_dates)
+            and len(missing_dates) == expected_count - observed_count
+        )
+        if (
+            not coverage_valid
+            or seen is not True
+            or observation_count < 1
+            or observation_count > observed_count
+            or not _normalize_trade_date(entry.get("first_source_trade_date"))
+            or not _normalize_trade_date(entry.get("last_source_trade_date"))
+        ):
+            return fail("period_escalation_ready_invariant_failed")
+        return {
+            **trace,
+            "gate_status": "passed",
+            "gate_pass": True,
+            "evidence_ready": True,
+            "reason": None,
+        }
+
+    if status == "not_seen":
+        expected_coverage = "not_applicable" if reset_for_trade_date else "passed"
+        if (
+            coverage_status != expected_coverage
+            or seen is not False
+            or missing_dates
+            or observed_count != expected_count
+            or observation_count != 0
+            or entry.get("first_source_trade_date") is not None
+            or entry.get("last_source_trade_date") is not None
+            or (reset_for_trade_date and (expected_count != 0 or observed_count != 0))
+        ):
+            return fail("period_escalation_not_seen_invariant_failed")
+        return {
+            **trace,
+            "gate_status": "not_seen",
+            "gate_pass": False,
+            "evidence_ready": True,
+            "reason": f"period_escalation_prerequisite_not_seen:{period}",
+        }
+
+    if status == "not_ready":
+        if (
+            coverage_status != "incomplete"
+            or seen is not False
+            or not missing_dates
+            or observed_count >= expected_count
+        ):
+            return fail("period_escalation_not_ready_invariant_failed")
+        return {
+            **trace,
+            "gate_status": "not_ready",
+            "gate_pass": False,
+            "evidence_ready": False,
+            "reason": f"period_escalation_prerequisite_not_ready:{period}",
+        }
+
+    return fail("period_escalation_status_invalid")
+
+
+def _same_day_formal_period_escalation_gate(
+    *,
+    period: str,
+    direction: str,
+    current_formal_pass_periods: set[str],
+) -> dict[str, Any]:
+    requirement = PERIOD_ESCALATION_REQUIREMENTS[period]
+    prerequisite_period = requirement["prerequisite_period"]
+    return {
+        "policy_version": ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
+        "policy_hash": ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
+        "target_period": period,
+        "prerequisite_period": prerequisite_period,
+        "direction": direction,
+        "expected_window_kind": requirement["window_kind"],
+        "expected_required_transition": PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction],
+        "context_contract_version": None,
+        "context_hash": None,
+        "evidence_source": "current_same_day_formal_pass",
+        "current_formal_pass_periods": [
+            candidate
+            for candidate in PERIOD_PRIORITY
+            if candidate in current_formal_pass_periods
+        ],
+        "gate_status": "passed",
+        "gate_pass": True,
+        "evidence_ready": True,
+        "reason": None,
+    }
+
+
+def _apply_period_escalation_gate(detail: Mapping[str, Any], gate: Mapping[str, Any]) -> dict[str, Any]:
+    output = dict(detail)
+    existing_formal_pass = output.get("classification") == "triggered"
+    output.update(
+        {
+            "existing_formal_classification": output.get("classification"),
+            "existing_formal_pass": existing_formal_pass,
+            "period_escalation_gate_pass": gate.get("gate_pass") is True,
+            "period_escalation_trace": dict(gate),
+            "prerequisite_periods": (
+                [str(gate.get("prerequisite_period"))]
+                if existing_formal_pass and gate.get("gate_status") == "passed"
+                else []
+            ),
+        }
+    )
+    if gate.get("gate_pass") is True:
+        return output
+    output["classification"] = "no_op" if gate.get("gate_status") == "not_seen" else "quality_blocked"
+    output["reason"] = gate.get("reason")
+    return output
+
+
+def _contract_hash_matches(value: Mapping[str, Any], hash_field: str) -> bool:
+    expected_hash = str(value.get(hash_field) or "")
+    if not expected_hash:
+        return False
+    payload = dict(value)
+    payload.pop(hash_field, None)
+    return expected_hash == hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _period_escalation_window_start(for_trade_date: str, period: str) -> str:
+    value = _parse_trade_date(for_trade_date)
+    if value is None:
+        return ""
+    if period == "W":
+        value = value - timedelta(days=value.weekday())
+    elif period == "M":
+        value = value.replace(day=1)
+    elif period == "Q":
+        value = value.replace(month=((value.month - 1) // 3) * 3 + 1, day=1)
+    elif period == "Y":
+        value = value.replace(month=1, day=1)
+    return value.strftime("%Y%m%d")
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _extract_projection_enrichment(projection_row: Mapping[str, Any] | None) -> dict[str, Any]:
     if not projection_row:
         return {}
@@ -850,23 +1333,31 @@ def _chain_satisfied(period: str, chain_pass: bool | str | None) -> bool:
     return chain_pass is True
 
 
-def _selected_previous_avg_amount(baseline: Mapping[str, Any]) -> Any:
+def _selected_previous_avg_amount(baseline: Mapping[str, Any]) -> tuple[str | None, Any]:
     for key in (
         "previous_avg_amount",
         "previous_amount",
         "previous_amount_baseline",
         "classification_previous_amount_baseline",
-        "trigger_previous_amount_baseline",
     ):
         value = baseline.get(key)
         if value not in (None, ""):
-            return value
-    return None
+            return key, value
+    return None, None
 
 
-def _amount_unit_status(baseline: Mapping[str, Any], projection: Mapping[str, Any]) -> dict[str, Any]:
+def _amount_unit_status(
+    baseline: Mapping[str, Any],
+    projection: Mapping[str, Any],
+    *,
+    amount_baseline_field: str | None = None,
+) -> dict[str, Any]:
+    if amount_baseline_field is None:
+        amount_baseline_field, _ = _selected_previous_avg_amount(baseline)
     baseline_unit = str(
-        baseline.get("trigger_previous_amount_baseline_unit")
+        (baseline.get(f"{amount_baseline_field}_unit") if amount_baseline_field else None)
+        or baseline.get("previous_amount_unit")
+        or baseline.get("previous_avg_amount_unit")
         or baseline.get("amount_unit")
         or ""
     ).strip()
@@ -875,16 +1366,23 @@ def _amount_unit_status(baseline: Mapping[str, Any], projection: Mapping[str, An
         or projection.get("amount_unit")
         or ""
     ).strip()
-    if baseline_unit and projection_unit and baseline_unit != projection_unit:
-        return {
-            "status": "mismatch",
-            "trigger_previous_amount_baseline_unit": baseline_unit,
-            "current_amount_metric_unit": projection_unit,
-        }
-    return {
-        "status": "matched" if baseline_unit and projection_unit else "not_declared",
+    normalization_trace = baseline.get("transition_previous_amount_normalization_trace")
+    trace = dict(normalization_trace) if isinstance(normalization_trace, Mapping) else None
+    result = {
+        "previous_amount_source_field": amount_baseline_field,
+        "previous_amount_baseline_unit": baseline_unit or None,
         "trigger_previous_amount_baseline_unit": baseline_unit or None,
         "current_amount_metric_unit": projection_unit or None,
+        "amount_normalization_trace": trace,
+    }
+    if baseline_unit and projection_unit and baseline_unit != projection_unit:
+        return {
+            **result,
+            "status": "mismatch",
+        }
+    return {
+        **result,
+        "status": "matched" if baseline_unit and projection_unit else "not_declared",
     }
 
 
@@ -923,6 +1421,8 @@ def _projection_quality_reason(projection: Mapping[str, Any]) -> str | None:
 
 
 def _period_pending_detail(period: str, period_baselines: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    baseline = _period_baseline(period_baselines, period)
+    amount_baseline_field, amount_baseline_value = _selected_previous_avg_amount(baseline)
     return {
         "period": period,
         "classification": "pending",
@@ -933,23 +1433,26 @@ def _period_pending_detail(period: str, period_baselines: Mapping[str, Any], rea
         "previous_entity_low": _period_value(period_baselines, period, "trigger_previous_entity_low"),
         "current_price_or_close": None,
         "current_amount_metric": None,
-        "previous_amount_baseline": _period_value(
-            period_baselines, period, "trigger_previous_amount_baseline"
-        ),
+        "previous_amount_source_field": amount_baseline_field,
+        "previous_amount_baseline": amount_baseline_value,
         "trigger_previous_entity_high": _period_value(period_baselines, period, "trigger_previous_entity_high"),
         "trigger_previous_entity_low": _period_value(period_baselines, period, "trigger_previous_entity_low"),
-        "trigger_previous_amount_baseline": _period_value(
-            period_baselines, period, "trigger_previous_amount_baseline"
-        ),
+        "trigger_previous_amount_baseline": amount_baseline_value,
         "transition_amount_pass": None,
         "trigger_amount_chain_pass": None,
-        "amount_unit_status": _amount_unit_status(_period_baseline(period_baselines, period), {}),
+        "amount_unit_status": _amount_unit_status(
+            baseline,
+            {},
+            amount_baseline_field=amount_baseline_field,
+        ),
         "amount_metric": "current_amount_metric",
-        "source_field_trace": _source_field_trace(period),
+        "source_field_trace": _source_field_trace(period, amount_baseline_field),
     }
 
 
 def _period_quality_detail(period: str, period_baselines: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    baseline = _period_baseline(period_baselines, period)
+    amount_baseline_field, amount_baseline_value = _selected_previous_avg_amount(baseline)
     return {
         "period": period,
         "classification": "quality_blocked",
@@ -960,19 +1463,20 @@ def _period_quality_detail(period: str, period_baselines: Mapping[str, Any], rea
         "previous_entity_low": _period_value(period_baselines, period, "trigger_previous_entity_low"),
         "current_price_or_close": None,
         "current_amount_metric": None,
-        "previous_amount_baseline": _period_value(
-            period_baselines, period, "trigger_previous_amount_baseline"
-        ),
+        "previous_amount_source_field": amount_baseline_field,
+        "previous_amount_baseline": amount_baseline_value,
         "trigger_previous_entity_high": _period_value(period_baselines, period, "trigger_previous_entity_high"),
         "trigger_previous_entity_low": _period_value(period_baselines, period, "trigger_previous_entity_low"),
-        "trigger_previous_amount_baseline": _period_value(
-            period_baselines, period, "trigger_previous_amount_baseline"
-        ),
+        "trigger_previous_amount_baseline": amount_baseline_value,
         "transition_amount_pass": None,
         "trigger_amount_chain_pass": None,
-        "amount_unit_status": _amount_unit_status(_period_baseline(period_baselines, period), {}),
+        "amount_unit_status": _amount_unit_status(
+            baseline,
+            {},
+            amount_baseline_field=amount_baseline_field,
+        ),
         "amount_metric": "current_amount_metric",
-        "source_field_trace": _source_field_trace(period),
+        "source_field_trace": _source_field_trace(period, amount_baseline_field),
     }
 
 
@@ -1104,14 +1608,18 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _source_field_trace(period: str) -> dict[str, str]:
+def _source_field_trace(period: str, amount_baseline_field: str | None = None) -> dict[str, Any]:
     transition_amount_field = CURRENT_PERIOD_AVG_FIELD_BY_PERIOD.get(period, "current_period_avg_with_today")
+    baseline_field = amount_baseline_field or "previous_avg_amount"
     return {
         "period": period,
         "previous_transition": "trigger_context_snapshot.period_trigger_baseline_json",
         "previous_entity_high": "trigger_context_snapshot.period_trigger_baseline_json.trigger_previous_entity_high",
         "previous_entity_low": "trigger_context_snapshot.period_trigger_baseline_json.trigger_previous_entity_low",
-        "previous_amount_baseline": "trigger_context_snapshot.period_trigger_baseline_json.trigger_previous_amount_baseline",
+        "previous_amount_baseline": (
+            f"trigger_context_snapshot.period_trigger_baseline_json.periods.{period}.{baseline_field}"
+        ),
+        "previous_amount_source_field": amount_baseline_field,
         "trigger_previous_entity_high": "trigger_context_snapshot.period_trigger_baseline_json",
         "trigger_previous_entity_low": "trigger_context_snapshot.period_trigger_baseline_json",
         "trigger_previous_amount_baseline": "trigger_context_snapshot.period_trigger_baseline_json",

@@ -30,7 +30,9 @@ from ashare_v3.events.models import (
 from ashare_v3.trigger.provisional_ordinary_matcher import (
     HINT_CONDITION_KEYS,
     ORDINARY_CONDITION_SIGNAL_TYPES,
+    SAME_DAY_FORMAL_EVIDENCE_SOURCE,
     SOURCE_METRIC_KIND,
+    assert_same_day_period_escalation_output_contract,
     build_provisional_ordinary_matcher_plans,
 )
 from ashare_v3.trigger.provisional_projection_execute import to_jsonable
@@ -368,14 +370,23 @@ def pre_enrich_ordinary_lifecycle_plan(plan: Mapping[str, Any], *, for_trade_dat
         if not triggered_periods:
             triggered_periods = [trigger_period]
         trigger_price = ordinary_trigger_price_for_period(current, trigger_period)
+        same_day_plan = _is_same_day_period_escalation_plan(current)
         current.update(
             {
                 "current_status": "matched",
                 "trigger_live": True,
                 "trigger_period": trigger_period,
-                "primary_trigger_period": current.get("primary_trigger_period") or trigger_period,
+                "primary_trigger_period": (
+                    current.get("primary_trigger_period")
+                    if same_day_plan
+                    else current.get("primary_trigger_period") or trigger_period
+                ),
                 "triggered_periods": triggered_periods,
-                "all_trigger_periods": list(current.get("all_trigger_periods") or triggered_periods),
+                "all_trigger_periods": (
+                    list(current.get("all_trigger_periods"))
+                    if same_day_plan
+                    else list(current.get("all_trigger_periods") or triggered_periods)
+                ),
                 "trigger_price": trigger_price,
             }
         )
@@ -575,6 +586,7 @@ def enrich_ordinary_plan(
     if not triggered_periods and str(plan.get("output_event_type") or "") == ORDINARY_STATE_CHANGED_EVENT_TYPE:
         triggered_periods = [trigger_period]
     trigger_price = ordinary_trigger_price_for_period(plan, trigger_period)
+    same_day_plan = _is_same_day_period_escalation_plan(plan)
     current_status = str(plan.get("current_status") or "matched")
     if current_status == "matched":
         trigger_live = True
@@ -605,8 +617,16 @@ def enrich_ordinary_plan(
         "trigger_period": trigger_period,
         "triggered_periods": triggered_periods,
         "trigger_price": trigger_price,
-        "primary_trigger_period": plan.get("primary_trigger_period") or trigger_period,
-        "all_trigger_periods": list(plan.get("all_trigger_periods") or triggered_periods),
+        "primary_trigger_period": (
+            plan.get("primary_trigger_period")
+            if same_day_plan
+            else plan.get("primary_trigger_period") or trigger_period
+        ),
+        "all_trigger_periods": (
+            list(plan.get("all_trigger_periods"))
+            if same_day_plan
+            else list(plan.get("all_trigger_periods") or triggered_periods)
+        ),
         "trigger_bucket": f"n3p:{plan.get('selected_metric_time') or selected_metric_id}",
         "source_outcome_event_type": output_event_type,
         "source_outcome_event_id": output_event_id,
@@ -857,6 +877,14 @@ def build_ordinary_trigger_matched_envelope(
             "projection_30m_type": plan.get("projection_30m_type") or "none",
             "trigger_period": plan.get("trigger_period"),
             "triggered_periods": plan.get("triggered_periods") or [],
+            "prerequisite_periods": plan.get("prerequisite_periods") or [],
+            "period_escalation_trace": to_jsonable(plan.get("period_escalation_trace") or {}),
+            "ordinary_period_escalation_policy_version": plan.get(
+                "ordinary_period_escalation_policy_version"
+            ),
+            "ordinary_period_escalation_policy_hash": plan.get(
+                "ordinary_period_escalation_policy_hash"
+            ),
             "trigger_price": plan.get("trigger_price"),
             "trigger_time": plan.get("selected_metric_time"),
             "trigger_bucket": plan.get("trigger_bucket"),
@@ -970,6 +998,16 @@ def build_ordinary_raw_json(plan: Mapping[str, Any]) -> dict[str, Any]:
             "trigger_type": plan.get("trigger_type"),
             "trigger_period": plan.get("trigger_period"),
             "triggered_periods": plan.get("triggered_periods") or [],
+            "all_trigger_periods": plan.get("all_trigger_periods") or [],
+            "primary_trigger_period": plan.get("primary_trigger_period"),
+            "prerequisite_periods": plan.get("prerequisite_periods") or [],
+            "period_escalation_trace": to_jsonable(plan.get("period_escalation_trace") or {}),
+            "ordinary_period_escalation_policy_version": plan.get(
+                "ordinary_period_escalation_policy_version"
+            ),
+            "ordinary_period_escalation_policy_hash": plan.get(
+                "ordinary_period_escalation_policy_hash"
+            ),
             "trigger_price": plan.get("trigger_price"),
             "trigger_time": plan.get("selected_metric_time"),
             "trigger_mark_candidate": plan.get("trigger_mark_candidate"),
@@ -1792,9 +1830,21 @@ def direction_for_plan(plan: Mapping[str, Any]) -> str:
     signal_type = str(plan.get("signal_type") or "")
     condition_key = str(plan.get("condition_key") or "")
     trigger_type = str(plan.get("trigger_type") or "")
-    if signal_type == "S_SELL" or condition_key.startswith("SELL") or trigger_type.startswith("SELL"):
-        return "sell"
-    return "buy"
+    direction = str(plan.get("direction") or "")
+    if direction not in {"buy", "sell"}:
+        raise N4POrdinaryExecuteBlocked("ordinary execute requires explicit buy/sell direction")
+    expected_signal_type = "B_BUY" if direction == "buy" else "S_SELL"
+    expected_prefix = "BUY" if direction == "buy" else "SELL"
+    if signal_type != expected_signal_type:
+        raise N4POrdinaryExecuteBlocked(
+            f"ordinary execute direction/signal_type mismatch: {direction}/{signal_type}"
+        )
+    if not condition_key.startswith(expected_prefix) or not trigger_type.startswith(expected_prefix):
+        raise N4POrdinaryExecuteBlocked(
+            "ordinary execute direction/condition/trigger_type mismatch: "
+            f"{direction}/{condition_key}/{trigger_type}"
+        )
+    return direction
 
 
 def parse_event_time(value: Any) -> datetime:
@@ -1830,6 +1880,35 @@ def _assert_ordinary_lifecycle_plan(plan: Mapping[str, Any]) -> None:
         raise N4POrdinaryExecuteBlocked(f"unsupported ordinary trigger_type: {trigger_type}")
     if plan.get("source_metric_kind") != SOURCE_METRIC_KIND:
         raise N4POrdinaryExecuteBlocked(f"unsupported source_metric_kind: {plan.get('source_metric_kind')}")
+    direction_for_plan(plan)
+    try:
+        assert_same_day_period_escalation_output_contract(plan)
+    except ValueError as exc:
+        raise N4POrdinaryExecuteBlocked(str(exc)) from exc
+
+
+def _is_same_day_period_escalation_plan(plan: Mapping[str, Any]) -> bool:
+    trace = plan.get("period_escalation_trace")
+    trace = trace if isinstance(trace, Mapping) else {}
+    if trace.get("same_day_formal_evidence") is True:
+        return True
+    period_traces = trace.get("periods")
+    if isinstance(period_traces, Mapping) and any(
+        isinstance(period_trace, Mapping)
+        and period_trace.get("evidence_source") == SAME_DAY_FORMAL_EVIDENCE_SOURCE
+        for period_trace in period_traces.values()
+    ):
+        return True
+    rule_proof = plan.get("rule_proof")
+    rule_proof = rule_proof if isinstance(rule_proof, Mapping) else {}
+    details = rule_proof.get("triggered_period_details")
+    return isinstance(details, list) and any(
+        isinstance(detail, Mapping)
+        and isinstance(detail.get("period_escalation_trace"), Mapping)
+        and detail["period_escalation_trace"].get("evidence_source")
+        == SAME_DAY_FORMAL_EVIDENCE_SOURCE
+        for detail in details
+    )
 
 
 def ordinary_trigger_type_allowed(trigger_type: str) -> bool:

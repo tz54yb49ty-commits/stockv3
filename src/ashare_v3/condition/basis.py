@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from hashlib import sha256
+import json
 from typing import Any, Iterable, Mapping
 
 import psycopg
@@ -74,6 +76,23 @@ STATIC_ANCHOR_PERIODS = ("Y", "Q", "M", "W")
 LOWER_PERIOD = {"Y": "Q", "Q": "M", "M": "W", "W": "D"}
 TRANSITION_WINDOWS = {"Y": 66, "Q": 22, "M": 5, "W": 1}
 PERIOD_TRIGGER_BASELINE_VERSION = "N2-R4-period-trigger-baseline-v1"
+PERIOD_ESCALATION_CONTEXT_VERSION = "N2-period-escalation-context-v1"
+PERIOD_ESCALATION_CONTEXT_GENERATION_MODE = "N2-period-escalation-daily-incremental-v1"
+PERIOD_ESCALATION_REQUIREMENTS = {
+    "W": {"prerequisite_period": "D", "window_kind": "week"},
+    "M": {"prerequisite_period": "W", "window_kind": "month"},
+    "Q": {"prerequisite_period": "M", "window_kind": "quarter"},
+    "Y": {"prerequisite_period": "Q", "window_kind": "year"},
+}
+PERIOD_ESCALATION_DIRECTION_TRANSITIONS = {
+    "buy": "volume_up",
+    "sell": "low_volume_down",
+}
+PERIOD_ESCALATION_BASIS_TABLES = {
+    "stock": ("stock_condition_basis", "stock_identity_key", "stock_condition_basis_id"),
+    "index": ("index_condition_basis", "index_identity_key", "index_condition_basis_id"),
+    "board": ("board_condition_basis", "board_identity_key", "board_condition_basis_id"),
+}
 PERIOD_TRIGGER_BASELINE_REQUIRED_KEYS = (
     "current_open_seed",
     "current_close_seed",
@@ -258,20 +277,6 @@ def build_condition_basis_dry_run(
     missing_active = [data_type for data_type in REQUIRED_ACTIVE_DATA_TYPES if data_type not in active_versions]
     if missing_active:
         raise ValueError(f"ready check is missing active versions: {missing_active}")
-    cache_key = (
-        dsn,
-        source_trade_date,
-        tuple(
-            (data_type, active_versions[data_type].get("active_source_version"), active_versions[data_type].get("source_batch_id"))
-            for data_type in REQUIRED_ACTIVE_DATA_TYPES
-        ),
-        bool(ready_check.get("passed")),
-        ready_check.get("expected_condition_stock_universe"),
-        ready_check.get("excluded_from_condition_universe"),
-    )
-    if cache_key in _BASIS_DRY_RUN_CACHE:
-        return deepcopy(_BASIS_DRY_RUN_CACHE[cache_key])
-
     with psycopg.connect(
         dsn,
         connect_timeout=10,
@@ -279,10 +284,39 @@ def build_condition_basis_dry_run(
         row_factory=dict_row,
     ) as conn, conn.cursor() as cur:
         date_context = infer_date_context(cur, source_trade_date)
+        previous_context_run = fetch_period_escalation_previous_context_run(cur, date_context)
+        incremental_epoch = period_escalation_incremental_epoch(previous_context_run)
+        open_source_dates = fetch_period_escalation_window_trade_dates(cur, date_context)
+        cache_key = (
+            dsn,
+            source_trade_date,
+            tuple(
+                (data_type, active_versions[data_type].get("active_source_version"), active_versions[data_type].get("source_batch_id"))
+                for data_type in REQUIRED_ACTIVE_DATA_TYPES
+            ),
+            incremental_epoch,
+            tuple(open_source_dates),
+            bool(ready_check.get("passed")),
+            ready_check.get("expected_condition_stock_universe"),
+            ready_check.get("excluded_from_condition_universe"),
+        )
+        if cache_key in _BASIS_DRY_RUN_CACHE:
+            return deepcopy(_BASIS_DRY_RUN_CACHE[cache_key])
         monitor_targets = fetch_monitor_target_status(cur, date_context.for_trade_date)
         stock_summary = fetch_stock_basis_preview(cur, date_context, active_versions)
         index_summary = fetch_index_basis_preview(cur, date_context, active_versions)
         board_summary = fetch_board_basis_preview(cur, date_context, active_versions)
+        attach_period_escalation_contexts(
+            cur,
+            date_context,
+            {
+                "stock": stock_summary,
+                "index": index_summary,
+                "board": board_summary,
+            },
+            previous_context_run=previous_context_run,
+            open_source_dates=open_source_dates,
+        )
         membership_summary = fetch_membership_summary(cur, date_context, active_versions)
 
     stock_summary.update(stock_condition_universe_summary(ready_check))
@@ -636,6 +670,582 @@ def fetch_board_basis_preview(
         "basis_rows": samples,
         "sample_basis_rows": samples[:3],
     }
+
+
+def fetch_period_escalation_previous_context_run(
+    cur: psycopg.Cursor[dict[str, Any]],
+    dates: DateContext,
+) -> dict[str, Any] | None:
+    """Resolve exactly zero or one eligible immediate predecessor run."""
+
+    cur.execute(
+        """
+        SELECT run_id,
+               updated_at::text AS updated_at
+        FROM common_condition_run
+        WHERE status = 'passed_active'
+          AND source_trade_date = %s
+          AND for_trade_date = %s
+        ORDER BY run_id
+        """,
+        (dates.source_prev_trade_date, dates.source_trade_date),
+    )
+    rows = [normalize_mapping(row) for row in cur.fetchall()]
+    if len(rows) > 1:
+        raise ValueError("period_escalation_previous_run_ambiguous")
+    return rows[0] if rows else None
+
+
+def period_escalation_incremental_epoch(previous_context_run: Mapping[str, Any] | None) -> tuple[str, str]:
+    if not previous_context_run:
+        return "", ""
+    return (
+        str(previous_context_run.get("run_id") or ""),
+        str(previous_context_run.get("updated_at") or ""),
+    )
+
+
+def attach_period_escalation_contexts(
+    cur: psycopg.Cursor[dict[str, Any]],
+    dates: DateContext,
+    summaries: Mapping[str, dict[str, Any]],
+    *,
+    previous_context_run: Mapping[str, Any] | None,
+    open_source_dates: Iterable[str],
+) -> None:
+    """Attach prior-day directional state without scanning historical basis rows."""
+
+    previous_run_id = str((previous_context_run or {}).get("run_id") or "")
+    for asset_kind, summary in summaries.items():
+        current_rows = list(summary.get("basis_rows") or [])
+        previous_context_rows = fetch_period_escalation_previous_context_rows(
+            cur,
+            asset_kind=asset_kind,
+            identity_keys=[basis_identity_key(row) for row in current_rows],
+            source_prev_trade_date=dates.source_prev_trade_date,
+            previous_run_id=previous_run_id,
+        )
+        previous_context_by_identity = index_period_escalation_previous_context_rows(previous_context_rows)
+        updated_rows = [
+            attach_period_escalation_context_to_row(
+                row,
+                dates=dates,
+                previous_context_by_identity=previous_context_by_identity,
+                open_source_dates=open_source_dates,
+            )
+            for row in current_rows
+        ]
+        summary["basis_rows"] = updated_rows
+        summary["sample_basis_rows"] = updated_rows[:3]
+
+
+def fetch_period_escalation_window_trade_dates(
+    cur: psycopg.Cursor[dict[str, Any]],
+    dates: DateContext,
+) -> list[str]:
+    cur.execute(
+        """
+        SELECT trade_date
+        FROM common_trade_calendar
+        WHERE is_open = true
+          AND trade_date <= %s
+          AND trade_date >= %s
+        ORDER BY trade_date
+        """,
+        (
+            dates.source_trade_date,
+            format_yyyymmdd(parse_yyyymmdd(dates.for_trade_date).replace(month=1, day=1)),
+        ),
+    )
+    return [
+        format_yyyymmdd(value) if isinstance(value := row.get("trade_date"), date) else str(value).replace("-", "")
+        for row in cur.fetchall()
+        if row.get("trade_date")
+    ]
+
+
+def fetch_period_escalation_previous_context_rows(
+    cur: psycopg.Cursor[dict[str, Any]],
+    *,
+    asset_kind: str,
+    identity_keys: Iterable[str],
+    source_prev_trade_date: str,
+    previous_run_id: str,
+) -> list[dict[str, Any]]:
+    """Read only the immediately preceding passed-active basis context."""
+
+    table_name, identity_column, basis_id_column = PERIOD_ESCALATION_BASIS_TABLES[asset_kind]
+    keys = sorted({str(key) for key in identity_keys if key})
+    if not keys or not previous_run_id:
+        return []
+    cur.execute(
+        f"""
+        SELECT b.source_trade_date,
+               b.{identity_column} AS identity_key,
+               b.run_id AS source_condition_run_id,
+               b.{basis_id_column} AS source_basis_id,
+               b.period_transition_d,
+               b.period_transition_w,
+               b.period_transition_m,
+               b.period_transition_q,
+               b.period_trigger_baseline_json
+        FROM {table_name} b
+        WHERE b.run_id = %s
+          AND b.source_trade_date = %s
+          AND b.{identity_column} = ANY(%s)
+        ORDER BY b.{identity_column}, b.{basis_id_column}
+        """,
+        (previous_run_id, source_prev_trade_date, keys),
+    )
+    return [normalize_mapping(row) for row in cur.fetchall()]
+
+
+def index_period_escalation_previous_context_rows(
+    previous_context_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Build the single fail-closed identity index for one asset-kind batch."""
+
+    output: dict[str, dict[str, Any]] = {}
+    for item in previous_context_rows:
+        row = normalize_mapping(item)
+        identity_key = str(row.get("identity_key") or "")
+        if not identity_key:
+            raise ValueError("period_escalation_previous_context_missing_identity")
+        if identity_key in output:
+            raise ValueError("period_escalation_previous_context_duplicate_identity")
+        output[identity_key] = row
+    return output
+
+
+def attach_period_escalation_context_to_row(
+    row: Mapping[str, Any],
+    *,
+    dates: DateContext,
+    previous_context_by_identity: Mapping[str, Mapping[str, Any]],
+    open_source_dates: Iterable[str],
+) -> dict[str, Any]:
+    output = dict(row)
+    identity_key = basis_identity_key(output)
+    baseline = normalize_mapping(output.get("period_trigger_baseline_json") or {})
+    previous_context = previous_context_by_identity.get(identity_key)
+    baseline["period_escalation_context"] = build_period_escalation_context(
+        dates=dates,
+        asset_kind=str(output.get("asset_kind") or ""),
+        identity_key=identity_key,
+        current_row=output,
+        previous_context=previous_context,
+        open_source_dates=open_source_dates,
+    )
+    output["period_trigger_baseline_json"] = baseline
+    return attach_context_enrichment_to_row(output)
+
+
+def build_period_escalation_context(
+    *,
+    dates: DateContext,
+    asset_kind: str,
+    identity_key: str,
+    current_row: Mapping[str, Any],
+    previous_context: Mapping[str, Any] | None,
+    open_source_dates: Iterable[str],
+) -> dict[str, Any]:
+    """Build the immutable directional incremental W/M/Q/Y prerequisite context."""
+
+    source_day = parse_yyyymmdd(dates.source_trade_date)
+    previous = normalized_previous_incremental_context(
+        previous_context,
+        dates=dates,
+        asset_kind=asset_kind,
+        identity_key=identity_key,
+    )
+    directions = {
+        direction: {
+            period: build_incremental_period_escalation_entry(
+                dates=dates,
+                source_day=source_day,
+                target_period=period,
+                direction=direction,
+                current_row=current_row,
+                previous_context=previous,
+                asset_kind=asset_kind,
+                identity_key=identity_key,
+                open_source_dates=open_source_dates,
+            )
+            for period in ("W", "M", "Q", "Y")
+        }
+        for direction in ("buy", "sell")
+    }
+    payload = {
+        "contract_version": PERIOD_ESCALATION_CONTEXT_VERSION,
+        "generation_mode": PERIOD_ESCALATION_CONTEXT_GENERATION_MODE,
+        "state_epoch_trade_date": dates.source_trade_date,
+        "previous_context_hash": previous.get("context_hash") if previous else None,
+        "previous_source_condition_run_id": previous.get("_previous_source_condition_run_id") if previous else None,
+        "source_layer": "N2_condition",
+        "asset_kind": asset_kind,
+        "identity_key": identity_key,
+        "for_trade_date": dates.for_trade_date,
+        "source_trade_date": dates.source_trade_date,
+        "directions": directions,
+    }
+    return {**payload, "context_hash": stable_json_hash(payload)}
+
+
+def normalized_previous_incremental_context(
+    previous_context_row: Mapping[str, Any] | None,
+    *,
+    dates: DateContext,
+    asset_kind: str,
+    identity_key: str,
+) -> Mapping[str, Any] | None:
+    """Accept only the previous day generated by this directional mode."""
+
+    if not isinstance(previous_context_row, Mapping):
+        return None
+    if "period_escalation_context" in previous_context_row:
+        context = normalize_mapping(previous_context_row.get("period_escalation_context") or {})
+    elif "directions" in previous_context_row:
+        context = normalize_mapping(previous_context_row)
+    else:
+        baseline = normalize_mapping(previous_context_row.get("period_trigger_baseline_json") or {})
+        context = normalize_mapping(baseline.get("period_escalation_context") or {})
+    if context.get("generation_mode") != PERIOD_ESCALATION_CONTEXT_GENERATION_MODE:
+        return None
+    if context.get("contract_version") != PERIOD_ESCALATION_CONTEXT_VERSION:
+        return None
+    if context.get("asset_kind") != asset_kind or context.get("identity_key") != identity_key:
+        return None
+    if context.get("source_trade_date") != dates.source_prev_trade_date:
+        return None
+    if context.get("for_trade_date") != dates.source_trade_date:
+        return None
+    if context.get("state_epoch_trade_date") != dates.source_prev_trade_date:
+        return None
+    context_hash = context.get("context_hash")
+    if not isinstance(context_hash, str):
+        return None
+    hashed = dict(context)
+    hashed.pop("context_hash", None)
+    if stable_json_hash(hashed) != context_hash:
+        return None
+    output = dict(context)
+    previous_run_id = str(
+        previous_context_row.get("source_condition_run_id")
+        or previous_context_row.get("run_id")
+        or ""
+    )
+    if previous_run_id:
+        output["_previous_source_condition_run_id"] = previous_run_id
+    return output
+
+
+def prior_incremental_entry(
+    previous_context: Mapping[str, Any] | None,
+    *,
+    direction: str,
+    target_period: str,
+    window_key: str,
+    window_start: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(previous_context, Mapping):
+        return None
+    directions = previous_context.get("directions")
+    if not isinstance(directions, Mapping):
+        return None
+    by_direction = directions.get(direction)
+    if not isinstance(by_direction, Mapping):
+        return None
+    entry = by_direction.get(target_period)
+    if not isinstance(entry, Mapping):
+        return None
+    requirement = PERIOD_ESCALATION_REQUIREMENTS[target_period]
+    expected_semantics = {
+        "target_period": target_period,
+        "prerequisite_period": requirement["prerequisite_period"],
+        "window_kind": requirement["window_kind"],
+        "window_key": window_key,
+        "window_start": window_start,
+        "reset_for_trade_date": False,
+        "required_transition": PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction],
+    }
+    if any(entry.get(field) != value for field, value in expected_semantics.items()):
+        return None
+    entry_hash = entry.get("entry_hash")
+    if not isinstance(entry_hash, str):
+        return None
+    hashed = dict(entry)
+    hashed.pop("entry_hash", None)
+    if stable_json_hash(hashed) != entry_hash:
+        return None
+    return entry
+
+
+def valid_prior_incremental_entry(
+    entry: Mapping[str, Any] | None,
+    *,
+    expected_dates: list[str],
+    asset_kind: str,
+    identity_key: str,
+) -> bool:
+    """Validate the previous entry without requiring complete negative coverage."""
+
+    if not isinstance(entry, Mapping):
+        return False
+    coverage_status = entry.get("coverage_status")
+    status = entry.get("status")
+    seen = entry.get("seen")
+    expected_count = entry.get("expected_source_trade_date_count")
+    observed_count = entry.get("observed_source_trade_date_count")
+    observation_count = entry.get("observation_count")
+    previous_state_used = entry.get("previous_incremental_state_used")
+    missing_dates = entry.get("missing_source_trade_dates")
+    state_epoch_trade_date = entry.get("state_epoch_trade_date")
+    if coverage_status not in {"passed", "incomplete"}:
+        return False
+    if status not in {"ready", "not_seen", "not_ready"} or type(seen) is not bool:
+        return False
+    if any(type(value) is not int for value in (expected_count, observed_count, observation_count)):
+        return False
+    if type(previous_state_used) is not bool:
+        return False
+    if not isinstance(missing_dates, list) or any(not isinstance(value, str) for value in missing_dates):
+        return False
+    if expected_count != len(expected_dates):
+        return False
+    unique_missing_dates = sorted(set(missing_dates))
+    if unique_missing_dates != missing_dates:
+        return False
+    if any(value not in expected_dates for value in missing_dates):
+        return False
+    if observed_count != expected_count - len(missing_dates):
+        return False
+    if previous_state_used != (observed_count > 1):
+        return False
+    observed_dates = [value for value in expected_dates if value not in missing_dates]
+    if not observed_dates or state_epoch_trade_date != observed_dates[0]:
+        return False
+    if entry.get("observation_end") != expected_dates[-1]:
+        return False
+    if coverage_status == "passed":
+        if missing_dates or observed_count != expected_count:
+            return False
+    elif not missing_dates or observed_count >= expected_count:
+        return False
+    if observation_count < 0 or observation_count > observed_count:
+        return False
+    if seen:
+        first_source_trade_date = entry.get("first_source_trade_date")
+        last_source_trade_date = entry.get("last_source_trade_date")
+        latest_source_basis_ref = entry.get("latest_source_basis_ref")
+        latest_source_condition_run_id = entry.get("latest_source_condition_run_id")
+        return (
+            status == "ready"
+            and observation_count > 0
+            and first_source_trade_date in observed_dates
+            and last_source_trade_date in observed_dates
+            and first_source_trade_date <= last_source_trade_date
+            and latest_source_basis_ref
+            == f"current:{asset_kind}:{identity_key}:{last_source_trade_date}"
+            and (
+                latest_source_condition_run_id is None
+                or isinstance(latest_source_condition_run_id, str)
+            )
+        )
+    if observation_count != 0:
+        return False
+    if any(
+        entry.get(field) is not None
+        for field in (
+            "first_source_trade_date",
+            "last_source_trade_date",
+            "latest_source_condition_run_id",
+            "latest_source_basis_ref",
+        )
+    ):
+        return False
+    return (
+        coverage_status == "passed" and status == "not_seen"
+    ) or (
+        coverage_status == "incomplete" and status == "not_ready"
+    )
+
+
+def build_incremental_period_escalation_entry(
+    *,
+    dates: DateContext,
+    source_day: date,
+    target_period: str,
+    direction: str,
+    current_row: Mapping[str, Any],
+    previous_context: Mapping[str, Any] | None,
+    asset_kind: str,
+    identity_key: str,
+    open_source_dates: Iterable[str],
+) -> dict[str, Any]:
+    requirement = PERIOD_ESCALATION_REQUIREMENTS[target_period]
+    prerequisite_period = requirement["prerequisite_period"]
+    window_start = period_escalation_window_start(target_period, dates.for_trade_date)
+    reset = source_day < window_start
+    required_transition = PERIOD_ESCALATION_DIRECTION_TRANSITIONS[direction]
+    window_key = period_key(target_period, dates.for_trade_date)
+    calendar_dates = sorted({str(value) for value in open_source_dates if str(value)})
+    window_start_text = format_yyyymmdd(window_start)
+    expected_dates = [
+        value
+        for value in calendar_dates
+        if window_start_text <= value <= dates.source_trade_date
+    ]
+    previous_expected_dates = [
+        value
+        for value in expected_dates
+        if value <= dates.source_prev_trade_date
+    ]
+    candidate_prior = None if reset else prior_incremental_entry(
+        previous_context,
+        direction=direction,
+        target_period=target_period,
+        window_key=window_key,
+        window_start=window_start_text,
+    )
+    prior_state_valid = valid_prior_incremental_entry(
+        candidate_prior,
+        expected_dates=previous_expected_dates,
+        asset_kind=asset_kind,
+        identity_key=identity_key,
+    )
+    can_continue = (
+        not reset
+        and prior_state_valid
+        and expected_dates
+        and expected_dates[-1] == dates.source_trade_date
+        and len(expected_dates) == len(previous_expected_dates) + 1
+    )
+    prior = candidate_prior if can_continue else None
+    prior_seen = bool(prior and prior.get("seen") is True)
+    prior_count = int(prior.get("observation_count") or 0) if prior else 0
+    current_match = (
+        not reset
+        and dates.source_trade_date in expected_dates
+        and str(current_row.get(f"period_transition_{PERIOD_FIELD_SUFFIX[prerequisite_period]}") or "") == required_transition
+    )
+    current_observation = period_escalation_observation(
+        current_row,
+        source_basis_ref=f"current:{asset_kind}:{identity_key}:{dates.source_trade_date}",
+    )
+    current_observation["source_trade_date"] = dates.source_trade_date
+    if reset:
+        coverage_status = "not_applicable"
+        missing_dates: list[str] = []
+        observed_count = 0
+    elif prior:
+        missing_dates = list(prior.get("missing_source_trade_dates") or [])
+        observed_count = int(prior.get("observed_source_trade_date_count") or 0) + 1
+        coverage_status = "passed" if not missing_dates else "incomplete"
+    else:
+        current_observed = dates.source_trade_date in expected_dates
+        missing_dates = [
+            value
+            for value in expected_dates
+            if not current_observed or value != dates.source_trade_date
+        ]
+        observed_count = 1 if current_observed else 0
+        coverage_status = "passed" if current_observed and not missing_dates else "incomplete"
+    seen = (prior_seen or current_match) if not reset else False
+    observation_count = prior_count + (1 if current_match else 0) if not reset else 0
+    if current_match:
+        first_source_trade_date = prior.get("first_source_trade_date") if prior_seen else current_observation["source_trade_date"]
+        last_source_trade_date = current_observation["source_trade_date"]
+        latest_source_condition_run_id = current_observation["source_condition_run_id"]
+        latest_source_basis_ref = current_observation["source_basis_ref"]
+    elif prior_seen:
+        first_source_trade_date = prior.get("first_source_trade_date")
+        last_source_trade_date = prior.get("last_source_trade_date")
+        latest_source_condition_run_id = prior.get("latest_source_condition_run_id")
+        latest_source_basis_ref = prior.get("latest_source_basis_ref")
+    else:
+        first_source_trade_date = None
+        last_source_trade_date = None
+        latest_source_condition_run_id = None
+        latest_source_basis_ref = None
+    payload = {
+        "target_period": target_period,
+        "prerequisite_period": prerequisite_period,
+        "window_kind": requirement["window_kind"],
+        "window_key": window_key,
+        "window_start": window_start_text,
+        "observation_end": dates.source_trade_date,
+        "reset_for_trade_date": reset,
+        "state_epoch_trade_date": (
+            prior.get("state_epoch_trade_date")
+            if prior
+            else (dates.source_trade_date if not reset and dates.source_trade_date in expected_dates else None)
+        ),
+        "required_transition": required_transition,
+        "status": "ready" if seen else ("not_ready" if coverage_status == "incomplete" else "not_seen"),
+        "coverage_status": coverage_status,
+        "seen": seen,
+        "expected_source_trade_date_count": len(expected_dates),
+        "observed_source_trade_date_count": observed_count,
+        "missing_source_trade_dates": missing_dates,
+        "observation_count": observation_count,
+        "previous_incremental_state_used": bool(prior),
+        "first_source_trade_date": first_source_trade_date,
+        "last_source_trade_date": last_source_trade_date,
+        "latest_source_condition_run_id": latest_source_condition_run_id,
+        "latest_source_basis_ref": latest_source_basis_ref,
+    }
+    return {**payload, "entry_hash": stable_json_hash(payload)}
+
+
+def period_escalation_window_start(target_period: str, for_trade_date: str) -> date:
+    value = parse_yyyymmdd(for_trade_date)
+    if target_period == "W":
+        return value - timedelta(days=value.weekday())
+    if target_period == "M":
+        return value.replace(day=1)
+    if target_period == "Q":
+        return first_day_of_quarter(value)
+    if target_period == "Y":
+        return value.replace(month=1, day=1)
+    raise ValueError(f"unsupported escalation target period: {target_period!r}")
+
+
+def period_escalation_observation(
+    row: Mapping[str, Any],
+    *,
+    source_basis_ref: str | None = None,
+) -> dict[str, Any]:
+    source_date = str(row.get("source_trade_date") or "")
+    return {
+        "source_trade_date": source_date,
+        "source_condition_run_id": row.get("source_condition_run_id") or row.get("run_id"),
+        "source_basis_ref": source_basis_ref
+        or (
+            f"basis:{row.get('source_condition_run_id') or row.get('run_id')}:{row.get('source_basis_id')}"
+            if row.get("source_basis_id") is not None
+            else None
+        ),
+        "period_transition_d": row.get("period_transition_d"),
+        "period_transition_w": row.get("period_transition_w"),
+        "period_transition_m": row.get("period_transition_m"),
+        "period_transition_q": row.get("period_transition_q"),
+    }
+
+
+def basis_identity_key(row: Mapping[str, Any]) -> str:
+    return str(
+        row.get("identity_key")
+        or row.get("stock_identity_key")
+        or row.get("index_identity_key")
+        or row.get("board_identity_key")
+        or ""
+    )
+
+
+def stable_json_hash(value: Mapping[str, Any]) -> str:
+    return sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def fetch_membership_summary(

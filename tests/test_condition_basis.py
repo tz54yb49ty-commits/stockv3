@@ -1,39 +1,52 @@
 import unittest
+from unittest.mock import patch
 
 from ashare_v3.condition.basis import (
     DateContext,
     DEFAULT_INDEX_POOL_IDENTITIES,
+    PERIOD_ESCALATION_CONTEXT_GENERATION_MODE,
+    PERIOD_ESCALATION_CONTEXT_VERSION,
     SYMMETRY_TARGET_BASE_PRICE_POLICY,
     PERIOD_TRIGGER_BASELINE_VERSION,
     PERIODS,
     active_versions_from_ready_check,
+    attach_period_escalation_contexts,
+    attach_period_escalation_context_to_row,
+    build_period_escalation_context,
     build_quality_items,
     canonical_target_fields_for_direction,
     computed_condition_fields,
     count_quality_severities,
     empty_necessary_condition_fields,
     empty_static_structure_fields,
+    fetch_period_escalation_previous_context_run,
+    fetch_period_escalation_previous_context_rows,
     fetch_period_contexts,
+    index_period_escalation_previous_context_rows,
     period_grade,
     period_trigger_baseline_has_required_shape,
     period_trigger_baseline_not_ready_periods,
     period_trigger_baseline_period_ready,
     ready_check_failure_quality_items,
+    stable_json_hash,
     stock_condition_universe_summary,
     transition_grade,
 )
+from ashare_v3.condition.context_materialization import build_materialization_payload_rows
 
 
 class RecordingCursor:
-    def __init__(self) -> None:
+    def __init__(self, rows: list[dict[str, object]] | None = None) -> None:
         self.sql_calls: list[str] = []
+        self.params_calls: list[object] = []
+        self.rows = list(rows or [])
 
     def execute(self, sql: str, params: object = None) -> None:
-        del params
         self.sql_calls.append(sql)
+        self.params_calls.append(params)
 
     def fetchall(self) -> list[dict[str, object]]:
-        return []
+        return list(self.rows)
 
 
 class ConditionBasisTest(unittest.TestCase):
@@ -531,6 +544,634 @@ class ConditionBasisTest(unittest.TestCase):
             self.assertEqual(fields["sell_necessary_key"], sell_key, code)
             self.assertFalse(fields["oversold_hint_necessary_base"], code)
             self.assertFalse(fields["overbought_hint_necessary_base"], code)
+
+    def test_period_escalation_context_uses_same_window_predecessor_only(self) -> None:
+        open_source_dates = [
+            "20260701", "20260702", "20260703", "20260706", "20260707",
+            "20260708", "20260709", "20260710", "20260713", "20260714",
+        ]
+        first = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260713", source_prev_trade_date="20260710",
+                for_trade_date="20260714", prev_trade_date="20260713",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260714", source_prev_trade_date="20260713",
+                for_trade_date="20260715", prev_trade_date="20260714",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            current_row={"period_transition_d": "flat"},
+            previous_context=first,
+            open_source_dates=open_source_dates,
+        )
+
+        weekly = context["directions"]["buy"]["W"]
+        self.assertEqual(context["contract_version"], PERIOD_ESCALATION_CONTEXT_VERSION)
+        self.assertEqual(context["generation_mode"], "N2-period-escalation-daily-incremental-v1")
+        self.assertEqual(context["state_epoch_trade_date"], "20260714")
+        self.assertEqual(weekly["prerequisite_period"], "D")
+        self.assertEqual(weekly["status"], "ready")
+        self.assertTrue(weekly["seen"])
+        self.assertTrue(weekly["previous_incremental_state_used"])
+        self.assertEqual(weekly["observation_count"], 1)
+        self.assertEqual(weekly["last_source_trade_date"], "20260713")
+        sell_weekly = context["directions"]["sell"]["W"]
+        self.assertEqual(sell_weekly["status"], "not_seen")
+        self.assertFalse(sell_weekly["seen"])
+        self.assertTrue(sell_weekly["previous_incremental_state_used"])
+        for target_period in ("M", "Q", "Y"):
+            self.assertEqual(context["directions"]["buy"][target_period]["status"], "not_ready")
+
+    def test_20260713_positive_evidence_is_ready_while_missing_coverage_is_retained(self) -> None:
+        open_source_dates = [
+            "20260701", "20260702", "20260703", "20260706", "20260707",
+            "20260708", "20260709", "20260710", "20260713",
+        ]
+        context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260713", source_prev_trade_date="20260710",
+                for_trade_date="20260714", prev_trade_date="20260713",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="index",
+            identity_key="index:SH:000300",
+            current_row={
+                "period_transition_d": "volume_up",
+                "period_transition_w": "volume_up",
+                "period_transition_m": "volume_up",
+                "period_transition_q": "volume_up",
+            },
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+
+        weekly = context["directions"]["buy"]["W"]
+        self.assertEqual(weekly["coverage_status"], "passed")
+        self.assertEqual(weekly["expected_source_trade_date_count"], 1)
+        self.assertEqual(weekly["observed_source_trade_date_count"], 1)
+        self.assertEqual(weekly["status"], "ready")
+        for target_period in ("M", "Q", "Y"):
+            entry = context["directions"]["buy"][target_period]
+            self.assertEqual(entry["coverage_status"], "incomplete")
+            self.assertEqual(entry["status"], "ready")
+            self.assertTrue(entry["seen"])
+            self.assertEqual(entry["expected_source_trade_date_count"], 9)
+            self.assertEqual(entry["observed_source_trade_date_count"], 1)
+            self.assertEqual(entry["observation_count"], 1)
+            self.assertEqual(entry["first_source_trade_date"], "20260713")
+            self.assertEqual(entry["last_source_trade_date"], "20260713")
+            self.assertEqual(entry["missing_source_trade_dates"], open_source_dates[:-1])
+
+    def test_period_escalation_context_applies_current_sell_grade_without_cross_direction_pollution(self) -> None:
+        context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260713", source_prev_trade_date="20260710",
+                for_trade_date="20260714", prev_trade_date="20260713",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="index",
+            identity_key="index:SH:000300",
+            current_row={"period_transition_d": "low_volume_down"},
+            previous_context=None,
+            open_source_dates=["20260713"],
+        )
+
+        self.assertEqual(context["directions"]["sell"]["W"]["status"], "ready")
+        self.assertEqual(context["directions"]["buy"]["W"]["status"], "not_seen")
+
+    def test_positive_evidence_is_directional_for_all_target_periods(self) -> None:
+        for direction, transition, other_direction in (
+            ("buy", "volume_up", "sell"),
+            ("sell", "low_volume_down", "buy"),
+        ):
+            with self.subTest(direction=direction):
+                context = build_period_escalation_context(
+                    dates=DateContext(
+                        source_trade_date="20260713", source_prev_trade_date="20260710",
+                        for_trade_date="20260714", prev_trade_date="20260713",
+                        for_trade_calendar_row_exists=True,
+                    ),
+                    asset_kind="board",
+                    identity_key="board:TDX:881001",
+                    current_row={
+                        f"period_transition_{period}": transition
+                        for period in ("d", "w", "m", "q")
+                    },
+                    previous_context=None,
+                    open_source_dates=[
+                        "20260701", "20260702", "20260703", "20260706", "20260707",
+                        "20260708", "20260709", "20260710", "20260713",
+                    ],
+                )
+
+                for target_period in ("W", "M", "Q", "Y"):
+                    entry = context["directions"][direction][target_period]
+                    self.assertEqual(entry["status"], "ready")
+                    self.assertTrue(entry["seen"])
+                    self.assertEqual(entry["observation_count"], 1)
+                    self.assertFalse(context["directions"][other_direction][target_period]["seen"])
+
+    def test_period_escalation_context_does_not_inherit_legacy_or_hash_tampered_context(self) -> None:
+        open_source_dates = ["20260713", "20260714"]
+        first = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260713", source_prev_trade_date="20260710",
+                for_trade_date="20260714", prev_trade_date="20260713",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="board",
+            identity_key="board:TDX:881001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        dates = DateContext(
+            source_trade_date="20260714", source_prev_trade_date="20260713",
+            for_trade_date="20260715", prev_trade_date="20260714",
+            for_trade_calendar_row_exists=True,
+        )
+        legacy = dict(first)
+        legacy.pop("generation_mode")
+        tampered = dict(first)
+        tampered["context_hash"] = "0" * 64
+        epoch_tampered = dict(first)
+        epoch_tampered["state_epoch_trade_date"] = "20260712"
+        epoch_payload = dict(epoch_tampered)
+        epoch_payload.pop("context_hash", None)
+        epoch_tampered["context_hash"] = stable_json_hash(epoch_payload)
+        for invalid_previous in (legacy, tampered, epoch_tampered):
+            context = build_period_escalation_context(
+                dates=dates,
+                asset_kind="board",
+                identity_key="board:TDX:881001",
+                current_row={"period_transition_d": "flat"},
+                previous_context=invalid_previous,
+                open_source_dates=open_source_dates,
+            )
+            entry = context["directions"]["buy"]["W"]
+            self.assertEqual(entry["status"], "not_ready")
+            self.assertFalse(entry["seen"])
+            self.assertFalse(entry["previous_incremental_state_used"])
+            self.assertEqual(entry["expected_source_trade_date_count"], 2)
+            self.assertEqual(entry["observed_source_trade_date_count"], 1)
+            self.assertEqual(entry["missing_source_trade_dates"], ["20260713"])
+
+    def test_attach_traces_the_exact_previous_source_condition_run(self) -> None:
+        open_source_dates = ["20260713", "20260714"]
+        previous_context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260713", source_prev_trade_date="20260710",
+                for_trade_date="20260714", prev_trade_date="20260713",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SH:600000",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        attached = attach_period_escalation_context_to_row(
+            {
+                "asset_kind": "stock",
+                "stock_identity_key": "stock:SH:600000",
+                "period_transition_d": "flat",
+                "period_trigger_baseline_json": {"periods": {period: {} for period in PERIODS}},
+                "raw_json": {},
+            },
+            dates=DateContext(
+                source_trade_date="20260714", source_prev_trade_date="20260713",
+                for_trade_date="20260715", prev_trade_date="20260714",
+                for_trade_calendar_row_exists=True,
+            ),
+            previous_context_by_identity={
+                "stock:SH:600000": {
+                    "identity_key": "stock:SH:600000",
+                    "source_condition_run_id": "condition_layer_20260713_v1",
+                    "period_trigger_baseline_json": {"period_escalation_context": previous_context},
+                },
+            },
+            open_source_dates=open_source_dates,
+        )
+        context = attached["period_trigger_baseline_json"]["period_escalation_context"]
+        entry = context["directions"]["buy"]["W"]
+        self.assertTrue(entry["previous_incremental_state_used"])
+        self.assertEqual(context["previous_context_hash"], previous_context["context_hash"])
+        self.assertEqual(context["previous_source_condition_run_id"], "condition_layer_20260713_v1")
+
+    def test_period_escalation_context_keeps_positive_evidence_despite_date_gap(self) -> None:
+        context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260715", source_prev_trade_date="20260714",
+                for_trade_date="20260716", prev_trade_date="20260715",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=["20260713", "20260714", "20260715"],
+        )
+
+        weekly = context["directions"]["buy"]["W"]
+        self.assertEqual(weekly["status"], "ready")
+        self.assertTrue(weekly["seen"])
+        self.assertEqual(weekly["coverage_status"], "incomplete")
+        self.assertEqual(weekly["expected_source_trade_date_count"], 3)
+        self.assertEqual(weekly["observed_source_trade_date_count"], 1)
+        self.assertEqual(weekly["missing_source_trade_dates"], ["20260713", "20260714"])
+        self.assertEqual(weekly["observation_count"], 1)
+
+    def test_incomplete_positive_state_is_inherited_without_losing_source_evidence(self) -> None:
+        open_source_dates = ["20260713", "20260714", "20260715", "20260716"]
+        first = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260715", source_prev_trade_date="20260714",
+                for_trade_date="20260716", prev_trade_date="20260715",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        inherited = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260716", source_prev_trade_date="20260715",
+                for_trade_date="20260717", prev_trade_date="20260716",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "flat"},
+            previous_context=first,
+            open_source_dates=open_source_dates,
+        )
+
+        weekly = inherited["directions"]["buy"]["W"]
+        self.assertEqual(weekly["status"], "ready")
+        self.assertTrue(weekly["seen"])
+        self.assertEqual(weekly["coverage_status"], "incomplete")
+        self.assertTrue(weekly["previous_incremental_state_used"])
+        self.assertEqual(weekly["state_epoch_trade_date"], "20260715")
+        self.assertEqual(weekly["observed_source_trade_date_count"], 2)
+        self.assertEqual(weekly["missing_source_trade_dates"], ["20260713", "20260714"])
+        self.assertEqual(weekly["observation_count"], 1)
+        self.assertEqual(weekly["first_source_trade_date"], "20260715")
+        self.assertEqual(weekly["last_source_trade_date"], "20260715")
+        self.assertEqual(
+            weekly["latest_source_basis_ref"],
+            "current:stock:stock:SZ:000001:20260715",
+        )
+
+    def test_incomplete_negative_state_stays_not_ready_until_current_positive_match(self) -> None:
+        open_source_dates = ["20260713", "20260714", "20260715", "20260716"]
+        first = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260715", source_prev_trade_date="20260714",
+                for_trade_date="20260716", prev_trade_date="20260715",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "flat"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        second = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260716", source_prev_trade_date="20260715",
+                for_trade_date="20260717", prev_trade_date="20260716",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=first,
+            open_source_dates=open_source_dates,
+        )
+
+        first_weekly = first["directions"]["buy"]["W"]
+        self.assertEqual(first_weekly["status"], "not_ready")
+        self.assertFalse(first_weekly["seen"])
+        weekly = second["directions"]["buy"]["W"]
+        self.assertEqual(weekly["status"], "ready")
+        self.assertTrue(weekly["seen"])
+        self.assertTrue(weekly["previous_incremental_state_used"])
+        self.assertEqual(weekly["coverage_status"], "incomplete")
+        self.assertEqual(weekly["observed_source_trade_date_count"], 2)
+        self.assertEqual(weekly["missing_source_trade_dates"], ["20260713", "20260714"])
+        self.assertEqual(weekly["observation_count"], 1)
+        self.assertEqual(weekly["first_source_trade_date"], "20260716")
+        self.assertEqual(weekly["last_source_trade_date"], "20260716")
+
+    def test_rehashed_entry_semantic_invariant_tampering_fails_closed(self) -> None:
+        open_source_dates = ["20260713", "20260714", "20260715", "20260716"]
+        first = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260715", source_prev_trade_date="20260714",
+                for_trade_date="20260716", prev_trade_date="20260715",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=open_source_dates,
+        )
+        invalid_values = {
+            "target_period": "M",
+            "prerequisite_period": "W",
+            "window_kind": "month",
+            "window_key": "W:2026-99",
+            "window_start": "20260714",
+            "reset_for_trade_date": True,
+            "required_transition": "low_volume_down",
+            "state_epoch_trade_date": "20260713",
+            "observation_end": "20260714",
+            "previous_incremental_state_used": True,
+            "observation_count": 0,
+            "latest_source_basis_ref": "current:stock:stock:SZ:000001:20260714",
+        }
+        for field, invalid_value in invalid_values.items():
+            with self.subTest(field=field):
+                tampered = dict(first)
+                tampered_directions = {
+                    direction: dict(entries)
+                    for direction, entries in first["directions"].items()
+                }
+                tampered_buy = dict(tampered_directions["buy"])
+                tampered_weekly = dict(tampered_buy["W"])
+                tampered_weekly[field] = invalid_value
+                tampered_weekly_payload = dict(tampered_weekly)
+                tampered_weekly_payload.pop("entry_hash", None)
+                tampered_weekly["entry_hash"] = stable_json_hash(tampered_weekly_payload)
+                tampered_buy["W"] = tampered_weekly
+                tampered_directions["buy"] = tampered_buy
+                tampered["directions"] = tampered_directions
+                tampered_payload = dict(tampered)
+                tampered_payload.pop("context_hash", None)
+                tampered["context_hash"] = stable_json_hash(tampered_payload)
+
+                second = build_period_escalation_context(
+                    dates=DateContext(
+                        source_trade_date="20260716", source_prev_trade_date="20260715",
+                        for_trade_date="20260717", prev_trade_date="20260716",
+                        for_trade_calendar_row_exists=True,
+                    ),
+                    asset_kind="stock",
+                    identity_key="stock:SZ:000001",
+                    current_row={"period_transition_d": "flat"},
+                    previous_context=tampered,
+                    open_source_dates=open_source_dates,
+                )
+
+                weekly = second["directions"]["buy"]["W"]
+                self.assertEqual(weekly["status"], "not_ready")
+                self.assertFalse(weekly["seen"])
+                self.assertFalse(weekly["previous_incremental_state_used"])
+                self.assertEqual(
+                    weekly["missing_source_trade_dates"],
+                    ["20260713", "20260714", "20260715"],
+                )
+
+    def test_all_target_windows_reset_without_inheriting_previous_state(self) -> None:
+        cases = (
+            ("W", "20260710", "20260709", "20260713", ["20260706", "20260710"]),
+            ("M", "20260731", "20260730", "20260803", ["20260730", "20260731"]),
+            ("Q", "20260930", "20260929", "20261008", ["20260929", "20260930"]),
+            ("Y", "20261231", "20261230", "20270104", ["20261230", "20261231"]),
+        )
+        for target_period, source_date, source_prev_date, for_date, open_dates in cases:
+            with self.subTest(target_period=target_period):
+                context = build_period_escalation_context(
+                    dates=DateContext(
+                        source_trade_date=source_date,
+                        source_prev_trade_date=source_prev_date,
+                        for_trade_date=for_date,
+                        prev_trade_date=source_date,
+                        for_trade_calendar_row_exists=True,
+                    ),
+                    asset_kind="stock",
+                    identity_key="stock:SZ:000001",
+                    current_row={
+                        "period_transition_d": "volume_up",
+                        "period_transition_w": "volume_up",
+                        "period_transition_m": "volume_up",
+                        "period_transition_q": "volume_up",
+                    },
+                    previous_context=None,
+                    open_source_dates=open_dates,
+                )
+
+                entry = context["directions"]["buy"][target_period]
+                self.assertTrue(entry["reset_for_trade_date"])
+                self.assertEqual(entry["coverage_status"], "not_applicable")
+                self.assertEqual(entry["status"], "not_seen")
+                self.assertFalse(entry["seen"])
+                self.assertEqual(entry["expected_source_trade_date_count"], 0)
+
+    def test_period_escalation_context_resets_week_on_new_for_trade_date(self) -> None:
+        context = build_period_escalation_context(
+            dates=DateContext(
+                source_trade_date="20260710", source_prev_trade_date="20260709",
+                for_trade_date="20260713", prev_trade_date="20260710",
+                for_trade_calendar_row_exists=True,
+            ),
+            asset_kind="stock",
+            identity_key="stock:SZ:000001",
+            current_row={"period_transition_d": "volume_up"},
+            previous_context=None,
+            open_source_dates=["20260706", "20260707", "20260708", "20260709", "20260710"],
+        )
+
+        weekly = context["directions"]["buy"]["W"]
+        self.assertTrue(weekly["reset_for_trade_date"])
+        self.assertEqual(weekly["expected_source_trade_date_count"], 0)
+        self.assertEqual(weekly["status"], "not_seen")
+        self.assertFalse(weekly["seen"])
+
+    def test_period_escalation_context_is_reenriched_and_materialized_without_new_columns(self) -> None:
+        dates = DateContext(
+            source_trade_date="20260714", source_prev_trade_date="20260713",
+            for_trade_date="20260715", prev_trade_date="20260714",
+            for_trade_calendar_row_exists=True,
+        )
+        enriched = attach_period_escalation_context_to_row(
+            {
+                "asset_kind": "stock",
+                "stock_identity_key": "stock:SH:600000",
+                "source_trade_date": dates.source_trade_date,
+                "source_version": "stock_daily_20260714_v1",
+                "period_transition_d": "volume_up",
+                "period_trigger_baseline_json": {"periods": {period: {} for period in PERIODS}},
+                "raw_json": {},
+            },
+            dates=dates,
+            previous_context_by_identity={},
+            open_source_dates=["20260713", "20260714"],
+        )
+        enriched.update(
+            {
+                "identity_key": "stock:SH:600000",
+                "condition_key": "BUY:W",
+                "source_row_id": 101,
+                "context_source_table": "stock_minute_target_scope",
+                "allowed_signal_types": ["BUY"],
+            }
+        )
+
+        rows = build_materialization_payload_rows(
+            {"stock": [enriched], "index": [], "board": []},
+            source_condition_run_id="condition_layer_20260714_v1",
+            target_run_id="condition_context_escalation_20260715_v1",
+            for_trade_date="20260715",
+        )
+        baseline = rows["stock"][0]["payload_json"]["period_trigger_baseline_json"]
+
+        self.assertEqual(baseline["period_escalation_context"]["contract_version"], PERIOD_ESCALATION_CONTEXT_VERSION)
+        self.assertTrue(enriched["context_enrichment_hash"])
+
+    def test_previous_context_run_and_row_reads_are_exact_and_fail_closed_on_duplicates(self) -> None:
+        dates = DateContext(
+            source_trade_date="20260714", source_prev_trade_date="20260713",
+            for_trade_date="20260715", prev_trade_date="20260714",
+            for_trade_calendar_row_exists=True,
+        )
+        duplicate_cursor = RecordingCursor(rows=[
+            {"run_id": "condition_a", "updated_at": "2026-07-13T18:00:00+08:00"},
+            {"run_id": "condition_b", "updated_at": "2026-07-13T18:00:01+08:00"},
+        ])
+        with self.assertRaisesRegex(ValueError, "period_escalation_previous_run_ambiguous"):
+            fetch_period_escalation_previous_context_run(duplicate_cursor, dates)
+        self.assertEqual(duplicate_cursor.params_calls[0], ("20260713", "20260714"))
+        self.assertIn("status = 'passed_active'", duplicate_cursor.sql_calls[0])
+        self.assertIn("for_trade_date = %s", duplicate_cursor.sql_calls[0])
+
+        single_cursor = RecordingCursor(rows=[{"run_id": "condition_layer_20260713_v1", "updated_at": "stamp"}])
+        self.assertEqual(
+            fetch_period_escalation_previous_context_run(single_cursor, dates),
+            {"run_id": "condition_layer_20260713_v1", "updated_at": "stamp"},
+        )
+        self.assertIsNone(fetch_period_escalation_previous_context_run(RecordingCursor(), dates))
+
+        row_cursor = RecordingCursor()
+        self.assertEqual(
+            fetch_period_escalation_previous_context_rows(
+                row_cursor,
+                asset_kind="stock",
+                identity_keys=["stock:SH:600000"],
+                source_prev_trade_date="20260713",
+                previous_run_id="condition_layer_20260713_v1",
+            ),
+            [],
+        )
+        self.assertEqual(row_cursor.params_calls[0], ("condition_layer_20260713_v1", "20260713", ["stock:SH:600000"]))
+        query = row_cursor.sql_calls[0]
+        self.assertIn("b.run_id = %s", query)
+        self.assertIn("b.source_trade_date = %s", query)
+        self.assertNotIn("b.source_trade_date >=", query)
+        self.assertNotIn("common_trade_calendar", query)
+        self.assertIn("period_trigger_baseline_json", query)
+
+    def test_previous_context_rows_are_indexed_once_per_asset_batch_and_duplicates_fail_closed(self) -> None:
+        class SinglePassRows:
+            def __init__(self, rows: list[dict[str, object]]) -> None:
+                self.rows = rows
+                self.iteration_count = 0
+
+            def __iter__(self):
+                self.iteration_count += 1
+                if self.iteration_count > 1:
+                    raise AssertionError("previous context rows were traversed more than once")
+                return iter(self.rows)
+
+        current_rows = [
+            {
+                "asset_kind": "stock",
+                "stock_identity_key": f"stock:SH:{index:06d}",
+                "period_transition_d": "flat",
+                "period_trigger_baseline_json": {"periods": {period: {} for period in PERIODS}},
+                "raw_json": {},
+            }
+            for index in range(256)
+        ]
+        previous_rows = SinglePassRows([
+            {"identity_key": f"stock:SH:{index:06d}"}
+            for index in range(256)
+        ])
+        summaries = {"stock": {"basis_rows": current_rows}}
+        dates = DateContext(
+            source_trade_date="20260714", source_prev_trade_date="20260713",
+            for_trade_date="20260715", prev_trade_date="20260714",
+            for_trade_calendar_row_exists=True,
+        )
+
+        with patch(
+            "ashare_v3.condition.basis.fetch_period_escalation_previous_context_rows",
+            return_value=previous_rows,
+        ) as fetch_previous:
+            attach_period_escalation_contexts(
+                object(),
+                dates,
+                summaries,
+                previous_context_run={"run_id": "condition_layer_20260713_v1"},
+                open_source_dates=["20260713", "20260714"],
+            )
+
+        self.assertEqual(previous_rows.iteration_count, 1)
+        fetch_previous.assert_called_once()
+        self.assertEqual(len(summaries["stock"]["basis_rows"]), 256)
+        self.assertEqual(len(summaries["stock"]["sample_basis_rows"]), 3)
+        with self.assertRaisesRegex(ValueError, "period_escalation_previous_context_duplicate_identity"):
+            index_period_escalation_previous_context_rows([
+                {"identity_key": "stock:SH:600000"},
+                {"identity_key": "stock:SH:600000"},
+            ])
+
+    def test_current_row_uses_one_previous_context_mapping_lookup(self) -> None:
+        class LookupSpy(dict[str, object]):
+            def __init__(self) -> None:
+                super().__init__({"stock:SH:600000": {"identity_key": "stock:SH:600000"}})
+                self.get_call_count = 0
+
+            def get(self, key: object, default: object = None) -> object:
+                self.get_call_count += 1
+                return super().get(key, default)
+
+            def __iter__(self):
+                raise AssertionError("row-level previous-context lookup must not iterate the mapping")
+
+        previous_context_by_identity = LookupSpy()
+        attached = attach_period_escalation_context_to_row(
+            {
+                "asset_kind": "stock",
+                "stock_identity_key": "stock:SH:600000",
+                "period_transition_d": "flat",
+                "period_trigger_baseline_json": {"periods": {period: {} for period in PERIODS}},
+                "raw_json": {},
+            },
+            dates=DateContext(
+                source_trade_date="20260714", source_prev_trade_date="20260713",
+                for_trade_date="20260715", prev_trade_date="20260714",
+                for_trade_calendar_row_exists=True,
+            ),
+            previous_context_by_identity=previous_context_by_identity,
+            open_source_dates=["20260713", "20260714"],
+        )
+
+        self.assertEqual(previous_context_by_identity.get_call_count, 1)
+        self.assertIn("period_escalation_context", attached["period_trigger_baseline_json"])
 
 
 if __name__ == "__main__":
