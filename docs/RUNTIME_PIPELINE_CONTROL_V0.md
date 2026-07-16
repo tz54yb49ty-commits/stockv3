@@ -163,6 +163,16 @@ runtime_pipeline_timeline
 `/n6/archive-status` 是 hot runtime keep-5 清理状态页，默认只读展示最近一次 cleanup 是否成功、保留/清理日期、blocker 和表级删除汇总。
 页面不得提供 cleanup execute 按钮，不得嵌入 cleanup confirm token，也不得在 N6 web 进程内写数据库。
 
+同一个 `com.ashare-v3.runtime-hot-cleanup-keep5-daily` 任务在完成既有 hot-row cleanup 后，直接清理最近 5 个有效交易日以外的 N3/N4/N5 每日本地文件；不做归档、不新增第二个 LaunchAgent。文件范围仅限 `docs/runtime/<YYYYMMDD>` 下的 N3/N4/N5 前缀项、固定 N3/N4 `tmp` 日报文件名，以及固定 N5 monitor/precheck/repair 日期目录。非法日期、未来日期、未知文件、symlink 和 active writer 均跳过。
+
+本地文件结果写入现有：
+
+```text
+docs/runtime_archive/hot_keep5_cleanup/keep5_cleanup_status.json
+```
+
+字段位于 `local_file_cleanup`，包含执行时间、保留/清理交易日、删除文件/目录数量、释放字节、N3/N4/N5 分层汇总、errors 和 blockers。状态文件使用原子替换；`/n6/archive-status` 只读取该文件，不扫描 runtime roots、不调用 launchctl，也不提供 execute/delete/retry/reload 控件。
+
 ```text
 GET /api/n6/ui/v1/archive-preview
 ```

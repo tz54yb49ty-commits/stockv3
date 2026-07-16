@@ -88,7 +88,7 @@ from ashare_v3.web.n6_ui_v1 import (
     post_close_fastlane_status_model,
     rag_search_model,
     READ_ONLY_SIDE_EFFECTS,
-    runtime_archive_status_model,
+    runtime_archive_status_model as _runtime_archive_status_model,
     input_messages_model,
     rollback_summary_model,
     signal_detail_model,
@@ -118,6 +118,40 @@ DEFAULT_PROFILE_NAME = "MVP default"
 DEFAULT_SIM_ACCOUNT_NAME = "MVP T+1 shadow account"
 DEFAULT_INITIAL_CASH = 1000000000
 DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def runtime_archive_status_model(data: dict[str, Any]) -> dict[str, Any]:
+    """Extend the read-only archive model with the combined local file cleanup."""
+
+    model = _runtime_archive_status_model(data)
+    hot_cleanup = dict(data.get("hot_cleanup") or {})
+    local_cleanup = dict(hot_cleanup.get("local_file_cleanup") or {})
+    per_layer = dict(local_cleanup.get("per_layer") or {})
+    model["local_file_cleanup"] = {
+        "result": str(local_cleanup.get("result") or "NO_LOCAL_FILE_CLEANUP_STATUS"),
+        "mode": str(local_cleanup.get("mode") or "dry_run"),
+        "started_at": str(local_cleanup.get("started_at") or ""),
+        "finished_at": str(local_cleanup.get("finished_at") or ""),
+        "duration_ms": float(local_cleanup.get("duration_ms") or 0),
+        "retention_trade_days": int(local_cleanup.get("retention_trade_days") or 5),
+        "retained_trade_dates": [str(item) for item in list(local_cleanup.get("retained_trade_dates") or [])],
+        "cleanup_trade_dates": [str(item) for item in list(local_cleanup.get("cleanup_trade_dates") or [])],
+        "deleted_file_count": int(local_cleanup.get("deleted_file_count") or 0),
+        "deleted_directory_count": int(local_cleanup.get("deleted_directory_count") or 0),
+        "released_bytes": int(local_cleanup.get("released_bytes") or 0),
+        "per_layer": {
+            layer: {
+                "deleted_file_count": int(dict(per_layer.get(layer) or {}).get("deleted_file_count") or 0),
+                "deleted_directory_count": int(dict(per_layer.get(layer) or {}).get("deleted_directory_count") or 0),
+                "released_bytes": int(dict(per_layer.get(layer) or {}).get("released_bytes") or 0),
+            }
+            for layer in ("n3", "n4", "n5")
+        },
+        "errors": [str(item) for item in list(local_cleanup.get("errors") or [])],
+        "blockers": [str(item) for item in list(local_cleanup.get("blockers") or [])],
+        "status_path": str(data.get("hot_cleanup_source_path") or ""),
+    }
+    return model
 N6_UI_V1_LINEAGE_N4_RUN_ID = "trigger_execute_20260605_condition_layer_20260604_source_20260604_v1"
 N6_UI_V1_LINEAGE_N5_RUN_ID = (
     "action_consumer_action_pipeline_20260605_trigger_execute_20260605_condition_layer_20260604_source_20260604_v1"

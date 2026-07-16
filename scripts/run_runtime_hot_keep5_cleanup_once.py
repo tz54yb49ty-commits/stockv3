@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import stat
 import subprocess
 from time import perf_counter
 from typing import Any, Callable, Iterable, Iterator
+from zoneinfo import ZoneInfo
 
 from ashare_v3.ingestion.runtime_archive import DEFAULT_RUNTIME_ARCHIVE_ROOT, runtime_archive_side_effects
 from ashare_v3.ingestion.runtime_archive_execute import DEFAULT_DSN
@@ -28,7 +32,20 @@ from ashare_v3.ingestion.runtime_hot_cleanup import (
 DEFAULT_REPORT_DIR = "docs/runtime_archive/hot_keep5_cleanup"
 DEFAULT_RETENTION_TRADE_DAYS = 5
 DEFAULT_SINGLE_FLIGHT_LOCK_NAME = ".keep5_cleanup.lock"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
 ARCHIVE_WRAPPER_SCRIPT = "scripts/run_v3_runtime_archive_keep5_daily_once.py"
+RUNTIME_ARTIFACT_PREFIXES = ("n3_", "n4_", "n5_")
+TMP_ARTIFACT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^N3P_(\d{8})_(\d{4})_trigger_proof_contract\.json$"), "n3"),
+    (re.compile(r"^N3_hint_(\d{8})_(\d{4})_midday_bridge_v1_contract\.json$"), "n3"),
+    (re.compile(r"^N4_(\d{8})_(\d{4})_(?:ordinary_matcher|hint_matcher)_execute_report\.json$"), "n4"),
+)
+N5_DATED_ARTIFACT_ROOTS = (
+    "tmp/N5_N3T_action_confirmation_fastlane_monitor",
+    "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck",
+    "tmp/n5_active_scope_terminal_ref_repair",
+)
 RUNTIME_WRITER_MARKERS = (
     "scripts/run_n3_",
     "scripts/run_n4_",
@@ -68,7 +85,323 @@ def json_default(value: Any) -> str:
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=json_default) + "\n", encoding="utf-8")
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=json_default) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def cleanup_local_runtime_artifacts(
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    retention_trade_days: int = DEFAULT_RETENTION_TRADE_DAYS,
+    retained_trade_dates: Iterable[str] | None = None,
+    cleanup_trade_dates: Iterable[str] | None = None,
+    execute: bool = False,
+    direct_delete_no_archive: bool = False,
+    confirm_token: str = "",
+    current_date: date | None = None,
+) -> dict[str, Any]:
+    """Plan or delete exact N3/N4/N5 daily filesystem artifacts."""
+
+    started_monotonic = perf_counter()
+    started_at = datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat()
+    today = current_date or datetime.now(ASIA_SHANGHAI).date()
+    root_input = Path(project_root)
+    payload = _local_file_cleanup_base(execute=execute, project_root=root_input, started_at=started_at)
+
+    if retention_trade_days != DEFAULT_RETENTION_TRADE_DAYS:
+        payload["blockers"] = ["retention_trade_days_must_equal_5"]
+        return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_RETENTION_CONTRACT")
+    if root_input.is_symlink() or not root_input.is_dir():
+        payload["blockers"] = ["project_root_missing_or_symlink"]
+        return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_PROJECT_ROOT")
+    if execute and (
+        not direct_delete_no_archive or confirm_token != DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN
+    ):
+        payload["blockers"] = ["direct_delete_confirm_token_required"]
+        return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_CONFIRM_TOKEN")
+
+    if retained_trade_dates is None or cleanup_trade_dates is None:
+        payload["blockers"] = ["authoritative_trade_date_partition_required"]
+        return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_TRADE_DATE_PARTITION")
+    retained_dates = [str(item) for item in retained_trade_dates]
+    cleanup_dates = [str(item) for item in cleanup_trade_dates]
+    partition_dates = retained_dates + cleanup_dates
+    if (
+        retained_dates != sorted(set(retained_dates))
+        or cleanup_dates != sorted(set(cleanup_dates))
+        or set(retained_dates).intersection(cleanup_dates)
+        or len(retained_dates) > retention_trade_days
+        or any(not _valid_local_artifact_trade_date(item, today=today) for item in partition_dates)
+    ):
+        payload["blockers"] = ["authoritative_trade_date_partition_invalid"]
+        return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_TRADE_DATE_PARTITION")
+
+    root = root_input.resolve()
+    targets, skipped = _discover_local_artifact_targets(root, today=today)
+    cleanup_set = set(cleanup_dates)
+    payload.update(
+        {
+            "project_root": str(root),
+            "retained_trade_dates": retained_dates,
+            "cleanup_trade_dates": cleanup_dates,
+            "skipped_count": len(skipped),
+            "skipped": skipped,
+        }
+    )
+
+    safe_targets: list[tuple[dict[str, Any], dict[str, int]]] = []
+    for target in targets:
+        if target["trade_date"] not in cleanup_set:
+            continue
+        stats, error = _local_artifact_target_stats(Path(target["path"]))
+        if error:
+            payload["errors"].append(error)
+            continue
+        safe_targets.append((target, stats))
+        _add_local_file_counts(payload, layer=str(target["layer"]), prefix="candidate", stats=stats)
+
+    if execute:
+        for target, stats in safe_targets:
+            path = Path(target["path"])
+            try:
+                if path.is_symlink():
+                    raise OSError("symlink target refused")
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError as exc:
+                payload["errors"].append(f"delete_failed:{path}:{exc}")
+                continue
+            _add_local_file_counts(payload, layer=str(target["layer"]), prefix="deleted", stats=stats)
+            payload["released_bytes"] += stats["bytes"]
+        payload["deleted_empty_date_directory_count"] = _remove_empty_runtime_date_directories(
+            root / "docs/runtime",
+            cleanup_dates,
+        )
+        payload["deleted_directory_count"] += payload["deleted_empty_date_directory_count"]
+        payload["cleanup_executed"] = True
+        result = "LOCAL_FILE_KEEP5_EXECUTE_PASS" if not payload["errors"] else "LOCAL_FILE_KEEP5_EXECUTE_PARTIAL"
+    else:
+        result = "LOCAL_FILE_KEEP5_DRY_RUN_PASS" if not payload["errors"] else "LOCAL_FILE_KEEP5_DRY_RUN_PARTIAL"
+
+    if payload["errors"]:
+        payload["blockers"] = ["local_artifact_cleanup_errors"]
+    payload["side_effects"]["cleanup_local_runtime_files"] = bool(
+        payload["deleted_file_count"] or payload["deleted_directory_count"]
+    )
+    return _finish_local_file_cleanup(payload, started_monotonic, result=result)
+
+
+def blocked_local_file_cleanup(
+    *,
+    project_root: str | Path,
+    execute: bool,
+    blocker: str,
+) -> dict[str, Any]:
+    started_monotonic = perf_counter()
+    payload = _local_file_cleanup_base(
+        execute=execute,
+        project_root=Path(project_root),
+        started_at=datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat(),
+    )
+    payload["blockers"] = [blocker]
+    return _finish_local_file_cleanup(payload, started_monotonic, result="BLOCKED_LOCAL_FILE_CLEANUP")
+
+
+def _local_file_cleanup_base(*, execute: bool, project_root: Path, started_at: str) -> dict[str, Any]:
+    per_layer = {
+        layer: {
+            "candidate_file_count": 0,
+            "candidate_directory_count": 0,
+            "candidate_bytes": 0,
+            "deleted_file_count": 0,
+            "deleted_directory_count": 0,
+            "released_bytes": 0,
+        }
+        for layer in ("n3", "n4", "n5")
+    }
+    return {
+        "result": "LOCAL_FILE_KEEP5_NOT_RUN",
+        "mode": "execute" if execute else "dry_run",
+        "started_at": started_at,
+        "finished_at": "",
+        "duration_ms": 0,
+        "project_root": str(project_root),
+        "retention_trade_days": DEFAULT_RETENTION_TRADE_DAYS,
+        "retained_trade_dates": [],
+        "cleanup_trade_dates": [],
+        "candidate_file_count": 0,
+        "candidate_directory_count": 0,
+        "candidate_bytes": 0,
+        "deleted_file_count": 0,
+        "deleted_directory_count": 0,
+        "deleted_empty_date_directory_count": 0,
+        "released_bytes": 0,
+        "cleanup_executed": False,
+        "skipped_count": 0,
+        "skipped": [],
+        "errors": [],
+        "blockers": [],
+        "per_layer": per_layer,
+        "side_effects": {
+            "writes_database": False,
+            "writes_archive_files": False,
+            "cleanup_local_runtime_files": False,
+            "outbox_inbox_checkpoint_touched": False,
+            "launchctl_touched": False,
+            "runtime_started": False,
+        },
+    }
+
+
+def _finish_local_file_cleanup(payload: dict[str, Any], started_monotonic: float, *, result: str) -> dict[str, Any]:
+    payload["result"] = result
+    payload["finished_at"] = datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat()
+    payload["duration_ms"] = round((perf_counter() - started_monotonic) * 1000.0, 3)
+    return payload
+
+
+def _discover_local_artifact_targets(root: Path, *, today: date) -> tuple[list[dict[str, Any]], list[str]]:
+    targets: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    runtime_root = root / "docs/runtime"
+    if runtime_root.is_dir() and not runtime_root.is_symlink():
+        for date_dir in sorted(runtime_root.iterdir(), key=lambda item: item.name):
+            trade_date = _valid_local_artifact_trade_date(date_dir.name, today=today)
+            if not trade_date or not date_dir.is_dir() or date_dir.is_symlink():
+                continue
+            for child in sorted(date_dir.iterdir(), key=lambda item: item.name):
+                layer = _runtime_artifact_layer(child.name)
+                if not layer:
+                    continue
+                if child.is_symlink():
+                    skipped.append(f"symlink_skipped:{child}")
+                    continue
+                targets.append({"path": child, "trade_date": trade_date, "layer": layer})
+
+    tmp_root = root / "tmp"
+    if tmp_root.is_dir() and not tmp_root.is_symlink():
+        for child in sorted(tmp_root.iterdir(), key=lambda item: item.name):
+            if child.is_symlink() or not child.is_file():
+                continue
+            for pattern, layer in TMP_ARTIFACT_RULES:
+                matched = pattern.fullmatch(child.name)
+                if not matched:
+                    continue
+                trade_date = _valid_local_artifact_trade_date(matched.group(1), today=today)
+                if trade_date:
+                    targets.append({"path": child, "trade_date": trade_date, "layer": layer})
+                else:
+                    skipped.append(f"invalid_or_future_date_skipped:{child}")
+                break
+
+    for relative_root in N5_DATED_ARTIFACT_ROOTS:
+        dated_root = root / relative_root
+        if not dated_root.is_dir() or dated_root.is_symlink():
+            continue
+        for child in sorted(dated_root.iterdir(), key=lambda item: item.name):
+            trade_date = _valid_local_artifact_trade_date(child.name, today=today)
+            if not trade_date or not child.is_dir():
+                continue
+            if child.is_symlink():
+                skipped.append(f"symlink_skipped:{child}")
+                continue
+            targets.append({"path": child, "trade_date": trade_date, "layer": "n5"})
+    return sorted(targets, key=lambda item: str(item["path"])), skipped
+
+
+def _runtime_artifact_layer(name: str) -> str:
+    lowered = name.lower()
+    for prefix in RUNTIME_ARTIFACT_PREFIXES:
+        if lowered.startswith(prefix):
+            return prefix[:2]
+    return ""
+
+
+def _valid_local_artifact_trade_date(value: str, *, today: date) -> str:
+    if not re.fullmatch(r"\d{8}", value):
+        return ""
+    try:
+        parsed = datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        return ""
+    return value if parsed <= today else ""
+
+
+def _local_artifact_target_stats(path: Path) -> tuple[dict[str, int], str]:
+    try:
+        root_stat = path.lstat()
+    except OSError as exc:
+        return {}, f"stat_failed:{path}:{exc}"
+    if stat.S_ISLNK(root_stat.st_mode):
+        return {}, f"symlink_skipped:{path}"
+    if stat.S_ISREG(root_stat.st_mode):
+        return {"file_count": 1, "directory_count": 0, "bytes": int(root_stat.st_size)}, ""
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return {}, f"non_regular_path_skipped:{path}"
+
+    file_count = 0
+    directory_count = 1
+    total_bytes = 0
+    stack = [path]
+    try:
+        while stack:
+            current = stack.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                    entry_path = Path(entry.path)
+                    if stat.S_ISLNK(entry_stat.st_mode):
+                        return {}, f"symlink_skipped:{entry_path}"
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        directory_count += 1
+                        stack.append(entry_path)
+                    elif stat.S_ISREG(entry_stat.st_mode):
+                        file_count += 1
+                        total_bytes += int(entry_stat.st_size)
+                    else:
+                        return {}, f"non_regular_path_skipped:{entry_path}"
+    except OSError as exc:
+        return {}, f"stat_failed:{path}:{exc}"
+    return {"file_count": file_count, "directory_count": directory_count, "bytes": total_bytes}, ""
+
+
+def _add_local_file_counts(payload: dict[str, Any], *, layer: str, prefix: str, stats: dict[str, int]) -> None:
+    file_key = f"{prefix}_file_count"
+    directory_key = f"{prefix}_directory_count"
+    bytes_key = "candidate_bytes" if prefix == "candidate" else "released_bytes"
+    payload[file_key] += stats["file_count"]
+    payload[directory_key] += stats["directory_count"]
+    if prefix == "candidate":
+        payload[bytes_key] += stats["bytes"]
+    layer_payload = payload["per_layer"][layer]
+    layer_payload[file_key] += stats["file_count"]
+    layer_payload[directory_key] += stats["directory_count"]
+    layer_payload[bytes_key] += stats["bytes"]
+
+
+def _remove_empty_runtime_date_directories(runtime_root: Path, cleanup_trade_dates: list[str]) -> int:
+    removed = 0
+    for trade_date in cleanup_trade_dates:
+        date_dir = runtime_root / trade_date
+        try:
+            if date_dir.is_dir() and not date_dir.is_symlink() and not any(date_dir.iterdir()):
+                date_dir.rmdir()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 @contextmanager
@@ -256,14 +589,33 @@ def augment_cleanup_report(
 ) -> dict[str, Any]:
     finished_at = datetime.now().astimezone().replace(microsecond=0).isoformat()
     summary = summarize_deleted_rows(list(report.get("deleted_rows") or []))
-    cleanup_success = (
+    row_cleanup_success = (
         str(report.get("result") or "").endswith("EXECUTE_PASS")
         and bool(report.get("cleanup_executed"))
         and bool(report.get("cleanup_complete", True))
     )
+    local_cleanup = dict(report.get("local_file_cleanup") or {})
+    local_cleanup_required = bool(report.get("execute")) and bool(report.get("direct_delete_no_archive"))
+    local_cleanup_success = (
+        not local_cleanup_required
+        or (
+            str(local_cleanup.get("result") or "") == "LOCAL_FILE_KEEP5_EXECUTE_PASS"
+            and bool(local_cleanup.get("cleanup_executed"))
+            and not list(local_cleanup.get("errors") or [])
+            and not list(local_cleanup.get("blockers") or [])
+        )
+    )
+    cleanup_success = row_cleanup_success and local_cleanup_success
+    result = str(report.get("result") or "")
+    if row_cleanup_success and local_cleanup_required and not local_cleanup_success:
+        if str(local_cleanup.get("result") or "").startswith("BLOCKED_"):
+            result = "BLOCKED_RUNTIME_HOT_KEEP5_LOCAL_FILE_CLEANUP"
+        else:
+            result = "RUNTIME_HOT_KEEP5_CLEANUP_EXECUTE_PARTIAL"
     retained_after = list(report.get("retained_trade_dates") or []) if cleanup_success else []
     return {
         **report,
+        "result": result,
         "cleanup_success": cleanup_success,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -314,10 +666,15 @@ def run_runtime_hot_keep5_cleanup_once(
     runtime_writer_process_detector: Callable[[], list[dict[str, Any]]] = detect_active_runtime_writer_processes,
     fk_closure_auditor: Callable[..., dict[str, Any]] | None = None,
     max_delete_units: int | None = None,
+    local_artifact_project_root: str | Path | None = None,
+    local_artifact_current_date: date | None = None,
 ) -> dict[str, Any]:
-    started_at = datetime.now().astimezone().replace(microsecond=0).isoformat()
+    started_at = datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat()
     started_monotonic = perf_counter()
     report_root = Path(report_dir)
+    local_project_root = Path(local_artifact_project_root) if local_artifact_project_root is not None else (
+        PROJECT_ROOT if trade_dates is None else report_root.parent
+    )
     plan_path = report_root / "keep5_cleanup_plan.json"
     closeout_path = report_root / "keep5_cleanup_closeout.json"
     required_confirm_token = DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN if direct_delete_no_archive else KEEP5_CONFIRM_TOKEN
@@ -332,6 +689,11 @@ def run_runtime_hot_keep5_cleanup_once(
                     active_runtime_writer_processes=active_runtime_writer_processes,
                     required_confirm_token=required_confirm_token,
                     lock_path=lock_path,
+                )
+                report["local_file_cleanup"] = blocked_local_file_cleanup(
+                    project_root=local_project_root,
+                    execute=execute,
+                    blocker="runtime_writer_active",
                 )
             else:
                 plan = build_keep2_dirty_hot_cleanup_plan(
@@ -371,8 +733,53 @@ def run_runtime_hot_keep5_cleanup_once(
                     "single_flight_lock_acquired": True,
                     "single_flight_lock_path": str(lock_path),
                 }
+                row_cleanup_execute_ready = (
+                    str(report.get("result") or "") == "DIRTY_HOT_KEEP2_CLEANUP_EXECUTE_PASS"
+                    and bool(report.get("cleanup_executed"))
+                    and bool(report.get("cleanup_complete"))
+                )
+                if not direct_delete_no_archive:
+                    local_file_cleanup = blocked_local_file_cleanup(
+                        project_root=local_project_root,
+                        execute=execute,
+                        blocker="direct_delete_no_archive_mode_required",
+                    )
+                elif active_archive_processes:
+                    local_file_cleanup = blocked_local_file_cleanup(
+                        project_root=local_project_root,
+                        execute=execute,
+                        blocker="archive_process_conflict",
+                    )
+                elif execute and not row_cleanup_execute_ready:
+                    local_file_cleanup = blocked_local_file_cleanup(
+                        project_root=local_project_root,
+                        execute=execute,
+                        blocker="hot_row_cleanup_not_complete",
+                    )
+                else:
+                    local_file_cleanup = cleanup_local_runtime_artifacts(
+                        project_root=local_project_root,
+                        retained_trade_dates=list(report.get("retained_trade_dates") or []),
+                        cleanup_trade_dates=list(report.get("cleanup_trade_dates") or []),
+                        execute=execute,
+                        direct_delete_no_archive=direct_delete_no_archive,
+                        confirm_token=confirm_token,
+                        current_date=local_artifact_current_date,
+                    )
+                report["local_file_cleanup"] = local_file_cleanup
+                report["side_effects"] = {
+                    **dict(report.get("side_effects") or {}),
+                    "cleanup_local_runtime_files": bool(
+                        dict(local_file_cleanup.get("side_effects") or {}).get("cleanup_local_runtime_files")
+                    ),
+                }
     except CleanupAlreadyRunningError as exc:
         report = blocked_already_running_report(report_root=report_root, execute=execute, error=exc)
+        report["local_file_cleanup"] = blocked_local_file_cleanup(
+            project_root=local_project_root,
+            execute=execute,
+            blocker="cleanup_already_running",
+        )
 
     report = augment_cleanup_report(report, started_at=started_at, started_monotonic=started_monotonic)
     sync_closeout_with_status(closeout_path, report)

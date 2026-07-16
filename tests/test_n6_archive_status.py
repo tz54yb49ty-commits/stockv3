@@ -215,12 +215,32 @@ def write_keep5_hot_cleanup_status_fixture(docs_root: Path) -> None:
                 "deleted_rows": [
                     {"trade_date": "20260525", "layer": "n3", "table": "stock_minute_bar_1m", "deleted_rows": 100},
                 ],
+                "local_file_cleanup": {
+                    "result": "LOCAL_FILE_KEEP5_EXECUTE_PASS",
+                    "mode": "execute",
+                    "started_at": "2026-07-16T01:00:04+08:00",
+                    "finished_at": "2026-07-16T01:03:04+08:00",
+                    "duration_ms": 180000,
+                    "retention_trade_days": 5,
+                    "retained_trade_dates": ["20260710", "20260713", "20260714", "20260715", "20260716"],
+                    "cleanup_trade_dates": ["20260708", "20260709"],
+                    "deleted_file_count": 97209,
+                    "deleted_directory_count": 28,
+                    "released_bytes": 33468592000,
+                    "per_layer": {
+                        "n3": {"deleted_file_count": 97170, "deleted_directory_count": 20, "released_bytes": 33460000000},
+                        "n4": {"deleted_file_count": 20, "deleted_directory_count": 0, "released_bytes": 592000},
+                        "n5": {"deleted_file_count": 19, "deleted_directory_count": 8, "released_bytes": 8000000},
+                    },
+                    "errors": [],
+                    "blockers": [],
+                },
                 "blockers": [],
                 "side_effects": {
                     "writes_database": True,
                     "writes_archive_files": False,
                     "cleanup_local_runtime": False,
-                    "cleanup_local_runtime_files": False,
+                    "cleanup_local_runtime_files": True,
                 },
             },
             ensure_ascii=False,
@@ -274,6 +294,39 @@ def write_archive_manifest_fixture(archive_root: Path, *, trade_date: str = "202
 
 
 class N6ArchiveStatusPageTest(unittest.TestCase):
+    def test_archive_status_reads_combined_local_file_cleanup_without_controls_or_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_root = Path(tmp) / "runtime_archive"
+            archive_root = Path(tmp) / "MacRaid/stock_db_archive/v3_runtime"
+            archive_root.mkdir(parents=True)
+            write_archive_status_fixture(docs_root)
+            write_keep5_hot_cleanup_status_fixture(docs_root)
+            status_path = docs_root / "hot_keep5_cleanup/keep5_cleanup_status.json"
+            client, repo = build_archive_status_client(docs_root=str(docs_root), archive_root=str(archive_root))
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+            api_response = client.get("/api/n6/ui/v1/archive-status")
+            page_response = client.get("/n6/archive-status")
+
+        payload = api_response.json()["local_file_cleanup"]
+        self.assertEqual(payload["result"], "LOCAL_FILE_KEEP5_EXECUTE_PASS")
+        self.assertEqual(payload["retained_trade_dates"], ["20260710", "20260713", "20260714", "20260715", "20260716"])
+        self.assertEqual(payload["cleanup_trade_dates"], ["20260708", "20260709"])
+        self.assertEqual(payload["deleted_file_count"], 97209)
+        self.assertEqual(payload["deleted_directory_count"], 28)
+        self.assertEqual(payload["released_bytes"], 33468592000)
+        self.assertEqual(payload["per_layer"]["n3"]["released_bytes"], 33460000000)
+        self.assertEqual(payload["status_path"], str(status_path))
+        self.assertIn("N3/N4/N5 Local File Cleanup", page_response.text)
+        self.assertIn("33468592000", page_response.text)
+        self.assertIn("20260708, 20260709", page_response.text)
+        self.assertIn("duration_ms", page_response.text)
+        self.assertNotIn("--execute", page_response.text)
+        self.assertNotIn("launchctl", page_response.text)
+        self.assertNotIn("<form", page_response.text.lower())
+        self.assertEqual(repo.forbidden_writes["n5_outbox"], 0)
+        self.assertEqual(repo.forbidden_writes["user_notification_queue"], 0)
+
     def test_archive_status_api_reads_artifact_without_database_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             docs_root = Path(tmp) / "runtime_archive"

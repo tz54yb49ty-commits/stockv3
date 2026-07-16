@@ -87,6 +87,30 @@
       </div>
     </section>
 
+    <section class="panel section">
+      <h2>N3/N4/N5 Local File Cleanup</h2>
+      <p class="muted">只读展示现有 01:00 keep-5 任务的本地文件清理结果；不提供删除、重试、reload 或系统调度控件。</p>
+      <table>
+        <tbody>
+          <tr><th>result</th><td>{{ archive_page.local_file_cleanup.result }}</td></tr>
+          <tr><th>mode</th><td>{{ archive_page.local_file_cleanup.mode }}</td></tr>
+          <tr><th>started_at</th><td>{{ archive_page.local_file_cleanup.started_at or "—" }}</td></tr>
+          <tr><th>finished_at</th><td>{{ archive_page.local_file_cleanup.finished_at or "—" }}</td></tr>
+          <tr><th>duration_ms</th><td>{{ archive_page.local_file_cleanup.duration_ms }}</td></tr>
+          <tr><th>retained_trade_dates</th><td>{{ archive_page.local_file_cleanup.retained_trade_dates | join(", ") }}</td></tr>
+          <tr><th>cleanup_trade_dates</th><td>{{ archive_page.local_file_cleanup.cleanup_trade_dates | join(", ") }}</td></tr>
+          <tr><th>deleted files / directories</th><td>{{ archive_page.local_file_cleanup.deleted_file_count }} / {{ archive_page.local_file_cleanup.deleted_directory_count }}</td></tr>
+          <tr><th>released_bytes</th><td>{{ archive_page.local_file_cleanup.released_bytes }}</td></tr>
+          <tr><th>N3 files / dirs / bytes</th><td>{{ archive_page.local_file_cleanup.per_layer.n3.deleted_file_count }} / {{ archive_page.local_file_cleanup.per_layer.n3.deleted_directory_count }} / {{ archive_page.local_file_cleanup.per_layer.n3.released_bytes }}</td></tr>
+          <tr><th>N4 files / dirs / bytes</th><td>{{ archive_page.local_file_cleanup.per_layer.n4.deleted_file_count }} / {{ archive_page.local_file_cleanup.per_layer.n4.deleted_directory_count }} / {{ archive_page.local_file_cleanup.per_layer.n4.released_bytes }}</td></tr>
+          <tr><th>N5 files / dirs / bytes</th><td>{{ archive_page.local_file_cleanup.per_layer.n5.deleted_file_count }} / {{ archive_page.local_file_cleanup.per_layer.n5.deleted_directory_count }} / {{ archive_page.local_file_cleanup.per_layer.n5.released_bytes }}</td></tr>
+          <tr><th>errors</th><td>{{ archive_page.local_file_cleanup.errors | join(", ") }}</td></tr>
+          <tr><th>blockers</th><td>{{ archive_page.local_file_cleanup.blockers | join(", ") }}</td></tr>
+          <tr><th>status</th><td><code>{{ archive_page.local_file_cleanup.status_path or "—" }}</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <section class="grid">
       <div class="panel">
         <div class="label">Cleanup Result</div>

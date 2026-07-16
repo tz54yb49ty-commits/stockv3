@@ -1,13 +1,19 @@
 import json
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import scripts.run_runtime_hot_keep5_cleanup_once as keep5_runner
 from scripts.run_runtime_dirty_hot_keep2_cleanup_once import (
     is_success_result,
     run_runtime_dirty_hot_keep2_cleanup_once,
 )
-from scripts.run_runtime_hot_keep5_cleanup_once import run_runtime_hot_keep5_cleanup_once
+from scripts.run_runtime_hot_keep5_cleanup_once import (
+    cleanup_local_runtime_artifacts,
+    run_runtime_hot_keep5_cleanup_once,
+)
 from ashare_v3.ingestion.runtime_hot_cleanup import DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN, KEEP5_CONFIRM_TOKEN
 
 
@@ -115,6 +121,8 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["result"], "BLOCKED_CONFIRM_TOKEN_REQUIRED")
         self.assertEqual(deleted, [])
         self.assertFalse(report["cleanup_executed"])
+        self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
+        self.assertIn("hot_row_cleanup_not_complete", report["local_file_cleanup"]["blockers"])
 
     def test_keep5_direct_delete_no_archive_blocks_active_archive_process(self) -> None:
         counter_calls: list[str] = []
@@ -215,6 +223,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
             )
             saved = json.loads(Path(report["docs_report_path"]).read_text(encoding="utf-8"))
             closeout = json.loads((Path(tmp) / "docs" / "keep5_cleanup_closeout.json").read_text(encoding="utf-8"))
+            temporary_files = list((Path(tmp) / "docs").glob(".*.tmp"))
 
         self.assertEqual(report["result"], "DIRTY_HOT_KEEP2_CLEANUP_EXECUTE_PASS")
         self.assertTrue(report["cleanup_success"])
@@ -230,6 +239,241 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["current_hot_trade_dates_after"], ["20260615", "20260616", "20260617", "20260618", "20260619"])
         self.assertEqual(saved["deleted_table_summary"], report["deleted_table_summary"])
         self.assertEqual(closeout["deleted_table_summary"], report["deleted_table_summary"])
+        self.assertEqual(temporary_files, [])
+
+    def test_local_file_execute_keeps_latest_five_dates_and_deletes_only_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dates = ["20260708", "20260709", "20260710", "20260713", "20260714", "20260715", "20260716"]
+            for trade_date in dates:
+                runtime_date = root / "docs/runtime" / trade_date
+                (runtime_date / "n3_daily").mkdir(parents=True)
+                (runtime_date / "n3_daily/payload.bin").write_bytes(b"n3-data")
+                (runtime_date / "N4_daily_report.json").write_bytes(b"n4")
+                (runtime_date / "n5_daily").mkdir()
+                (runtime_date / "n5_daily/payload.json").write_bytes(b"n5")
+                (root / "tmp").mkdir(exist_ok=True)
+                (root / "tmp" / f"N3P_{trade_date}_1000_trigger_proof_contract.json").write_bytes(b"n3p")
+                (root / "tmp" / f"N3_hint_{trade_date}_1001_midday_bridge_v1_contract.json").write_bytes(b"hint")
+                (root / "tmp" / f"N4_{trade_date}_1002_ordinary_matcher_execute_report.json").write_bytes(b"n4-report")
+                precheck = root / "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck" / trade_date
+                precheck.mkdir(parents=True)
+                (precheck / "status.json").write_bytes(b"n5-status")
+
+            old_runtime = root / "docs/runtime/20260708"
+            (old_runtime / "n2_keep.json").write_text("keep", encoding="utf-8")
+            external = root / "outside.txt"
+            external.write_text("outside", encoding="utf-8")
+            (old_runtime / "n3_symlink").symlink_to(external)
+            future = root / "docs/runtime/20260717/n3_future"
+            future.mkdir(parents=True)
+            (future / "payload.json").write_text("future", encoding="utf-8")
+            invalid = root / "tmp/N3P_20290231_1000_trigger_proof_contract.json"
+            invalid.write_text("invalid", encoding="utf-8")
+
+            report = cleanup_local_runtime_artifacts(
+                project_root=root,
+                retained_trade_dates=dates[-5:],
+                cleanup_trade_dates=dates[:-5],
+                execute=True,
+                direct_delete_no_archive=True,
+                confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                current_date=date(2026, 7, 16),
+            )
+
+            self.assertEqual(report["result"], "LOCAL_FILE_KEEP5_EXECUTE_PASS")
+            self.assertEqual(report["retained_trade_dates"], ["20260710", "20260713", "20260714", "20260715", "20260716"])
+            self.assertEqual(report["cleanup_trade_dates"], ["20260708", "20260709"])
+            self.assertFalse((old_runtime / "n3_daily").exists())
+            self.assertFalse((old_runtime / "N4_daily_report.json").exists())
+            self.assertFalse((old_runtime / "n5_daily").exists())
+            self.assertFalse((root / "tmp/N3P_20260708_1000_trigger_proof_contract.json").exists())
+            self.assertFalse((root / "tmp/N4_20260709_1002_ordinary_matcher_execute_report.json").exists())
+            self.assertFalse((root / "tmp/N5_N3T_action_confirmation_fastlane_open_monitor_precheck/20260708").exists())
+            self.assertTrue((root / "docs/runtime/20260710/n3_daily/payload.bin").exists())
+            self.assertTrue((old_runtime / "n2_keep.json").exists())
+            self.assertTrue((old_runtime / "n3_symlink").is_symlink())
+            self.assertTrue(external.exists())
+            self.assertTrue(future.exists())
+            self.assertTrue(invalid.exists())
+            self.assertGreater(report["deleted_file_count"], 0)
+            self.assertGreater(report["deleted_directory_count"], 0)
+            self.assertGreater(report["released_bytes"], 0)
+            self.assertGreater(report["per_layer"]["n3"]["released_bytes"], 0)
+            self.assertGreater(report["per_layer"]["n4"]["released_bytes"], 0)
+            self.assertGreater(report["per_layer"]["n5"]["released_bytes"], 0)
+
+    def test_local_file_dry_run_deletes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for trade_date in ("20260708", "20260709", "20260710", "20260713", "20260714", "20260715"):
+                target = root / "docs/runtime" / trade_date / "n3_daily/payload.json"
+                target.parent.mkdir(parents=True)
+                target.write_text(trade_date, encoding="utf-8")
+
+            report = cleanup_local_runtime_artifacts(
+                project_root=root,
+                retained_trade_dates=["20260709", "20260710", "20260713", "20260714", "20260715"],
+                cleanup_trade_dates=["20260708"],
+                current_date=date(2026, 7, 16),
+            )
+
+            self.assertEqual(report["result"], "LOCAL_FILE_KEEP5_DRY_RUN_PASS")
+            self.assertEqual(report["cleanup_trade_dates"], ["20260708"])
+            self.assertGreater(report["candidate_file_count"], 0)
+            self.assertEqual(report["deleted_file_count"], 0)
+            self.assertEqual(report["deleted_directory_count"], 0)
+            self.assertEqual(report["released_bytes"], 0)
+            self.assertTrue((root / "docs/runtime/20260708/n3_daily/payload.json").exists())
+
+    def test_local_file_partition_uses_authoritative_trade_dates_not_weekend_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for trade_date in (
+                "20260708",
+                "20260709",
+                "20260710",
+                "20260711",
+                "20260712",
+                "20260713",
+                "20260714",
+                "20260715",
+            ):
+                target = root / "docs/runtime" / trade_date / "n3_daily/payload.json"
+                target.parent.mkdir(parents=True)
+                target.write_text(trade_date, encoding="utf-8")
+
+            report = cleanup_local_runtime_artifacts(
+                project_root=root,
+                retained_trade_dates=["20260709", "20260710", "20260713", "20260714", "20260715"],
+                cleanup_trade_dates=["20260708"],
+                current_date=date(2026, 7, 16),
+            )
+
+        self.assertEqual(report["retained_trade_dates"], ["20260709", "20260710", "20260713", "20260714", "20260715"])
+        self.assertEqual(report["cleanup_trade_dates"], ["20260708"])
+
+    def test_blocked_hot_row_cleanup_never_calls_local_file_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(keep5_runner, "cleanup_local_runtime_artifacts") as local_cleanup:
+                report = run_runtime_hot_keep5_cleanup_once(
+                    report_dir=Path(tmp) / "reports",
+                    local_artifact_project_root=Path(tmp),
+                    archive_root=Path(tmp) / "archive",
+                    direct_delete_no_archive=True,
+                    execute=True,
+                    confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                    trade_dates=["20260708", "20260709", "20260710", "20260713", "20260714", "20260715"],
+                    archive_process_detector=lambda: [],
+                    runtime_writer_process_detector=lambda: [],
+                    table_counter=lambda _spec, _trade_date: 1,
+                    table_deleter=lambda _spec, _trade_date: 0,
+                    fk_closure_auditor=lambda **_kwargs: {
+                        "missing_child_scope_count": 1,
+                        "order_bad_count": 0,
+                        "missing_child_scope": [{"child_table": "blocked"}],
+                        "order_bad": [],
+                    },
+                )
+
+        self.assertEqual(report["result"], "BLOCKED_PLAN_NOT_PASS")
+        local_cleanup.assert_not_called()
+        self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
+        self.assertIn("hot_row_cleanup_not_complete", report["local_file_cleanup"]["blockers"])
+
+    def test_local_file_partial_makes_combined_execute_fail(self) -> None:
+        local_partial = {
+            "result": "LOCAL_FILE_KEEP5_EXECUTE_PARTIAL",
+            "cleanup_executed": True,
+            "errors": ["delete_failed"],
+            "blockers": ["local_artifact_cleanup_errors"],
+            "side_effects": {"cleanup_local_runtime_files": True},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(keep5_runner, "cleanup_local_runtime_artifacts", return_value=local_partial):
+                report = run_runtime_hot_keep5_cleanup_once(
+                    report_dir=Path(tmp) / "reports",
+                    local_artifact_project_root=Path(tmp),
+                    archive_root=Path(tmp) / "archive",
+                    direct_delete_no_archive=True,
+                    skip_row_count_plan=True,
+                    execute=True,
+                    confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                    trade_dates=["20260708", "20260709", "20260710", "20260713", "20260714", "20260715"],
+                    archive_process_detector=lambda: [],
+                    runtime_writer_process_detector=lambda: [],
+                    table_deleter=lambda _spec, _trade_date: 0,
+                    fk_closure_auditor=lambda **_kwargs: {
+                        "missing_child_scope_count": 0,
+                        "order_bad_count": 0,
+                        "missing_child_scope": [],
+                        "order_bad": [],
+                    },
+                )
+
+        self.assertEqual(report["result"], "RUNTIME_HOT_KEEP5_CLEANUP_EXECUTE_PARTIAL")
+        self.assertFalse(report["cleanup_success"])
+        self.assertFalse(str(report["result"]).endswith("_PASS"))
+
+    def test_active_writer_blocks_local_file_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "docs/runtime/20260708/n3_daily/payload.json"
+            target.parent.mkdir(parents=True)
+            target.write_text("keep", encoding="utf-8")
+
+            report = run_runtime_hot_keep5_cleanup_once(
+                report_dir=root / "reports",
+                local_artifact_project_root=root,
+                archive_root=root / "archive",
+                direct_delete_no_archive=True,
+                execute=True,
+                confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                trade_dates=["20260708", "20260709", "20260710", "20260713", "20260714", "20260715"],
+                archive_process_detector=lambda: [],
+                runtime_writer_process_detector=lambda: [{"pid": 77, "command": "python3 scripts/run_n3_writer.py"}],
+            )
+
+            self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
+            self.assertIn("runtime_writer_active", report["local_file_cleanup"]["blockers"])
+            self.assertTrue(target.exists())
+
+    def test_keep5_runner_executes_local_file_phase_with_existing_confirm_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trade_dates = ["20260708", "20260709", "20260710", "20260713", "20260714", "20260715"]
+            for trade_date in trade_dates:
+                target = root / "docs/runtime" / trade_date / "n3_daily/payload.json"
+                target.parent.mkdir(parents=True)
+                target.write_text(trade_date, encoding="utf-8")
+
+            report = run_runtime_hot_keep5_cleanup_once(
+                report_dir=root / "reports",
+                local_artifact_project_root=root,
+                local_artifact_current_date=date(2026, 7, 16),
+                archive_root=root / "archive",
+                direct_delete_no_archive=True,
+                skip_row_count_plan=True,
+                execute=True,
+                confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                trade_dates=trade_dates,
+                archive_process_detector=lambda: [],
+                runtime_writer_process_detector=lambda: [],
+                table_deleter=lambda _spec, _trade_date: 0,
+                fk_closure_auditor=lambda **_kwargs: {
+                    "missing_child_scope_count": 0,
+                    "order_bad_count": 0,
+                    "missing_child_scope": [],
+                    "order_bad": [],
+                },
+            )
+
+            self.assertEqual(report["result"], "DIRTY_HOT_KEEP2_CLEANUP_EXECUTE_PASS")
+            self.assertEqual(report["local_file_cleanup"]["result"], "LOCAL_FILE_KEEP5_EXECUTE_PASS")
+            self.assertFalse((root / "docs/runtime/20260708/n3_daily").exists())
+            self.assertTrue((root / "docs/runtime/20260709/n3_daily/payload.json").exists())
+            saved = json.loads((root / "reports/keep5_cleanup_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["local_file_cleanup"]["released_bytes"], len("20260708"))
 
 
 if __name__ == "__main__":
