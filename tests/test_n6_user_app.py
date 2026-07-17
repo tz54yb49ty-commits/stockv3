@@ -7569,13 +7569,29 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("e.payload_json->>'primary_trigger_period'", sql)
         self.assertNotIn("required_periods", sql)
 
-    def test_app_v1_signal_periods_prefer_all_trigger_periods_from_projection_payload(self) -> None:
+    def test_app_v1_signal_periods_skip_empty_all_before_triggered_and_nested_n4_fallback(self) -> None:
         source = inspect.getsource(PostgresN6UserRepository._app_v1_triggered_periods_expr)
         all_periods_expr = "p.source_payload_json->'payload_json'->>'all_trigger_periods'"
         triggered_expr = "p.source_payload_json->'payload_json'->>'triggered_periods'"
-        self.assertIn(all_periods_expr, source)
-        self.assertIn(triggered_expr, source)
+        nested_all_expr = "p.source_payload_json->'payload_json'->'source_n4_payload'->>'all_trigger_periods'"
+        nested_triggered_expr = "p.source_payload_json->'payload_json'->'source_n4_payload'->>'triggered_periods'"
+        self.assertIn(f"NULLIF(NULLIF({all_periods_expr}, ''), '[]')", source)
+        self.assertIn(f"NULLIF(NULLIF({triggered_expr}, ''), '[]')", source)
+        self.assertIn(nested_all_expr, source)
+        self.assertIn(nested_triggered_expr, source)
         self.assertLess(source.index(all_periods_expr), source.index(triggered_expr))
+        self.assertLess(source.index(triggered_expr), source.index(nested_all_expr))
+        self.assertLess(source.index(nested_all_expr), source.index(nested_triggered_expr))
+
+    def test_app_v1_signal_primary_period_reads_nested_n4_payload(self) -> None:
+        source = inspect.getsource(PostgresN6UserRepository._app_v1_actual_trigger_period_expr)
+        direct_primary_expr = "p.source_payload_json->'payload_json'->>'primary_trigger_period'"
+        nested_primary_expr = "p.source_payload_json->'payload_json'->'source_n4_payload'->>'primary_trigger_period'"
+        nested_trigger_expr = "p.source_payload_json->'payload_json'->'source_n4_payload'->>'trigger_period'"
+        self.assertIn(f"NULLIF({direct_primary_expr}, '')", source)
+        self.assertIn(nested_primary_expr, source)
+        self.assertIn(nested_trigger_expr, source)
+        self.assertLess(source.index(direct_primary_expr), source.index(nested_primary_expr))
 
     def test_message_dashboard_reads_standard_outbox_source_run_id(self) -> None:
         cursor = RecordingCursor()

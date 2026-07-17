@@ -4861,11 +4861,17 @@ class PostgresN6UserRepository:
     def _app_v1_actual_trigger_period_expr(self) -> str:
         return """
             COALESCE(
-              p.source_payload_json->'payload_json'->>'primary_trigger_period',
-              p.source_payload_json->'payload_json'->>'trigger_period',
-              c.card_payload_json->>'primary_trigger_period',
-              c.card_payload_json->>'trigger_period',
-              p.display_payload_json->>'primary_trigger_period'
+              NULLIF(p.source_payload_json->'payload_json'->>'primary_trigger_period', ''),
+              NULLIF(p.source_payload_json->'payload_json'->>'trigger_period', ''),
+              NULLIF(p.source_payload_json->'payload_json'->'source_n4_payload'->>'primary_trigger_period', ''),
+              NULLIF(p.source_payload_json->'payload_json'->'source_n4_payload'->>'trigger_period', ''),
+              NULLIF(p.source_payload_json->'payload_json'->'trace_json'->'source_n4_payload'->>'primary_trigger_period', ''),
+              NULLIF(p.source_payload_json->'payload_json'->'trace_json'->'source_n4_payload'->>'trigger_period', ''),
+              NULLIF(p.trace_json->'source_n4_payload'->>'primary_trigger_period', ''),
+              NULLIF(p.trace_json->'source_n4_payload'->>'trigger_period', ''),
+              NULLIF(c.card_payload_json->>'primary_trigger_period', ''),
+              NULLIF(c.card_payload_json->>'trigger_period', ''),
+              NULLIF(p.display_payload_json->>'primary_trigger_period', '')
             )
         """
 
@@ -4882,14 +4888,20 @@ class PostgresN6UserRepository:
     def _app_v1_triggered_periods_expr(self, actual_trigger_period_expr: str) -> str:
         return f"""
             COALESCE(
-              p.source_payload_json->'payload_json'->>'all_trigger_periods',
-              p.source_payload_json->'payload_json'->'trace_json'->>'all_trigger_periods',
-              p.trace_json->>'all_trigger_periods',
-              c.card_payload_json->>'all_trigger_periods',
-              p.source_payload_json->'payload_json'->>'triggered_periods',
-              p.source_payload_json->'payload_json'->'trace_json'->>'triggered_periods',
-              p.trace_json->>'triggered_periods',
-              c.card_payload_json->>'triggered_periods',
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'source_n4_payload'->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'source_n4_payload'->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'trace_json'->'source_n4_payload'->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'trace_json'->'source_n4_payload'->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(p.trace_json->'source_n4_payload'->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.trace_json->'source_n4_payload'->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'trace_json'->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.source_payload_json->'payload_json'->'trace_json'->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(p.trace_json->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(p.trace_json->>'triggered_periods', ''), '[]'),
+              NULLIF(NULLIF(c.card_payload_json->>'all_trigger_periods', ''), '[]'),
+              NULLIF(NULLIF(c.card_payload_json->>'triggered_periods', ''), '[]'),
               CASE
                 WHEN {actual_trigger_period_expr} IS NOT NULL
                 THEN jsonb_build_array({actual_trigger_period_expr})::text

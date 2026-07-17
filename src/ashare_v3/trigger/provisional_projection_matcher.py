@@ -77,6 +77,15 @@ def build_provisional_projection_plan(
     legacy_signal_type: str,
     not_applicable_reason: str | None = None,
 ) -> dict[str, Any]:
+    condition_projection_fields = {
+        "condition_projection_context": (
+            row.get("condition_projection_context")
+            if row.get("condition_projection_context") is not None
+            else {}
+        ),
+        "condition_projection_context_status": row.get("condition_projection_context_status") or "not_ready",
+        "condition_projection_context_trace": dict(row.get("condition_projection_context_trace") or {}),
+    }
     if not_applicable_reason:
         mapping = canonicalize_trigger_candidate(
             str(row.get("condition_key") or ""),
@@ -106,6 +115,7 @@ def build_provisional_projection_plan(
             "source_projection_id": None,
             "asset_kind": str(row.get("asset_kind") or ""),
             "identity_key": str(row.get("identity_key") or ""),
+            **condition_projection_fields,
             "direction": str(row.get("direction") or ""),
             "signal_type": mapping.signal_type,
             "runtime_signal_type": mapping.signal_type,
@@ -217,6 +227,7 @@ def build_provisional_projection_plan(
         "source_projection_id": source_projection_id,
         "asset_kind": str(row.get("asset_kind") or ""),
         "identity_key": str(row.get("identity_key") or ""),
+        **condition_projection_fields,
         "direction": str(row.get("direction") or ""),
         "signal_type": mapping.signal_type,
         "runtime_signal_type": mapping.signal_type,

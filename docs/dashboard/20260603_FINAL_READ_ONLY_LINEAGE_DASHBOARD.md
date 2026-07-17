@@ -2,8 +2,8 @@
 
 Result: `DASHBOARD_ARTIFACT_PASS`
 
-Layer role: `runtime_control`
-Generated at: `2026-06-04T17:22:49+0800`
+Layer role: `runtime_control`<br>
+Generated at: `2026-06-04T17:22:49+0800`<br>
 Trade date: `20260603`
 
 ## Endpoint
@@ -33,7 +33,7 @@ actions.
 | N4 v4 | `TriggerMatched` | `pending` | 863 |
 | N5 v1 | `ActionBlocked` | `pending` | 863 |
 
-N5 outbox consumed/updated: `false`.
+N5 outbox consumed/updated: `false`.<br>
 N6 inbox/checkpoint refs for N5 action: `0/0`.
 
 ## N5 Blocked Reason

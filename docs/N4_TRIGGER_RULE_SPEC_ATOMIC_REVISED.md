@@ -93,6 +93,62 @@ previous_avg_amount
 upper-period chain baseline inputs
 ```
 
+#### 2.1.1 Condition projection context passthrough v1
+
+N2 freezes downstream projection fields under:
+
+```text
+period_trigger_baseline_json.condition_projection_context
+contract_version=N2-condition-projection-context-v1
+```
+
+N4 reads this object only from the localized trigger context snapshot. It must
+not query N1/N2 source tables or recompute any field. The N4 validation policy
+is:
+
+```text
+policy_version=N4-condition-projection-passthrough-v1
+policy_hash=2cd95d3d427ec07ccd208bc7b939081d104415f6b9da3c4bf78e40b78a6d279e
+validation_effect=trace_only_no_trigger_lifecycle_dedup_or_n5_entry_change
+```
+
+N4 validates the upstream contract version and hash, `source_layer`,
+`asset_kind`, `identity_key`, `source_trade_date`, `for_trade_date`, source
+`status`, the asset-specific field shape, non-empty `name`, and canonical
+positive Decimal-string `close`. Optional N2 fields may remain null. Stock must
+carry `score` and `pe_core`; index and board must not add those stock-only keys.
+
+Every new ordinary/FULL/HINT `TriggerMatched`, and every
+`TriggerStateChanged` already produced by the canonical lifecycle, carries:
+
+```text
+condition_projection_context
+condition_projection_context_status=ready|not_ready
+condition_projection_context_trace={
+  policy_version,
+  policy_hash,
+  expected_contract_version,
+  source_path,
+  status,
+  validation_reasons,
+  source_context_hash,
+  validation_effect
+}
+```
+
+The context object is passed through unchanged. Missing, old, malformed,
+mismatched, `not_ready`, or hash-invalid context is retained for audit and
+marked `condition_projection_context_status=not_ready`; it must not modify the
+existing matcher result, trigger state, event type, lifecycle identity,
+material-change comparison, event schema, dedup key, or N5 entry decision.
+Context-only changes therefore do not create `TriggerStateChanged`, but a
+`TriggerStateChanged` produced for another material lifecycle change carries
+the latest context from that evaluation.
+
+The payload addition is optional and additive under the existing N4 event
+schema `v1`. Existing JSONB context/event storage is sufficient; no physical
+column or schema migration is required. Historical events are not backfilled.
+
 ### 2.2 N3 Realtime Inputs
 
 N3 realtime inputs provide current numeric values. They must provide at least:

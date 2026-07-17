@@ -222,6 +222,7 @@ pending_market_data 的 trigger_live=false；matched 的 trigger_live=true；ina
 TriggerCleared / TriggerLiveChanged 仅作为旧 run 证据或兼容项，新 runtime 清除统一用 TriggerStateChanged(trigger_live=false, current_status=inactive)。
 N5 只负责动作确认事实和动作事件，不负责用户展示策略。
 TriggerMatched 是 N5 唯一动作确认入口；TriggerPendingMarketData 和 TriggerStateChanged 不得创建动作确认。
+同一 TriggerMatched 重放必须幂等；TriggerStateChanged(trigger_live=false) 终止当前 tracking episode 后，同 action grain 的新 event_id TriggerMatched 必须开启新 episode，并生成以该 source trigger event 为幂等边界的新 ActionEligible；该语义在同一 planner batch 或跨 invocation 到达时必须一致。
 N5 canonical action_state 只能为 eligible / blocked / executed / skipped / expired。
 N5 internal confirmation_status=pending/passed/failed/expired、tracking_until、last_checked_minute_label 不是 canonical action_state。
 ActionExecuted 只表示 N5 动作确认事实成立并发出动作事件，不表示真实下单、sim、N6 展示、语音或交易意图。

@@ -17,13 +17,16 @@ from ashare_v3.events.ids import stable_hash
 from ashare_v3.trigger.action_confirmation_metric_matcher import (
     FORMAL_AMOUNT_SOURCE_KIND,
     FORMAL_AMOUNT_UNIT,
+    decimal_json,
     evaluate_formal_amount_chain,
+    formal_transition_previous_amount_value,
     trigger_amount_chain_pass_for_period,
 )
 from ashare_v3.trigger.projection_matcher import normalize_context_row
 from ashare_v3.trigger.rule_v4_matcher import (
     CURRENT_PERIOD_AVG_FIELD_BY_PERIOD,
     LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS,
+    OUTCOME_TO_EVENT_TYPE,
     ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
     ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
     PERIOD_ESCALATION_CONTEXT_VERSION,
@@ -400,10 +403,21 @@ def context_with_formal_amount_unit_compat(
         if not baseline_dict:
             patched_periods[str(period)] = baseline
             continue
-        if not baseline_dict.get("trigger_previous_amount_baseline_unit"):
-            baseline_dict["trigger_previous_amount_baseline_unit"] = FORMAL_AMOUNT_UNIT
-        if not baseline_dict.get("amount_unit"):
-            baseline_dict["amount_unit"] = FORMAL_AMOUNT_UNIT
+        canonical_value, _, normalization_trace = formal_transition_previous_amount_value(
+            baseline_dict,
+            str(period),
+            asset_kind=str(output.get("asset_kind") or ""),
+        )
+        source_field = normalization_trace.get("source_field")
+        baseline_dict["transition_previous_amount_normalization_trace"] = {
+            **normalization_trace,
+            "period": str(period),
+            "canonical_value": decimal_json(canonical_value),
+            "canonical_unit": FORMAL_AMOUNT_UNIT if canonical_value is not None else None,
+        }
+        if canonical_value is not None and source_field:
+            baseline_dict[str(source_field)] = decimal_json(canonical_value)
+            baseline_dict[f"{source_field}_unit"] = FORMAL_AMOUNT_UNIT
         patched_periods[str(period)] = baseline_dict
     output["period_trigger_baseline_json"] = {**baseline_json, "periods": patched_periods}
     return output
@@ -482,6 +496,13 @@ def build_provisional_ordinary_plan(
         "asset_kind": asset_kind,
         "identity_key": identity_key,
         "display_name": metric.get("name") or context.get("name") or identity_key,
+        "condition_projection_context": (
+            context.get("condition_projection_context")
+            if context.get("condition_projection_context") is not None
+            else {}
+        ),
+        "condition_projection_context_status": context.get("condition_projection_context_status") or "not_ready",
+        "condition_projection_context_trace": dict(context.get("condition_projection_context_trace") or {}),
         "condition_key": condition_key,
         "direction": rule_plan.get("direction"),
         "signal_type": signal_type,
@@ -842,6 +863,95 @@ def assert_same_day_period_escalation_output_contract(
 
     if candidate_identified and is_exact_raw_legacy_input():
         return
+
+    if "output_event_type" in rule_proof:
+        fail("rule_proof_output_event_type_forbidden")
+
+    raw_event_source = rule_eval_result if rule_eval_result else rule_plan
+    raw_outcome = raw_event_source.get("outcome_classification")
+    if raw_outcome not in OUTCOME_TO_EVENT_TYPE:
+        fail("raw_outcome_classification_invalid")
+    raw_output_event_type = raw_event_source.get("output_event_type")
+    if raw_output_event_type != OUTCOME_TO_EVENT_TYPE[raw_outcome]:
+        fail("rule_eval_result_output_event_type_conflicting_with_raw_outcome")
+
+    lifecycle_required_fields = {
+        "lifecycle_state_key",
+        "lifecycle_state_key_version",
+        "previous_current_status",
+        "previous_status",
+        "current_status",
+        "lifecycle_output_reason",
+        "state_change_reason",
+        "writes_trigger_match",
+        "n5_entry_allowed",
+        "is_n5_action_entry",
+        "trigger_live",
+    }
+    lifecycle_annotated = any(
+        field in rule_plan
+        for field in {
+            "lifecycle_state_key",
+            "lifecycle_state_key_version",
+            "lifecycle_output_reason",
+        }
+    )
+    if lifecycle_annotated:
+        missing_lifecycle_fields = sorted(lifecycle_required_fields - set(rule_plan))
+        if missing_lifecycle_fields:
+            fail(f"lifecycle_fields_missing:{','.join(missing_lifecycle_fields)}")
+        if (
+            rule_plan.get("lifecycle_state_key_version")
+            != "n4p_provisional_trigger_lifecycle_v1"
+            or not isinstance(rule_plan.get("lifecycle_state_key"), str)
+            or not rule_plan.get("lifecycle_state_key")
+            or rule_plan.get("previous_current_status") != rule_plan.get("previous_status")
+        ):
+            fail("lifecycle_identity_or_previous_status_invalid")
+
+        final_event_type = rule_plan.get("output_event_type")
+        current_status = rule_plan.get("current_status")
+        previous_status_value = rule_plan.get("previous_status")
+        lifecycle_reason = rule_plan.get("lifecycle_output_reason")
+        if lifecycle_reason == "inactive_to_matched":
+            lifecycle_event_valid = (
+                final_event_type == "TriggerMatched"
+                and current_status == "matched"
+                and previous_status_value in {"inactive", "pending_market_data"}
+            )
+        elif lifecycle_reason == "matched_changed":
+            lifecycle_event_valid = (
+                final_event_type == "TriggerStateChanged"
+                and current_status == "matched"
+                and previous_status_value == "matched"
+            )
+        elif lifecycle_reason == "matched_to_inactive":
+            lifecycle_event_valid = (
+                final_event_type == "TriggerStateChanged"
+                and current_status == "inactive"
+                and previous_status_value == "matched"
+            )
+        elif lifecycle_reason == "pending_market_data":
+            lifecycle_event_valid = (
+                final_event_type == "TriggerPendingMarketData"
+                and current_status == "pending_market_data"
+            )
+        else:
+            lifecycle_event_valid = False
+        expected_state_change_reason = (
+            "deactivated" if lifecycle_reason == "matched_to_inactive" else lifecycle_reason
+        )
+        final_enters_n5 = final_event_type == "TriggerMatched"
+        if (
+            not lifecycle_event_valid
+            or rule_plan.get("state_change_reason") != expected_state_change_reason
+            or rule_plan.get("trigger_live") is not (current_status == "matched")
+            or rule_plan.get("writes_trigger_match") is not final_enters_n5
+            or rule_plan.get("n5_entry_allowed") is not final_enters_n5
+            or rule_plan.get("is_n5_action_entry") is not final_enters_n5
+        ):
+            fail("top_level_output_event_type_conflicting_with_lifecycle")
+
     if not candidate_identified:
         return
 
@@ -856,6 +966,8 @@ def assert_same_day_period_escalation_output_contract(
     for source_index, (source_name, source) in enumerate(sources):
         for other_name, other_source in sources[source_index + 1 :]:
             for field in set(source) & set(other_source):
+                if lifecycle_annotated and field == "output_event_type":
+                    continue
                 if source[field] != other_source[field]:
                     fail(f"source_field_conflicting:{source_name}:{other_name}:{field}")
 

@@ -2,9 +2,9 @@
 
 Result: `DASHBOARD_ARTIFACT_PASS`
 
-Layer role: `runtime_control`
-Generated at: `2026-06-08T20:54:05+08:00`
-Trade date: `20260608`
+Layer role: `runtime_control`<br>
+Generated at: `2026-06-08T20:54:05+08:00`<br>
+Trade date: `20260608`<br>
 Cutoff: `09:52`
 
 ## Endpoint

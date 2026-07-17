@@ -688,7 +688,7 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(plan["target_minute_boundary_policy"], "session_close_boundary_latest_physical_label_v1")
         self.assertEqual(plan["closed_minute_contract"]["minute_label"], "14:59")
         self.assertEqual(plan["required_physical_labels"][-1], "14:59")
-        self.assertEqual(plan["required_raw_source_labels"][-1], "14:59")
+        self.assertEqual(plan["required_raw_source_labels"][-1], "15:00")
         self.assertNotIn("11:30", plan["required_raw_source_labels"])
         self.assertIn("13:00", plan["required_raw_source_labels"])
         self.assertFalse(plan["side_effects"]["full_market_fallback_used"])
@@ -1077,23 +1077,55 @@ class N3C1ScopedArtifactDraftTest(unittest.TestCase):
         self.assertEqual(rows_by_label["13:00"]["raw_source_label"], "11:30")
         self.assertEqual(rows_by_label["13:00"]["amount"], 450360.0)
 
-    def test_mootdx_c1_physical_normalizer_rejects_raw_1500_as_regular_c1_minute(self):
-        with self.assertRaisesRegex(MinuteLabelNormalizationError, BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE):
-            normalize_c1_physical_intraday_1m_labels(
-                [
-                    {
-                        "bar_time": "2026-07-08 15:00",
-                        "open": 6.05,
-                        "high": 6.05,
-                        "low": 6.04,
-                        "close": 6.04,
-                        "amount": 1000000.0,
-                    }
-                ],
-                trade_date="20260708",
-                intraday_trade_date="20260708",
-                source_adapter="mootdx",
-            )
+    def test_mootdx_c1_physical_normalizer_maps_raw_1500_to_final_physical_1459(self):
+        rows = normalize_c1_physical_intraday_1m_labels(
+            [
+                {
+                    "bar_time": "2026-07-08 15:00",
+                    "open": 6.05,
+                    "high": 6.05,
+                    "low": 6.04,
+                    "close": 6.04,
+                    "amount": 1000000.0,
+                }
+            ],
+            trade_date="20260708",
+            intraday_trade_date="20260708",
+            source_adapter="mootdx",
+        )
+
+        self.assertEqual(rows[0]["physical_c1_label"], "14:59")
+        self.assertEqual(rows[0]["raw_source_label"], "15:00")
+
+    def test_mootdx_c1_physical_normalizer_prefers_raw_1500_for_final_physical_1459(self):
+        rows = normalize_c1_physical_intraday_1m_labels(
+            [
+                {
+                    "bar_time": "2026-07-08 14:59",
+                    "open": 6.04,
+                    "high": 6.04,
+                    "low": 6.04,
+                    "close": 6.04,
+                    "amount": 0.0,
+                },
+                {
+                    "bar_time": "2026-07-08 15:00",
+                    "open": 6.05,
+                    "high": 6.05,
+                    "low": 6.04,
+                    "close": 6.04,
+                    "amount": 1000000.0,
+                },
+            ],
+            trade_date="20260708",
+            intraday_trade_date="20260708",
+            source_adapter="mootdx",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "14:59")
+        self.assertEqual(rows[0]["raw_source_label"], "15:00")
+        self.assertEqual(rows[0]["amount"], 1000000.0)
 
     def test_mootdx_c1_physical_normalizer_keeps_afternoon_raw_labels_current(self):
         rows = normalize_c1_physical_intraday_1m_labels(

@@ -43,7 +43,7 @@ BLOCKED_PREVIOUS_DAY_RAW_C1_CONTEXT_INSUFFICIENT = "BLOCKED_PREVIOUS_DAY_RAW_C1_
 BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH = "BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH"
 BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE = "BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE"
 
-SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_morning_close_boundary_v3"
+SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_close_boundaries_v4"
 SOURCE_LABEL_SEMANTICS = "source_label"
 PHYSICAL_LABEL_SEMANTICS = "start_label"
 FORBIDDEN_SOURCE_CLOSE_LABELS = {"11:30"}
@@ -387,12 +387,16 @@ def apply_source_close_label_policy_to_row(row: Mapping[str, Any], *, for_trade_
 def _source_close_label_for_physical_label(physical_label: str) -> str:
     if not validate_ashare_c1_minute_label(physical_label):
         return ""
+    if physical_label == "14:59":
+        return "15:00"
     return physical_label
 
 
 def _physical_label_for_source_close_label(raw_label: str) -> str:
     if raw_label == "11:30":
         return "13:00"
+    if raw_label == "15:00":
+        return "14:59"
     if not re.fullmatch(r"\d{2}:\d{2}", raw_label or ""):
         return ""
     try:

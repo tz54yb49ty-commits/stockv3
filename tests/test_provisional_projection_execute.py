@@ -1,3 +1,4 @@
+from copy import deepcopy
 import inspect
 import json
 import unittest
@@ -19,6 +20,7 @@ from tests.test_trigger_projection_matcher import (
     CONTEXT_RUN_ID,
     PROJECTION_RUN_ID,
     context_row,
+    context_row_with_condition_projection,
     hint_1m_projection_row,
     projection_row,
 )
@@ -155,6 +157,65 @@ class ProjectionRunOncePatch:
 
 
 class ProvisionalProjectionExecuteTest(unittest.TestCase):
+    def test_condition_projection_context_passthrough_preserves_hint_lifecycle_and_dedup(self) -> None:
+        context = context_row_with_condition_projection(
+            "index:SH:000016",
+            "buy",
+            "BUY_HINT",
+            ["BUY_HINT"],
+            asset_kind="index",
+        )
+        projection = projection_row("index", "index:SH:000016", "ready", "up_volume_expanding")
+        initial = build_plan([context], [projection])
+        outbox = initial["writes"]["common_event_outbox"][0]
+        payload = outbox["payload_json"]
+        expected_context = context["period_trigger_baseline_json"]["condition_projection_context"]
+
+        self.assertEqual(outbox["event_type"], "TriggerMatched")
+        self.assertEqual(outbox["event_schema_version"], "v1")
+        self.assertEqual(payload["condition_projection_context"], expected_context)
+        self.assertEqual(payload["condition_projection_context_status"], "ready")
+        self.assertEqual(payload["condition_projection_context_trace"]["validation_reasons"], [])
+        self.assertTrue(payload["n5_entry_allowed"])
+        self.assertEqual(
+            initial["writes"]["common_trigger_match"][0]["raw_json"]["condition_projection_context"],
+            expected_context,
+        )
+
+        legacy = build_plan(
+            [context_row("index:SH:000016", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="index")],
+            [projection],
+        )["writes"]["common_event_outbox"][0]
+        self.assertEqual(outbox["dedup_key"], legacy["dedup_key"])
+        self.assertEqual(outbox["event_id"], legacy["event_id"])
+
+        previous = previous_state_for_payload(payload)
+        previous["raw_json"]["projection_30m_type"] = "shrink_down"
+        previous["raw_json"]["trigger_mark_candidate"] = "30m_shrink"
+        changed = build_plan([context], [projection], previous_trigger_states=[previous])
+        changed_payload = changed["writes"]["common_event_outbox"][0]["payload_json"]
+        self.assertEqual(changed_payload["event_type"], "TriggerStateChanged")
+        self.assertTrue(changed_payload["trigger_live"])
+        self.assertFalse(changed_payload["n5_entry_allowed"])
+        self.assertEqual(changed_payload["condition_projection_context"], expected_context)
+
+        invalid_context = deepcopy(context)
+        invalid_context["period_trigger_baseline_json"]["condition_projection_context"]["fields"]["close"] = "10.6"
+        invalid_initial = build_plan([invalid_context], [projection])
+        invalid_payload = invalid_initial["writes"]["common_event_outbox"][0]["payload_json"]
+        self.assertEqual(invalid_payload["event_type"], "TriggerMatched")
+        self.assertEqual(invalid_payload["condition_projection_context_status"], "not_ready")
+        self.assertEqual(
+            invalid_initial["writes"]["common_event_outbox"][0]["event_id"],
+            outbox["event_id"],
+        )
+        unchanged = build_plan(
+            [invalid_context],
+            [projection],
+            previous_trigger_states=[previous_state_for_payload(payload)],
+        )
+        self.assertEqual(unchanged["writes"]["common_event_outbox"], [])
+
     def test_hint_run_once_without_baseline_policy_fails_before_using_same_day_states(self) -> None:
         import ashare_v3.trigger.provisional_projection_execute as projection_execute
 
@@ -996,6 +1057,11 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
         self.assertEqual(payload["event_type"], "TriggerStateChanged")
         self.assertFalse(payload["trigger_live"])
         self.assertEqual(payload["current_status"], "inactive")
+        self.assertEqual(payload["state_change_reason"], "deactivated")
+        self.assertEqual(
+            plan["writes"]["common_trigger_state"][0]["raw_json"]["lifecycle_output_reason"],
+            "matched_to_inactive",
+        )
         self.assertFalse(payload["n5_entry_allowed"])
 
     def test_duplicate_target_run_blocks_without_upsert_or_overwrite(self) -> None:

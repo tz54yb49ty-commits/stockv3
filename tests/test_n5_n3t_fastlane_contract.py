@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import io
 import json
 import plistlib
@@ -20,6 +21,82 @@ from ashare_v3.market.c1_scoped_artifact import (
 
 
 WORKING_DIRECTORY = "/Users/chuanfuchen/Documents/A股监控系统v3"
+
+
+def _write_auto_refresh_activation_config(
+    root: Path,
+    *,
+    for_trade_date: str = "20260714",
+) -> tuple[Path, Path]:
+    activation_path = (
+        root / "write_enabled_activation_config_current_runtime_deferred_v1.json"
+    )
+    review_path = (
+        root
+        / "policy_review"
+        / for_trade_date
+        / "active_worker_policy_review_current_latest.json"
+    )
+    activation_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                "for_trade_date": for_trade_date,
+                "active_worker_policy_review_path": str(review_path),
+                "active_worker_policy_review_path_policy": {
+                    "policy_type": "fastlane_active_worker_policy_review_runtime_resolved_v1",
+                    "authorization_timing": "runtime_deferred_to_runner",
+                    "resolution": "runtime_read_only_latest_artifact",
+                    "no_secret_embedded": True,
+                },
+                "n5_active_scope_artifact_dir": str(root / "n5_active_scope"),
+                "n3_c1_n3t_artifact_dir": str(root / "n3_c1_n3t"),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return activation_path, review_path
+
+
+def _auto_refresh_review(
+    *,
+    result: str,
+    current_exchange_time: str = "2026-07-14T09:25:15+08:00",
+) -> dict[str, object]:
+    return {
+        "policy_type": "fastlane_active_worker_policy_v1",
+        "result": result,
+        "for_trade_date": "20260714",
+        "current_exchange_time": current_exchange_time,
+        "session_phase": "pre_open_call_auction_after_0925",
+        "active_worker_write_enabled_ready": result == "PASS",
+        "activation_scope": "idle_open_scheduler" if result == "PASS" else "not_ready",
+        "automatic_chain_verified": False,
+        "manual_gate_required": False,
+        "waiting_reasons": [] if result == "PASS" else ["waiting_for_trading_day_monitor_pass"],
+        "blockers": [] if result != "BLOCKED" else ["trading_day_monitor_blocked"],
+        "chain_backlog": {"n5_intake_remaining": 0, "n3t_metric_remaining": 0},
+        "final_verdict": f"TEST_{result}",
+    }
+
+
+def _canonical_n5_action_intake_lanes() -> dict[str, object]:
+    from ashare_v3.runtime_control.n5_n3t_fastlane import (
+        N5_ACTION_INTAKE_ALLOWED_INPUT,
+        N5_ACTION_INTAKE_CONTRACT_HASH,
+        N5_ACTION_INTAKE_CONTRACT_VERSION,
+        N5_ACTION_INTAKE_FORBIDDEN,
+    )
+
+    return {
+        "n5_action_intake": {
+            "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+            "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+            "allowed_input": dict(N5_ACTION_INTAKE_ALLOWED_INPUT),
+            "forbidden": dict(N5_ACTION_INTAKE_FORBIDDEN),
+        }
+    }
 
 
 def _plist_placeholders(value: object) -> list[str]:
@@ -108,6 +185,73 @@ def _current_day_c1_rows_for_fixture(
             }
         )
     return rows
+
+
+def _object_cursor_batch_scope_payload(
+    *,
+    object_count: int,
+    for_trade_date: str = "20260717",
+    next_unchecked_minute_label: str = "09:31",
+    include_hint_ref: bool = False,
+) -> dict[str, object]:
+    scope_rows: list[dict[str, object]] = []
+    active_ref_count = 0
+    for index in range(object_count):
+        code = f"{600000 + index:06d}"
+        identity_key = f"stock:SH:{code}"
+        refs: list[dict[str, object]] = [
+            {
+                "for_trade_date": for_trade_date,
+                "state_key": f"state-{code}-buy",
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "source_trigger_event_id": f"trigger-{code}-buy",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_trigger_run_id": f"n4-run-{code}-buy",
+                "source_trigger_event_time": f"{for_trade_date[:4]}-{for_trade_date[4:6]}-{for_trade_date[6:]}T09:31:00+08:00",
+                "trigger_time": f"{for_trade_date[:4]}-{for_trade_date[4:6]}-{for_trade_date[6:]}T09:31:00+08:00",
+                "first_confirmation_minute_label": "09:31",
+                "next_unchecked_minute_label": next_unchecked_minute_label,
+                "scope_status": "active",
+            }
+        ]
+        if include_hint_ref:
+            refs.append(
+                {
+                    **refs[0],
+                    "state_key": f"state-{code}-hint",
+                    "condition_key": "BUY_HINT:M",
+                    "source_trigger_event_id": f"trigger-{code}-hint",
+                    "source_trigger_run_id": f"n4-run-{code}-hint",
+                }
+            )
+        active_ref_count += len(refs)
+        scope_rows.append(
+            {
+                "for_trade_date": for_trade_date,
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "scope_status": "active",
+                "active_tracking_refs": refs,
+                "attention_event_refs": [],
+            }
+        )
+    return {
+        "artifact_type": "n5_active_scope_snapshot_v1",
+        "artifact_schema_version": "v1",
+        "producer_layer": "N5_action",
+        "for_trade_date": for_trade_date,
+        "scope_granularity": "object",
+        "scope_status": "active",
+        "scope_count": object_count,
+        "active_tracking_ref_count": active_ref_count,
+        "full_market_fallback_allowed": False,
+        "n3_scans_n5_internals": False,
+        "scope_rows": scope_rows,
+    }
 
 
 class N5N3TFastlaneContractTest(unittest.TestCase):
@@ -470,6 +614,125 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertIn("waiting_for_n5_intake_exact_cover", review["waiting_reasons"])
         self.assertIn("waiting_for_n3t_metric_exact_cover", review["waiting_reasons"])
         self.assertEqual(review["blockers"], [])
+
+    def test_trading_day_monitor_allows_zero_actionexecuted_during_exact_cover_bootstrap(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LABELS,
+            build_fastlane_active_worker_policy_review,
+            build_fastlane_trading_day_monitor_review,
+        )
+
+        current_exchange_time = "2026-07-13T09:56:13+08:00"
+        monitor_review = build_fastlane_trading_day_monitor_review(
+            for_trade_date="20260713",
+            current_exchange_time=current_exchange_time,
+            launchd_states={
+                label: {"loaded": True, "pid": None, "runs": 100, "last_exit_code": 0}
+                for label in FASTLANE_LABELS.values()
+            },
+            plist_summaries={
+                label: {
+                    "label": label,
+                    "start_interval": 5 if key == "n3_c1_n3t" else 3,
+                    "run_at_load": False,
+                    "keep_alive": False,
+                    "uses_activation_config": True,
+                    "has_placeholder": False,
+                    "has_secret_literal": False,
+                    "has_old_runner_ref": False,
+                }
+                for key, label in FASTLANE_LABELS.items()
+            },
+            recent_log_manifests={label: [] for label in FASTLANE_LABELS.values()},
+            chain_evidence={
+                "session_phase": "trading",
+                "n4_triggermatched": 146,
+                "n5_actioneligible": 118,
+                "n5_active_tracking": 102,
+                "n5_active_scope_artifacts": 12,
+                "n3_scoped_c1_artifacts": 870,
+                "n3t_c1_closed_metric_rows": 870,
+                "n5_actionexecuted": 0,
+                "closed_minute_available": True,
+                "n4_outbox_status_unchanged": True,
+                "n4_outbox_updated": False,
+                "n5_output_event_types": ["ActionEligible"],
+                "n3_consumed_only_explicit_active_scope_artifact": True,
+                "n3_scanned_n5_db": False,
+                "n3_full_market_fallback": False,
+                "n3t_lineage_ok": True,
+                "legacy_metric_used": False,
+                "old_n3_n4_labels_unchanged": True,
+                "n6_touched": False,
+            },
+        )
+        policy_review = build_fastlane_active_worker_policy_review(
+            for_trade_date="20260713",
+            monitor_review=monitor_review,
+        )
+
+        self.assertEqual(monitor_review["result"], "WAITING")
+        self.assertNotIn("n5_actionexecuted_not_advancing", monitor_review["blockers"])
+        self.assertIn("waiting_for_n5_intake_exact_cover", monitor_review["waiting_reasons"])
+        self.assertIn("waiting_for_n5_actionexecuted_exact_cover", monitor_review["waiting_reasons"])
+        self.assertEqual(policy_review["result"], "PASS")
+        self.assertTrue(policy_review["active_worker_write_enabled_ready"])
+        self.assertEqual(policy_review["activation_scope"], "exact_cover_backlog_bootstrap")
+        self.assertEqual(policy_review["current_exchange_time"], current_exchange_time)
+
+    def test_trading_day_monitor_still_blocks_zero_actionexecuted_without_exact_cover_backlog(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LABELS,
+            build_fastlane_trading_day_monitor_review,
+        )
+
+        review = build_fastlane_trading_day_monitor_review(
+            for_trade_date="20260713",
+            current_exchange_time="2026-07-13T09:56:13+08:00",
+            launchd_states={
+                label: {"loaded": True, "pid": None, "runs": 100, "last_exit_code": 0}
+                for label in FASTLANE_LABELS.values()
+            },
+            plist_summaries={
+                label: {
+                    "label": label,
+                    "start_interval": 5 if key == "n3_c1_n3t" else 3,
+                    "run_at_load": False,
+                    "keep_alive": False,
+                    "uses_activation_config": True,
+                    "has_placeholder": False,
+                    "has_secret_literal": False,
+                    "has_old_runner_ref": False,
+                }
+                for key, label in FASTLANE_LABELS.items()
+            },
+            recent_log_manifests={label: [] for label in FASTLANE_LABELS.values()},
+            chain_evidence={
+                "session_phase": "trading",
+                "n4_triggermatched": 12,
+                "n5_actioneligible": 12,
+                "n5_active_tracking": 12,
+                "n5_active_scope_artifacts": 1,
+                "n3_scoped_c1_artifacts": 12,
+                "n3t_c1_closed_metric_rows": 12,
+                "n5_actionexecuted": 0,
+                "closed_minute_available": True,
+                "n4_outbox_status_unchanged": True,
+                "n4_outbox_updated": False,
+                "n5_output_event_types": ["ActionEligible"],
+                "n3_consumed_only_explicit_active_scope_artifact": True,
+                "n3_scanned_n5_db": False,
+                "n3_full_market_fallback": False,
+                "n3t_lineage_ok": True,
+                "legacy_metric_used": False,
+                "old_n3_n4_labels_unchanged": True,
+                "n6_touched": False,
+            },
+        )
+
+        self.assertEqual(review["result"], "BLOCKED")
+        self.assertIn("n5_actionexecuted_not_advancing", review["blockers"])
+        self.assertNotIn("waiting_for_n5_actionexecuted_exact_cover", review["waiting_reasons"])
 
     def test_trading_day_monitor_bootstraps_n5_intake_when_n4_exists_but_n5_has_not_started(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
@@ -1320,6 +1583,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260703",
                         "n5_intake_max_events": 300,
                         "n5_active_scope_artifact_dir": str(scope_dir),
@@ -1382,6 +1646,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260703",
                         "n5_intake_max_events": 300,
                         "n5_active_scope_artifact_dir": str(scope_dir),
@@ -1724,6 +1989,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260706",
                         "n5_active_scope_artifact_dir": str(scope_dir),
                         "post_close_final_a_pass_done_marker_path": str(marker_path),
@@ -1807,6 +2073,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260706",
                         "post_close_final_a_pass_done_marker_path": str(marker_path),
                         "runtime_inputs": {
@@ -1910,6 +2177,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260706",
                         "post_close_final_a_pass_done_marker_path": str(marker_path),
                         "runtime_inputs": {
@@ -2199,6 +2467,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260706",
                         "n5_intake_max_events": 300,
                         "n5_active_scope_artifact_dir": str(scope_dir),
@@ -2286,6 +2555,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260706",
                         "n5_intake_max_events": 300,
                         "active_worker_policy_review_path": str(review_path),
@@ -2371,6 +2641,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260703",
                         "n5_intake_max_events": 300,
                         "active_worker_policy_review_path": str(review_path),
@@ -2457,6 +2728,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                                 "consumer_name": "n5_live_tracking_poller_v2_fastlane",
                             },
                         },
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "execute_policy": {
                             "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
                             "user_confirmed": True,
@@ -3906,7 +4178,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(output["source_metric_run_id"], metric_0955)
         self.assertEqual(
             planned_candidates,
-            [(source_0931, metric_0931), (source_0955, metric_0955)],
+            [(source_0955, metric_0955), (source_0931, metric_0931)],
         )
 
     def test_n5_executed_discovery_uses_exact_next_unchecked_metric_only(self) -> None:
@@ -4503,6 +4775,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
                         "for_trade_date": "20260703",
                         "active_worker_policy_review_path": str(review_path),
                         "n5_active_scope_artifact_dir": str(artifact_dir),
@@ -4611,6 +4884,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
     def test_post_close_readiness_rollover_writes_next_day_waiting_config_and_stable_pointer(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            N5_ACTION_INTAKE_ALLOWED_INPUT,
+            N5_ACTION_INTAKE_CONTRACT_HASH,
+            N5_ACTION_INTAKE_CONTRACT_VERSION,
+            N5_ACTION_INTAKE_FORBIDDEN,
             build_fastlane_active_launchd_plan,
             write_fastlane_post_close_readiness_config_rollover,
         )
@@ -4623,6 +4900,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "activation_config_path": "tmp/nonexistent_activation_config_20260706_v1.json",
                         "for_trade_date": "20260706",
                         "n5_intake_interval_seconds": 3,
                         "n3_c1_n3t_interval_seconds": 5,
@@ -4662,15 +4940,38 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 working_directory=WORKING_DIRECTORY,
                 activation_config_path=report["stable_activation_config_path"],
             )
+            base_sha256 = hashlib.sha256(base_path.read_bytes()).hexdigest()
+            dated_sha256 = hashlib.sha256(Path(report["dated_activation_config_path"]).read_bytes()).hexdigest()
+            stable_sha256 = hashlib.sha256(Path(report["stable_activation_config_path"]).read_bytes()).hexdigest()
 
         self.assertEqual(report["result"], "PASS")
         self.assertEqual(report["next_trade_date"], "20260707")
         self.assertEqual(dated_config["for_trade_date"], "20260707")
         self.assertEqual(stable_config["for_trade_date"], "20260707")
+        self.assertEqual(dated_config, stable_config)
+        self.assertNotIn("activation_config_path", dated_config)
+        intake = stable_config["lanes"]["n5_action_intake"]
+        self.assertEqual(intake["contract_version"], N5_ACTION_INTAKE_CONTRACT_VERSION)
+        self.assertEqual(intake["contract_hash"], N5_ACTION_INTAKE_CONTRACT_HASH)
+        self.assertEqual(intake["allowed_input"], N5_ACTION_INTAKE_ALLOWED_INPUT)
+        self.assertEqual(intake["forbidden"], N5_ACTION_INTAKE_FORBIDDEN)
+        self.assertNotIn("trigger_state_changed_true_consumption", intake["forbidden"])
         self.assertEqual(review["result"], "WAITING")
         self.assertFalse(review["active_worker_write_enabled_ready"])
         self.assertEqual(report["active_worker_policy_review"]["result"], "WAITING")
         self.assertTrue(report["stable_atomic_write"]["os_replace_used"])
+        self.assertEqual(report["base_activation_config_sha256"], base_sha256)
+        self.assertEqual(report["dated_activation_config_sha256"], dated_sha256)
+        self.assertEqual(report["stable_activation_config_sha256"], stable_sha256)
+        self.assertEqual(dated_sha256, stable_sha256)
+        self.assertTrue(report["stable_dated_content_equal"])
+        self.assertEqual(
+            report["n5_action_intake_contract"],
+            {
+                "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+                "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+            },
+        )
         self.assertFalse(report["boundary"]["db_written"])
         self.assertFalse(report["boundary"]["runtime_executed"])
         self.assertFalse(report["boundary"]["n4_outbox_updated"])
@@ -4711,6 +5012,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
     def test_write_enabled_activation_config_builder_adds_session_and_execute_policy(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            N5_ACTION_INTAKE_ALLOWED_INPUT,
+            N5_ACTION_INTAKE_CONTRACT_HASH,
+            N5_ACTION_INTAKE_CONTRACT_VERSION,
+            N5_ACTION_INTAKE_FORBIDDEN,
             build_fastlane_active_launchd_plan,
             build_fastlane_write_enabled_activation_config,
         )
@@ -4719,6 +5024,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             root = Path(tmpdir)
             base_config = {
                 "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                "activation_config_path": "tmp/nonexistent_activation_config_20260703_v1.json",
                 "for_trade_date": "20260703",
                 "n5_intake_interval_seconds": 3,
                 "n3_c1_n3t_interval_seconds": 5,
@@ -4729,6 +5035,19 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 "lock_dir": "tmp/fastlane_locks",
                 "log_dir": "tmp/fastlane_logs",
                 "dsn_env_policy": "runtime_env_required_no_secret_in_artifact",
+                "lanes": {
+                    "n5_action_intake": {
+                        "runner": "scripts/run_n5_live_tracking_poller_once.py",
+                        "allowed_input": {
+                            "n4_outbox_read_only": True,
+                            "trigger_matched": True,
+                            "trigger_state_changed_false": True,
+                        },
+                        "forbidden": {
+                            "trigger_state_changed_true_consumption": True,
+                        },
+                    }
+                },
             }
             active_worker_policy_review = {
                 "result": "PASS",
@@ -4767,9 +5086,18 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 working_directory=WORKING_DIRECTORY,
                 activation_config_path=str(config_path),
             )
+            config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
 
         encoded = json.dumps(config, ensure_ascii=False, sort_keys=True)
         self.assertEqual(config["artifact_type"], "n5_n3t_fastlane_activation_config_v1")
+        self.assertEqual(config["artifact_version"], 1)
+        self.assertNotIn("activation_config_path", config)
+        intake = config["lanes"]["n5_action_intake"]
+        self.assertEqual(intake["contract_version"], N5_ACTION_INTAKE_CONTRACT_VERSION)
+        self.assertEqual(intake["contract_hash"], N5_ACTION_INTAKE_CONTRACT_HASH)
+        self.assertEqual(intake["allowed_input"], N5_ACTION_INTAKE_ALLOWED_INPUT)
+        self.assertEqual(intake["forbidden"], N5_ACTION_INTAKE_FORBIDDEN)
+        self.assertEqual(intake["runner"], "scripts/run_n5_live_tracking_poller_once.py")
         self.assertEqual(config["session_context_policy"]["policy_type"], "fastlane_runtime_clock_session_context_v1")
         self.assertTrue(config["session_context_policy"]["trade_calendar_is_open"])
         self.assertTrue(config["session_context_policy"]["post_close_final_a_pass_available"])
@@ -4804,6 +5132,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertNotRegex(encoded, r"postgres(?:ql)?://")
         self.assertEqual(config["active_worker_policy_review_ref"]["bootstrap_mode"], "automatic_chain_verified")
         self.assertTrue(plan["automatic_worker_activation_ready"])
+        self.assertEqual(plan["n5_action_intake_contract"]["contract_hash"], N5_ACTION_INTAKE_CONTRACT_HASH)
+        self.assertEqual(plan["activation_config_sha256"], config_sha256)
         self.assertEqual(plan["activation_scope"], "full_chain_automatic_worker")
         self.assertEqual(
             plan["write_enabled_lane_readiness"],
@@ -4818,6 +5148,62 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertIn("--write-active-scope-artifact", plan["n5_intake"]["plist"]["ProgramArguments"])
         self.assertIn("--execute", plan["n3_c1_n3t"]["plist"]["ProgramArguments"])
         self.assertIn("--execute", plan["n5_executed"]["plist"]["ProgramArguments"])
+
+    def test_write_enabled_authorization_rejects_legacy_and_tampered_intake_contract(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            build_fastlane_write_enabled_activation_config,
+            load_fastlane_activation_config,
+            validate_fastlane_write_enabled_activation_authorization,
+        )
+
+        ready_review = {
+            "result": "PASS",
+            "for_trade_date": "20260703",
+            "active_worker_write_enabled_ready": True,
+            "automatic_chain_verified": True,
+            "manual_gate_required": False,
+            "chain_backlog": {"n5_intake_remaining": 0, "n3t_metric_remaining": 0},
+            "waiting_reasons": [],
+            "blockers": [],
+        }
+        legacy_config = {
+            "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+            "for_trade_date": "20260703",
+            "session_context_policy": {
+                "policy_type": "fastlane_runtime_clock_session_context_v1",
+                "trade_calendar_is_open": True,
+            },
+            "execute_policy": {
+                "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
+                "user_confirmed": True,
+                "n5_action_intake": {"execute": True},
+            },
+            "active_worker_policy_review_ref": ready_review,
+            "lanes": {
+                "n5_action_intake": {
+                    "allowed_input": {"trigger_matched": True},
+                    "forbidden": {"trigger_state_changed_true_consumption": True},
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_path = Path(tmpdir) / "legacy_activation_config.json"
+            legacy_path.write_text(json.dumps(legacy_config), encoding="utf-8")
+            loaded = load_fastlane_activation_config(legacy_path)
+
+        self.assertIn("trigger_state_changed_true_consumption", loaded["lanes"]["n5_action_intake"]["forbidden"])
+        with self.assertRaisesRegex(ValueError, "n5_intake_contract_version_mismatch"):
+            validate_fastlane_write_enabled_activation_authorization(loaded)
+
+        aligned = build_fastlane_write_enabled_activation_config(
+            {"artifact_type": "n5_n3t_fastlane_activation_config_v1", "for_trade_date": "20260703"},
+            trade_calendar_is_open=True,
+            active_worker_policy_review=ready_review,
+            enable_n5_intake=True,
+        )
+        aligned["lanes"]["n5_action_intake"]["contract_hash"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "n5_intake_contract_hash_mismatch"):
+            validate_fastlane_write_enabled_activation_authorization(aligned)
 
     def test_write_enabled_activation_config_builder_derives_metric_context_source_dir(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_write_enabled_activation_config
@@ -4961,6 +5347,14 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             preflight = build_fastlane_write_enabled_activation_config_full_chain_preflight(
                 activation_config_path=config_path,
             )
+            config["lanes"]["n5_action_intake"]["contract_hash"] = "f" * 64
+            config_path.write_text(
+                json.dumps(config, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            tampered_preflight = build_fastlane_write_enabled_activation_config_full_chain_preflight(
+                activation_config_path=config_path,
+            )
 
         self.assertEqual(preflight["result"], "PREFLIGHT_PASS")
         self.assertEqual(
@@ -4981,6 +5375,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(preflight["blockers"], [])
         self.assertFalse(preflight["forbidden_operation_proof"]["database_written_by_plan"])
         self.assertFalse(preflight["forbidden_operation_proof"]["launchd_loaded_or_started"])
+        self.assertEqual(tampered_preflight["result"], "BLOCKED")
+        self.assertEqual(tampered_preflight["blockers"], ["n5_intake_contract_hash_mismatch"])
 
     def test_write_enabled_activation_config_full_chain_preflight_blocks_missing_review_ref(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
@@ -5034,6 +5430,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
     def test_write_enabled_activation_config_full_chain_preflight_resolves_review_path(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            N5_ACTION_INTAKE_ALLOWED_INPUT,
+            N5_ACTION_INTAKE_CONTRACT_HASH,
+            N5_ACTION_INTAKE_CONTRACT_VERSION,
+            N5_ACTION_INTAKE_FORBIDDEN,
             build_fastlane_write_enabled_activation_config_full_chain_preflight,
         )
 
@@ -5067,6 +5467,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "artifact_version": 1,
                         "for_trade_date": "20260703",
                         "active_worker_policy_review_path": str(review_path),
                         "session_context_policy": {
@@ -5089,6 +5490,14 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "n3_c1_n3t_previous_day_context_artifact_dir": str(root / "previous_day_context"),
                         "n3_c1_n3t_previous_day_context_provider": "postgres_previous_day_raw_c1_context_v1",
                         "n3_c1_n3t_n3t_writer_adapter": "postgres_n3t_action_confirmation_metric_writer_v1",
+                        "lanes": {
+                            "n5_action_intake": {
+                                "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+                                "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+                                "allowed_input": N5_ACTION_INTAKE_ALLOWED_INPUT,
+                                "forbidden": N5_ACTION_INTAKE_FORBIDDEN,
+                            }
+                        },
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -6027,6 +6436,103 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertIn("waiting_for_n4_triggermatched", review["waiting_reasons"])
         self.assertEqual(review["blockers"], [])
 
+        stale_previous_trade_date_logs = {
+            label: [
+                {
+                    "for_trade_date": "20260705",
+                    "verdict": "N5_LIVE_TRACKING_EXECUTE_PASS",
+                    "session_phase": "post_close",
+                    "writes_enabled": True,
+                    "artifact_writes_enabled": True,
+                }
+            ]
+            for label in FASTLANE_LABELS.values()
+        }
+        stale_date_review = build_fastlane_trading_day_monitor_review(
+            for_trade_date="20260706",
+            current_exchange_time="2026-07-06T09:30:30+08:00",
+            launchd_states=launchd_states,
+            plist_summaries=plist_summaries,
+            recent_log_manifests=stale_previous_trade_date_logs,
+            stderr_snapshots={},
+            chain_evidence={
+                "session_phase": "trading",
+                "n4_triggermatched": 0,
+                "n5_actioneligible": 0,
+                "n5_active_tracking": 0,
+                "n5_active_scope_artifacts": 0,
+                "n3_scoped_c1_artifacts": 0,
+                "n3t_c1_closed_metric_rows": 0,
+                "n5_actionexecuted": 0,
+                "closed_minute_available": False,
+                "n4_outbox_status_unchanged": True,
+                "n4_outbox_updated": False,
+                "n5_output_event_types": [],
+                "n3_consumed_only_explicit_active_scope_artifact": True,
+                "n3_scanned_n5_db": False,
+                "n3_full_market_fallback": False,
+                "n3t_lineage_ok": True,
+                "legacy_metric_used": False,
+                "old_n3_n4_labels_unchanged": True,
+                "n6_touched": False,
+            },
+        )
+
+        self.assertEqual(stale_date_review["result"], "WAITING")
+        self.assertEqual(stale_date_review["blockers"], [])
+        self.assertEqual(
+            stale_date_review["ignored_stale_log_manifest_counts"],
+            {label: 1 for label in FASTLANE_LABELS.values()},
+        )
+
+        missing_date_logs = {
+            label: [
+                {
+                    "verdict": "N5_LIVE_TRACKING_EXECUTE_PASS",
+                    "session_phase": "post_close",
+                    "writes_enabled": True,
+                    "artifact_writes_enabled": True,
+                }
+            ]
+            for label in FASTLANE_LABELS.values()
+        }
+        missing_date_review = build_fastlane_trading_day_monitor_review(
+            for_trade_date="20260706",
+            current_exchange_time="2026-07-06T09:30:30+08:00",
+            launchd_states=launchd_states,
+            plist_summaries=plist_summaries,
+            recent_log_manifests=missing_date_logs,
+            stderr_snapshots={},
+            chain_evidence={
+                "session_phase": "trading",
+                "n4_triggermatched": 0,
+                "n5_actioneligible": 0,
+                "n5_active_tracking": 0,
+                "n5_active_scope_artifacts": 0,
+                "n3_scoped_c1_artifacts": 0,
+                "n3t_c1_closed_metric_rows": 0,
+                "n5_actionexecuted": 0,
+                "closed_minute_available": False,
+                "n4_outbox_status_unchanged": True,
+                "n4_outbox_updated": False,
+                "n5_output_event_types": [],
+                "n3_consumed_only_explicit_active_scope_artifact": True,
+                "n3_scanned_n5_db": False,
+                "n3_full_market_fallback": False,
+                "n3t_lineage_ok": True,
+                "legacy_metric_used": False,
+                "old_n3_n4_labels_unchanged": True,
+                "n6_touched": False,
+            },
+        )
+
+        self.assertEqual(missing_date_review["result"], "WAITING")
+        self.assertEqual(missing_date_review["blockers"], [])
+        self.assertEqual(
+            missing_date_review["ignored_stale_log_manifest_counts"],
+            {label: 1 for label in FASTLANE_LABELS.values()},
+        )
+
     def test_trading_day_monitor_blocks_runner_writes_outside_phase_policy(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
             FASTLANE_LABELS,
@@ -6076,6 +6582,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         }
         recent_log_manifests[FASTLANE_LABELS["n5_intake"]] = [
             {
+                "for_trade_date": "20260706",
                 "verdict": "N5_LIVE_TRACKING_EXECUTE_PASS",
                 "writes_enabled": True,
                 "artifact_writes_enabled": True,
@@ -8118,6 +8625,60 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(rows[0]["raw_source_label"], "13:01")
         self.assertEqual(rows[0]["amount"], 2231867)
 
+    def test_current_day_source_provider_final_close_requires_raw_1500(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260709",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:300144",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": "n4-match-300144",
+            "source_trigger_run_id": "n4-run-300144",
+            "scope_status": "active",
+            "required_physical_labels": ["14:59"],
+            "required_raw_source_labels": ["15:00"],
+        }
+        raw_1459 = {
+            "bar_time": "2026-07-09T14:59:00+08:00",
+            "open": 10,
+            "high": 10,
+            "low": 10,
+            "close": 10,
+            "amount": 0,
+        }
+        raw_1500 = {
+            "bar_time": "2026-07-09T15:00:00+08:00",
+            "open": 10,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.1,
+            "amount": 1000000,
+        }
+
+        missing_final_close = _current_day_source_rows_from_provider_rows(
+            provider_rows=[raw_1459],
+            plan_row=plan_row,
+            for_trade_date="20260709",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=[raw_1459, raw_1500],
+            plan_row=plan_row,
+            for_trade_date="20260709",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(missing_final_close, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "14:59")
+        self.assertEqual(rows[0]["raw_source_label"], "15:00")
+        self.assertEqual(rows[0]["amount"], 1000000)
+
     def test_current_day_artifact_rebuilds_stale_raw_physical_label_even_with_current_policy(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
 
@@ -8252,7 +8813,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
 
         targets = [candidate.get("target_hhmm") for candidate, _payload in candidates]
-        self.assertEqual(targets, ["0958"])
+        self.assertEqual(targets, ["0958", "0959", "1000"])
 
     def test_current_day_source_provider_maps_mootdx_raw_1300_as_physical_afternoon_open(self) -> None:
         from run_n3_c1_n3t_action_confirmation_fastlane_once import (
@@ -14994,7 +15555,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 self.assertEqual(len(planned_artifacts), 1)
                 planned = planned_artifacts[0]
                 self.assertEqual(planned["target_hhmm"], "0937")
-                self.assertEqual(planned["source_run_hash"], source_hash_0937)
+                self.assertEqual(planned["ref_source_run_hash"], source_hash_0937)
+                self.assertNotEqual(planned["source_run_hash"], source_hash_0937)
                 current_rows = _current_day_c1_rows_for_fixture(
                     trade_date="20260707",
                     scope_row=ref_scope_row,
@@ -15433,11 +15995,17 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             selected_staging_path = (
                 output_dir
                 / "current_day_staging"
-                / f"n3_c1_scoped_current_day_staging_v1_{captured['provider_namespaces'][0]}_fastlane.json"
+                / (
+                    "n3_c1_scoped_current_day_staging_v1_"
+                    + manifest["c1_active_a_minute_batch"]["selected_source_runs"][-1][
+                        "source_run_namespace"
+                    ]
+                    + "_fastlane.json"
+                )
             )
             selected_staging_exists = selected_staging_path.exists()
 
-        self.assertEqual(captured["provider_targets"], ["0951"])
+        self.assertEqual(captured["provider_targets"], ["0959"])
         self.assertTrue(selected_staging_exists, manifest)
         self.assertEqual(
             manifest["current_day_source_provider_result"]["selection_reason"],
@@ -15457,7 +16025,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
         self.assertEqual(
             manifest["c1_active_a_minute_batch"]["staging_artifact_written_count"],
-            1,
+            9,
         )
 
     def test_n3_runner_active_a_minute_batch_lunch_boundary_calls_provider_before_staging(self) -> None:
@@ -15704,7 +16272,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             def current_day_source_provider_adapter(*, args, planned_artifacts):
                 self.assertEqual(len(planned_artifacts), 1)
                 planned = planned_artifacts[0]
-                captured["namespace"] = planned["namespace_token"]
+                captured["namespace"] = planned["ref_source_run_namespace"]
                 current_rows = _current_day_c1_rows_for_fixture(
                     trade_date="20260708",
                     scope_row=ref,
@@ -16019,7 +16587,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertTrue(captured["provider_called"], second_manifest)
         self.assertEqual(captured["provider_targets"], ["1000"])
         self.assertEqual(
-            second_manifest["lane_results"]["c1_lane"]["mode"],
+            second_manifest["current_day_source_provider_result"]["mode"],
             "active_a_minute_batch_direct_provider",
         )
 
@@ -16235,18 +16803,21 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                     raise runner.FastlaneShellBlocked("deadline_must_not_interrupt_ready_staging_batch")
 
             args = argparse.Namespace(current_day_source_artifact_dir=str(source_dir))
-            materialized_count = runner._materialize_active_a_minute_batch_direct_staging_artifacts(
-                args=args,
-                active_scope_artifacts=selected,
-                output_dir=output_dir,
-                observed_at="2026-07-08T10:01:00+08:00",
-                deadline_check=deadline_check,
-                source_artifacts=source_artifacts,
-            )
+            with self.assertRaisesRegex(
+                runner.FastlaneShellBlocked,
+                "deadline_must_not_interrupt_ready_staging_batch",
+            ):
+                runner._materialize_active_a_minute_batch_direct_staging_artifacts(
+                    args=args,
+                    active_scope_artifacts=selected,
+                    output_dir=output_dir,
+                    observed_at="2026-07-08T10:01:00+08:00",
+                    deadline_check=deadline_check,
+                    source_artifacts=source_artifacts,
+                )
             staging_count = len(list((output_dir / "current_day_staging").glob("*.json")))
 
-        self.assertEqual(materialized_count, 2)
-        self.assertEqual(staging_count, 2)
+        self.assertEqual(staging_count, 1)
 
     def test_active_a_minute_batch_fetches_same_object_once_and_materializes_all_minutes(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -16385,10 +16956,110 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         self.assertEqual(summary["selected_object_count"], 1)
-        self.assertEqual(summary["selected_candidate_count"], 1)
-        self.assertEqual(provider_targets, ["0951"])
-        self.assertEqual(materialized_count, 1)
-        self.assertEqual(staging_targets, ["0951"])
+        self.assertEqual(summary["selected_candidate_count"], 3)
+        self.assertEqual(provider_targets, ["0953"])
+        self.assertEqual(materialized_count, 3)
+        self.assertEqual(staging_targets, ["0951", "0952", "0953"])
+
+    def test_active_a_minute_batch_87_objects_with_10_cursor_minutes_pulls_87_objects(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            source_dir = root / "current_day_source"
+            artifact_dir.mkdir()
+            source_dir.mkdir()
+            scope_rows = []
+            for index in range(87):
+                code = f"{index + 1:06d}"
+                identity_key = f"stock:SZ:{code}"
+                ref = {
+                    "for_trade_date": "20260709",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,M,W,D",
+                    "state_key": f"state-{code}",
+                    "source_trigger_event_id": f"event-{code}",
+                    "source_trigger_event_type": "TriggerMatched",
+                    "trigger_time": "2026-07-09T09:51:00+08:00",
+                    "first_confirmation_minute_label": "09:51",
+                    "next_unchecked_minute_label": "09:51",
+                    "scope_status": "active",
+                }
+                scope_rows.append(
+                    {
+                        "for_trade_date": "20260709",
+                        "asset_kind": "stock",
+                        "identity_key": identity_key,
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                )
+            payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260709",
+                "scope_granularity": "object",
+                "scope_count": 87,
+                "active_tracking_ref_count": 87,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": scope_rows,
+            }
+            scope_path = artifact_dir / "n5_active_scope_snapshot_v1_20260709_active_set_a.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            selected, summary = runner._select_active_a_minute_batch_direct_provider_artifacts(
+                active_scope_artifacts=[runner._active_scope_artifact_base_candidate(scope_path, payload)],
+                output_dir=output_dir,
+                source_dir=source_dir,
+                closed_hhmm="1000",
+                max_candidates=128,
+            )
+            captured = {"planned_count": 0}
+
+            def provider_adapter(*, args, planned_artifacts):
+                captured["planned_count"] = len(planned_artifacts)
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": False,
+                    "artifact_count": 0,
+                    "source_row_count": 0,
+                    "source_artifacts": [],
+                    "failed_candidate_count": 0,
+                    "market_data_pulled": False,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "writes_common_event_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            args = argparse.Namespace(
+                current_day_source_artifact_dir=str(source_dir),
+                current_day_source_provider_max_candidates_per_invocation=128,
+                c1_active_a_minute_batch_summary=summary,
+                fastlane_current_exchange_time="2026-07-09T10:01:00+08:00",
+            )
+            result = runner._run_active_a_minute_batch_direct_provider_adapter(
+                args=args,
+                active_scope_artifacts=selected,
+                output_dir=output_dir,
+                current_day_source_provider_adapter=provider_adapter,
+            )
+
+        self.assertEqual(summary["selected_object_count"], 87)
+        self.assertEqual(summary["selected_candidate_count"], 870)
+        self.assertEqual(captured["planned_count"], 87)
+        self.assertEqual(result["candidate_count"], 87)
 
     def test_active_a_minute_batch_limits_pending_minutes_per_object(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -16446,13 +17117,16 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         selected_targets = [str(item.get("target_hhmm") or "") for item in selected]
-        self.assertEqual(selected_targets, ["0951"])
+        self.assertEqual(
+            selected_targets,
+            ["0951", "0952", "0953", "0954", "0955", "0956", "0957", "0958", "0959", "1000"],
+        )
         self.assertEqual(
             summary["max_minutes_per_object"],
             runner.DEFAULT_ACTIVE_A_MINUTE_BATCH_MAX_MINUTES_PER_OBJECT,
         )
         self.assertEqual(summary["selected_object_count"], 1)
-        self.assertEqual(summary["selected_candidate_count"], 1)
+        self.assertEqual(summary["selected_candidate_count"], 10)
         self.assertEqual(summary["remaining_candidate_count"], 0)
         self.assertEqual(summary["reason"], runner.ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE)
 
@@ -16519,8 +17193,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                     max_candidates=1,
                 )
 
-        self.assertEqual(len(selected), 1)
-        self.assertEqual(source_lookup_count, 1)
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(source_lookup_count, 10)
         self.assertEqual(summary["remaining_candidate_count"], 0)
 
     def test_n3_runner_default_source_provider_chunk_processes_backlog_batch(self) -> None:
@@ -16528,7 +17202,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         args = argparse.Namespace(current_day_source_provider_max_candidates_per_invocation=0)
 
-        self.assertEqual(runner._current_day_source_provider_max_candidates(args), 128)
+        self.assertEqual(runner._current_day_source_provider_max_candidates(args), 256)
 
     def test_n3_runner_active_a_minute_batch_default_selects_full_active_a(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -17898,10 +18572,15 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 max_candidates=128,
             )
 
-        self.assertEqual(summary["selected_candidate_count"], 1)
-        self.assertEqual(summary["remaining_candidate_count"], 0)
-        self.assertEqual(summary["closed_minute_label"], "14:15")
+        self.assertEqual(summary["selected_candidate_count"], 10)
+        self.assertEqual(summary["remaining_candidate_count"], 35)
+        self.assertEqual(summary["closed_minute_label"], "multiple")
         self.assertEqual(selected[0]["target_hhmm"], "1415")
+        self.assertEqual(selected[-1]["target_hhmm"], "1424")
+        self.assertEqual(
+            [item["target_hhmm"] for item in summary["provider_fetch_artifacts"]],
+            ["1459"],
+        )
         self.assertIn("_1415_", selected[0]["source_run_namespace"])
 
     def test_active_a_minute_payload_candidates_do_not_expand_history_after_cursor(self) -> None:
@@ -17945,8 +18624,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             closed_hhmm="1459",
         )
 
-        self.assertEqual(len(candidates), 1)
+        self.assertEqual(len(candidates), 45)
         self.assertEqual(candidates[0][1]["target_hhmm"], "1415")
+        self.assertEqual(candidates[-1][1]["target_hhmm"], "1459")
 
     def test_active_a_minute_selector_uses_canonical_lunch_next_label(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -18198,7 +18878,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         self.assertEqual(closed_hhmm, "")
 
-    def test_n3_runner_post_close_does_not_call_c1_provider_for_active_a_hot_path(self) -> None:
+    def test_n3_runner_post_close_waits_for_final_a_close_grace_before_c1_provider(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -18258,7 +18938,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "n3_c1_n3t_artifact_dir": str(output_dir),
                         "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
                         "session_context": {
-                            "current_exchange_time": "2026-07-09T15:03:00+08:00",
+                            "current_exchange_time": "2026-07-09T15:00:59+08:00",
                             "trade_calendar_is_open": True,
                             "formal_trigger_matched_available": True,
                             "closed_minute_available": True,
@@ -18271,7 +18951,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
             def current_day_source_provider_adapter(*, args, planned_artifacts):
-                raise AssertionError("post_close must not call C1 provider")
+                raise AssertionError("post_close C1 provider must wait until 15:01")
 
             manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
                 ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
@@ -18279,10 +18959,356 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
-        self.assertEqual(manifest["reason"], "post_close_c1_provider_disabled")
+        self.assertEqual(manifest["reason"], "post_close_final_a_close_grace_waiting")
         self.assertEqual(
             manifest["lane_results"]["c1_lane"]["reason"],
-            "post_close_c1_provider_disabled",
+            "post_close_final_a_close_grace_waiting",
+        )
+        self.assertEqual(
+            manifest["post_close_final_a_close_grace_pull"]["target_physical_minute_label"],
+            "14:59",
+        )
+        self.assertEqual(
+            manifest["post_close_final_a_close_grace_pull"]["raw_source_close_label"],
+            "15:00",
+        )
+
+    def test_post_close_final_a_c1_uses_full_a_before_legacy_twelve_candidate_chunk(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            source_dir = root / "source"
+            scope_path = root / "n5_active_scope_snapshot_v1_20260709_final_a.json"
+            output_dir.mkdir()
+            source_dir.mkdir()
+            scope_rows = []
+            for sequence in range(20):
+                identity_key = f"stock:SZ:{sequence + 1:06d}"
+                ref = {
+                    "for_trade_date": "20260709",
+                    "state_key": f"state:{sequence}",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,Q,M,W,D",
+                    "scope_status": "active",
+                    "source_trigger_event_id": f"evt:{sequence}",
+                    "source_trigger_run_id": f"n4-run:{sequence}",
+                    "first_confirmation_minute_label": "14:59",
+                    "next_unchecked_minute_label": "14:59",
+                    "source_trigger_event_time": "2026-07-09T14:58:00+08:00",
+                    "trigger_time": "2026-07-09T14:58:00+08:00",
+                }
+                scope_rows.append(
+                    {
+                        "for_trade_date": "20260709",
+                        "asset_kind": "stock",
+                        "identity_key": identity_key,
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                )
+            scope_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260709",
+                        "action_run_id": "n5_live_tracking_20260709__active_set_a__fastlane_v1",
+                        "scope_granularity": "object",
+                        "scope_count": 20,
+                        "active_tracking_ref_count": 20,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": scope_rows,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            raw_scope = runner._discover_single_active_scope_artifact(
+                scope_path,
+                fanout=False,
+            )
+            ref_fanout = runner._discover_single_active_scope_artifact(
+                scope_path,
+                fanout=True,
+            )
+            n3t_chunk, n3t_summary = runner._select_post_close_final_a_pass_candidate_chunk(
+                active_scope_artifacts=ref_fanout,
+                output_dir=output_dir,
+                max_candidates=12,
+            )
+            c1_selected, c1_summary = (
+                runner._select_active_a_minute_batch_direct_provider_artifacts(
+                    active_scope_artifacts=raw_scope,
+                    output_dir=output_dir,
+                    source_dir=source_dir,
+                    closed_hhmm="1459",
+                    max_candidates=256,
+                )
+            )
+            close_grace_pull = {
+                "reason": "post_close_final_a_close_grace_pull_ready",
+                "external_pull_allowed": True,
+            }
+            runner._apply_post_close_final_a_full_scope_coverage(
+                close_grace_pull=close_grace_pull,
+                c1_summary=c1_summary,
+            )
+
+        self.assertEqual(len(n3t_chunk), 12)
+        self.assertEqual(n3t_summary["remaining_candidate_count"], 8)
+        self.assertEqual(len(c1_selected), 20)
+        self.assertEqual(c1_summary["pending_object_count"], 20)
+        self.assertEqual(c1_summary["selected_object_count"], 20)
+        self.assertEqual(c1_summary["remaining_object_count"], 0)
+        self.assertEqual(len(c1_summary["provider_fetch_artifacts"]), 20)
+        self.assertTrue(close_grace_pull["external_pull_allowed"])
+        self.assertEqual(close_grace_pull["full_scope_remaining_object_count"], 0)
+
+    def test_post_close_final_a_c1_rejects_partial_scope_before_external_pull(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        close_grace_pull = {
+            "reason": "post_close_final_a_close_grace_pull_ready",
+            "external_pull_allowed": True,
+        }
+        runner._apply_post_close_final_a_full_scope_coverage(
+            close_grace_pull=close_grace_pull,
+            c1_summary={
+                "pending_object_count": 300,
+                "selected_object_count": 256,
+                "remaining_object_count": 44,
+            },
+        )
+
+        self.assertFalse(close_grace_pull["external_pull_allowed"])
+        self.assertEqual(
+            close_grace_pull["reason"],
+            "post_close_final_a_scope_exceeds_single_pull_limit",
+        )
+        self.assertEqual(close_grace_pull["full_scope_remaining_object_count"], 44)
+
+    def test_post_close_final_a_attempt_marker_claim_is_process_atomic(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "attempt.json"
+            barrier = threading.Barrier(2)
+            outcomes: list[str] = []
+
+            def claim() -> None:
+                barrier.wait()
+                try:
+                    runner._claim_atomic_compact_json(
+                        marker_path,
+                        {"artifact_type": "claim-test", "status": "started"},
+                    )
+                except FileExistsError:
+                    outcomes.append("already_exists")
+                else:
+                    outcomes.append("claimed")
+
+            threads = [threading.Thread(target=claim) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            payload = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(sorted(outcomes), ["already_exists", "claimed"])
+        self.assertEqual(payload["status"], "started")
+
+    def test_n3_runner_post_close_final_a_uses_single_close_grace_pull(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            ref = {
+                "for_trade_date": "20260709",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300144",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_300144_1458",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash1458",
+                "first_confirmation_minute_label": "14:58",
+                "last_checked_minute_label": "14:58",
+                "next_unchecked_minute_label": "14:59",
+                "source_trigger_event_time": "2026-07-09T14:58:00+08:00",
+                "trigger_time": "2026-07-09T14:58:00+08:00",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260709",
+                "action_run_id": "n5_live_tracking_20260709__active_set_a__fastlane_v1",
+                "scope_granularity": "object",
+                "scope_count": 1,
+                "active_tracking_ref_count": 1,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260709",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:300144",
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260709_active_set_a.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260709",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "current_exchange_time": "2026-07-09T15:01:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                            "post_close_final_a_pass_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            provider_calls: list[dict[str, str]] = []
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                planned = dict(planned_artifacts[0])
+                provider_calls.append(
+                    {
+                        "target_hhmm": str(planned["target_hhmm"]),
+                        "namespace": str(planned["namespace_token"]),
+                    }
+                )
+                current_rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260709",
+                    scope_row=ref,
+                    through_label="14:59",
+                )
+                source_path = (
+                    current_source_dir
+                    / f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                )
+                source_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260709",
+                            "target_hhmm": planned["target_hhmm"],
+                            "target_minute_label": "14:59",
+                            "source_run_hash": planned["source_run_hash"],
+                            "source_run_namespace": planned["namespace_token"],
+                            "scope_count": 1,
+                            "closed_minute_rows": current_rows,
+                            "closed_minute_row_count": len(current_rows),
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "source_row_count": len(current_rows),
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "writes_common_event_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            first_manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            second_manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            self.assertTrue(provider_calls, (first_manifest, second_manifest))
+            marker_path = (
+                output_dir
+                / "post_close_final_a"
+                / "n3_c1_n3t_post_close_final_a_c1_pull_attempt_v1_20260709.json"
+            )
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            source_payload = json.loads(
+                next(current_source_dir.glob("n3_c1_scoped_current_day_source_rows_v1_*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            staging_paths = list((output_dir / "current_day_staging").glob("*.json"))
+
+        self.assertEqual(len(provider_calls), 1)
+        self.assertEqual(provider_calls[0]["target_hhmm"], "1459")
+        self.assertTrue(provider_calls[0]["namespace"].startswith("20260709_1459_"))
+        self.assertEqual(marker["status"], "completed")
+        self.assertEqual(marker["target_physical_minute_label"], "14:59")
+        self.assertEqual(marker["raw_source_close_label"], "15:00")
+        self.assertRegex(marker["selected_provider_scope_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(marker["full_scope_pending_object_count"], 1)
+        self.assertEqual(marker["full_scope_selected_object_count"], 1)
+        self.assertEqual(marker["full_scope_remaining_object_count"], 0)
+        self.assertFalse(marker["database_written"])
+        self.assertFalse(marker["writes_canonical_minute_bar_1m"])
+        self.assertFalse(marker["writes_n3_outbox"])
+        self.assertFalse(marker["touches_n4_n5_n6_outbox"])
+        self.assertTrue(staging_paths)
+        self.assertNotIn(
+            "15:00",
+            {row["physical_c1_label"] for row in source_payload["closed_minute_rows"]},
+        )
+        final_row = next(
+            row
+            for row in source_payload["closed_minute_rows"]
+            if row["physical_c1_label"] == "14:59"
+        )
+        self.assertEqual(final_row["raw_source_label"], "15:00")
+        self.assertIn(
+            second_manifest.get("reason"),
+            {
+                "c1_active_a_minute_batch_chunk_incomplete",
+                "c1_active_a_minute_batch_ready_for_n3t_lane",
+                "scoped_c1_n3t_executor_required",
+                "waiting_for_valid_c1_n3t_candidate",
+            },
         )
 
     def test_n3_runner_accepts_explicit_current_exchange_time_for_historical_active_a(self) -> None:
@@ -18457,6 +19483,182 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual({ref["condition_key"] for ref in refs}, {"BUY:Y,M,W,D", "BUY_HINT:Y,Q,M,W,D"})
         self.assertEqual(candidate_payload["active_tracking_ref_count"], 2)
         self.assertEqual(candidates[0]["target_hhmm"], "0951")
+
+    def test_object_scope_ref_fanout_compacts_legacy_trace_and_reuses_current_artifact(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        large_trace = {"blob": "n4-payload" * 4_000, "event_id": "n4-event-1"}
+        trigger_ref = {"blob": "trigger-ref" * 4_000, "event_id": "n4-event-1"}
+        state_ref = {"blob": "state-ref" * 4_000, "event_id": "n4-state-1"}
+        ref = {
+            "for_trade_date": "20260716",
+            "state_key": "stock:SZ:300144|buy|BUY:Y,M,W,D",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:300144",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,M,W,D",
+            "source_trigger_event_id": "n4-event-1",
+            "source_trigger_event_type": "TriggerMatched",
+            "source_trigger_run_id": "n4-run-1",
+            "source_trigger_event_time": "2026-07-16T09:31:00+08:00",
+            "latest_n4_event_time": "2026-07-16T09:31:00+08:00",
+            "trigger_time": "2026-07-16T09:31:00+08:00",
+            "first_confirmation_minute_label": "09:31",
+            "next_unchecked_minute_label": "09:31",
+            "source_run_hash": "sourcehash1",
+            "scope_status": "active",
+            "source_n4_payload": large_trace,
+            "action_entry_trigger_matched_ref": trigger_ref,
+            "latest_trigger_state_changed_ref": state_ref,
+        }
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "artifact_schema_version": "v1",
+            "producer_layer": "N5_action",
+            "for_trade_date": "20260716",
+            "scope_granularity": "object",
+            "scope_count": 1,
+            "active_tracking_ref_count": 1,
+            "scope_rows": [
+                {
+                    "for_trade_date": "20260716",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:300144",
+                    "scope_status": "active",
+                    "active_tracking_refs": [ref],
+                    "attention_event_refs": [],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "n5_active_scope_snapshot_v1.json"
+            output_dir = root / "out"
+            candidates = runner._active_scope_artifact_candidates(source_path, payload)
+            context = runner._infer_scope_context(candidates[0])
+            fanout_path = (
+                output_dir
+                / "active_scope_ref_fanout"
+                / f"n5_active_scope_snapshot_v1_{context['namespace_token']}_ref_fanout.json"
+            )
+            fanout_path.parent.mkdir(parents=True)
+            legacy_payload = {
+                **payload,
+                "target_hhmm": "0931",
+                "source_run_hash": context["source_run_hash"],
+                "source_run_namespace": context["namespace_token"],
+                "object_scope_ref_fanout": True,
+            }
+            fanout_path.write_text(
+                json.dumps(legacy_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            legacy_size = fanout_path.stat().st_size
+
+            first = runner._materialize_object_scope_ref_fanout_active_scope_artifacts(
+                active_scope_artifacts=candidates,
+                output_dir=output_dir,
+            )
+            compact_text = fanout_path.read_text(encoding="utf-8")
+            compact_payload = json.loads(compact_text)
+            compact_ref = compact_payload["scope_rows"][0]["active_tracking_refs"][0]
+            compact_mtime_ns = fanout_path.stat().st_mtime_ns
+            with patch.object(runner.os, "replace", wraps=runner.os.replace) as replace_mock:
+                second = runner._materialize_object_scope_ref_fanout_active_scope_artifacts(
+                    active_scope_artifacts=candidates,
+                    output_dir=output_dir,
+                )
+
+            self.assertEqual(first[0]["fanout_materialization_status"], "compacted")
+            self.assertEqual(second[0]["fanout_materialization_status"], "reused")
+            replace_mock.assert_not_called()
+            self.assertEqual(fanout_path.stat().st_mtime_ns, compact_mtime_ns)
+            self.assertEqual(compact_text.count("\n"), 1)
+            self.assertLess(fanout_path.stat().st_size, legacy_size // 10)
+            self.assertEqual(
+                compact_payload["fanout_payload_policy"],
+                runner.OBJECT_SCOPE_REF_FANOUT_PAYLOAD_POLICY,
+            )
+            self.assertEqual(compact_payload["source_object_scope_artifact_path"], str(source_path))
+            for field, value in (
+                ("source_n4_payload", large_trace),
+                ("action_entry_trigger_matched_ref", trigger_ref),
+                ("latest_trigger_state_changed_ref", state_ref),
+            ):
+                self.assertNotIn(field, compact_ref)
+                self.assertEqual(
+                    compact_ref[f"{field}_sha256"],
+                    runner._canonical_json_value_sha256(value),
+                )
+            self.assertEqual(compact_ref["source_trigger_event_id"], "n4-event-1")
+            self.assertEqual(compact_ref["next_unchecked_minute_label"], "09:31")
+
+    def test_object_scope_ref_fanout_large_active_set_has_bounded_compact_output(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        rows: list[dict[str, object]] = []
+        for index in range(600):
+            identity_key = f"stock:SZ:{300000 + index:06d}"
+            ref = {
+                "for_trade_date": "20260716",
+                "state_key": f"state-{index}",
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,M,W,D",
+                "source_trigger_event_id": f"n4-event-{index}",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_trigger_run_id": "n4-run-large-a",
+                "source_trigger_event_time": "2026-07-16T09:31:00+08:00",
+                "trigger_time": "2026-07-16T09:31:00+08:00",
+                "first_confirmation_minute_label": "09:31",
+                "next_unchecked_minute_label": "09:31",
+                "source_run_hash": f"source-{index}",
+                "scope_status": "active",
+                "source_n4_payload": {"blob": "x" * 4_096, "index": index},
+                "action_entry_trigger_matched_ref": {"blob": "y" * 4_096, "index": index},
+                "latest_trigger_state_changed_ref": {"blob": "z" * 4_096, "index": index},
+            }
+            rows.append(
+                {
+                    "for_trade_date": "20260716",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "scope_status": "active",
+                    "active_tracking_refs": [ref],
+                    "attention_event_refs": [],
+                }
+            )
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "for_trade_date": "20260716",
+            "scope_granularity": "object",
+            "scope_count": len(rows),
+            "active_tracking_ref_count": len(rows),
+            "scope_rows": rows,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidates = runner._active_scope_artifact_candidates(root / "active_a.json", payload)
+            materialized = runner._materialize_object_scope_ref_fanout_active_scope_artifacts(
+                active_scope_artifacts=candidates,
+                output_dir=root / "out",
+            )
+            fanout_dir = root / "out" / "active_scope_ref_fanout"
+            fanout_paths = list(fanout_dir.glob("*.json"))
+            total_size = sum(path.stat().st_size for path in fanout_paths)
+            temp_paths = list(fanout_dir.glob(".*.tmp"))
+
+        self.assertEqual(len(candidates), 600)
+        self.assertEqual(len(materialized), 600)
+        self.assertTrue(all(item["fanout_materialization_status"] == "written" for item in materialized))
+        self.assertEqual(len(fanout_paths), 600)
+        self.assertLess(total_size, 2_500_000)
+        self.assertEqual(temp_paths, [])
 
     def test_n3_runner_active_a_minute_batch_dedupes_refs_to_object_candidates(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -18670,7 +19872,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         args = argparse.Namespace(existing_staging_metric_context_max_candidates_per_invocation=0)
 
-        self.assertEqual(runner._existing_staging_metric_context_max_candidates(args), 64)
+        self.assertEqual(runner._existing_staging_metric_context_max_candidates(args), 2048)
 
     def test_n3_runner_default_active_scope_discovery_reads_latest_snapshot_only(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -18718,6 +19920,33 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(discovered[0]["path"], str(latest_path))
         self.assertEqual(discovered[0]["source_run_hash"], "newhash0950")
         self.assertEqual(discovered[0]["scope_count"], 2)
+
+    def test_n3t_latest_trigger_time_sort_value_prioritizes_new_active_ref(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        old_artifact = {
+            "scope_rows": [
+                {
+                    "active_tracking_refs": [
+                        {"trigger_time": "2026-07-10T09:31:00+08:00"},
+                    ]
+                }
+            ]
+        }
+        new_artifact = {
+            "scope_rows": [
+                {
+                    "active_tracking_refs": [
+                        {"trigger_time": "2026-07-10T13:07:00+08:00"},
+                    ]
+                }
+            ]
+        }
+
+        self.assertGreater(
+            runner._n3t_latest_trigger_time_sort_value(new_artifact),
+            runner._n3t_latest_trigger_time_sort_value(old_artifact),
+        )
 
     def test_n3_runner_source_provider_concurrency_defaults_and_caps(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -18814,12 +20043,15 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                     }
                 )
 
-            result = runner._build_current_day_source_rows_with_market_adapter(
-                args=argparse.Namespace(current_day_source_artifact_dir=str(source_dir)),
-                planned_artifacts=planned_artifacts,
-                market_adapter=FakeMarketAdapter(),
-                provider_name="mootdx_today_minute_adapter_v1",
-            )
+            # The provider worker must not depend on resolving a module-global
+            # timestamp helper inside the concurrent execution path.
+            with patch.object(runner, "_wall_clock_observed_at", None):
+                result = runner._build_current_day_source_rows_with_market_adapter(
+                    args=argparse.Namespace(current_day_source_artifact_dir=str(source_dir)),
+                    planned_artifacts=planned_artifacts,
+                    market_adapter=FakeMarketAdapter(),
+                    provider_name="mootdx_today_minute_adapter_v1",
+                )
             written_paths = sorted(source_dir.glob("*.json"))
 
         self.assertEqual(result["artifact_count"], 1)
@@ -18983,6 +20215,130 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(result["artifact_count"], 4)
         self.assertEqual(result["provider_concurrency"], 2)
         self.assertEqual(adapter.max_active, 2)
+
+    def test_current_day_source_provider_reuses_one_adapter_per_worker(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        adapters: list[object] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.fetch_count = 0
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                self.fetch_count += 1
+                time.sleep(0.02)
+                return [
+                    {
+                        "physical_c1_label": "09:51",
+                        "raw_source_label": "09:51",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        def adapter_factory():
+            adapter = FakeMarketAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = Path(tmpdir) / "current_day_source"
+            source_dir.mkdir()
+            planned_artifacts = []
+            for index in range(6):
+                code = f"300{index + 1:03d}"
+                source_run_hash = f"hash{code}"
+                planned_artifacts.append(
+                    {
+                        "for_trade_date": "20260708",
+                        "target_hhmm": "0951",
+                        "source_run_hash": source_run_hash,
+                        "namespace_token": f"20260708_0951_{source_run_hash}",
+                        "inline_pull_plan_payload": {
+                            "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                            "for_trade_date": "20260708",
+                            "target_hhmm": "0951",
+                            "source_run_hash": source_run_hash,
+                            "plan_status": "planned",
+                            "scope_count": 1,
+                            "full_market_fallback_used": False,
+                            "plan_rows": [
+                                {
+                                    "for_trade_date": "20260708",
+                                    "asset_kind": "stock",
+                                    "identity_key": f"stock:SZ:{code}",
+                                    "direction": "buy",
+                                    "signal_type": "B_BUY",
+                                    "condition_key": "BUY:Y,M,W,D",
+                                    "scope_status": "active",
+                                    "required_physical_labels": ["09:51"],
+                                    "required_raw_source_labels": ["09:51"],
+                                }
+                            ],
+                        },
+                    }
+                )
+
+            result = runner._build_current_day_source_rows_with_market_adapter(
+                args=argparse.Namespace(
+                    current_day_source_artifact_dir=str(source_dir),
+                    current_day_source_provider_concurrency=2,
+                ),
+                planned_artifacts=planned_artifacts,
+                market_adapter_factory=adapter_factory,
+                provider_name="mootdx_today_minute_adapter_v1",
+            )
+
+        self.assertEqual(result["artifact_count"], 6)
+        self.assertEqual(result["provider_adapter_instance_count"], len(adapters))
+        self.assertLessEqual(len(adapters), 2)
+        self.assertEqual(sum(adapter.fetch_count for adapter in adapters), 6)
+
+    def test_active_a_minute_provider_source_key_ignores_cursor_changes(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = {
+            "artifact_type": "n5_active_scope_snapshot_v1",
+            "for_trade_date": "20260710",
+            "scope_rows": [
+                {
+                    "for_trade_date": "20260710",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:300144",
+                    "active_tracking_refs": [
+                        {
+                            "for_trade_date": "20260710",
+                            "asset_kind": "stock",
+                            "identity_key": "stock:SZ:300144",
+                            "direction": "buy",
+                            "next_unchecked_minute_label": "10:01",
+                        }
+                    ],
+                }
+            ],
+        }
+        advanced = json.loads(json.dumps(payload))
+        advanced["scope_rows"][0]["active_tracking_refs"][0][
+            "next_unchecked_minute_label"
+        ] = "10:09"
+
+        self.assertEqual(
+            runner._active_a_minute_batch_provider_source_run_hash(
+                payload,
+                target_hhmm="1010",
+            ),
+            runner._active_a_minute_batch_provider_source_run_hash(
+                advanced,
+                target_hhmm="1010",
+            ),
+        )
 
     def test_lane_result_reports_pending_trigger_age_for_active_refs(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -19524,8 +20880,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             manifest["c1_active_a_minute_batch"]["reason"],
             "c1_active_a_minute_batch_chunk_incomplete",
         )
-        self.assertEqual(manifest["c1_active_a_minute_batch"]["remaining_candidate_count"], 6)
-        self.assertEqual(manifest["active_scope_artifact_count"], 1)
+        self.assertEqual(manifest["c1_active_a_minute_batch"]["remaining_candidate_count"], 12)
+        self.assertEqual(manifest["active_scope_artifact_count"], 2)
 
     def test_n3_runner_scoped_pull_plan_selection_reads_latest_persisted_fanout(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -19773,7 +21129,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 )
 
         self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
-        self.assertEqual(manifest["reason"], "c1_active_a_minute_batch_chunk_incomplete")
+        self.assertEqual(manifest["reason"], "waiting_for_valid_c1_n3t_candidate")
         self.assertEqual(manifest["current_day_source_provider_result"]["artifact_count"], 1)
         self.assertFalse(manifest["current_day_source_provider_result"]["database_written"])
         self.assertFalse(manifest["current_day_source_provider_result"]["writes_n3_outbox"])
@@ -19924,6 +21280,1087 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(first["payload"]["value"], 1)
         self.assertEqual(second["payload"]["value"], 2)
         self.assertEqual(load_count["count"], 2)
+
+    def test_fastlane_latency_fields_measure_closed_source_staging_and_proof(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        self.assertEqual(
+            runner._minute_closed_to_observed_ms(
+                for_trade_date="20260710",
+                target_hhmm="1000",
+                observed_at="2026-07-10T10:01:05+08:00",
+            ),
+            5000,
+        )
+        self.assertEqual(
+            runner._elapsed_ms(
+                started_at="2026-07-10T10:01:05+08:00",
+                completed_at="2026-07-10T10:01:05.250+08:00",
+            ),
+            250,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metric_path = Path(tmpdir) / "metric.json"
+            metric_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n3_c1_scoped_closed_1m_artifact_v1",
+                        "minute_closed_to_source_ms": 5000,
+                        "source_to_staging_ms": 250,
+                        "staging_to_proof_ms": 800,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = runner._n3t_writer_latency_summary(
+                [{"metric_context_artifact_path": str(metric_path)}]
+            )
+
+        self.assertEqual(summary["minute_closed_to_source_ms"], 5000)
+        self.assertEqual(summary["source_to_staging_ms"], 250)
+        self.assertEqual(summary["staging_to_proof_ms"], 800)
+        self.assertIsNone(summary["proof_to_action_ms"])
+
+    def test_n3t_writer_batches_rows_per_target_table(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.executemany_calls: list[tuple[str, list[object]]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def executemany(self, sql, values) -> None:
+                self.executemany_calls.append((sql, list(values)))
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        fake_connection = FakeConnection()
+        row = {column: None for column in runner.N3T_WRITER_INSERT_COLUMNS}
+        for column in (
+            "source_closed_minute_bar_ids",
+            "previous_day_minute_refs",
+            "blocked_reasons",
+            "trace_json",
+            "raw_json",
+        ):
+            row[column] = {}
+        rows_by_table = {
+            "stock_n3t_action_confirmation_metric": [dict(row), dict(row)],
+            "board_n3t_action_confirmation_metric": [dict(row)],
+        }
+
+        with patch("psycopg.connect", return_value=fake_connection), patch.object(
+            runner,
+            "_n3t_insert_rows_by_table",
+            return_value=rows_by_table,
+        ):
+            result = runner._write_n3t_metrics_to_postgres(
+                args=argparse.Namespace(),
+                n3t_writer_inputs=[{"metric_context_artifact_path": "fixture.json"}],
+            )
+
+        self.assertEqual(result["inserted_rows"], 3)
+        self.assertEqual(len(fake_connection.cursor_instance.executemany_calls), 2)
+        self.assertEqual(
+            [len(values) for _sql, values in fake_connection.cursor_instance.executemany_calls],
+            [2, 1],
+        )
+
+    def test_previous_day_context_batch_reuses_one_connection_for_candidates(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        fake_connection = FakeConnection()
+        connect_calls: list[object] = []
+        received_connections: list[object] = []
+
+        def fake_connect(*args, **kwargs):
+            connect_calls.append((args, kwargs))
+            return fake_connection
+
+        def fake_single_builder(**kwargs):
+            received_connections.append(kwargs["connection"])
+            return {
+                "adapter_type": "n3_c1_n3t_previous_day_context_provider_adapter_v1",
+                "artifact_written": True,
+                "artifact_count": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            runner,
+            "_build_previous_day_context_artifact_from_postgres",
+            side_effect=fake_single_builder,
+        ):
+            result = runner._build_previous_day_context_artifacts_batch_from_postgres(
+                args=argparse.Namespace(),
+                planned_artifacts=[
+                    {"target_hhmm": "1001", "namespace_token": "first"},
+                    {"target_hhmm": "1002", "namespace_token": "second"},
+                ],
+                previous_context_dir=Path(tmpdir),
+                provider_name="postgres_previous_day_raw_c1_context_v1",
+                dsn="postgresql://test-user:" + "test-pass" + "@localhost/testdb",
+                connect_factory=fake_connect,
+            )
+
+        self.assertEqual(len(connect_calls), 1)
+        self.assertEqual(received_connections, [fake_connection, fake_connection])
+        self.assertEqual(result["artifact_count"], 2)
+        self.assertEqual(result["candidate_blockers"], [])
+
+    def test_metric_context_builder_uses_batch_previous_context_before_single_provider(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "metric_source"
+            source_dir.mkdir()
+            active_scope_path = root / "scope.json"
+            active_scope_path.write_text(json.dumps({"artifact_type": "fixture"}), encoding="utf-8")
+            metric_path = root / "metric.json"
+            planned = {
+                "target_hhmm": "1001",
+                "source_run_hash": "source-hash",
+                "namespace_token": "source-namespace",
+                "input_active_scope_artifact_path": str(active_scope_path),
+                "staging_artifact_path": str(root / "staging.json"),
+                "metric_context_artifact_path": str(metric_path),
+            }
+            source = {
+                "path": str(source_dir / "source.json"),
+                "sha256": "source-sha",
+                "payload": {"metric_context_rows": []},
+            }
+            batch_calls: list[list[Mapping[str, Any]]] = []
+
+            def individual_provider(**_kwargs):
+                self.fail("batch provider must prevent per-candidate provider execution")
+
+            def batch_provider(*, args, planned_artifacts, previous_context_dir):
+                batch_calls.append(list(planned_artifacts))
+                return {
+                    "adapter_type": "n3_c1_n3t_previous_day_context_batch_provider_adapter_v1",
+                    "previous_day_context_provider_results": [],
+                    "candidate_blockers": [],
+                }
+
+            setattr(individual_provider, "batch_adapter", batch_provider)
+
+            def materialize(**kwargs):
+                self.assertIsNone(kwargs["previous_day_context_provider_adapter"])
+                return None
+
+            with patch.object(
+                runner,
+                "_find_metric_context_source_artifact",
+                side_effect=[None, None, source],
+            ), patch.object(
+                runner,
+                "_materialize_metric_context_source_artifact_from_previous_day_context",
+                side_effect=materialize,
+            ), patch.object(
+                runner,
+                "build_n3_c1_scoped_artifact_plan",
+                return_value={"artifact_status": "planned", "metric_context_status": "ready"},
+            ):
+                result = runner._build_metric_context_from_source_artifacts(
+                    args=argparse.Namespace(
+                        execute=True,
+                        output_dir=str(root),
+                        previous_day_context_artifact_dir=str(root / "previous_context"),
+                    ),
+                    planned_artifacts=[planned],
+                    source_dir=source_dir,
+                    previous_day_context_provider_adapter=individual_provider,
+                )
+
+        self.assertEqual(len(batch_calls), 1)
+        self.assertEqual(batch_calls[0], [planned])
+        self.assertEqual(result["artifact_count"], 1)
+        self.assertEqual(result["candidate_blockers"], [])
+
+    def test_metric_context_builder_rejects_batch_provider_write_side_effect(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "metric_source"
+            source_dir.mkdir()
+
+            def provider(**_kwargs):
+                self.fail("write-capable batch provider must be rejected before single provider use")
+
+            def batch_provider(*, args, planned_artifacts, previous_context_dir):
+                return {
+                    "adapter_type": "n3_c1_n3t_previous_day_context_batch_provider_adapter_v1",
+                    "database_written": True,
+                }
+
+            setattr(provider, "batch_adapter", batch_provider)
+            with self.assertRaisesRegex(
+                runner.FastlaneShellBlocked,
+                "previous_day_context_batch_provider_database_written_forbidden",
+            ):
+                runner._build_metric_context_from_source_artifacts(
+                    args=argparse.Namespace(
+                        execute=True,
+                        output_dir=str(root),
+                        previous_day_context_artifact_dir=str(root / "previous_context"),
+                    ),
+                    planned_artifacts=[
+                        {
+                            "target_hhmm": "1001",
+                            "staging_artifact_path": str(root / "staging.json"),
+                        }
+                    ],
+                    source_dir=source_dir,
+                    previous_day_context_provider_adapter=provider,
+                )
+
+    def test_policy_review_auto_refresh_decision_uses_session_window_and_preserves_pass(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            classify_fastlane_policy_review_auto_refresh,
+        )
+
+        before_open = classify_fastlane_policy_review_auto_refresh(
+            for_trade_date="20260714",
+            current_exchange_time="2026-07-14T09:24:59+08:00",
+        )
+        refresh = classify_fastlane_policy_review_auto_refresh(
+            for_trade_date="20260714",
+            current_exchange_time="2026-07-14T09:25:00+08:00",
+        )
+        already_pass = classify_fastlane_policy_review_auto_refresh(
+            for_trade_date="20260714",
+            current_exchange_time="2026-07-14T09:25:15+08:00",
+            existing_review=_auto_refresh_review(result="PASS"),
+        )
+        after_session = classify_fastlane_policy_review_auto_refresh(
+            for_trade_date="20260714",
+            current_exchange_time="2026-07-14T15:00:00+08:00",
+        )
+
+        self.assertEqual(before_open["action"], "NOOP_BEFORE_0925")
+        self.assertEqual(refresh["action"], "REFRESH_REQUIRED")
+        self.assertEqual(already_pass["action"], "NOOP_ALREADY_PASS")
+        self.assertEqual(after_session["action"], "NOOP_AFTER_SESSION")
+        self.assertFalse(before_open["business_runtime_execution_allowed"])
+
+    def test_policy_review_auto_refresh_atomic_write_rejects_invalid_without_replacement(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            write_fastlane_active_worker_policy_review_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            review_path = Path(tmpdir) / "active_worker_policy_review_current_latest.json"
+            review_path.write_text('{"sentinel":"keep"}\n', encoding="utf-8")
+            invalid = _auto_refresh_review(result="PASS")
+            invalid["for_trade_date"] = "20260715"
+
+            with self.assertRaisesRegex(ValueError, "for_trade_date mismatch"):
+                write_fastlane_active_worker_policy_review_atomic(
+                    policy_review_path=review_path,
+                    review=invalid,
+                    expected_for_trade_date="20260714",
+                )
+
+            self.assertEqual(json.loads(review_path.read_text(encoding="utf-8")), {"sentinel": "keep"})
+            self.assertFalse(review_path.with_name(review_path.name + ".tmp").exists())
+
+    def test_policy_review_auto_refresh_runner_is_pre0925_noop_without_queries_or_write(self) -> None:
+        from scripts.run_n5_n3t_policy_review_auto_refresh_once import (
+            run_policy_review_auto_refresh_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            activation_path, review_path = _write_auto_refresh_activation_config(Path(tmpdir))
+            review_path.parent.mkdir(parents=True)
+            review_path.write_text(
+                json.dumps(_auto_refresh_review(result="WAITING")),
+                encoding="utf-8",
+            )
+            before = review_path.read_bytes()
+
+            def forbidden_calendar_reader(**_kwargs):
+                self.fail("pre-09:25 noop must not query the calendar")
+
+            def forbidden_monitor_builder(_args):
+                self.fail("pre-09:25 noop must not build a monitor review")
+
+            report = run_policy_review_auto_refresh_once(
+                activation_config_path=activation_path,
+                current_exchange_time="2026-07-14T09:24:59+08:00",
+                launchagents_dir=Path(tmpdir),
+                log_dir=Path(tmpdir),
+                dsn="",
+                calendar_reader=forbidden_calendar_reader,
+                monitor_report_builder=forbidden_monitor_builder,
+            )
+
+            self.assertEqual(report["result"], "NOOP")
+            self.assertFalse(report["policy_review_written"])
+            self.assertEqual(review_path.read_bytes(), before)
+            self.assertFalse(report["boundary"]["read_only_db_queries"])
+
+    def test_policy_review_auto_refresh_runner_writes_canonical_pass_atomically(self) -> None:
+        import os
+
+        from scripts.run_n5_n3t_policy_review_auto_refresh_once import (
+            run_policy_review_auto_refresh_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            activation_path, review_path = _write_auto_refresh_activation_config(root)
+            review_path.parent.mkdir(parents=True)
+            review_path.write_text(
+                json.dumps(_auto_refresh_review(result="WAITING")),
+                encoding="utf-8",
+            )
+
+            def calendar_reader(*, dsn, for_trade_date):
+                self.assertEqual(dsn, "secret-not-serialized")
+                self.assertEqual(for_trade_date, "20260714")
+                return True
+
+            def monitor_builder(args):
+                self.assertEqual(args.for_trade_date, "20260714")
+                self.assertEqual(args.current_exchange_time, "2026-07-14T09:25:15+08:00")
+                self.assertEqual(args.dsn, "secret-not-serialized")
+                return {"active_worker_policy_review": _auto_refresh_review(result="PASS")}
+
+            real_replace = os.replace
+            with patch(
+                "ashare_v3.runtime_control.n5_n3t_fastlane.os.replace",
+                wraps=real_replace,
+            ) as replace_mock:
+                report = run_policy_review_auto_refresh_once(
+                    activation_config_path=activation_path,
+                    current_exchange_time="2026-07-14T09:25:15+08:00",
+                    launchagents_dir=root,
+                    log_dir=root,
+                    dsn="secret-not-serialized",
+                    calendar_reader=calendar_reader,
+                    monitor_report_builder=monitor_builder,
+                )
+
+            persisted = json.loads(review_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["result"], "PASS")
+        self.assertTrue(report["policy_review_written"])
+        self.assertEqual(report["decision"]["action"], "REFRESH_REQUIRED")
+        self.assertTrue(report["atomic_write"]["os_replace_used"])
+        self.assertTrue(persisted["active_worker_write_enabled_ready"])
+        self.assertEqual(persisted["activation_scope"], "idle_open_scheduler")
+        replace_mock.assert_called_once()
+        self.assertNotIn("secret-not-serialized", json.dumps(report, sort_keys=True))
+        self.assertFalse(report["boundary"]["db_written"])
+        self.assertFalse(report["boundary"]["business_runtime_executed"])
+        self.assertFalse(report["boundary"]["n4_outbox_updated"])
+        self.assertFalse(report["boundary"]["n5_outbox_updated"])
+
+    def test_policy_review_auto_refresh_runner_never_promotes_waiting_candidate(self) -> None:
+        from scripts.run_n5_n3t_policy_review_auto_refresh_once import (
+            run_policy_review_auto_refresh_once,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            activation_path, review_path = _write_auto_refresh_activation_config(root)
+
+            report = run_policy_review_auto_refresh_once(
+                activation_config_path=activation_path,
+                current_exchange_time="2026-07-14T09:25:15+08:00",
+                launchagents_dir=root,
+                log_dir=root,
+                dsn="not-serialized",
+                calendar_reader=lambda **_kwargs: True,
+                monitor_report_builder=lambda _args: {
+                    "active_worker_policy_review": _auto_refresh_review(result="WAITING")
+                },
+            )
+            persisted = json.loads(review_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["result"], "WAITING")
+        self.assertFalse(persisted["active_worker_write_enabled_ready"])
+        self.assertEqual(persisted["result"], "WAITING")
+
+    def test_policy_review_auto_refresh_launchd_plan_uses_stable_config_without_runtime_args(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL,
+            build_fastlane_policy_review_auto_refresh_launchd_plan,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            activation_path, _review_path = _write_auto_refresh_activation_config(Path(tmpdir))
+            plan = build_fastlane_policy_review_auto_refresh_launchd_plan(
+                working_directory=WORKING_DIRECTORY,
+                activation_config_path=str(activation_path),
+            )
+
+        plist = plan["plist"]
+        joined = " ".join(plist["ProgramArguments"])
+        self.assertEqual(plan["result"], "PLAN_ONLY_PASS")
+        self.assertEqual(plist["Label"], FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL)
+        self.assertEqual(plist["StartInterval"], 15)
+        self.assertFalse(plist["RunAtLoad"])
+        self.assertFalse(plist["KeepAlive"])
+        self.assertIn(str(activation_path), plist["ProgramArguments"])
+        self.assertIn("--scheduler-quiet", plist["ProgramArguments"])
+        self.assertNotIn("--current-exchange-time", joined)
+        self.assertNotIn("--dsn", joined)
+        self.assertNotIn("--execute", joined)
+        self.assertNotIn("launchctl", joined)
+        self.assertFalse(plan["boundary"]["launchd_installed_or_reloaded"])
+
+    def test_trading_day_monitor_resolves_trade_date_from_stable_activation_config(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import FASTLANE_LABELS
+        from scripts.review_n5_n3t_fastlane_trading_day_monitor import (
+            _read_plist_summaries,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            activation_path, _review_path = _write_auto_refresh_activation_config(root)
+            for label in FASTLANE_LABELS.values():
+                plist = {
+                    "Label": label,
+                    "ProgramArguments": [
+                        "/usr/bin/python3",
+                        "scripts/run_n5_live_tracking_poller_once.py",
+                        "--activation-config",
+                        str(activation_path),
+                        "--scheduler-quiet",
+                    ],
+                    "StartInterval": 5 if "c1-n3t" in label else 3,
+                    "RunAtLoad": False,
+                    "KeepAlive": False,
+                }
+                with (root / f"{label}.plist").open("wb") as handle:
+                    plistlib.dump(plist, handle)
+
+            summaries = _read_plist_summaries(root)
+
+        for label in FASTLANE_LABELS.values():
+            self.assertTrue(summaries[label]["activation_config_20260714"])
+            self.assertEqual(
+                summaries[label]["activation_config_artifact_type"],
+                "n5_n3t_fastlane_activation_config_v1",
+            )
+
+    def test_object_cursor_batch_selects_256_objects_and_4096_proofs(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=256)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0946",
+            )
+            selected, summary = runner._select_pending_object_cursor_batch_records(
+                records=records,
+                existing_proof_keys=set(),
+            )
+            provider_plans = runner._object_cursor_batch_provider_plans(
+                selected_records=selected,
+                observed_at="2026-07-17T09:47:05+08:00",
+            )
+
+        self.assertEqual(len(records), 4096)
+        self.assertEqual(len(selected), 4096)
+        self.assertEqual(summary["selected_object_count"], 256)
+        self.assertEqual(summary["remaining_candidate_count"], 0)
+        self.assertEqual(len(provider_plans), 256)
+        self.assertEqual({item["target_hhmm"] for item in provider_plans}, {"0946"})
+
+    def test_object_cursor_batch_buy_and_hint_share_one_object_minute_proof(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1, include_hint_ref=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0931",
+            )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["selected_ref_count"], 2)
+        refs = records[0]["payload"]["scope_rows"][0]["active_tracking_refs"]
+        self.assertEqual({ref["condition_key"] for ref in refs}, {"BUY:Y,Q,M,W,D", "BUY_HINT:M"})
+
+    def test_object_cursor_batch_provider_pulls_once_per_object_without_legacy_artifacts(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=256)
+        fetches: list[str] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                fetches.append(str(subscription["identity_key"]))
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": source_close_label_for_physical_start_label(
+                            for_trade_date,
+                            label,
+                        )["raw_source_label"],
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                    for label in ("09:31", "09:32")
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0932",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:33:05+08:00",
+            )
+            result = runner._build_current_day_source_rows_with_market_adapter(
+                args=argparse.Namespace(
+                    current_day_source_artifact_dir=str(root / "legacy_source"),
+                    current_day_source_provider_concurrency=4,
+                ),
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+            legacy_dir_exists = (root / "legacy_source").exists()
+
+        self.assertEqual(len(plans), 256)
+        self.assertEqual(len(fetches), 256)
+        self.assertEqual(len(set(fetches)), 256)
+        self.assertEqual(result["inline_payload_count"], 256)
+        self.assertEqual(result["artifact_count"], 0)
+        self.assertFalse(result["artifact_written"])
+        self.assertFalse(legacy_dir_exists)
+
+    def test_object_cursor_batch_previous_day_context_reuses_one_connection(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.sql: list[str] = []
+                self.calendar_query = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, _params) -> None:
+                self.sql.append(str(sql))
+                self.calendar_query = "common_trade_calendar" in str(sql)
+
+            def fetchone(self):
+                return {"prev_trade_date": "20260716"} if self.calendar_query else None
+
+            def fetchall(self):
+                if self.calendar_query:
+                    return []
+                return [
+                    {
+                        "bar_id": 1,
+                        "identity_key": "stock:SH:600000",
+                        "raw_source_label": "09:32",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        connections: list[FakeConnection] = []
+
+        def connect_factory(_dsn):
+            connection = FakeConnection()
+            connections.append(connection)
+            return connection
+
+        expected = {"stock": {("stock:SH:600000", "09:31"): {"09:32"}}}
+        with patch.object(runner, "_expected_previous_day_context_keys", return_value=expected):
+            result = runner._load_previous_day_context_rows_for_object_cursor_batch(
+                args=argparse.Namespace(),
+                staging_payloads=[
+                    {"for_trade_date": "20260717", "target_minute_label": "09:31"},
+                    {"for_trade_date": "20260717", "target_minute_label": "09:32"},
+                ],
+                provider_name="postgres_previous_day_raw_c1_context_v1",
+                dsn="postgresql://test",
+                connect_factory=connect_factory,
+            )
+
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(result["database_connection_count"], 1)
+        self.assertEqual(result["previous_day_minute_row_count"], 1)
+        self.assertEqual(result["missing_row_keys"], [])
+        market_queries = [sql for sql in connections[0].cursor_instance.sql if "minute_bar_1m" in sql]
+        self.assertEqual(len(market_queries), 1)
+
+    def test_object_cursor_batch_existing_proof_check_reads_only_n3t_tables(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.sql: list[str] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, _params) -> None:
+                self.sql.append(str(sql))
+
+            def fetchall(self):
+                return [
+                    {
+                        "projection_run_id": "n3t-run-1",
+                        "identity_key": "stock:SH:600000",
+                        "metric_minute_label": "09:31",
+                    }
+                ]
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        connection = FakeConnection()
+        existing = runner._load_existing_n3t_object_minute_proof_keys(
+            records=[
+                {
+                    "object_key": ("20260717", "stock", "stock:SH:600000", "buy"),
+                    "target_hhmm": "0931",
+                    "n3t_metric_run_id": "n3t-run-1",
+                }
+            ],
+            dsn="postgresql://test",
+            connect_factory=lambda _dsn: connection,
+        )
+
+        self.assertEqual(existing, {("n3t-run-1", "stock:SH:600000", "09:31")})
+        joined_sql = "\n".join(connection.cursor_instance.sql)
+        self.assertIn("stock_n3t_action_confirmation_metric", joined_sql)
+        self.assertNotIn("common_action_tracking_state", joined_sql)
+        self.assertNotIn("common_event_outbox", joined_sql)
+
+    def test_n3t_writer_accepts_inline_metric_context_without_file_read(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        scope_row = {
+            "for_trade_date": "20260717",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": "trigger-600000",
+            "source_trigger_run_id": "n4-run-600000",
+            "scope_status": "active",
+        }
+        metric_payload = {
+            "artifact_type": "n3_c1_scoped_closed_1m_artifact_v1",
+            "artifact_status": "planned",
+            "for_trade_date": "20260717",
+            "target_minute_label": "09:31",
+            "metric_context_status": "ready",
+            "scope_count": 1,
+            "scope_rows": [scope_row],
+            "metric_context_count": 1,
+            "metric_context_rows": [
+                {
+                    **scope_row,
+                    "source_closed_minute_bar_ids": ["current:600000:09:31"],
+                    "closed_minute_rows": [{"source_row_ref": "current:600000:09:31"}],
+                    "previous_day_minute_refs": ["previous:600000:09:31"],
+                    "metric_values": {
+                        **_n3t_boundary_metric_fields(),
+                        "current_price": 12,
+                        "previous_120m_body_high": 11,
+                        "previous_120m_body_low": 9,
+                        "previous_30m_body_high": 10.5,
+                        "previous_30m_body_low": 9.5,
+                        "previous_5m_body_high": 10.1,
+                        "previous_5m_body_low": 9.8,
+                        "previous_1m_body_high": 10,
+                        "previous_1m_body_low": 9.9,
+                        "current_1m_amount": 1000,
+                        "previous_1m_amount": 900,
+                        "current_5m_amount": 5000,
+                        "previous_5m_amount": 4500,
+                        "current_30m_closed_elapsed_amount": 30000,
+                        "previous_day_same_window_amount": 28000,
+                    },
+                }
+            ],
+            "full_market_fallback_used": False,
+            "database_written": False,
+            "writes_n3_outbox": False,
+        }
+        metric_hash = runner._json_payload_sha256(metric_payload)
+        with patch.object(
+            runner,
+            "_read_optional_json_artifact",
+            side_effect=AssertionError("inline writer must not read a metric file"),
+        ):
+            rows_by_table = runner._n3t_insert_rows_by_table(
+                args=argparse.Namespace(
+                    fastlane_current_exchange_time="2026-07-17T09:32:05+08:00"
+                ),
+                n3t_writer_inputs=[
+                    {
+                        "n3t_metric_run_id": (
+                            "n3t_action_confirmation_metric_20260717_until_0931__"
+                            "fastlane_sr_inlineproof01_raw_prevday_c1_amount_v1"
+                        ),
+                        "metric_context_artifact_path": "inline://object_cursor_batch/metric_context",
+                        "metric_context_artifact_sha256": metric_hash,
+                        "metric_context_payload": metric_payload,
+                    }
+                ],
+            )
+
+        self.assertEqual(list(rows_by_table), ["stock_n3t_action_confirmation_metric"])
+        self.assertEqual(len(rows_by_table["stock_n3t_action_confirmation_metric"]), 1)
+        self.assertTrue(rows_by_table["stock_n3t_action_confirmation_metric"][0]["metric_ready"])
+
+    def test_object_cursor_batch_runs_source_staging_and_proof_in_one_invocation(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        ref = dict(payload["scope_rows"][0]["active_tracking_refs"][0])
+        scope_row = {
+            "for_trade_date": "20260717",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": ref["source_trigger_event_id"],
+            "source_trigger_run_id": ref["source_trigger_run_id"],
+            "scope_status": "active",
+        }
+        current_rows = _current_day_c1_rows_for_fixture(
+            trade_date="20260717",
+            scope_row=scope_row,
+            through_label="09:32",
+        )
+        previous_rows = _previous_day_c1_rows_for_fixture(
+            trade_date="20260716",
+            identity_key="stock:SH:600000",
+        )
+        captured_writer_inputs: list[dict[str, object]] = []
+
+        def source_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline source adapter")
+
+        def source_inline_adapter(*, args, planned_artifacts):
+            artifacts = []
+            for plan in planned_artifacts:
+                source_payload = {
+                    "artifact_type": runner.CURRENT_DAY_SOURCE_ROWS_TYPE,
+                    "artifact_schema_version": "v1",
+                    "producer_layer": "N3_market_data",
+                    "for_trade_date": "20260717",
+                    "target_hhmm": plan["target_hhmm"],
+                    "source_run_hash": plan["source_run_hash"],
+                    "source_run_namespace": plan["namespace_token"],
+                    "source_provider": "fixture",
+                    "source_adapter": "fixture",
+                    "source_version": "test",
+                    "direction": "buy",
+                    "source_written_at": "2026-07-17T09:33:05+08:00",
+                    "minute_closed_to_source_ms": 5000,
+                    "scope_count": 1,
+                    "closed_minute_row_count": len(current_rows),
+                    "closed_minute_rows": current_rows,
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+                artifacts.append(
+                    {
+                        "path": "inline://object_cursor_batch/source",
+                        "sha256": runner._json_payload_sha256(source_payload),
+                        "payload": source_payload,
+                        "object_batch_key": plan["object_batch_key"],
+                    }
+                )
+            return {
+                "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                "inline_payload_count": len(artifacts),
+                "source_artifacts": artifacts,
+                "failed_candidate_count": 0,
+                "market_data_pulled": True,
+                "database_written": False,
+                "runtime_execute": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(source_adapter, "inline_batch_adapter", source_inline_adapter)
+
+        def previous_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline previous-day adapter")
+
+        def previous_inline_adapter(*, args, staging_payloads):
+            return {
+                "adapter_type": "n3_c1_n3t_previous_day_context_inline_batch_provider_adapter_v1",
+                "for_trade_date": "20260717",
+                "previous_trade_date": "20260716",
+                "previous_day_minute_row_count": len(previous_rows),
+                "previous_day_minute_rows": previous_rows,
+                "missing_row_keys": [],
+                "missing_object_keys": [],
+                "database_connection_count": 1,
+                "database_read": True,
+                "database_written": False,
+                "market_data_pulled": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(previous_adapter, "inline_rows_batch_adapter", previous_inline_adapter)
+
+        def writer_adapter(*, args, n3t_writer_inputs):
+            captured_writer_inputs.extend(dict(item) for item in n3t_writer_inputs)
+            return {
+                "adapter_type": "n3t_action_confirmation_metric_writer_adapter_v1",
+                "write_executed": True,
+                "db_write_executed": True,
+                "writes_enabled": True,
+                "source_basis": "N3T_C1_CLOSED",
+                "metric_role": "action_confirmation",
+                "proof_consumer": "N5",
+                "not_n5_final_proof": False,
+                "n3t_writer_input_count": len(n3t_writer_inputs),
+                "metric_plan_row_count": len(n3t_writer_inputs),
+                "inserted_rows": len(n3t_writer_inputs),
+                "target_table_counts": {
+                    "stock_n3t_action_confirmation_metric": len(n3t_writer_inputs)
+                },
+                "writes_common_event_outbox": False,
+                "writes_canonical_minute_bar_1m": False,
+                "touches_n4_n5_n6_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-17T09:33:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=0,
+            )
+            with patch.object(
+                runner,
+                "_load_existing_n3t_object_minute_proof_keys",
+                return_value=set(),
+            ):
+                manifest = runner._run_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="fixture-invocation",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    current_day_source_provider_adapter=source_adapter,
+                    previous_day_context_provider_adapter=previous_adapter,
+                    n3t_writer_adapter=writer_adapter,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 101.0,
+                )
+            batch_paths = list((root / "out" / "object_cursor_batch").glob("*.json"))
+            legacy_paths = list((root / "out").glob("current_day_staging/*.json"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(len(captured_writer_inputs), 2)
+        self.assertEqual(
+            [item["target_hhmm"] for item in captured_writer_inputs],
+            ["0931", "0932"],
+        )
+        self.assertEqual(manifest["object_cursor_batch"]["provider_call_count"], 1)
+        self.assertEqual(manifest["object_cursor_batch"]["proof_row_count"], 2)
+        self.assertEqual(len(batch_paths), 1)
+        self.assertEqual(legacy_paths, [])
+        self.assertTrue(manifest["boundary"]["pulls_market_data"])
+        self.assertTrue(manifest["boundary"]["writes_n3t_metric_db"])
+        self.assertFalse(manifest["boundary"]["scans_n5_db"])
+        self.assertFalse(manifest["boundary"]["writes_canonical_minute_bar_1m"])
+        self.assertFalse(manifest["boundary"]["touches_n4_n5_n6_outbox"])
+
+    def test_scheduler_object_cursor_hot_path_skips_legacy_fanout_discovery(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        raw_artifact = {"path": "latest-a.json", "for_trade_date": "20260717"}
+
+        def apply_config(args):
+            args.fastlane_session_phase = "trading"
+            args.fastlane_active_worker_decision = {}
+            args.fastlane_current_exchange_time = "2026-07-17T09:33:05+08:00"
+            args.output_dir = "/tmp/object-cursor-batch-test"
+
+        def discover(_args, *, fanout=True):
+            if fanout:
+                self.fail("scheduler hot path must not discover legacy fanout artifacts")
+            return [raw_artifact]
+
+        with patch.object(runner, "_apply_activation_config", side_effect=apply_config), patch.object(
+            runner,
+            "_validate_args",
+            return_value=None,
+        ), patch.object(
+            runner,
+            "_discover_requested_active_scope_artifacts",
+            side_effect=discover,
+        ), patch.object(
+            runner,
+            "_configured_current_day_source_provider_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_configured_previous_day_context_provider_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_configured_n3t_writer_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_run_object_cursor_batch_hot_path",
+            return_value={"verdict": "fixture-hot-path"},
+        ) as hot_path:
+            manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--execute", "--scheduler-quiet"]
+            )
+
+        self.assertEqual(manifest["verdict"], "fixture-hot-path")
+        self.assertEqual(hot_path.call_args.kwargs["active_scope_artifacts"], [raw_artifact])
+
+    def test_object_cursor_batch_deadline_reports_clean_remaining_progress(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        manifest = runner._object_cursor_batch_manifest(
+            args=argparse.Namespace(
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                max_runtime_seconds=30.0,
+            ),
+            invocation_id="deadline-fixture",
+            active_scope_artifacts=[{"path": "latest-a.json"}],
+            selection_summary={
+                "selected_object_count": 2,
+                "selected_candidate_count": 32,
+                "processed_candidate_count": 16,
+                "failed_candidate_count": 0,
+                "remaining_candidate_count": 16,
+            },
+            source_result={"inline_payload_count": 2, "market_data_pulled": True},
+            previous_result={"database_connection_count": 1},
+            writer_result={},
+            batch_artifacts=[],
+            failure_records=[],
+            reason="object_cursor_batch_chunk_incomplete",
+            started=100.0,
+            now_monotonic=lambda: 130.1,
+        )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["remaining_candidate_count"], 16)
+        self.assertEqual(
+            manifest["lane_results"]["n3t_lane"]["reason"],
+            "object_cursor_batch_chunk_incomplete",
+        )
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["hard_blocker_count"], 0)
 
 
 if __name__ == "__main__":

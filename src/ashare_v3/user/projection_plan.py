@@ -17,8 +17,10 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Protocol, Sequence
 
 import psycopg
@@ -61,6 +63,15 @@ CANONICAL_EVENT_TYPES = ("ActionEligible", "ActionBlocked", "ActionExecuted", "A
 LEGACY_EVENT_TYPES = ("ActionEvent", "HintEvent")
 ALLOWED_EVENT_TYPES = CANONICAL_EVENT_TYPES + LEGACY_EVENT_TYPES
 USER_MESSAGE_EVENT_TYPES = ("ActionEligible", "ActionExecuted")
+N5_PCT_CONTRACT_VERSION = "N5-trigger-action-pct-context-v1"
+N2_CONDITION_PROJECTION_CONTEXT_VERSION = "N2-condition-projection-context-v1"
+N5_PROJECTION_MESSAGE_CONTRACT_VERSION = "N5-n6-projection-message-v1"
+N5_PROJECTION_MESSAGE_CONTRACT_HASH = (
+    "572078a71de8cf00963f718bc812fbe3a1ae09652a3faaa8bb3774f51b882025"
+)
+N6_INDUSTRY_SOURCE_RELATION = "v_n6_board_membership_fact"
+N6_INDUSTRY_READ_ROLE = "n6_ui_readonly_role"
+PCT_DECIMAL_STRING_PATTERN = re.compile(r"^-?\d+\.\d{6}$")
 NON_INPUT_N5_EVENT_TYPES = ("RiskEvent", "PositionEvent")
 NOTIFICATION_SOURCE_BY_EVENT_TYPE = {
     "ActionEligible": "n5_action_eligible",
@@ -187,6 +198,18 @@ class ProjectionEvent:
     board_code: str | None
     board_name: str | None
     current_price: Any | None = None
+    board_identity_key: str | None = None
+    industry_status: str | None = None
+    industry_provenance: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class IndustryMembershipRow:
+    trade_date: str
+    stock_identity_key: str
+    board_identity_key: str
+    board_code: str
+    board_name: str | None
 
 
 @dataclass
@@ -221,6 +244,10 @@ class PostgresProjectionPlanRepository:
             default_profile = self._fetch_default_profile(cur, admin.user_id if admin else None)
             n5_outbox_counts = self._fetch_n5_outbox_counts(cur)
             events = self._fetch_projection_events(cur)
+            events = freeze_stock_industry_context(
+                events,
+                self._fetch_reviewed_industry_rows(cur, events),
+            )
         return ProjectionInputSnapshot(
             table_counts=table_counts,
             admin=admin,
@@ -315,10 +342,32 @@ class PostgresProjectionPlanRepository:
                    NULL::text AS source_display_table,
                    NULL::integer AS display_basis_id,
                    payload_json->>'source_condition_run_id' AS display_run_id,
-                   COALESCE(payload_json->>'code', split_part(identity_key, ':', 3)) AS code,
-                   payload_json->>'name' AS name,
-                   COALESCE(payload_json->>'target_price', payload_json->>'action_target_price') AS target_price,
-                   COALESCE(payload_json->>'expected_return_pct', payload_json->>'action_expected_return_pct') AS expected_return_pct,
+                   CASE
+                     WHEN payload_json ? 'projection_message_contract_version'
+                       THEN payload_json->>'asset_code'
+                     ELSE COALESCE(payload_json->>'code', split_part(identity_key, ':', 3))
+                   END AS code,
+                   CASE
+                     WHEN payload_json ? 'projection_message_contract_version'
+                       THEN payload_json->>'asset_name'
+                     ELSE payload_json->>'name'
+                   END AS name,
+                   CASE
+                     WHEN payload_json ? 'projection_message_contract_version'
+                       THEN CASE WHEN payload_json->>'direction' = 'sell'
+                         THEN payload_json->'condition_projection_context'->'fields'->>'sell_target_price'
+                         ELSE payload_json->'condition_projection_context'->'fields'->>'buy_target_price'
+                       END
+                     ELSE COALESCE(payload_json->>'target_price', payload_json->>'action_target_price')
+                   END AS target_price,
+                   CASE
+                     WHEN payload_json ? 'projection_message_contract_version'
+                       THEN CASE WHEN payload_json->>'direction' = 'sell'
+                         THEN payload_json->>'sell_expected_return_pct'
+                         ELSE payload_json->>'buy_expected_return_pct'
+                       END
+                     ELSE COALESCE(payload_json->>'expected_return_pct', payload_json->>'action_expected_return_pct')
+                   END AS expected_return_pct,
                    COALESCE(payload_json->>'board_code', payload_json->'trace_json'->>'board_code') AS board_code,
                    COALESCE(payload_json->>'board_name', payload_json->'trace_json'->>'board_name') AS board_name,
                    payload_json->>'current_price' AS current_price
@@ -332,6 +381,54 @@ class PostgresProjectionPlanRepository:
             (self.source_action_run_id, list(ALLOWED_EVENT_TYPES)),
         )
         return [ProjectionEvent(**dict(row)) for row in cur.fetchall()]
+
+    def _fetch_reviewed_industry_rows(
+        self,
+        cur: psycopg.Cursor[dict[str, Any]],
+        events: Sequence[ProjectionEvent],
+    ) -> list[IndustryMembershipRow]:
+        stock_identity_keys = sorted(
+            {
+                event.identity_key
+                for event in events
+                if is_projection_message_contract_event(event) and event.asset_kind == "stock"
+            }
+        )
+        source_trade_dates = sorted(
+            {
+                source_trade_date_for_event(event)
+                for event in events
+                if is_projection_message_contract_event(event)
+                and event.asset_kind == "stock"
+                and source_trade_date_for_event(event)
+            }
+        )
+        if (
+            not stock_identity_keys
+            or not source_trade_dates
+            or not self._table_exists(cur, N6_INDUSTRY_SOURCE_RELATION)
+        ):
+            return []
+        cur.execute(
+            """
+            SELECT DISTINCT trade_date,
+                            stock_identity_key,
+                            board_identity_key,
+                            board_code,
+                            board_name
+              FROM v_n6_board_membership_fact
+             WHERE stock_identity_key = ANY(%s)
+               AND trade_date = ANY(%s)
+               AND board_type = 'tdx_industry'
+             ORDER BY stock_identity_key,
+                      trade_date,
+                      board_identity_key,
+                      board_code,
+                      board_name
+            """,
+            (stock_identity_keys, source_trade_dates),
+        )
+        return [IndustryMembershipRow(**dict(row)) for row in cur.fetchall()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -506,7 +603,9 @@ def build_projection_report(
 ) -> dict[str, Any]:
     source_events = list(snapshot.events)
     filter_result = normalize_user_message_event_filter(user_message_event_filter)
-    user_message_events = events_for_user_message_filter(source_events, filter_result["event_types"])
+    filtered_user_message_events = events_for_user_message_filter(source_events, filter_result["event_types"])
+    pct_partition = partition_pct_projection_events(filtered_user_message_events)
+    user_message_events = pct_partition["projectable_events"]
     missing = summarize_missing_fields(source_events)
     event_summary = summarize_events(source_events)
     user_message_summary = build_user_message_summary(source_events, user_message_events, filter_result)
@@ -548,8 +647,14 @@ def build_projection_report(
         if item.get("severity") == "P2" and item.get("status") == "warning"
     ]
     result = "BLOCKED" if severity_counts["P0"] > 0 else "DRY_RUN_PASS"
-    if result == "DRY_RUN_PASS" and source_events and not user_message_events:
-        result = "PROJECTION_PASS_ZERO_USER_MESSAGES"
+    if result == "DRY_RUN_PASS" and pct_partition["event_quality_items"]:
+        result = "DRY_RUN_PASS_WITH_EVENT_P0_SKIPS"
+    if result != "BLOCKED" and source_events and not user_message_events:
+        result = (
+            "PROJECTION_PASS_ZERO_USER_MESSAGES_WITH_EVENT_P0_SKIPS"
+            if pct_partition["event_quality_items"]
+            else "PROJECTION_PASS_ZERO_USER_MESSAGES"
+        )
     report = build_base_report(
         result=result,
         blockers=sorted(set(blockers)),
@@ -574,6 +679,12 @@ def build_projection_report(
         "event_types": list(filter_result["event_types"]),
     }
     report["user_message_summary"] = user_message_summary
+    report["user_message_summary"]["event_contract_skipped_count"] = len(
+        pct_partition["blocked_events"]
+    )
+    report["event_projection_quality"] = build_event_projection_quality_summary(
+        pct_partition
+    )
     return report
 
 
@@ -942,6 +1053,334 @@ def events_for_user_message_filter(events: Sequence[ProjectionEvent], event_type
     return [event for event in events if event.event_type in allowed]
 
 
+def evaluate_pct_projection_contract(event: ProjectionEvent) -> dict[str, Any]:
+    payload = event.payload_json or {}
+    if event.event_type not in USER_MESSAGE_EVENT_TYPES:
+        return {"status": "not_applicable", "projectable": True, "reasons": []}
+    marker = payload.get("pct_contract_version")
+    if marker in (None, ""):
+        return {"status": "legacy", "projectable": True, "reasons": []}
+
+    reasons: list[str] = []
+    if str(marker) != N5_PCT_CONTRACT_VERSION:
+        reasons.append("pct_contract_version_mismatch")
+    else:
+        context_value = payload.get("condition_projection_context")
+        context = context_value if isinstance(context_value, Mapping) else {}
+        if "condition_projection_context" not in payload:
+            reasons.append("condition_projection_context_missing")
+        elif not isinstance(context_value, Mapping):
+            reasons.append("condition_projection_context_not_object")
+        if str(payload.get("condition_projection_context_status") or "") != "ready":
+            reasons.append("condition_projection_context_status_not_ready")
+        context_trace = payload.get("condition_projection_context_trace")
+        if not isinstance(context_trace, Mapping) or str(context_trace.get("status") or "") != "ready":
+            reasons.append("condition_projection_context_trace_not_ready")
+        if isinstance(context_value, Mapping):
+            if str(context.get("contract_version") or "") != N2_CONDITION_PROJECTION_CONTEXT_VERSION:
+                reasons.append("condition_projection_contract_version_mismatch")
+            if str(context.get("source_layer") or "") != "N2_condition":
+                reasons.append("condition_projection_source_layer_mismatch")
+            if str(context.get("asset_kind") or "") != event.asset_kind:
+                reasons.append("condition_projection_asset_kind_mismatch")
+            if str(context.get("identity_key") or "") != event.identity_key:
+                reasons.append("condition_projection_identity_key_mismatch")
+            if str(context.get("for_trade_date") or "") != event.trade_date:
+                reasons.append("condition_projection_for_trade_date_mismatch")
+            if str(context.get("status") or "") != "ready":
+                reasons.append("condition_projection_source_status_not_ready")
+            if not condition_projection_context_hash_valid(context):
+                reasons.append("condition_projection_context_hash_invalid")
+            fields = context.get("fields")
+            if not isinstance(fields, Mapping):
+                reasons.append("condition_projection_fields_missing")
+                fields = {}
+            if not str(fields.get("name") or "").strip():
+                reasons.append("condition_projection_name_missing")
+            if not canonical_positive_decimal_string(fields.get("close")):
+                reasons.append("condition_projection_close_invalid")
+        if not positive_decimal_value(payload.get("trigger_price")):
+            reasons.append("trigger_price_invalid")
+        if str(payload.get("trigger_pct_status") or "") != "ready":
+            reasons.append("trigger_pct_status_not_ready")
+        if not fixed_six_decimal_string(payload.get("trigger_pct")):
+            reasons.append("trigger_pct_format_invalid")
+        if event.event_type == "ActionExecuted":
+            if not positive_decimal_value(payload.get("action_price")):
+                reasons.append("action_price_invalid")
+            if str(payload.get("action_pct_status") or "") != "ready":
+                reasons.append("action_pct_status_not_ready")
+            if not fixed_six_decimal_string(payload.get("action_pct")):
+                reasons.append("action_pct_format_invalid")
+
+    return {
+        "status": "ready" if not reasons else "not_ready",
+        "projectable": not reasons,
+        "reasons": reasons,
+    }
+
+
+def is_projection_message_contract_event(event: ProjectionEvent) -> bool:
+    return "projection_message_contract_version" in (event.payload_json or {})
+
+
+def source_trade_date_for_event(event: ProjectionEvent) -> str | None:
+    context = (event.payload_json or {}).get("condition_projection_context")
+    if not isinstance(context, Mapping):
+        return None
+    value = str(context.get("source_trade_date") or "").strip()
+    return value or None
+
+
+def freeze_stock_industry_context(
+    events: Sequence[ProjectionEvent],
+    membership_rows: Sequence[IndustryMembershipRow],
+) -> list[ProjectionEvent]:
+    indexed: dict[
+        tuple[str, str],
+        dict[tuple[str, str, str | None], IndustryMembershipRow],
+    ] = {}
+    for row in membership_rows:
+        mappings = indexed.setdefault((row.stock_identity_key, row.trade_date), {})
+        mappings[(row.board_identity_key, row.board_code, row.board_name)] = row
+
+    frozen: list[ProjectionEvent] = []
+    for event in events:
+        if not is_projection_message_contract_event(event):
+            frozen.append(event)
+            continue
+        if event.asset_kind != "stock":
+            event.industry_status = "not_applicable"
+            event.industry_provenance = None
+            frozen.append(event)
+            continue
+
+        source_trade_date = source_trade_date_for_event(event)
+        matches = list(indexed.get((event.identity_key, source_trade_date or ""), {}).values())
+        event.board_identity_key = None
+        event.board_code = None
+        event.board_name = None
+        provenance = {
+            "source_relation": N6_INDUSTRY_SOURCE_RELATION,
+            "read_role": N6_INDUSTRY_READ_ROLE,
+            "source_trade_date": source_trade_date,
+            "board_type": "tdx_industry",
+            "distinct_mapping_count": len(matches),
+        }
+        if len(matches) == 1:
+            row = matches[0]
+            event.board_identity_key = row.board_identity_key
+            event.board_code = row.board_code
+            event.board_name = row.board_name
+            event.industry_status = "ready"
+            event.industry_provenance = {
+                **provenance,
+                "board_identity_key": row.board_identity_key,
+                "board_code": row.board_code,
+                "board_name": row.board_name,
+            }
+        else:
+            event.industry_status = "not_ready"
+            event.industry_provenance = {
+                **provenance,
+                "reason": (
+                    "industry_membership_missing"
+                    if not matches
+                    else "industry_membership_ambiguous"
+                ),
+            }
+        frozen.append(event)
+    return frozen
+
+
+def evaluate_projection_message_contract(event: ProjectionEvent) -> dict[str, Any]:
+    pct_evaluation = evaluate_pct_projection_contract(event)
+    if not is_projection_message_contract_event(event):
+        return pct_evaluation
+
+    payload = event.payload_json or {}
+    reasons = list(pct_evaluation["reasons"])
+    if event.event_type not in USER_MESSAGE_EVENT_TYPES:
+        reasons.append("projection_message_event_type_not_supported")
+    if payload.get("pct_contract_version") != N5_PCT_CONTRACT_VERSION:
+        reasons.append("pct_contract_version_mismatch")
+    if payload.get("projection_message_contract_version") != N5_PROJECTION_MESSAGE_CONTRACT_VERSION:
+        reasons.append("projection_message_contract_version_mismatch")
+    if payload.get("projection_message_contract_hash") != N5_PROJECTION_MESSAGE_CONTRACT_HASH:
+        reasons.append("projection_message_contract_hash_mismatch")
+    if payload.get("projection_message_status") != "ready":
+        reasons.append("projection_message_status_not_ready")
+    not_ready_reasons = payload.get("projection_message_not_ready_reasons")
+    if not isinstance(not_ready_reasons, list):
+        reasons.append("projection_message_not_ready_reasons_invalid")
+    elif not_ready_reasons:
+        reasons.append("projection_message_not_ready_reasons_present")
+    if not str(payload.get("asset_code") or "").strip():
+        reasons.append("projection_message_asset_code_missing")
+    if not str(payload.get("asset_name") or "").strip():
+        reasons.append("projection_message_asset_name_missing")
+    if event.asset_kind != "stock" and ("score" in payload or "pe_core" in payload):
+        reasons.append("projection_message_non_stock_score_or_pe_core_present")
+    return {
+        "status": "ready" if not reasons else "not_ready",
+        "projectable": not reasons,
+        "reasons": sorted(set(reasons)),
+    }
+
+
+def partition_pct_projection_events(events: Sequence[ProjectionEvent]) -> dict[str, Any]:
+    projectable_events: list[ProjectionEvent] = []
+    blocked_events: list[ProjectionEvent] = []
+    event_quality_items: list[dict[str, Any]] = []
+    for event in events:
+        evaluation = evaluate_projection_message_contract(event)
+        if evaluation["projectable"]:
+            projectable_events.append(event)
+            continue
+        blocked_events.append(event)
+        projection_message = is_projection_message_contract_event(event)
+        item = quality_item(
+            "P0",
+            "failed",
+            (
+                f"projection_message_contract_invalid:{event.event_id}"
+                if projection_message
+                else f"condition_action_pct_projection_contract_invalid:{event.event_id}"
+            ),
+            "Invalid N5 projection contract blocks only this N6 user projection event",
+            expected=(
+                N5_PROJECTION_MESSAGE_CONTRACT_VERSION
+                if projection_message
+                else N5_PCT_CONTRACT_VERSION
+            ),
+            actual=str(
+                (event.payload_json or {}).get(
+                    "projection_message_contract_version"
+                    if projection_message
+                    else "pct_contract_version"
+                )
+                or "missing"
+            ),
+            details={
+                "quality_scope": "source_event",
+                "source_event_id": event.event_id,
+                "source_event_type": event.event_type,
+                "reasons": list(evaluation["reasons"]),
+                "n5_outbox_mutation": False,
+                "upstream_fact_mutation": False,
+            },
+        )
+        event_quality_items.append(item)
+    return {
+        "projectable_events": projectable_events,
+        "blocked_events": blocked_events,
+        "event_quality_items": event_quality_items,
+    }
+
+
+def build_event_projection_quality_summary(partition: Mapping[str, Any]) -> dict[str, Any]:
+    items = [dict(item) for item in partition.get("event_quality_items") or []]
+    return {
+        "quality_scope": "source_event",
+        "p0_count": len(items),
+        "skipped_event_count": len(partition.get("blocked_events") or []),
+        "projectable_event_count": len(partition.get("projectable_events") or []),
+        "run_blocking": False,
+        "items": items,
+    }
+
+
+def pct_projection_payload_fields(event: ProjectionEvent) -> dict[str, Any]:
+    payload = event.payload_json or {}
+    if (
+        event.event_type not in USER_MESSAGE_EVENT_TYPES
+        or payload.get("pct_contract_version") != N5_PCT_CONTRACT_VERSION
+    ):
+        return {}
+    fields = {
+        "pct_contract_version": payload.get("pct_contract_version"),
+        "condition_projection_context": payload.get("condition_projection_context"),
+        "condition_projection_context_status": payload.get("condition_projection_context_status"),
+        "condition_projection_context_trace": payload.get("condition_projection_context_trace"),
+        "trigger_price": payload.get("trigger_price"),
+        "trigger_pct": payload.get("trigger_pct"),
+        "trigger_pct_status": payload.get("trigger_pct_status"),
+        "action_price": payload.get("action_price"),
+        "action_pct": payload.get("action_pct"),
+        "action_pct_status": payload.get("action_pct_status"),
+    }
+    if is_projection_message_contract_event(event):
+        fields.update(
+            {
+                "projection_message_contract_version": payload.get("projection_message_contract_version"),
+                "projection_message_contract_hash": payload.get("projection_message_contract_hash"),
+                "projection_message_status": payload.get("projection_message_status"),
+                "projection_message_not_ready_reasons": payload.get("projection_message_not_ready_reasons"),
+                "asset_code": payload.get("asset_code"),
+                "asset_name": payload.get("asset_name"),
+                "buy_expected_return_pct": payload.get("buy_expected_return_pct"),
+                "sell_expected_return_pct": payload.get("sell_expected_return_pct"),
+                "up_secondary_expected_return_pct": payload.get("up_secondary_expected_return_pct"),
+                "up_reference_period": payload.get("up_reference_period"),
+                "down_reference_period": payload.get("down_reference_period"),
+                "primary_trigger_period": payload.get("primary_trigger_period"),
+                "all_trigger_periods": payload.get("all_trigger_periods"),
+                "score": payload.get("score"),
+                "pe_core": payload.get("pe_core"),
+                "industry_status": event.industry_status,
+                "industry_provenance": event.industry_provenance,
+            }
+        )
+    return fields
+
+
+def projection_code_for_event(event: ProjectionEvent) -> str | None:
+    if is_projection_message_contract_event(event):
+        value = (event.payload_json or {}).get("asset_code")
+        return str(value).strip() if value not in (None, "") else None
+    return event.code or event.identity_key
+
+
+def projection_name_for_event(event: ProjectionEvent) -> str | None:
+    if is_projection_message_contract_event(event):
+        value = (event.payload_json or {}).get("asset_name")
+        return str(value).strip() if value not in (None, "") else None
+    return event.name or event.identity_key
+
+
+def condition_projection_context_hash_valid(context: Mapping[str, Any]) -> bool:
+    actual = str(context.get("context_hash") or "")
+    payload = {str(key): value for key, value in context.items() if key != "context_hash"}
+    expected = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    return bool(actual) and actual == expected
+
+
+def canonical_positive_decimal_string(value: Any) -> bool:
+    return isinstance(value, str) and positive_decimal_value(value)
+
+
+def positive_decimal_value(value: Any) -> bool:
+    if value in (None, "") or isinstance(value, bool):
+        return False
+    try:
+        numeric = Decimal(str(value))
+    except (ValueError, ArithmeticError):
+        return False
+    return numeric.is_finite() and numeric > 0
+
+
+def fixed_six_decimal_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(PCT_DECIMAL_STRING_PATTERN.fullmatch(value))
+
+
 def build_user_message_summary(
     source_events: Sequence[ProjectionEvent],
     user_message_events: Sequence[ProjectionEvent],
@@ -974,13 +1413,14 @@ def build_sample_plans(
     for event in list(events)[: max(0, sample_limit)]:
         direction = str(event.payload_json.get("direction") or "")
         signal_type = str(event.payload_json.get("signal_type") or "")
-        code = event.code or event.identity_key
-        name = event.name or event.identity_key
+        code = projection_code_for_event(event)
+        name = projection_name_for_event(event)
         card_type = card_type_for_event(event)
         card_status = card_status_for_event(event)
         action_state = action_state_for_event(event)
         action_mark = action_mark_for_event(event)
         projection_policy = projection_policy_for_event(event)
+        pct_fields = pct_projection_payload_fields(event)
         title = f"{name} {signal_type}".strip()
         output.append(
             {
@@ -1022,6 +1462,7 @@ def build_sample_plans(
                     "source_condition_display_basis_id": event.display_basis_id,
                     "source_condition_display_run_id": event.display_run_id,
                     "projection_status": "visible",
+                    **pct_fields,
                 },
                 "card": {
                     "user_id": user_id,
@@ -1054,6 +1495,7 @@ def build_sample_plans(
                     "decision_buttons": False if event.event_type == "ActionBlocked" else None,
                     "sim_allowed": False,
                     "real_trade_allowed": False,
+                    **pct_fields,
                 },
                 "notification": {
                     "user_id": user_id,

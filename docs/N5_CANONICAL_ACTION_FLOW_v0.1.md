@@ -94,6 +94,141 @@ TriggerStateChanged
 
 When `trigger_live=false`, N5 must stop continuing 120m / 30m / 5m / 1m confirmation for that trigger state. It must not delete historical action facts, action events, user projection, TTS, sim, or audit evidence.
 
+Repeated delivery of the same `TriggerMatched` event is idempotent. After a
+`TriggerStateChanged(trigger_live=false)` expires the current tracking episode,
+a later distinct `TriggerMatched` event for the same action grain starts a new
+episode and emits a new `ActionEligible` keyed by that source trigger event.
+This episode boundary must be identical whether the events arrive in one
+planner batch or in separate invocations.
+
+### 2.1 Condition Projection Context And Price Percentages
+
+New N5 live-tracking events use the additive contract marker:
+
+```text
+pct_contract_version=N5-trigger-action-pct-context-v1
+```
+
+`ActionEligible` freezes its price and N2 condition context from the verified
+action-entry reference only:
+
+```text
+action_entry_trigger_matched_ref.source_n4_payload.trigger_price
+action_entry_trigger_matched_ref.source_n4_payload.condition_projection_context
+action_entry_trigger_matched_ref.source_n4_payload.condition_projection_context_status
+action_entry_trigger_matched_ref.source_n4_payload.condition_projection_context_trace
+```
+
+The canonical calculation is:
+
+```text
+trigger_pct = (entry TriggerMatched trigger_price / entry N2 close - 1) * 100
+```
+
+`TriggerStateChanged(trigger_live=true)` may refresh the current
+`source_n4_payload` and `latest_trigger_state_changed_ref`, but it must not
+replace the frozen action-entry price, context, or `trigger_pct`. An
+`ActionExecuted` event keeps that entry snapshot and additionally publishes:
+
+```text
+action_price = selected passing N3T_C1_CLOSED.current_price
+action_pct = (action_price / the same entry N2 close - 1) * 100
+```
+
+`trigger_pct` and `action_pct` use `Decimal`, `ROUND_HALF_UP`, and exactly six
+fraction digits. `action_price` preserves the selected N3T `current_price`
+value without price recomputation or rounding; N5 must not query raw 1m facts
+or recompute the N2 close.
+
+The N2 context object and N4 validation trace pass through unchanged. Missing,
+old, malformed, or `not_ready` context does not block the existing N5 action
+lifecycle. In that case the applicable percentage is null, its status is
+`not_ready`, and stable not-ready reasons are emitted. A valid selected N3T
+price may still be exposed as `action_price` even when `action_pct` is not
+available.
+
+These fields are optional additive payload data under event schema `v2`. They
+must not enter the action state key, event ID, dedup key, `action_state`, final
+`action_mark`, or N3T final-proof decision. Historical events are not backfilled.
+
+### 2.2 N5 -> N6 Projection Message Contract v1
+
+New live-tracking `ActionEligible` and `ActionExecuted` events additionally
+carry the additive N5-owned message contract:
+
+```text
+projection_message_contract_version=N5-n6-projection-message-v1
+projection_message_contract_hash=572078a71de8cf00963f718bc812fbe3a1ae09652a3faaa8bb3774f51b882025
+projection_message_status=ready|not_ready
+projection_message_not_ready_reasons=[]
+```
+
+The hash is the fixed SHA256 of the 2,653-byte canonical compact sorted-JSON
+manifest; it is not a per-event data hash. N2 `condition_projection_context.context_hash`
+continues to protect the frozen context object. The marker and flattened fields
+are additive under event schema `v2`; they must not alter lifecycle, tracking
+state, event ID, dedup key, final action mark, or N3T final-proof semantics.
+
+N5 owns and emits:
+
+```text
+asset_code                 = validated identity_key third segment
+asset_name                 = entry context fields.name
+buy_expected_return_pct    = entry context fields.buy_expected_return_pct
+sell_expected_return_pct   = entry context fields.sell_expected_return_pct
+up_secondary_expected_return_pct
+up_reference_period
+down_reference_period
+score / pe_core            = stock entry context only
+```
+
+All values are copied from the verified action-entry `TriggerMatched` context;
+N5 must not recompute N2 targets, returns, close, score, or reference periods.
+Index and board events must not emit stock-only `score` or `pe_core`. Optional
+return/reference fields may be null without making the message contract
+not-ready.
+
+Before marking the message ready, N5 validates the action-entry context version,
+hash, source layer, asset, identity, for-trade date, source status and exact
+asset field shape. It also validates the N4 passthrough policy version/hash,
+status, and `source_context_hash`. Invalid message evidence only sets
+`projection_message_status=not_ready` with stable ordered reasons; existing
+N5 `ActionEligible` / `ActionExecuted` lifecycle remains unchanged.
+
+Event shape is fixed:
+
+```text
+ActionEligible:
+  action_price/action_pct/action_pct_status are absent
+
+ActionExecuted:
+  action_price is the selected passing N3T_C1_CLOSED.current_price
+  action_pct/action_pct_status are present and ready when the message is ready
+```
+
+Formal trigger periods remain separate from HINT's 30m projection evidence:
+
+```text
+ordinary / FULL:
+  trigger_period = primary_trigger_period
+  primary_trigger_period in Y/Q/M/W/D
+  all_trigger_periods = current formal set
+
+BUY_HINT / SELL_HINT:
+  trigger_period = 30m
+  primary_trigger_period = null
+  all_trigger_periods = []
+```
+
+The bounded tracking persistence helper may retain internal
+`triggered_periods=[30m]` solely to preserve its existing non-empty storage
+requirement. It is not a formal period set and must not appear as
+`all_trigger_periods` or `triggered_periods` in the N5 user message payload.
+
+Historical events without this marker remain read-only compatibility evidence;
+they are not backfilled and cannot be silently treated as v1 message-contract
+events.
+
 ## 3. Canonical Action State
 
 Canonical N5 `action_state` values are:

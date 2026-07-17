@@ -63,8 +63,9 @@ def stock_basis_row() -> dict[str, object]:
 
 
 def period_trigger_baseline_json() -> dict[str, object]:
-    return {
+    baseline = {
         "baseline_version": "N2-R4-period-trigger-baseline-v1",
+        "condition_projection_context": condition_projection_context(),
         "periods": {
             period: {
                 "baseline_ready": True,
@@ -87,6 +88,28 @@ def period_trigger_baseline_json() -> dict[str, object]:
             }
             for period in ("Y", "Q", "M", "W", "D")
         },
+    }
+    baseline["period_escalation_context"] = {
+        "contract_version": "N2-period-escalation-context-v1",
+        "generation_mode": "directional_incremental_v1",
+        "context_hash": "test-context-hash",
+    }
+    return baseline
+
+
+def condition_projection_context() -> dict[str, object]:
+    return {
+        "contract_version": "N2-condition-projection-context-v1",
+        "source_layer": "N2_condition",
+        "asset_kind": "stock",
+        "identity_key": "stock:SH:600000",
+        "source_trade_date": "20260522",
+        "for_trade_date": "20260525",
+        "status": "ready",
+        "fields": {"name": "浦发银行", "close": "11"},
+        "nullable_fields": [],
+        "not_ready_reasons": [],
+        "context_hash": "condition-projection-context-hash",
     }
 
 
@@ -145,7 +168,8 @@ def board_basis_row(board_code: str = "881001") -> dict[str, object]:
 
 class ConditionPoolTest(unittest.TestCase):
     def test_build_pool_rows_covers_ordinary_full_and_hint(self) -> None:
-        rows = build_pool_rows_for_basis("stock", stock_basis_row())
+        basis = stock_basis_row()
+        rows = build_pool_rows_for_basis("stock", basis)
         by_key = {row["condition_key"]: row for row in rows}
 
         self.assertEqual(set(by_key), {"BUY:Y,M,D", "SELL:W", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"})
@@ -158,6 +182,16 @@ class ConditionPoolTest(unittest.TestCase):
         self.assertEqual(by_key["BUY:Y,M,D"]["total_mv"], "1000000.01")
         self.assertIsNotNone(by_key["BUY:Y,M,D"]["condition_pool_ref"])
         self.assertEqual(by_key["BUY:Y,M,D"]["period_trigger_baseline_json"]["baseline_version"], "N2-R4-period-trigger-baseline-v1")
+        self.assertEqual(by_key["BUY:Y,M,D"]["period_trigger_baseline_json"], basis["period_trigger_baseline_json"])
+        for row in by_key.values():
+            self.assertEqual(
+                row["period_trigger_baseline_json"]["condition_projection_context"],
+                condition_projection_context(),
+            )
+        self.assertEqual(
+            by_key["BUY:Y,M,D"]["period_trigger_baseline_json"]["period_escalation_context"]["generation_mode"],
+            "directional_incremental_v1",
+        )
 
     def test_allowed_signal_types_use_n2_canonical_condition_semantics(self) -> None:
         rows = build_pool_rows_for_basis("stock", stock_basis_row())

@@ -770,6 +770,15 @@ def build_provisional_trigger_matched_envelope(
         "source_event_type": plan.get("source_event_type"),
         "identity_key": plan.get("identity_key"),
         "asset_kind": plan.get("asset_kind"),
+        "condition_projection_context": to_jsonable(
+            plan.get("condition_projection_context")
+            if plan.get("condition_projection_context") is not None
+            else {}
+        ),
+        "condition_projection_context_status": plan.get("condition_projection_context_status") or "not_ready",
+        "condition_projection_context_trace": to_jsonable(
+            plan.get("condition_projection_context_trace") or {}
+        ),
         "direction": plan.get("direction"),
         "condition_key": plan.get("condition_key"),
         "original_condition_key": original_condition_key,
@@ -867,6 +876,15 @@ def build_provisional_raw_json(plan: Mapping[str, Any]) -> dict[str, Any]:
         "provisional": True,
         "asset_kind": plan.get("asset_kind"),
         "identity_key": plan.get("identity_key"),
+        "condition_projection_context": to_jsonable(
+            plan.get("condition_projection_context")
+            if plan.get("condition_projection_context") is not None
+            else {}
+        ),
+        "condition_projection_context_status": plan.get("condition_projection_context_status") or "not_ready",
+        "condition_projection_context_trace": to_jsonable(
+            plan.get("condition_projection_context_trace") or {}
+        ),
         "condition_key": plan.get("condition_key"),
         "original_condition_key": plan.get("original_condition_key") or plan.get("condition_key"),
         "signal_type": plan.get("signal_type"),

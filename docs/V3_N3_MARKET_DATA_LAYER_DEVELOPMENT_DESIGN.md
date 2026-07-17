@@ -1249,7 +1249,17 @@ must not request raw `11:30`, create a synthetic `11:30` row, or bridge raw
 N3T context construction. Afternoon plans continue with physical `13:00`
 requiring raw close label `13:01`. A source-run label of `15:00` is only a
 session close boundary for C1 scoped pull planning and maps to physical target
-`14:59` under `session_close_boundary_latest_physical_label_v1`.
+`14:59` under `session_close_boundary_latest_physical_label_v1`. The
+post-close final-A path must wait until at least `15:01`, perform at most one
+bounded external pull, and use raw source label `15:00` as physical C1 label
+`14:59`. If mootdx returns both raw `14:59` and raw `15:00`, the final-A path
+keeps raw `15:00`; it must not create a physical `15:00` row. The C1 pull
+selection uses the complete explicit final-A object scope and is independent
+from the bounded N3T evaluation chunk. A final-A scope larger than the C1
+single-pull object limit must fail closed before any partial external pull.
+The once-per-day attempt marker is claimed with exclusive creation and records
+the selected provider-scope hash plus pending, selected, and remaining object
+counts.
 
 ```text
 empty scope -> explicit no-op pull plan.
