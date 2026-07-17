@@ -116,6 +116,56 @@ def write_mock_n3p_rollback_from_argv(argv: list[str]) -> Path:
     return rollback_path
 
 
+def hint_source_idempotent_noop_payload(*, hhmm: str = "1044") -> dict[str, object]:
+    target_run_id = proof_poller.hint_target_run_id(
+        "20260611",
+        SUBSCRIPTION_RUN_ID,
+        hhmm,
+        hint_proof_kind=proof_poller.MIDDAY_BRIDGE_HINT_PROOF_KIND,
+    )
+    return {
+        "result": proof_poller.HINT_SOURCE_IDEMPOTENT_NOOP_RESULT,
+        "status": "noop",
+        "execution_mode": "noop",
+        "idempotency_decision": "idempotent_pass",
+        "reason": proof_poller.HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+        "for_trade_date": "20260611",
+        "actual_until_hhmm": hhmm,
+        "proof_input_time": f"2026-06-11T{hhmm[:2]}:{hhmm[2:]}:00+08:00",
+        "hint_proof_kind": proof_poller.MIDDAY_BRIDGE_HINT_PROOF_KIND,
+        "proof_kind": proof_poller.MIDDAY_BRIDGE_HINT_PROOF_KIND,
+        "subscription_run_id": SUBSCRIPTION_RUN_ID,
+        "target_run_id": target_run_id,
+        "source_artifact_path": (
+            f"docs/intraday_live_current/20260611/"
+            f"N3_hint_index_board_1m_{hhmm}_midday_bridge_frequency8_payload.json"
+        ),
+        "source_report_path": (
+            f"docs/intraday_live_current/20260611/"
+            f"N3_hint_index_board_1m_{hhmm}_midday_bridge_frequency8_fetch_report.json"
+        ),
+        "payload_hash": "a" * 64,
+        "source_payload_hash": "a" * 64,
+        "source_artifact_file_sha256": "b" * 64,
+        "candidate_payload_hash": "c" * 64,
+        "candidate_differs_from_persisted": True,
+        "downstream_refs": {"n4_refs": 3, "n5_refs": 3},
+        "artifact_written": False,
+        "artifact_reused": True,
+        "market_data_pulled": True,
+        "database_written": False,
+        "execute_contract_ready": True,
+        "idempotent_target_execute_contract_ready": False,
+        "writes_outbox": False,
+        "consumes_outbox": False,
+        "updates_inbox_or_checkpoint": False,
+        "starts_worker": False,
+        "touches_n4_n5_n6": False,
+        "real_runner_wired": True,
+        "layer_runner_called": True,
+    }
+
+
 class N3IntradayAutoPollActivationTest(unittest.TestCase):
     def test_proof_poller_uses_enabled_lineage_config_over_stale_cli_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,6 +321,15 @@ class N3IntradayAutoPollActivationTest(unittest.TestCase):
         self.assertNotIn("common_event_outbox", argv_blob)
         self.assertNotIn("common_event_inbox", argv_blob)
         self.assertNotIn("common_event_consumer_checkpoint", argv_blob)
+        hint_source_step = next(
+            step for step in report["planned_child_steps"] if step["step_id"] == "n3_hint_source_fetch"
+        )
+        hint_source_report_index = hint_source_step["argv"].index("--json-report-path") + 1
+        self.assertEqual(
+            hint_source_step["argv"][hint_source_report_index],
+            "tmp/N3_hint_20260611_source_returned_source_child_report.json",
+        )
+        self.assertNotIn("docs/intraday_live_current", hint_source_step["argv"][hint_source_report_index])
         self.assertEqual(report["executed_child_command_count"], 0)
         self.assertTrue(all(value is False for value in report["side_effects"].values()))
 
@@ -997,6 +1056,15 @@ class N3IntradayAutoPollActivationTest(unittest.TestCase):
         self.assertIn("--json-report-path", n3p_execute_argv)
         self.assertIn("--rollback-sql-path", n3p_execute_argv)
         self.assertNotIn("--output-path", n3p_execute_argv)
+        hint_source_argv = next(
+            argv for argv in calls if argv[1].endswith("run_n3_hint_index_board_1m_source_fetch_once.py")
+        )
+        hint_source_report_index = hint_source_argv.index("--json-report-path") + 1
+        self.assertEqual(
+            hint_source_argv[hint_source_report_index],
+            "tmp/N3_hint_20260611_source_returned_source_child_report.json",
+        )
+        self.assertNotIn("docs/intraday_live_current", hint_source_argv[hint_source_report_index])
 
     def test_proof_poller_n3p_only_branch_does_not_build_hint_steps(self) -> None:
         report = proof_poller.run_proof_poller_once(
@@ -1197,6 +1265,181 @@ class N3IntradayAutoPollActivationTest(unittest.TestCase):
         for step in report["executed_child_steps"]:
             self.assertGreaterEqual(step["child_duration_ms"], 0)
         self.assertNotIn("run_n3p", json.dumps(calls, sort_keys=True))
+        source_argv = calls[0]
+        source_report_path = source_argv[source_argv.index("--json-report-path") + 1]
+        self.assertEqual(source_report_path, "tmp/N3_hint_20260611_source_returned_source_child_report.json")
+        self.assertNotIn("docs/intraday_live_current", source_report_path)
+
+    def test_proof_poller_hint_only_exact_source_noop_skips_preflight_and_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            os.chdir(tmp)
+            self.addCleanup(os.chdir, old_cwd)
+            report_path = Path("tmp/N3_intraday_proof_poller_hint_noop.json")
+            calls: list[list[str]] = []
+
+            def runner(argv: list[str]) -> dict[str, object]:
+                calls.append(argv)
+                self.assertTrue(argv[1].endswith("run_n3_hint_index_board_1m_source_fetch_once.py"))
+                return {"returncode": 0, "json": hint_source_idempotent_noop_payload()}
+
+            report = proof_poller.run_proof_poller_once(
+                for_trade_date="20260611",
+                source_trade_date=SOURCE_TRADE_DATE,
+                source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+                subscription_run_id=SUBSCRIPTION_RUN_ID,
+                preload_run_id=PRELOAD_RUN_ID,
+                n4_context_run_id=N4_CONTEXT_RUN_ID,
+                execute=True,
+                user_confirmed=True,
+                command_runner=runner,
+                branch_mode="hint_only",
+                json_report_path=str(report_path),
+            )
+            written = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["status"], "noop")
+        self.assertEqual(report["execution_mode"], "noop")
+        self.assertEqual(report["reason"], "noop_existing_hint_target_passed")
+        self.assertEqual(report["n3p_status"], "skipped")
+        self.assertEqual(report["hint_status"], "noop")
+        self.assertEqual(report["executed_child_command_count"], 1)
+        self.assertEqual([step["step_id"] for step in report["executed_child_steps"]], ["n3_hint_source_fetch"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(report["last_successful_child"], "n3_hint_source_fetch")
+        self.assertEqual(report["resolved_target_run_ids"]["hint_target_run_id"], report["hint_target_run_id"])
+        self.assertEqual(report["actual_hhmm_handoff"]["hint"]["idempotency"]["status"], "passed")
+        self.assertEqual(written["status"], report["status"])
+        self.assertEqual(written["executed_child_command_count"], 1)
+        self.assertNotIn("preflight_artifacts", written["actual_hhmm_handoff"]["hint"])
+        source_argv = calls[0]
+        wrapper_report_path = source_argv[source_argv.index("--json-report-path") + 1]
+        self.assertEqual(wrapper_report_path, "tmp/N3_hint_20260611_source_returned_source_child_report.json")
+        canonical_report_path = report["actual_hhmm_handoff"]["hint"]["source_report_path"]
+        self.assertTrue(canonical_report_path.endswith("N3_hint_index_board_1m_1044_midday_bridge_frequency8_fetch_report.json"))
+        self.assertNotEqual(wrapper_report_path, canonical_report_path)
+
+    def test_proof_poller_both_preserves_n3p_success_when_hint_source_noops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            os.chdir(tmp)
+            self.addCleanup(os.chdir, old_cwd)
+            calls: list[list[str]] = []
+
+            def runner(argv: list[str]) -> dict[str, object]:
+                calls.append(argv)
+                runner_path = argv[1]
+                if runner_path.endswith("run_n3p_current_source_fetch_once.py"):
+                    return {
+                        "returncode": 0,
+                        "json": {
+                            "result": "EXECUTE_READY_REAL_IO_CONTRACT",
+                            "actual_until_hhmm": "1046",
+                            "source_payload_run_id": "n3p_mixed_realtime_source_payload_20260611_until_1046_v1",
+                            "payload_hash": "n3p-hash",
+                            "payload_path": "docs/intraday_live_current/20260611/N3P_mixed_realtime_1046_source_fetch_payload.json",
+                        },
+                    }
+                if runner_path.endswith("run_n3p_trigger_proof_preflight_once.py"):
+                    contract_path = Path(argv[argv.index("--contract-path") + 1])
+                    preflight_path = Path(argv[argv.index("--preflight-path") + 1])
+                    target_run_id = argv[argv.index("--target-run-id") + 1]
+                    contract_path.parent.mkdir(parents=True, exist_ok=True)
+                    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+                    contract_path.write_text(json.dumps({"target_run_id": target_run_id}), encoding="utf-8")
+                    preflight_path.write_text(json.dumps({"target_run_id": target_run_id}), encoding="utf-8")
+                    return {
+                        "returncode": 0,
+                        "json": {
+                            "result": "PLAN_ONLY_PASS",
+                            "contract_path": str(contract_path),
+                            "preflight_path": str(preflight_path),
+                            "target_run_id": target_run_id,
+                        },
+                    }
+                if runner_path.endswith("run_v3_realtime_virtual_metric_writer_once.py"):
+                    write_mock_n3p_rollback_from_argv(argv)
+                    return {"returncode": 0, "json": {"result": "EXECUTE_PASS"}}
+                if runner_path.endswith("run_n3_hint_index_board_1m_source_fetch_once.py"):
+                    return {"returncode": 0, "json": hint_source_idempotent_noop_payload()}
+                self.fail(f"unexpected child after HINT source noop: {runner_path}")
+
+            report = proof_poller.run_proof_poller_once(
+                for_trade_date="20260611",
+                source_trade_date=SOURCE_TRADE_DATE,
+                source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+                subscription_run_id=SUBSCRIPTION_RUN_ID,
+                preload_run_id=PRELOAD_RUN_ID,
+                n4_context_run_id=N4_CONTEXT_RUN_ID,
+                execute=True,
+                user_confirmed=True,
+                command_runner=runner,
+                branch_mode="both",
+            )
+
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["execution_mode"], "execute")
+        self.assertEqual(report["n3p_status"], "passed")
+        self.assertEqual(report["hint_status"], "noop")
+        self.assertEqual(report["executed_child_command_count"], 4)
+        self.assertEqual(
+            [step["step_id"] for step in report["executed_child_steps"]],
+            [
+                "n3p_current_source_fetch",
+                "n3p_trigger_proof_preflight",
+                "n3p_trigger_proof_execute",
+                "n3_hint_source_fetch",
+            ],
+        )
+        self.assertEqual(len(calls), 4)
+        self.assertIn("n3p_target_run_id", report["resolved_target_run_ids"])
+        self.assertIn("hint_target_run_id", report["resolved_target_run_ids"])
+
+    def test_proof_poller_malformed_hint_source_noop_claim_fails_closed(self) -> None:
+        mutations = {
+            "unknown_result": lambda payload: payload.update(result="UNKNOWN_NOOP_RESULT"),
+            "target": lambda payload: payload.update(target_run_id="wrong"),
+            "trade_date": lambda payload: payload.update(for_trade_date="20260612"),
+            "subscription": lambda payload: payload.update(subscription_run_id="wrong"),
+            "proof_kind": lambda payload: payload.update(proof_kind="wrong"),
+            "payload_hash": lambda payload: payload.update(payload_hash=""),
+            "hash_alias": lambda payload: payload.update(source_payload_hash="d" * 64),
+            "file_sha": lambda payload: payload.update(source_artifact_file_sha256=""),
+            "candidate_hash": lambda payload: payload.update(candidate_payload_hash=""),
+            "artifact_written": lambda payload: payload.update(artifact_written=True),
+            "artifact_reused": lambda payload: payload.update(artifact_reused=False),
+            "market_data_pulled": lambda payload: payload.update(market_data_pulled=False),
+            "database_written": lambda payload: payload.update(database_written=True),
+            "idempotent_execute_ready": lambda payload: payload.update(idempotent_target_execute_contract_ready=True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                calls: list[list[str]] = []
+                payload = hint_source_idempotent_noop_payload()
+                mutate(payload)
+
+                def runner(argv: list[str]) -> dict[str, object]:
+                    calls.append(argv)
+                    return {"returncode": 0, "json": payload}
+
+                report = proof_poller.run_proof_poller_once(
+                    for_trade_date="20260611",
+                    source_trade_date=SOURCE_TRADE_DATE,
+                    source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+                    subscription_run_id=SUBSCRIPTION_RUN_ID,
+                    preload_run_id=PRELOAD_RUN_ID,
+                    n4_context_run_id=N4_CONTEXT_RUN_ID,
+                    execute=True,
+                    user_confirmed=True,
+                    command_runner=runner,
+                    branch_mode="hint_only",
+                )
+
+                self.assertEqual(report["status"], "blocked")
+                self.assertTrue(str(report["reason"]).startswith("hint_source_noop_handoff_invalid:"))
+                self.assertEqual(report["hint_status"], "blocked")
+                self.assertEqual(report["executed_child_command_count"], 1)
+                self.assertEqual(len(calls), 1)
 
     def test_proof_poller_hint_parent_report_redacts_large_child_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

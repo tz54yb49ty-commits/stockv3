@@ -36,6 +36,8 @@ N3P_SOURCE_ALIGNMENT_RETRY_EXHAUSTED_BLOCKER = "BLOCKED_N3P_SOURCE_CANONICAL_MIN
 N3P_SOURCE_ALIGNMENT_ADJACENT_RACE = "adjacent_minute_source_boundary_race"
 N3P_ROLLBACK_ARTIFACT_MISSING_BLOCKER = "BLOCKED_N3P_ROLLBACK_ARTIFACT_MISSING"
 N3P_ROLLBACK_ARTIFACT_UNSAFE_BLOCKER = "BLOCKED_N3P_ROLLBACK_ARTIFACT_UNSAFE"
+HINT_SOURCE_IDEMPOTENT_NOOP_RESULT = "NOOP_N3_HINT_TARGET_ALREADY_PASSED"
+HINT_SOURCE_IDEMPOTENT_NOOP_REASON = "noop_existing_hint_target_passed"
 SOURCE_FETCH_WINDOW_START_HHMM = "0925"
 SOURCE_FETCH_WINDOW_END_HHMM = "1530"
 DEFAULT_MAX_ALIGNMENT_RETRIES = 2
@@ -214,6 +216,10 @@ def hint_source_artifact_path(for_trade_date: str, hhmm: str = ACTUAL_HHMM_PLACE
     return f"docs/intraday_live_current/{for_trade_date}/N3_hint_index_board_1m_{hhmm}_midday_bridge_frequency8_payload.json"
 
 
+def hint_source_child_report_path(for_trade_date: str) -> str:
+    return f"tmp/N3_hint_{for_trade_date}_{SOURCE_RETURNED_CANDIDATE}_source_child_report.json"
+
+
 def n3p_source_artifact_path(for_trade_date: str, hhmm: str = ACTUAL_HHMM_PLACEHOLDER) -> str:
     return f"docs/intraday_live_current/{for_trade_date}/N3P_mixed_realtime_{hhmm}_source_fetch_payload.json"
 
@@ -382,7 +388,7 @@ def build_proof_poller_plan(
                 common,
                 target_run_id=f"n3_hint_index_board_1m_source_payload_{for_trade_date}_until_{ACTUAL_HHMM_PLACEHOLDER}_v1",
                 hint_proof_kind=hint_proof_kind,
-                json_report_path=f"docs/intraday_live_current/{for_trade_date}/N3_hint_index_board_1m_{ACTUAL_HHMM_PLACEHOLDER}_midday_bridge_frequency8_fetch_report.json",
+                json_report_path=hint_source_child_report_path(for_trade_date),
                 execute=execute,
             ),
         },
@@ -958,6 +964,7 @@ def _execute_child_sequence(
             common,
             target_run_id=hint_source_candidate_run_id(for_trade_date),
             hint_proof_kind=hint_proof_kind,
+            json_report_path=hint_source_child_report_path(for_trade_date),
             execute=True,
         ),
     }
@@ -989,12 +996,70 @@ def _execute_child_sequence(
     report["actual_hhmm_handoff"]["hint"] = {
         "actual_hhmm": hint_hhmm,
         "source_artifact_path": hint_source_path,
+        "source_report_path": _extract_string(hint_source_payload, "source_report_path", "report_path"),
         "source_payload_hash": _extract_string(hint_source_payload, "source_payload_hash", "payload_hash"),
+        "source_artifact_file_sha256": _extract_string(hint_source_payload, "source_artifact_file_sha256", "file_sha256"),
+        "idempotency_decision": str(hint_source_payload.get("idempotency_decision") or ""),
+        "artifact_written": hint_source_payload.get("artifact_written"),
+        "artifact_reused": hint_source_payload.get("artifact_reused"),
+        "candidate_payload_hash": str(hint_source_payload.get("candidate_payload_hash") or ""),
+        "candidate_differs_from_persisted": bool(hint_source_payload.get("candidate_differs_from_persisted")),
         "target_run_id": hint_target,
     }
     report["hint_actual_hhmm"] = hint_hhmm
     report["hint_target_run_id"] = hint_target
     flush_progress()
+
+    if _is_hint_source_noop_claim(hint_source_payload):
+        noop_handoff = _validate_hint_source_noop_handoff(
+            hint_source_payload=hint_source_payload,
+            expected_hhmm=hint_hhmm,
+            expected_target_run_id=hint_target,
+            expected_for_trade_date=for_trade_date,
+            expected_subscription_run_id=subscription_run_id,
+            expected_hint_proof_kind=hint_proof_kind,
+        )
+        report["actual_hhmm_handoff"]["hint"]["idempotency"] = noop_handoff
+        if noop_handoff.get("status") != "passed":
+            report.update(
+                {
+                    "status": "blocked",
+                    "reason": str(noop_handoff.get("reason") or "hint_source_noop_handoff_invalid"),
+                    "execution_mode": "blocked",
+                    "hint_status": "blocked",
+                    "blocked_hint_source_noop_handoff": dict(noop_handoff),
+                }
+            )
+            flush_progress()
+            return report
+
+        report["hint_status"] = "noop"
+        report["hint_noop_reason"] = HINT_SOURCE_IDEMPOTENT_NOOP_REASON
+        resolved_target_run_ids = {"hint_target_run_id": hint_target}
+        if n3p_source_run_id:
+            resolved_target_run_ids["n3p_source_payload_run_id"] = n3p_source_run_id
+        if n3p_target:
+            resolved_target_run_ids["n3p_target_run_id"] = n3p_target
+        report["resolved_target_run_ids"] = resolved_target_run_ids
+        if branch_mode == "hint_only":
+            report.update(
+                {
+                    "status": "noop",
+                    "reason": HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+                    "execution_mode": "noop",
+                    "noop_reason": HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+                }
+            )
+        else:
+            report.update(
+                {
+                    "status": "passed",
+                    "reason": "",
+                    "execution_mode": "execute",
+                }
+            )
+        flush_progress()
+        return report
 
     hint_preflight_step = {
         "step_id": "n3_hint_proof_preflight",
@@ -1626,6 +1691,88 @@ def _blocked_missing_handoff(report: dict[str, Any], step_id: str, field_name: s
     report["executed_child_command_count"] = len(report.get("executed_child_steps") or [])
     _refresh_closeout_progress(report, blocked_child_step=step_id)
     return report
+
+
+def _validate_hint_source_noop_handoff(
+    *,
+    hint_source_payload: Mapping[str, Any],
+    expected_hhmm: str,
+    expected_target_run_id: str,
+    expected_for_trade_date: str,
+    expected_subscription_run_id: str,
+    expected_hint_proof_kind: str,
+) -> dict[str, Any]:
+    payload_hash = str(hint_source_payload.get("payload_hash") or "")
+    source_payload_hash = str(hint_source_payload.get("source_payload_hash") or "")
+    checks = {
+        "result": str(hint_source_payload.get("result") or "") == HINT_SOURCE_IDEMPOTENT_NOOP_RESULT,
+        "status": str(hint_source_payload.get("status") or "") == "noop",
+        "execution_mode": str(hint_source_payload.get("execution_mode") or "") == "noop",
+        "idempotency_decision": str(hint_source_payload.get("idempotency_decision") or "") == "idempotent_pass",
+        "reason": str(hint_source_payload.get("reason") or "") == HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+        "for_trade_date": str(hint_source_payload.get("for_trade_date") or "") == expected_for_trade_date,
+        "subscription_run_id": str(hint_source_payload.get("subscription_run_id") or "") == expected_subscription_run_id,
+        "hint_proof_kind": str(hint_source_payload.get("hint_proof_kind") or "") == expected_hint_proof_kind,
+        "proof_kind": str(hint_source_payload.get("proof_kind") or "") == expected_hint_proof_kind,
+        "actual_until_hhmm": str(hint_source_payload.get("actual_until_hhmm") or "") == expected_hhmm,
+        "target_run_id": str(hint_source_payload.get("target_run_id") or "") == expected_target_run_id,
+        "source_artifact_path": bool(_extract_string(hint_source_payload, "source_artifact_path", "payload_path")),
+        "source_report_path": bool(_extract_string(hint_source_payload, "source_report_path", "report_path")),
+        "payload_hash": bool(payload_hash),
+        "source_payload_hash": bool(source_payload_hash),
+        "payload_hash_alias_matches": payload_hash == source_payload_hash,
+        "source_artifact_file_sha256": bool(
+            _extract_string(hint_source_payload, "source_artifact_file_sha256", "file_sha256")
+        ),
+        "candidate_payload_hash": bool(str(hint_source_payload.get("candidate_payload_hash") or "")),
+        "artifact_written": hint_source_payload.get("artifact_written") is False,
+        "artifact_reused": hint_source_payload.get("artifact_reused") is True,
+        "market_data_pulled": hint_source_payload.get("market_data_pulled") is True,
+        "database_written": hint_source_payload.get("database_written") is False,
+        "idempotent_target_execute_contract_ready": (
+            hint_source_payload.get("idempotent_target_execute_contract_ready") is False
+        ),
+        "writes_outbox": hint_source_payload.get("writes_outbox") is False,
+        "consumes_outbox": hint_source_payload.get("consumes_outbox") is False,
+        "updates_inbox_or_checkpoint": hint_source_payload.get("updates_inbox_or_checkpoint") is False,
+        "starts_worker": hint_source_payload.get("starts_worker") is False,
+        "touches_n4_n5_n6": hint_source_payload.get("touches_n4_n5_n6") is False,
+    }
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    if failed_checks:
+        return {
+            "status": "blocked",
+            "reason": f"hint_source_noop_handoff_invalid:{','.join(failed_checks)}",
+            "checks": checks,
+        }
+    return {
+        "status": "passed",
+        "reason": HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+        "checks": checks,
+        "target_run_id": expected_target_run_id,
+        "source_artifact_path": _extract_string(hint_source_payload, "source_artifact_path", "payload_path"),
+        "source_report_path": _extract_string(hint_source_payload, "source_report_path", "report_path"),
+        "source_payload_hash": _extract_string(hint_source_payload, "source_payload_hash", "payload_hash"),
+        "source_artifact_file_sha256": _extract_string(
+            hint_source_payload,
+            "source_artifact_file_sha256",
+            "file_sha256",
+        ),
+        "candidate_payload_hash": str(hint_source_payload.get("candidate_payload_hash") or ""),
+        "candidate_differs_from_persisted": bool(hint_source_payload.get("candidate_differs_from_persisted")),
+        "downstream_refs": dict(hint_source_payload.get("downstream_refs") or {}),
+    }
+
+
+def _is_hint_source_noop_claim(hint_source_payload: Mapping[str, Any]) -> bool:
+    return any(
+        (
+            str(hint_source_payload.get("result") or "") == HINT_SOURCE_IDEMPOTENT_NOOP_RESULT,
+            str(hint_source_payload.get("status") or "") == "noop",
+            str(hint_source_payload.get("execution_mode") or "") == "noop",
+            str(hint_source_payload.get("idempotency_decision") or "") == "idempotent_pass",
+        )
+    )
 
 
 def _blocked_preflight_artifact_handoff(report: dict[str, Any], handoff: Mapping[str, Any]) -> dict[str, Any]:

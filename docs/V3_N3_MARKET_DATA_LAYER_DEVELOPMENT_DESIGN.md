@@ -406,8 +406,10 @@ N3 combined run-once child runner contract:
     retry 期间不得执行 N3P preflight/execute 或 HINT child，不得写 artifact/register/source run。
     patch/test gate 只能通过 injectable command_runner/mock 证明 execute body，不得真实执行 child wrappers。
   poller idempotency policy：
-    same HHMM + same source hash + passed source run => idempotent_pass
-    same HHMM + different source hash => blocked unless supersession policy is explicit
+    N3P source payload：same HHMM + same source hash + passed source run => idempotent_pass；
+    N3P source payload：same HHMM + different source hash => blocked unless supersession policy is explicit。
+    HINT projection target：完整 passed target 且 persisted artifact/DB lineage 闭合时，后续 candidate
+    hash 漂移只登记差异并返回只读 no-op；target 不存在但同路径 artifact hash 不同时仍必须阻断。
     existing proof target with same source hash / baseline / row counts and zero outbox refs => idempotent_pass
     existing dirty or different target => blocked
     zero stock quote rows must remain not ready and must never be promoted by poller coordination
@@ -804,6 +806,56 @@ source artifact:
   corrected midday bridge artifact should be named with `midday_bridge`, for example:
     docs/intraday_live_current/<YYYYMMDD>/N3_hint_index_board_1m_<HHMM>_midday_bridge_frequency8_payload.json
     docs/intraday_live_current/<YYYYMMDD>/N3_hint_index_board_1m_<HHMM>_midday_bridge_frequency8_fetch_report.json
+
+duplicate target / artifact immutability:
+  HINT source provider 必须先完成 source payload 校验，并仅使用 source returned
+  `actual_until_hhmm` 构造精确 projection target；在写 artifact 前，必须通过
+  `REPEATABLE READ READ ONLY`、`Asia/Shanghai` 事务核对该 target 的 run、quality、
+  index/board metric rows、metric_ready 分布、source artifact path/hash/file SHA 及
+  downstream refs。
+  target 不存在且无 partial DB facts 时，才允许首次 create-only 写入 artifact pair。
+  target 已为 passed、P0=0，quality 不含 P0 failure，rows/ready distribution 与
+  source path/hash/file SHA 全部闭合时，必须返回：
+    result=NOOP_N3_HINT_TARGET_ALREADY_PASSED
+    status=noop
+    idempotency_decision=idempotent_pass
+    reason=noop_existing_hint_target_passed
+    artifact_written=false
+    database_written=false
+  HINT projection 固定 writes_outbox=false；该 target 出现 N3 outbox/inbox/checkpoint
+  refs 必须 fail closed。既有 N4/N5 direct downstream refs 仅作审计摘要登记，不阻断上述
+  只读 no-op；该摘要不宣称完成 N4 outbox 到 N5 inbox 的全链路遍历。HINT target 出现
+  直接 N6 ref 属于未授权 lineage，必须 fail closed。
+  quality 闭合必须精确包含一条 P2 passed
+  `N3_HINT_INDEX_BOARD_1M_PROOF_PERSISTENCE_READY`；只允许额外存在至多一条 P1 warning
+  `N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT`，其他 gate/status/severity 均阻断。
+  `proof_rows_input_total` 必须精确等于已存 index/board metric rows 加
+  `metric_fact_exclusion_count`；排除数大于零时 P1 warning 的 actual_value 必须等于排除数，
+  排除数为零时不得出现该 warning。全部 proof rows 被合法排除、metric rows=0 仍可闭合，
+  但其 metric identity 集合必须为空且 artifact/run/quality 证据仍须完整。
+  run 的 source_trade_date/source_condition_run_id 必须与 target 内嵌 subscription lineage 一致；
+  artifact payload 的 trade date、actual HHMM、subscription、proof kind、source candidate id、
+  N4 context id，以及 report result/只读副作用字段必须与该闭合 lineage 一致，不能只比较 hash。
+  已闭合 passed target 的后续 candidate payload_hash 即使变化，也只能登记
+  candidate/persisted hash 差异；不得覆盖历史 artifact、不得重跑或自动 supersede。
+  target 为 failed/partial，DB 行数或 ready 分布不闭合，artifact 缺失、hash 不闭合，
+  或内部 trade date/minute/subscription/proof identity 不一致时必须 fail closed。
+  payload/report artifact pair 必须 write-once：两者均不存在时才可 create-only 写入；
+  两者均存在且 self-hash、payload_hash、file SHA 和互相引用精确一致时只读复用，bytes、
+  inode 和 mtime 不变；partial pair、异 hash、损坏 JSON、symlink、非普通文件或竞争写入
+  必须保留既有文件并阻断，禁止无条件 `write_bytes` 覆盖。
+  provider-owned canonical fetch report 与通用 child wrapper report 必须使用不同路径：
+  canonical pair 继续位于 `docs/intraday_live_current/<YYYYMMDD>/`，wrapper 只可写
+  `tmp/N3_hint_<YYYYMMDD>_source_returned_source_child_report.json`。wrapper 不得取得
+  canonical report 路径的写权限；poller handoff 继续以 child stdout payload 中的
+  `source_report_path` 为准。重复分钟 no-op 后 canonical payload/report 的 bytes、inode、
+  mtime 均须不变。
+  poller 收到 exact source no-op 后不得继续 HINT preflight/execute：`hint_only` 总体返回
+  noop 且只运行 source child；`both` 保留同轮已成功 N3P 结果并返回 passed、
+  `hint_status=noop`。
+  `docs/N3_20260717_HINT_0931_SOURCE_ARTIFACT_PROVENANCE_ATTESTATION.json` 仅登记历史
+  overwrite 事实。其状态为 `HISTORICAL_LINEAGE_ATTESTED_SOURCE_BYTES_UNAVAILABLE`；
+  原始 bytes 不可恢复，生产代码不得读取该 attestation 作为 execute/no-op/supersession 授权。
 
 write scope:
   common_market_data_run

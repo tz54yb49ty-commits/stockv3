@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Callable
 
 from scripts.n3_n4_combined_child_contract import MIDDAY_BRIDGE_HINT_PROOF_KIND
@@ -28,12 +29,15 @@ HINT_SOURCE_ARTIFACT_BLOCKER = "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER"
 HINT_SOURCE_PAYLOAD_BLOCKER = "BLOCKED_N3_HINT_SOURCE_PAYLOAD_INVALID"
 HINT_SOURCE_PROOF_KIND_BLOCKER = "BLOCKED_HINT_PROOF_KIND"
 HINT_SOURCE_WAITING_RESULT = "BLOCKED_N3_HINT_SOURCE_LATEST_BEFORE_TARGET"
+HINT_SOURCE_IDEMPOTENCY_BLOCKER = "BLOCKED_N3_HINT_SOURCE_IDEMPOTENCY"
+HINT_SOURCE_IDEMPOTENT_NOOP_RESULT = "NOOP_N3_HINT_TARGET_ALREADY_PASSED"
 HINT_PROOF_PREFLIGHT_BLOCKER = "BLOCKED_N3_HINT_PROOF_PREFLIGHT"
 HINT_PROOF_PREFLIGHT_ARTIFACT_MATERIALIZATION_BLOCKER = "BLOCKED_N3_HINT_PREFLIGHT_ARTIFACT_MATERIALIZATION"
 HINT_PROOF_PREFLIGHT_ARTIFACT_CONTRACT_BLOCKER = "BLOCKED_HINT_CONTRACT_CONTENT_MISMATCH"
 HINT_PROOF_EXECUTE_BLOCKER = "BLOCKED_N3_HINT_PROOF_EXECUTE"
 
 HINT_SOURCE_MODE = "index_board_frequency8_1m"
+HINT_METRIC_PROOF_KIND = "index_board_1m_hint_projection_v1"
 HINT_SOURCE_SCOPE_POLICY = "n4_context_hint_index_board_frequency8_v1"
 HINT_SOURCE_HASH_POLICY = "payload_hash_canonical_file_sha256_trace"
 N3_OUTBOX_EVENT_TYPES = (
@@ -44,6 +48,8 @@ N3_OUTBOX_EVENT_TYPES = (
     "MarketDataMissing",
     "MarketDisplaySnapshotUpdated",
 )
+N6_DIRECT_REF_TABLES = ("user_projection_run", "user_signal_projection", "user_signal_card")
+N6_DIRECT_REF_COLUMNS = ("user_projection_run_id", "source_action_run_id")
 _DEFAULT_HINT_ARTIFACT_WRITER = object()
 
 _FORBIDDEN_SIDE_EFFECTS = {
@@ -113,6 +119,113 @@ class N3HintFrequency8SourceProvider:
                 artifact_written=False,
             )
 
+        try:
+            from ashare_v3.market.hint_1m_projection_persistence import (
+                build_hint_projection_run_id,
+                parse_hint_projection_run_id,
+            )
+
+            target_run_id = build_hint_projection_run_id(
+                trade_date=str(payload.get("for_trade_date") or ""),
+                until_hhmm=str(payload.get("actual_until_hhmm") or ""),
+                source_subscription_run_id=str(payload.get("subscription_run_id") or ""),
+                proof_kind=MIDDAY_BRIDGE_HINT_PROOF_KIND,
+            )
+            parsed_target = parse_hint_projection_run_id(target_run_id)
+            condition_run_id = str(payload.get("subscription_run_id") or "").removeprefix(
+                f"market_data_subscription_{payload.get('for_trade_date')}_"
+            )
+            expected_source_target_run_id = (
+                f"n3_hint_index_board_1m_source_payload_{payload.get('for_trade_date')}_until_source_returned_v1"
+            )
+            expected_n4_context_run_id = (
+                f"trigger_context_snapshot_{payload.get('for_trade_date')}_{condition_run_id}__atomic_rule_v1"
+            )
+            if (
+                parsed_target["source_subscription_run_id"] != str(payload.get("subscription_run_id") or "")
+                or not condition_run_id.startswith("condition_layer_")
+                or str(payload.get("target_run_id") or "") != expected_source_target_run_id
+                or str(payload.get("n4_context_run_id") or "") != expected_n4_context_run_id
+            ):
+                return _blocked(
+                    HINT_SOURCE_IDEMPOTENCY_BLOCKER,
+                    "source_lineage_identity_mismatch",
+                    expected_source_target_run_id=expected_source_target_run_id,
+                    expected_n4_context_run_id=expected_n4_context_run_id,
+                    artifact_written=False,
+                )
+        except Exception as exc:
+            return _blocked(
+                HINT_SOURCE_IDEMPOTENCY_BLOCKER,
+                f"target_run_id_invalid:{type(exc).__name__}:{exc}",
+                artifact_written=False,
+            )
+        snapshot_loader = getattr(self.backend, "load_n3_hint_idempotency_snapshot", None)
+        if not callable(snapshot_loader):
+            return _blocked(
+                HINT_SOURCE_IDEMPOTENCY_BLOCKER,
+                "idempotency snapshot loader dependency is required",
+                target_run_id=target_run_id,
+                artifact_written=False,
+            )
+        snapshot = dict(
+            snapshot_loader(
+                args=args,
+                report=report,
+                dependencies=dependencies,
+                target_run_id=target_run_id,
+            )
+            or {}
+        )
+        if _is_blocked(snapshot):
+            return snapshot
+        idempotency = classify_n3_hint_existing_target(
+            target_run_id=target_run_id,
+            snapshot=snapshot,
+            candidate_payload=payload,
+        )
+        if idempotency["decision"] == "blocked":
+            return _blocked(
+                HINT_SOURCE_IDEMPOTENCY_BLOCKER,
+                str(idempotency.get("reason") or "existing_hint_target_invalid"),
+                target_run_id=target_run_id,
+                idempotency_decision="blocked",
+                idempotency_evidence=idempotency.get("evidence") or {},
+                candidate_payload_hash=compute_n3_hint_frequency8_source_payload_hash(payload),
+                artifact_written=False,
+            )
+        if idempotency["decision"] == "idempotent_pass":
+            result = {
+                "result": HINT_SOURCE_IDEMPOTENT_NOOP_RESULT,
+                "status": "noop",
+                "execution_mode": "noop",
+                "idempotency_decision": "idempotent_pass",
+                "reason": "noop_existing_hint_target_passed",
+                "for_trade_date": str(payload.get("for_trade_date") or ""),
+                "actual_until_hhmm": str(payload.get("actual_until_hhmm") or ""),
+                "proof_input_time": str(payload.get("proof_input_time") or ""),
+                "hint_proof_kind": MIDDAY_BRIDGE_HINT_PROOF_KIND,
+                "proof_kind": MIDDAY_BRIDGE_HINT_PROOF_KIND,
+                "subscription_run_id": str(payload.get("subscription_run_id") or ""),
+                "target_run_id": target_run_id,
+                "source_artifact_path": str(idempotency.get("source_artifact_path") or ""),
+                "source_report_path": str(idempotency.get("source_report_path") or ""),
+                "payload_hash": str(idempotency.get("persisted_payload_hash") or ""),
+                "source_payload_hash": str(idempotency.get("persisted_payload_hash") or ""),
+                "source_artifact_file_sha256": str(idempotency.get("persisted_file_sha256") or ""),
+                "candidate_payload_hash": compute_n3_hint_frequency8_source_payload_hash(payload),
+                "candidate_differs_from_persisted": bool(idempotency.get("candidate_differs_from_persisted")),
+                "downstream_refs": dict(idempotency.get("downstream_refs") or {}),
+                "artifact_written": False,
+                "artifact_reused": True,
+                "market_data_pulled": True,
+                "database_written": False,
+                "execute_contract_ready": False,
+                "idempotent_target_execute_contract_ready": False,
+            }
+            _apply_forbidden_side_effect_guards(result)
+            return result
+
         artifact = dict(
             artifact_writer(
                 args=args,
@@ -148,6 +261,7 @@ class N3HintFrequency8SourceProvider:
                 "file_sha256": str(artifact.get("file_sha256") or ""),
                 "source_artifact_file_sha256": str(artifact.get("file_sha256") or artifact.get("source_artifact_file_sha256") or ""),
                 "artifact_written": bool(artifact.get("artifact_written", True)),
+                "artifact_reused": bool(artifact.get("artifact_reused", False)),
                 "market_data_pulled": True,
                 "database_written": False,
                 "execute_contract_ready": True,
@@ -738,11 +852,13 @@ class N3HintFrequency8SourceBackend:
         scope_loader: Any = None,
         market_fetcher: Any = None,
         artifact_writer: Any = _DEFAULT_HINT_ARTIFACT_WRITER,
+        target_snapshot_loader: Any = None,
     ) -> None:
         self.env = os.environ if env is None else env
         self.config = dict(config or {})
         self.scope_loader = scope_loader
         self.market_fetcher = market_fetcher
+        self.target_snapshot_loader = target_snapshot_loader
         self.artifact_writer = (
             N3HintFrequency8SourceArtifactWriter()
             if artifact_writer is _DEFAULT_HINT_ARTIFACT_WRITER
@@ -834,6 +950,41 @@ class N3HintFrequency8SourceBackend:
             payload=payload,
             fetch_report=fetch_report,
             config=config,
+        )
+
+    def load_n3_hint_idempotency_snapshot(
+        self,
+        *,
+        args: Any,
+        report: Mapping[str, Any],
+        dependencies: Any,
+        target_run_id: str,
+    ) -> Mapping[str, Any]:
+        config = self._resolve_config()
+        if _is_blocked(config):
+            return config
+        loader = _component_callable(
+            self.target_snapshot_loader,
+            "load_n3_hint_idempotency_snapshot",
+        ) or _dependency_method(
+            dependencies,
+            "db_connection",
+            "load_n3_hint_idempotency_snapshot",
+        )
+        if loader is not None:
+            return _call_with_supported_kwargs(
+                loader,
+                args=args,
+                report=report,
+                dependencies=dependencies,
+                config=config,
+                target_run_id=target_run_id,
+            )
+        return load_n3_hint_idempotency_snapshot_from_db(
+            args=args,
+            dependencies=dependencies,
+            config=config,
+            target_run_id=target_run_id,
         )
 
     def _resolve_config(self) -> Mapping[str, Any]:
@@ -958,29 +1109,117 @@ class N3HintFrequency8SourceArtifactWriter:
         payload_to_write["payload_hash"] = payload_hash
         payload_to_write["source_payload_hash"] = payload_hash
         payload_to_write["source_artifact_hash_policy"] = HINT_SOURCE_HASH_POLICY
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            payload_bytes = _canonical_json_bytes(payload_to_write)
-            payload_path.write_bytes(payload_bytes)
-            file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-            report_to_write = {
-                **dict(fetch_report),
-                "result": N3_READY_RESULT,
-                "payload_hash": payload_hash,
+        payload_bytes = _canonical_json_bytes(payload_to_write)
+        file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        report_to_write = {
+            **dict(fetch_report),
+            "result": N3_READY_RESULT,
+            "payload_hash": payload_hash,
+            "payload_path": str(payload_path),
+            "report_path": str(report_path),
+            "file_sha256": file_sha256,
+            "artifact_written": True,
+            "database_written": False,
+            "writes_outbox": False,
+            "consumes_outbox": False,
+            "updates_inbox_or_checkpoint": False,
+            "starts_worker": False,
+            "touches_n4_n5_n6": False,
+        }
+        report_bytes = _canonical_json_bytes(report_to_write)
+
+        payload_exists = payload_path.exists() or payload_path.is_symlink()
+        report_exists = report_path.exists() or report_path.is_symlink()
+        if payload_exists or report_exists:
+            if payload_exists != report_exists:
+                return _blocked(
+                    HINT_SOURCE_ARTIFACT_BLOCKER,
+                    "artifact_pair_partial",
+                    payload_path=str(payload_path),
+                    report_path=str(report_path),
+                    artifact_written=False,
+                )
+            existing = inspect_n3_hint_artifact_pair(
+                payload_path=payload_path,
+                report_path=report_path,
+                expected_payload_hash=payload_hash,
+                expected_file_sha256=file_sha256,
+                expected_for_trade_date=for_trade_date,
+                expected_actual_until_hhmm=actual_until_hhmm,
+                expected_subscription_run_id=str(payload.get("subscription_run_id") or ""),
+                expected_hint_proof_kind=str(payload.get("hint_proof_kind") or ""),
+                expected_source_target_run_id=str(payload.get("target_run_id") or ""),
+                expected_n4_context_run_id=str(payload.get("n4_context_run_id") or ""),
+            )
+            if existing.get("status") != "passed":
+                return _blocked(
+                    HINT_SOURCE_ARTIFACT_BLOCKER,
+                    str(existing.get("reason") or "artifact_pair_invalid"),
+                    payload_path=str(payload_path),
+                    report_path=str(report_path),
+                    artifact_validation=dict(existing),
+                    artifact_written=False,
+                )
+            return {
                 "payload_path": str(payload_path),
                 "report_path": str(report_path),
+                "payload_hash": payload_hash,
+                "source_payload_hash": payload_hash,
                 "file_sha256": file_sha256,
-                "artifact_written": True,
+                "source_artifact_file_sha256": file_sha256,
+                "artifact_written": False,
+                "artifact_reused": True,
                 "database_written": False,
                 "writes_outbox": False,
-                "consumes_outbox": False,
-                "updates_inbox_or_checkpoint": False,
-                "starts_worker": False,
-                "touches_n4_n5_n6": False,
             }
-            report_path.write_bytes(_canonical_json_bytes(report_to_write))
+        payload_created_identity: tuple[int, int] | None = None
+        report_created_identity: tuple[int, int] | None = None
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with payload_path.open("xb") as payload_file:
+                payload_stat = os.fstat(payload_file.fileno())
+                payload_created_identity = (payload_stat.st_dev, payload_stat.st_ino)
+                payload_file.write(payload_bytes)
+            with report_path.open("xb") as report_file:
+                report_stat = os.fstat(report_file.fileno())
+                report_created_identity = (report_stat.st_dev, report_stat.st_ino)
+                report_file.write(report_bytes)
+        except FileExistsError as exc:
+            cleanup = _discard_incomplete_artifact_pair_created_by_current_attempt(
+                payload_path=payload_path,
+                report_path=report_path,
+                payload_created_identity=payload_created_identity,
+                report_created_identity=report_created_identity,
+            )
+            reason = "artifact_partial_cleanup_failed" if cleanup["status"] != "passed" else f"artifact_create_race:{exc.filename or ''}"
+            return _blocked(
+                HINT_SOURCE_ARTIFACT_BLOCKER,
+                reason,
+                payload_path=str(payload_path),
+                report_path=str(report_path),
+                cleanup=cleanup,
+                artifact_written=False,
+            )
         except OSError as exc:
-            return _blocked(HINT_SOURCE_ARTIFACT_BLOCKER, f"artifact_write_failed:{type(exc).__name__}:{exc}")
+            cleanup = _discard_incomplete_artifact_pair_created_by_current_attempt(
+                payload_path=payload_path,
+                report_path=report_path,
+                payload_created_identity=payload_created_identity,
+                report_created_identity=report_created_identity,
+            )
+            reason = (
+                "artifact_partial_cleanup_failed"
+                if cleanup["status"] != "passed"
+                else f"artifact_write_failed:{type(exc).__name__}:{exc}"
+            )
+            return _blocked(
+                HINT_SOURCE_ARTIFACT_BLOCKER,
+                reason,
+                payload_path=str(payload_path),
+                report_path=str(report_path),
+                cleanup=cleanup,
+                artifact_written=False,
+            )
         return {
             "payload_path": str(payload_path),
             "report_path": str(report_path),
@@ -989,9 +1228,198 @@ class N3HintFrequency8SourceArtifactWriter:
             "file_sha256": file_sha256,
             "source_artifact_file_sha256": file_sha256,
             "artifact_written": True,
+            "artifact_reused": False,
             "database_written": False,
             "writes_outbox": False,
         }
+
+
+def inspect_n3_hint_artifact_pair(
+    *,
+    payload_path: str | os.PathLike[str],
+    report_path: str | os.PathLike[str],
+    expected_payload_hash: str,
+    expected_file_sha256: str,
+    expected_for_trade_date: str,
+    expected_actual_until_hhmm: str,
+    expected_subscription_run_id: str,
+    expected_hint_proof_kind: str,
+    expected_source_target_run_id: str,
+    expected_n4_context_run_id: str,
+) -> dict[str, Any]:
+    payload_file = Path(payload_path)
+    report_file = Path(report_path)
+    for artifact_kind, path in (("payload", payload_file), ("report", report_file)):
+        if path.is_symlink():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_symlink"}
+        if not path.exists():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_missing"}
+        if not path.is_file():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_not_regular_file"}
+    try:
+        payload_bytes = payload_file.read_bytes()
+        report_bytes = report_file.read_bytes()
+        parsed_payload = json.loads(payload_bytes)
+        parsed_report = json.loads(report_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"status": "blocked", "reason": f"artifact_json_invalid:{type(exc).__name__}"}
+    if not isinstance(parsed_payload, Mapping) or not isinstance(parsed_report, Mapping):
+        return {"status": "blocked", "reason": "artifact_json_root_not_object"}
+
+    recomputed_payload_hash = compute_n3_hint_frequency8_source_payload_hash(parsed_payload)
+    embedded_payload_hash = str(parsed_payload.get("payload_hash") or "")
+    embedded_source_payload_hash = str(parsed_payload.get("source_payload_hash") or "")
+    observed_file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    expected_payload_hash = str(expected_payload_hash or "")
+    expected_file_sha256 = str(expected_file_sha256 or "")
+    expected_for_trade_date = str(expected_for_trade_date or "")
+    expected_actual_until_hhmm = str(expected_actual_until_hhmm or "")
+    expected_subscription_run_id = str(expected_subscription_run_id or "")
+    expected_hint_proof_kind = str(expected_hint_proof_kind or "")
+    expected_source_target_run_id = str(expected_source_target_run_id or "")
+    expected_n4_context_run_id = str(expected_n4_context_run_id or "")
+    try:
+        from ashare_v3.market.hint_1m_projection_persistence import (
+            build_hint_projection_run_id,
+            parse_hint_projection_run_id,
+        )
+
+        parsed_target = parse_hint_projection_run_id(
+            build_hint_projection_run_id(
+                trade_date=expected_for_trade_date,
+                until_hhmm=expected_actual_until_hhmm,
+                source_subscription_run_id=expected_subscription_run_id,
+                proof_kind=expected_hint_proof_kind,
+            )
+        )
+        condition_run_id = expected_subscription_run_id.removeprefix(
+            f"market_data_subscription_{expected_for_trade_date}_"
+        )
+        canonical_source_target_run_id = (
+            f"n3_hint_index_board_1m_source_payload_{expected_for_trade_date}_until_source_returned_v1"
+        )
+        canonical_n4_context_run_id = (
+            f"trigger_context_snapshot_{expected_for_trade_date}_{condition_run_id}__atomic_rule_v1"
+        )
+        expected_identity_valid = (
+            parsed_target["trade_date"] == expected_for_trade_date
+            and parsed_target["until_hhmm"] == expected_actual_until_hhmm
+            and parsed_target["source_subscription_run_id"] == expected_subscription_run_id
+            and parsed_target["proof_kind"] == expected_hint_proof_kind
+            and condition_run_id.startswith("condition_layer_")
+        )
+    except Exception:
+        canonical_source_target_run_id = ""
+        canonical_n4_context_run_id = ""
+        expected_identity_valid = False
+    checks = {
+        "payload_hash_present": bool(expected_payload_hash),
+        "file_sha256_present": bool(expected_file_sha256),
+        "embedded_payload_hash_matches": embedded_payload_hash == expected_payload_hash,
+        "embedded_source_payload_hash_matches": embedded_source_payload_hash == expected_payload_hash,
+        "recomputed_payload_hash_matches": recomputed_payload_hash == expected_payload_hash,
+        "observed_file_sha256_matches": observed_file_sha256 == expected_file_sha256,
+        "report_payload_hash_matches": str(parsed_report.get("payload_hash") or "") == expected_payload_hash,
+        "report_file_sha256_matches": str(parsed_report.get("file_sha256") or "") == expected_file_sha256,
+        "report_payload_path_matches": str(parsed_report.get("payload_path") or "") == str(payload_file),
+        "report_path_matches": str(parsed_report.get("report_path") or "") == str(report_file),
+        "payload_for_trade_date_matches": str(parsed_payload.get("for_trade_date") or "") == expected_for_trade_date,
+        "payload_actual_until_hhmm_matches": str(parsed_payload.get("actual_until_hhmm") or "") == expected_actual_until_hhmm,
+        "payload_subscription_run_id_matches": str(parsed_payload.get("subscription_run_id") or "") == expected_subscription_run_id,
+        "payload_hint_proof_kind_matches": str(parsed_payload.get("hint_proof_kind") or "") == expected_hint_proof_kind,
+        "payload_proof_kind_matches": str(parsed_payload.get("proof_kind") or "") == expected_hint_proof_kind,
+        "payload_source_target_run_id_matches": str(parsed_payload.get("target_run_id") or "") == expected_source_target_run_id,
+        "payload_n4_context_run_id_matches": str(parsed_payload.get("n4_context_run_id") or "") == expected_n4_context_run_id,
+        "payload_hash_policy_matches": str(parsed_payload.get("source_artifact_hash_policy") or "") == HINT_SOURCE_HASH_POLICY,
+        "payload_database_written_false": parsed_payload.get("database_written") is False,
+        "payload_writes_outbox_false": parsed_payload.get("writes_outbox") is False,
+        "report_result_ready": str(parsed_report.get("result") or "") == N3_READY_RESULT,
+        "report_actual_until_hhmm_matches": str(parsed_report.get("actual_until_hhmm") or "") == expected_actual_until_hhmm,
+        "report_proof_kind_matches": str(parsed_report.get("proof_kind") or "") == expected_hint_proof_kind,
+        "report_artifact_written_true": parsed_report.get("artifact_written") is True,
+        "report_database_written_false": parsed_report.get("database_written") is False,
+        "report_writes_outbox_false": parsed_report.get("writes_outbox") is False,
+        "report_consumes_outbox_false": parsed_report.get("consumes_outbox") is False,
+        "report_updates_inbox_or_checkpoint_false": parsed_report.get("updates_inbox_or_checkpoint") is False,
+        "report_starts_worker_false": parsed_report.get("starts_worker") is False,
+        "report_touches_n4_n5_n6_false": parsed_report.get("touches_n4_n5_n6") is False,
+        "expected_identity_valid": expected_identity_valid,
+        "expected_source_target_run_id_canonical": expected_source_target_run_id == canonical_source_target_run_id,
+        "expected_n4_context_run_id_canonical": expected_n4_context_run_id == canonical_n4_context_run_id,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        return {
+            "status": "blocked",
+            "reason": f"artifact_pair_contract_mismatch:{','.join(failed)}",
+            "checks": checks,
+            "observed_payload_hash": recomputed_payload_hash,
+            "observed_file_sha256": observed_file_sha256,
+        }
+    return {
+        "status": "passed",
+        "reason": "artifact_pair_closed",
+        "checks": checks,
+        "payload_hash": expected_payload_hash,
+        "file_sha256": expected_file_sha256,
+        "payload_path": str(payload_file),
+        "report_path": str(report_file),
+    }
+
+
+def _discard_incomplete_artifact_pair_created_by_current_attempt(
+    *,
+    payload_path: Path,
+    report_path: Path,
+    payload_created_identity: tuple[int, int] | None,
+    report_created_identity: tuple[int, int] | None,
+) -> dict[str, Any]:
+    cleanup: dict[str, str] = {}
+    failed = False
+    for artifact_kind, identity, path in (
+        ("report", report_created_identity, report_path),
+        ("payload", payload_created_identity, payload_path),
+    ):
+        if identity is None:
+            cleanup[artifact_kind] = "not_created_by_current_attempt"
+            continue
+        try:
+            observed = path.lstat()
+        except FileNotFoundError:
+            cleanup[artifact_kind] = "already_absent"
+            continue
+        except OSError as exc:
+            cleanup[artifact_kind] = f"lstat_failed:{type(exc).__name__}:{exc}"
+            failed = True
+            continue
+        observed_identity = (observed.st_dev, observed.st_ino)
+        if not stat.S_ISREG(observed.st_mode) or observed_identity != identity:
+            cleanup[artifact_kind] = "identity_changed_preserved"
+            failed = True
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            cleanup[artifact_kind] = f"unlink_failed:{type(exc).__name__}:{exc}"
+            failed = True
+            continue
+        if path.exists() or path.is_symlink():
+            cleanup[artifact_kind] = "still_present_after_unlink"
+            failed = True
+        else:
+            cleanup[artifact_kind] = "removed_current_attempt_file"
+    return {
+        "status": "blocked" if failed else "passed",
+        "artifacts": cleanup,
+    }
+
+
+def _hint_fetch_report_path_for_payload_path(payload_path: str | os.PathLike[str]) -> Path | None:
+    path = Path(payload_path)
+    suffix = "_payload.json"
+    if not path.name.endswith(suffix):
+        return None
+    return path.with_name(f"{path.name[:-len(suffix)]}_fetch_report.json")
 
 
 def fetch_n3_hint_frequency8_market_rows_from_adapter(
@@ -1077,6 +1505,533 @@ def load_n3_hint_frequency8_scope_from_db(
                 conn.execute("ROLLBACK")
     except Exception as exc:
         return _blocked(HINT_SOURCE_SCOPE_BLOCKER, f"scope_loader_exception:{type(exc).__name__}:{exc}")
+
+
+def load_n3_hint_idempotency_snapshot_from_db(
+    *,
+    args: Any,
+    dependencies: Any,
+    config: Mapping[str, Any],
+    target_run_id: str,
+) -> Mapping[str, Any]:
+    del args, dependencies
+    try:
+        with _connect_db(config) as conn:
+            conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            conn.execute("SET LOCAL TIME ZONE 'Asia/Shanghai'")
+            try:
+                return _load_n3_hint_idempotency_snapshot_with_connection(
+                    conn=conn,
+                    target_run_id=target_run_id,
+                )
+            finally:
+                conn.execute("ROLLBACK")
+    except Exception as exc:
+        return _blocked(
+            HINT_SOURCE_IDEMPOTENCY_BLOCKER,
+            f"idempotency_snapshot_exception:{type(exc).__name__}:{exc}",
+            target_run_id=target_run_id,
+            artifact_written=False,
+        )
+
+
+def _load_n3_hint_idempotency_snapshot_with_connection(
+    *,
+    conn: Any,
+    target_run_id: str,
+) -> Mapping[str, Any]:
+    run_rows = _fetchall(
+        conn,
+        "SELECT status, p0_count, for_trade_date, source_trade_date, source_condition_run_id, raw_json FROM common_market_data_run WHERE run_id=%s",
+        (target_run_id,),
+    )
+    run_row = _result_row_mapping(
+        run_rows[0],
+        ("status", "p0_count", "for_trade_date", "source_trade_date", "source_condition_run_id", "raw_json"),
+    ) if len(run_rows) == 1 else {}
+    quality_row = _result_row_mapping(
+        _fetchone(
+            conn,
+            """
+            SELECT
+              count(*) AS quality_rows,
+              count(*) FILTER (WHERE status='passed') AS quality_passed_rows,
+              count(*) FILTER (WHERE severity='P0' AND status<>'passed') AS quality_p0_failures,
+              count(*) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_PERSISTENCE_READY'
+              ) AS canonical_quality_rows,
+              count(*) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_PERSISTENCE_READY'
+                  AND severity='P2'
+                  AND status='passed'
+              ) AS canonical_quality_passed_rows,
+              count(*) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT'
+              ) AS allowed_warning_rows,
+              count(*) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT'
+                  AND severity='P1'
+                  AND status='warning'
+              ) AS allowed_warning_valid_rows,
+              count(*) FILTER (
+                WHERE NOT (
+                  (gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_PERSISTENCE_READY'
+                    AND severity='P2'
+                    AND status='passed')
+                  OR
+                  (gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT'
+                    AND severity='P1'
+                    AND status='warning')
+                )
+              ) AS unexpected_quality_rows,
+              max(actual_value) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_PERSISTENCE_READY'
+              ) AS canonical_quality_actual_value,
+              max(actual_value) FILTER (
+                WHERE gate_code='N3_HINT_INDEX_BOARD_1M_PROOF_NOT_READY_EXCLUDED_FROM_FACT'
+              ) AS allowed_warning_actual_value
+            FROM common_market_data_quality_item
+            WHERE run_id=%s
+            """,
+            (target_run_id,),
+        ),
+        (
+            "quality_rows",
+            "quality_passed_rows",
+            "quality_p0_failures",
+            "canonical_quality_rows",
+            "canonical_quality_passed_rows",
+            "allowed_warning_rows",
+            "allowed_warning_valid_rows",
+            "unexpected_quality_rows",
+            "canonical_quality_actual_value",
+            "allowed_warning_actual_value",
+        ),
+    )
+    metric_summaries: dict[str, dict[str, Any]] = {}
+    for asset_kind in ("index", "board"):
+        table_name = f"{asset_kind}_realtime_hint_projection_metric"
+        summary = _result_row_mapping(
+            _fetchone(
+                conn,
+                f"""
+                SELECT
+                  count(*) AS row_count,
+                  count(*) FILTER (WHERE metric_ready IS TRUE) AS ready_rows,
+                  count(*) FILTER (WHERE metric_ready IS FALSE) AS not_ready_rows,
+                  count(*) FILTER (WHERE metric_ready IS NULL) AS invalid_ready_rows,
+                  array_remove(array_agg(DISTINCT source_artifact_path), NULL) AS artifact_paths,
+                  array_remove(array_agg(DISTINCT source_artifact_sha256), NULL) AS artifact_hashes,
+                  array_remove(array_agg(DISTINCT trade_date), NULL) AS trade_dates,
+                  array_remove(array_agg(DISTINCT metric_minute_label), NULL) AS metric_minute_labels,
+                  array_remove(array_agg(DISTINCT source_subscription_run_id), NULL) AS subscription_run_ids,
+                  array_remove(array_agg(DISTINCT proof_kind), NULL) AS proof_kinds
+                FROM {table_name}
+                WHERE projection_run_id=%s
+                """,
+                (target_run_id,),
+            ),
+            (
+                "row_count",
+                "ready_rows",
+                "not_ready_rows",
+                "invalid_ready_rows",
+                "artifact_paths",
+                "artifact_hashes",
+                "trade_dates",
+                "metric_minute_labels",
+                "subscription_run_ids",
+                "proof_kinds",
+            ),
+        )
+        metric_summaries[asset_kind] = {
+            "rows": int(summary.get("row_count") or 0),
+            "ready_rows": int(summary.get("ready_rows") or 0),
+            "not_ready_rows": int(summary.get("not_ready_rows") or 0),
+            "invalid_ready_rows": int(summary.get("invalid_ready_rows") or 0),
+            "artifact_paths": _string_list(summary.get("artifact_paths")),
+            "artifact_hashes": _string_list(summary.get("artifact_hashes")),
+            "trade_dates": _string_list(summary.get("trade_dates")),
+            "metric_minute_labels": _string_list(summary.get("metric_minute_labels")),
+            "subscription_run_ids": _string_list(summary.get("subscription_run_ids")),
+            "proof_kinds": _string_list(summary.get("proof_kinds")),
+        }
+
+    return {
+        "run_exists": len(run_rows),
+        "run_status": str(run_row.get("status") or ""),
+        "run_p0_count": int(run_row.get("p0_count") or 0),
+        "run_for_trade_date": str(run_row.get("for_trade_date") or ""),
+        "run_source_trade_date": str(run_row.get("source_trade_date") or ""),
+        "run_source_condition_run_id": str(run_row.get("source_condition_run_id") or ""),
+        "run_raw_json": _json_mapping(run_row.get("raw_json")),
+        "quality_rows": int(quality_row.get("quality_rows") or 0),
+        "quality_passed_rows": int(quality_row.get("quality_passed_rows") or 0),
+        "quality_p0_failures": int(quality_row.get("quality_p0_failures") or 0),
+        "canonical_quality_rows": int(quality_row.get("canonical_quality_rows") or 0),
+        "canonical_quality_passed_rows": int(quality_row.get("canonical_quality_passed_rows") or 0),
+        "allowed_warning_rows": int(quality_row.get("allowed_warning_rows") or 0),
+        "allowed_warning_valid_rows": int(quality_row.get("allowed_warning_valid_rows") or 0),
+        "unexpected_quality_rows": int(quality_row.get("unexpected_quality_rows") or 0),
+        "canonical_quality_actual_value": str(quality_row.get("canonical_quality_actual_value") or ""),
+        "allowed_warning_actual_value": str(quality_row.get("allowed_warning_actual_value") or ""),
+        "index_rows": metric_summaries["index"]["rows"],
+        "index_ready_rows": metric_summaries["index"]["ready_rows"],
+        "index_not_ready_rows": metric_summaries["index"]["not_ready_rows"],
+        "index_invalid_ready_rows": metric_summaries["index"]["invalid_ready_rows"],
+        "index_artifact_paths": metric_summaries["index"]["artifact_paths"],
+        "index_artifact_hashes": metric_summaries["index"]["artifact_hashes"],
+        "index_trade_dates": metric_summaries["index"]["trade_dates"],
+        "index_metric_minute_labels": metric_summaries["index"]["metric_minute_labels"],
+        "index_subscription_run_ids": metric_summaries["index"]["subscription_run_ids"],
+        "index_proof_kinds": metric_summaries["index"]["proof_kinds"],
+        "board_rows": metric_summaries["board"]["rows"],
+        "board_ready_rows": metric_summaries["board"]["ready_rows"],
+        "board_not_ready_rows": metric_summaries["board"]["not_ready_rows"],
+        "board_invalid_ready_rows": metric_summaries["board"]["invalid_ready_rows"],
+        "board_artifact_paths": metric_summaries["board"]["artifact_paths"],
+        "board_artifact_hashes": metric_summaries["board"]["artifact_hashes"],
+        "board_trade_dates": metric_summaries["board"]["trade_dates"],
+        "board_metric_minute_labels": metric_summaries["board"]["metric_minute_labels"],
+        "board_subscription_run_ids": metric_summaries["board"]["subscription_run_ids"],
+        "board_proof_kinds": metric_summaries["board"]["proof_kinds"],
+        "outbox_refs": _count_sql(
+            conn,
+            "SELECT count(*) FROM common_event_outbox WHERE source_layer=%s AND event_type = ANY(%s) AND source_run_id=%s",
+            ("N3_market_data", list(N3_OUTBOX_EVENT_TYPES), target_run_id),
+        ),
+        "inbox_refs": _count_event_inbox_refs_for_source_run(conn, target_run_id),
+        "checkpoint_refs": _count_event_checkpoint_refs_for_source_run(conn, target_run_id),
+        "n4_refs": _count_optional_column_refs(
+            conn,
+            ("common_trigger_run", "common_trigger_state", "common_trigger_match"),
+            (
+                "run_id",
+                "source_run_id",
+                "trigger_run_id",
+                "projection_run_id",
+                "source_projection_run_id",
+                "source_market_data_run_id",
+            ),
+            target_run_id,
+        ),
+        "n5_refs": _count_optional_column_refs(
+            conn,
+            ("common_action_run", "common_action_event"),
+            ("run_id", "source_run_id", "trigger_run_id", "action_run_id", "projection_run_id"),
+            target_run_id,
+        ),
+        "n6_refs": _count_optional_column_refs(
+            conn,
+            N6_DIRECT_REF_TABLES,
+            N6_DIRECT_REF_COLUMNS,
+            target_run_id,
+        ),
+        "transaction_isolation": "repeatable read",
+        "transaction_read_only": True,
+        "transaction_timezone": "Asia/Shanghai",
+    }
+
+
+def classify_n3_hint_existing_target(
+    *,
+    target_run_id: str,
+    snapshot: Mapping[str, Any],
+    candidate_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        from ashare_v3.market.hint_1m_projection_persistence import parse_hint_projection_run_id
+
+        parsed_target = parse_hint_projection_run_id(target_run_id)
+    except Exception as exc:
+        return {
+            "decision": "blocked",
+            "reason": f"target_run_id_invalid:{type(exc).__name__}:{exc}",
+            "evidence": {"target_run_id": target_run_id},
+        }
+    candidate_payload_hash = compute_n3_hint_frequency8_source_payload_hash(candidate_payload)
+    count_keys = (
+        "run_exists",
+        "quality_rows",
+        "index_rows",
+        "board_rows",
+        "outbox_refs",
+        "inbox_refs",
+        "checkpoint_refs",
+        "n4_refs",
+        "n5_refs",
+        "n6_refs",
+    )
+    counts = {key: int(snapshot.get(key) or 0) for key in count_keys}
+    if counts["run_exists"] == 0:
+        partial = {key: value for key, value in counts.items() if key != "run_exists" and value}
+        if partial:
+            return {
+                "decision": "blocked",
+                "reason": "target_absent_with_partial_database_facts",
+                "evidence": partial,
+            }
+        return {
+            "decision": "write_allowed",
+            "reason": "hint_target_absent",
+            "evidence": counts,
+        }
+    if counts["run_exists"] != 1:
+        return {
+            "decision": "blocked",
+            "reason": "target_run_cardinality_invalid",
+            "evidence": counts,
+        }
+
+    run_raw_json = _json_mapping(snapshot.get("run_raw_json"))
+    rows_by_asset = _json_mapping(run_raw_json.get("rows_by_asset"))
+    persisted_path = str(run_raw_json.get("source_artifact_path") or "")
+    persisted_payload_hash = str(
+        run_raw_json.get("source_artifact_payload_hash")
+        or run_raw_json.get("source_artifact_sha256")
+        or ""
+    )
+    persisted_file_sha256 = str(run_raw_json.get("source_artifact_file_sha256") or "")
+    expected_rows = {
+        "index": int(rows_by_asset.get("index") or 0),
+        "board": int(rows_by_asset.get("board") or 0),
+    }
+    actual_rows = {
+        "index": counts["index_rows"],
+        "board": counts["board_rows"],
+    }
+    expected_total = sum(expected_rows.values())
+    proof_rows_input_total = _strict_nonnegative_int(run_raw_json.get("proof_rows_input_total"))
+    metric_fact_exclusion_count = _strict_nonnegative_int(run_raw_json.get("metric_fact_exclusion_count"))
+    canonical_quality_actual_value = _strict_nonnegative_int(snapshot.get("canonical_quality_actual_value"))
+    allowed_warning_actual_value = _strict_nonnegative_int(snapshot.get("allowed_warning_actual_value"))
+    ready_distribution_closed = all(
+        int(snapshot.get(f"{asset_kind}_ready_rows") or 0)
+        + int(snapshot.get(f"{asset_kind}_not_ready_rows") or 0)
+        == actual_rows[asset_kind]
+        and int(snapshot.get(f"{asset_kind}_invalid_ready_rows") or 0) == 0
+        for asset_kind in ("index", "board")
+    )
+    metric_paths = sorted(
+        {
+            *(_string_list(snapshot.get("index_artifact_paths"))),
+            *(_string_list(snapshot.get("board_artifact_paths"))),
+        }
+    )
+    metric_hashes = sorted(
+        {
+            *(_string_list(snapshot.get("index_artifact_hashes"))),
+            *(_string_list(snapshot.get("board_artifact_hashes"))),
+        }
+    )
+    for_trade_date = str(candidate_payload.get("for_trade_date") or "")
+    actual_until_hhmm = str(candidate_payload.get("actual_until_hhmm") or "")
+    subscription_run_id = str(candidate_payload.get("subscription_run_id") or "")
+    hint_proof_kind = str(candidate_payload.get("hint_proof_kind") or candidate_payload.get("proof_kind") or "")
+    expected_condition_run_id = subscription_run_id.removeprefix(
+        f"market_data_subscription_{for_trade_date}_"
+    )
+    metric_trade_dates = sorted(
+        {*_string_list(snapshot.get("index_trade_dates")), *_string_list(snapshot.get("board_trade_dates"))}
+    )
+    metric_minute_labels = sorted(
+        {
+            *_string_list(snapshot.get("index_metric_minute_labels")),
+            *_string_list(snapshot.get("board_metric_minute_labels")),
+        }
+    )
+    metric_subscription_run_ids = sorted(
+        {
+            *_string_list(snapshot.get("index_subscription_run_ids")),
+            *_string_list(snapshot.get("board_subscription_run_ids")),
+        }
+    )
+    metric_proof_kinds = sorted(
+        {*_string_list(snapshot.get("index_proof_kinds")), *_string_list(snapshot.get("board_proof_kinds"))}
+    )
+    expected_filename = f"N3_hint_index_board_1m_{actual_until_hhmm}_midday_bridge_frequency8_payload.json"
+    expected_path_suffix = str(Path(for_trade_date) / expected_filename)
+    checks = {
+        "target_run_id_present": bool(target_run_id),
+        "target_trade_date_matches": parsed_target["trade_date"] == for_trade_date,
+        "target_minute_matches": parsed_target["until_hhmm"] == actual_until_hhmm,
+        "target_subscription_matches": parsed_target["source_subscription_run_id"] == subscription_run_id,
+        "target_proof_kind_matches": parsed_target["proof_kind"] == hint_proof_kind,
+        "run_status_passed": str(snapshot.get("run_status") or "") == "passed",
+        "run_p0_zero": int(snapshot.get("run_p0_count") or 0) == 0,
+        "run_for_trade_date_matches": str(snapshot.get("run_for_trade_date") or "") == for_trade_date,
+        "run_source_trade_date_matches": (
+            str(snapshot.get("run_source_trade_date") or "") == parsed_target["source_trade_date"]
+        ),
+        "run_source_condition_run_id_matches": (
+            bool(expected_condition_run_id)
+            and str(snapshot.get("run_source_condition_run_id") or "") == expected_condition_run_id
+        ),
+        "run_proof_kind_matches": str(run_raw_json.get("proof_kind") or "") == hint_proof_kind,
+        "run_writes_outbox_false": run_raw_json.get("writes_outbox") is False,
+        "run_artifact_hash_policy_matches": (
+            str(run_raw_json.get("source_artifact_hash_policy") or "") == HINT_SOURCE_HASH_POLICY
+        ),
+        "rows_by_asset_keys_valid": set(rows_by_asset).issubset({"index", "board"}),
+        "proof_rows_input_total_present": proof_rows_input_total is not None,
+        "metric_fact_exclusion_count_present": metric_fact_exclusion_count is not None,
+        "proof_rows_total_closed": (
+            proof_rows_input_total is not None
+            and metric_fact_exclusion_count is not None
+            and proof_rows_input_total == expected_total + metric_fact_exclusion_count
+        ),
+        "canonical_quality_exactly_one": int(snapshot.get("canonical_quality_rows") or 0) == 1,
+        "canonical_quality_passed": int(snapshot.get("canonical_quality_passed_rows") or 0) == 1,
+        "allowed_warning_cardinality": int(snapshot.get("allowed_warning_rows") or 0) in (0, 1),
+        "allowed_warning_valid": (
+            int(snapshot.get("allowed_warning_valid_rows") or 0)
+            == int(snapshot.get("allowed_warning_rows") or 0)
+        ),
+        "quality_rows_exact": (
+            counts["quality_rows"]
+            == int(snapshot.get("canonical_quality_rows") or 0)
+            + int(snapshot.get("allowed_warning_rows") or 0)
+        ),
+        "unexpected_quality_zero": int(snapshot.get("unexpected_quality_rows") or 0) == 0,
+        "canonical_quality_actual_matches_proof_total": (
+            canonical_quality_actual_value is not None
+            and proof_rows_input_total is not None
+            and canonical_quality_actual_value == proof_rows_input_total
+        ),
+        "warning_matches_exclusion_count": (
+            metric_fact_exclusion_count is not None
+            and (
+                (
+                    metric_fact_exclusion_count == 0
+                    and int(snapshot.get("allowed_warning_rows") or 0) == 0
+                    and allowed_warning_actual_value is None
+                )
+                or (
+                    metric_fact_exclusion_count > 0
+                    and int(snapshot.get("allowed_warning_rows") or 0) == 1
+                    and allowed_warning_actual_value == metric_fact_exclusion_count
+                )
+            )
+        ),
+        "quality_p0_zero": int(snapshot.get("quality_p0_failures") or 0) == 0,
+        "rows_by_asset_match": actual_rows == expected_rows,
+        "row_total_match": sum(actual_rows.values()) == expected_total,
+        "ready_distribution_closed": ready_distribution_closed,
+        "persisted_path_present": bool(persisted_path),
+        "persisted_payload_hash_present": bool(persisted_payload_hash),
+        "persisted_file_sha256_present": bool(persisted_file_sha256),
+        "persisted_path_matches_target_minute": persisted_path.endswith(expected_path_suffix),
+        "metric_paths_match": metric_paths == ([persisted_path] if expected_total else []),
+        "metric_hashes_match": metric_hashes == ([persisted_payload_hash] if expected_total else []),
+        "metric_trade_date_matches": metric_trade_dates == ([for_trade_date] if expected_total else []),
+        "metric_minute_matches": metric_minute_labels == ([actual_until_hhmm] if expected_total else []),
+        "metric_subscription_matches": metric_subscription_run_ids == ([subscription_run_id] if expected_total else []),
+        "metric_proof_kind_matches": metric_proof_kinds == ([HINT_METRIC_PROOF_KIND] if expected_total else []),
+        "n3_outbox_refs_zero": counts["outbox_refs"] == 0,
+        "n3_inbox_refs_zero": counts["inbox_refs"] == 0,
+        "n3_checkpoint_refs_zero": counts["checkpoint_refs"] == 0,
+        "unexpected_n6_direct_refs_zero": counts["n6_refs"] == 0,
+    }
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    if failed_checks:
+        return {
+            "decision": "blocked",
+            "reason": f"existing_hint_target_contract_mismatch:{','.join(failed_checks)}",
+            "evidence": {
+                "checks": checks,
+                "counts": counts,
+                "expected_rows": expected_rows,
+                "actual_rows": actual_rows,
+                "metric_paths": metric_paths,
+                "metric_hashes": metric_hashes,
+                "metric_trade_dates": metric_trade_dates,
+                "metric_minute_labels": metric_minute_labels,
+                "metric_subscription_run_ids": metric_subscription_run_ids,
+                "metric_proof_kinds": metric_proof_kinds,
+            },
+        }
+
+    report_path = _hint_fetch_report_path_for_payload_path(persisted_path)
+    if report_path is None:
+        return {
+            "decision": "blocked",
+            "reason": "persisted_artifact_path_not_canonical",
+            "evidence": {"source_artifact_path": persisted_path},
+        }
+    artifact = inspect_n3_hint_artifact_pair(
+        payload_path=persisted_path,
+        report_path=report_path,
+        expected_payload_hash=persisted_payload_hash,
+        expected_file_sha256=persisted_file_sha256,
+        expected_for_trade_date=for_trade_date,
+        expected_actual_until_hhmm=actual_until_hhmm,
+        expected_subscription_run_id=subscription_run_id,
+        expected_hint_proof_kind=hint_proof_kind,
+        expected_source_target_run_id=str(candidate_payload.get("target_run_id") or ""),
+        expected_n4_context_run_id=str(candidate_payload.get("n4_context_run_id") or ""),
+    )
+    if artifact.get("status") != "passed":
+        return {
+            "decision": "blocked",
+            "reason": str(artifact.get("reason") or "persisted_artifact_pair_invalid"),
+            "evidence": {"artifact": dict(artifact), "counts": counts},
+        }
+    downstream_refs = {
+        key: counts[key]
+        for key in ("outbox_refs", "inbox_refs", "checkpoint_refs", "n4_refs", "n5_refs", "n6_refs")
+    }
+    return {
+        "decision": "idempotent_pass",
+        "reason": "noop_existing_hint_target_passed",
+        "source_artifact_path": persisted_path,
+        "source_report_path": str(report_path),
+        "persisted_payload_hash": persisted_payload_hash,
+        "persisted_file_sha256": persisted_file_sha256,
+        "candidate_differs_from_persisted": candidate_payload_hash != persisted_payload_hash,
+        "downstream_refs": downstream_refs,
+        "evidence": {
+            "checks": checks,
+            "counts": counts,
+            "candidate_payload_hash": candidate_payload_hash,
+            "artifact": dict(artifact),
+        },
+    }
+
+
+def _result_row_mapping(row: Any, columns: Sequence[str]) -> dict[str, Any]:
+    if row is None:
+        return {}
+    if isinstance(row, Mapping):
+        return dict(row)
+    return {column: row[index] for index, column in enumerate(columns) if index < len(row)}
+
+
+def _strict_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 and str(parsed) == str(value).strip() else None
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return sorted(str(item) for item in value if item not in (None, ""))
 
 
 def load_n3_hint_target_snapshot_from_db(
@@ -1526,8 +2481,8 @@ def _load_n3_hint_target_snapshot_with_connection(*, conn: Any, target_run_id: s
         ),
         "n6_refs": _count_optional_column_refs(
             conn,
-            ("user_projection_run", "user_signal_projection", "user_signal_card"),
-            ("run_id", "source_run_id", "trigger_run_id", "action_run_id", "projection_run_id"),
+            N6_DIRECT_REF_TABLES,
+            N6_DIRECT_REF_COLUMNS,
             target_run_id,
         ),
     }
@@ -1538,18 +2493,11 @@ def _count_event_inbox_refs_for_source_run(conn: Any, target_run_id: str) -> int
         conn,
         """
         SELECT count(*)
-        FROM common_event_inbox inbox
-        WHERE EXISTS (
-          SELECT 1
-          FROM common_event_outbox outbox
-          WHERE outbox.source_layer=%s
-            AND outbox.event_type = ANY(%s)
-            AND outbox.source_run_id=%s
-            AND inbox.source_layer = outbox.source_layer
-            AND inbox.event_id = outbox.event_id
-        )
+        FROM common_event_inbox
+        WHERE source_layer=%s
+          AND source_run_id=%s
         """,
-        ("N3_market_data", list(N3_OUTBOX_EVENT_TYPES), target_run_id),
+        ("N3_market_data", target_run_id),
     )
 
 
