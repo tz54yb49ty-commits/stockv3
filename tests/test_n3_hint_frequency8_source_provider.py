@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -12,11 +13,22 @@ MIDDAY_BRIDGE_PROOF_KIND = "index_board_1m_hint_projection_v1_midday_bridge_v1"
 def _args(**overrides):
     values = {
         "for_trade_date": "20260630",
-        "target_run_id": "n3_hint_index_board_1m_source_payload_20260630_until_1300_v1",
+        "target_run_id": "n3_hint_index_board_1m_source_payload_20260630_until_source_returned_v1",
         "n4_context_run_id": "trigger_context_snapshot_20260630_condition_layer_20260629_source_20260629_for_20260630_v1__atomic_rule_v1",
         "subscription_run_id": "market_data_subscription_20260630_condition_layer_20260629_source_20260629_for_20260630_v1",
         "hint_proof_kind": MIDDAY_BRIDGE_PROOF_KIND,
     }
+    if "for_trade_date" in overrides and "subscription_run_id" not in overrides:
+        trade_date = str(overrides["for_trade_date"])
+        values["target_run_id"] = (
+            f"n3_hint_index_board_1m_source_payload_{trade_date}_until_source_returned_v1"
+        )
+        values["subscription_run_id"] = (
+            f"market_data_subscription_{trade_date}_condition_layer_20260629_source_20260629_for_{trade_date}_v1"
+        )
+        values["n4_context_run_id"] = (
+            f"trigger_context_snapshot_{trade_date}_condition_layer_20260629_source_20260629_for_{trade_date}_v1__atomic_rule_v1"
+        )
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -117,10 +129,25 @@ class CleanTargetSnapshotLoader:
             "n6_refs": 0,
         }
         self.calls = 0
+        self.target_run_ids = []
 
     def load_n3_hint_target_snapshot(self, **_kwargs):
         self.calls += 1
         return self.snapshot
+
+    def load_n3_hint_idempotency_snapshot(self, **_kwargs):
+        self.calls += 1
+        self.target_run_ids.append(str(_kwargs.get("target_run_id") or ""))
+        return self.snapshot
+
+
+class FailIfCalledArtifactWriter:
+    def __init__(self):
+        self.calls = 0
+
+    def write_n3_hint_frequency8_artifacts(self, **_kwargs):
+        self.calls += 1
+        raise AssertionError("artifact writer must not run for a passed idempotent target")
 
 
 class MarketAdapter:
@@ -393,6 +420,83 @@ def _previous_day_rows_for_first_window_preflight():
             }
         )
     return rows
+
+
+def _passed_hint_idempotency_snapshot(source_payload, **overrides):
+    counts = dict(source_payload.get("source_payload_counts") or {})
+    rows_by_asset = {
+        asset_kind: int(counts.get(f"{asset_kind}_rows") or 0)
+        for asset_kind in ("index", "board")
+    }
+    for_trade_date = str(source_payload.get("for_trade_date") or "")
+    subscription_run_id = str(source_payload.get("subscription_run_id") or "")
+    source_condition_run_id = subscription_run_id.removeprefix(
+        f"market_data_subscription_{for_trade_date}_"
+    )
+    source_trade_date = source_condition_run_id.split("_source_", 1)[0].removeprefix("condition_layer_")
+    common = {
+        "run_exists": 1,
+        "run_status": "passed",
+        "run_p0_count": 0,
+        "run_for_trade_date": for_trade_date,
+        "run_source_trade_date": source_trade_date,
+        "run_source_condition_run_id": source_condition_run_id,
+        "run_raw_json": {
+            "proof_kind": MIDDAY_BRIDGE_PROOF_KIND,
+            "source_artifact_path": str(source_payload.get("source_artifact_path") or ""),
+            "source_artifact_payload_hash": str(source_payload.get("payload_hash") or ""),
+            "source_artifact_file_sha256": str(source_payload.get("source_artifact_file_sha256") or ""),
+            "source_artifact_hash_policy": "payload_hash_canonical_file_sha256_trace",
+            "rows_by_asset": rows_by_asset,
+            "proof_rows_input_total": sum(rows_by_asset.values()),
+            "metric_fact_exclusion_count": 0,
+            "writes_outbox": False,
+        },
+        "quality_rows": 1,
+        "quality_passed_rows": 1,
+        "quality_p0_failures": 0,
+        "canonical_quality_rows": 1,
+        "canonical_quality_passed_rows": 1,
+        "allowed_warning_rows": 0,
+        "allowed_warning_valid_rows": 0,
+        "unexpected_quality_rows": 0,
+        "canonical_quality_actual_value": str(sum(rows_by_asset.values())),
+        "allowed_warning_actual_value": "",
+        "outbox_refs": 0,
+        "inbox_refs": 0,
+        "checkpoint_refs": 0,
+        "n4_refs": 3,
+        "n5_refs": 3,
+        "n6_refs": 0,
+    }
+    for asset_kind in ("index", "board"):
+        row_count = rows_by_asset[asset_kind]
+        common.update(
+            {
+                f"{asset_kind}_rows": row_count,
+                f"{asset_kind}_ready_rows": row_count,
+                f"{asset_kind}_not_ready_rows": 0,
+                f"{asset_kind}_invalid_ready_rows": 0,
+                f"{asset_kind}_artifact_paths": (
+                    [str(source_payload.get("source_artifact_path") or "")] if row_count else []
+                ),
+                f"{asset_kind}_artifact_hashes": (
+                    [str(source_payload.get("payload_hash") or "")] if row_count else []
+                ),
+                f"{asset_kind}_trade_dates": (
+                    [str(source_payload.get("for_trade_date") or "")] if row_count else []
+                ),
+                f"{asset_kind}_metric_minute_labels": (
+                    [str(source_payload.get("actual_until_hhmm") or "")] if row_count else []
+                ),
+                f"{asset_kind}_subscription_run_ids": (
+                    [str(source_payload.get("subscription_run_id") or "")] if row_count else []
+                ),
+                f"{asset_kind}_proof_kinds": (["index_board_1m_hint_projection_v1"] if row_count else []),
+            }
+        )
+    common.update(overrides)
+    return common
 
 
 def _cumulative_row(identity_key, label, cumulative, *, elapsed_index):
@@ -1175,9 +1279,9 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                 "common_trigger_match": 0,
                 "common_action_run": 0,
                 "common_action_event": 0,
-                "user_projection_run": 0,
-                "user_signal_projection": 0,
-                "user_signal_card": 0,
+                "user_projection_run": 1,
+                "user_signal_projection": 2,
+                "user_signal_card": 3,
             },
             columns_by_table={
                 "common_trigger_run": ("run_id",),
@@ -1185,9 +1289,9 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                 "common_trigger_match": ("source_projection_run_id",),
                 "common_action_run": ("source_run_id",),
                 "common_action_event": ("trigger_run_id",),
-                "user_projection_run": ("source_run_id",),
-                "user_signal_projection": ("action_run_id",),
-                "user_signal_card": ("projection_run_id",),
+                "user_projection_run": ("user_projection_run_id", "source_action_run_id"),
+                "user_signal_projection": ("user_projection_run_id", "source_action_run_id"),
+                "user_signal_card": ("user_projection_run_id", "source_action_run_id"),
             },
         )
 
@@ -1199,6 +1303,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
         self.assertEqual(snapshot["outbox_refs"], 2)
         self.assertEqual(snapshot["inbox_refs"], 3)
         self.assertEqual(snapshot["checkpoint_refs"], 5)
+        self.assertEqual(snapshot["n6_refs"], 6)
         executed_sql = "\n".join(sql for sql, _params in conn.statements).lower()
         for forbidden_fragment in (
             "payload_json::text",
@@ -1212,11 +1317,12 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
             "from common_event_outbox where source_layer=%s and event_type = any(%s) and source_run_id=%s",
             " ".join(executed_sql.split()),
         )
-        self.assertIn("from common_event_inbox inbox", " ".join(executed_sql.split()))
-        self.assertIn("from common_event_outbox outbox", " ".join(executed_sql.split()))
-        self.assertIn("inbox.source_layer = outbox.source_layer", " ".join(executed_sql.split()))
-        self.assertIn("inbox.event_id = outbox.event_id", " ".join(executed_sql.split()))
-        self.assertNotIn("from common_event_inbox where source_run_id=%s", " ".join(executed_sql.split()))
+        self.assertIn(
+            "from common_event_inbox where source_layer=%s and source_run_id=%s",
+            " ".join(executed_sql.split()),
+        )
+        self.assertIn("user_projection_run_id=%s", " ".join(executed_sql.split()))
+        self.assertIn("source_action_run_id=%s", " ".join(executed_sql.split()))
 
     def test_target_snapshot_outbox_refs_use_existing_outbox_index_prefix(self) -> None:
         from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_target_snapshot_with_connection
@@ -1254,7 +1360,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
         self.assertIn("MarketDisplaySnapshotUpdated", outbox_params[1])
         self.assertEqual(outbox_params[2], target_run_id)
 
-    def test_target_snapshot_inbox_refs_use_outbox_to_inbox_index_join(self) -> None:
+    def test_target_snapshot_inbox_refs_use_direct_source_run_reference(self) -> None:
         from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_target_snapshot_with_connection
 
         target_run_id = "n3_hint_index_board_1m_source_payload_20260703_0931_midday_bridge_v1"
@@ -1276,21 +1382,16 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
         inbox_statements = [
             (" ".join(sql.lower().split()), params)
             for sql, params in conn.statements
-            if "from common_event_inbox inbox" in " ".join(sql.lower().split())
+            if "from common_event_inbox" in " ".join(sql.lower().split())
         ]
         self.assertEqual(len(inbox_statements), 1)
         inbox_sql, inbox_params = inbox_statements[0]
-        self.assertIn("from common_event_outbox outbox", inbox_sql)
-        self.assertIn("outbox.source_layer=%s", inbox_sql)
-        self.assertIn("outbox.event_type = any(%s)", inbox_sql)
-        self.assertIn("outbox.source_run_id=%s", inbox_sql)
-        self.assertIn("inbox.source_layer = outbox.source_layer", inbox_sql)
-        self.assertIn("inbox.event_id = outbox.event_id", inbox_sql)
-        self.assertNotIn("from common_event_inbox where source_run_id=%s", inbox_sql)
+        self.assertIn("from common_event_inbox", inbox_sql)
+        self.assertIn("source_layer=%s", inbox_sql)
+        self.assertIn("source_run_id=%s", inbox_sql)
+        self.assertNotIn("from common_event_outbox", inbox_sql)
         self.assertEqual(inbox_params[0], "N3_market_data")
-        self.assertIn("MarketSnapshotUpdated", inbox_params[1])
-        self.assertIn("MarketDisplaySnapshotUpdated", inbox_params[1])
-        self.assertEqual(inbox_params[2], target_run_id)
+        self.assertEqual(inbox_params[1], target_run_id)
 
     def test_target_snapshot_loader_does_not_fallback_to_text_when_optional_ref_columns_missing(self) -> None:
         from scripts.n3_hint_frequency8_source_provider import _load_n3_hint_target_snapshot_with_connection
@@ -1403,6 +1504,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                 scope_loader=ScopeLoader(_scope()),
                 market_fetcher=N3HintFrequency8MarketFetchAdapter(client_factory=lambda: client),
                 artifact_writer=None,
+                target_snapshot_loader=CleanTargetSnapshotLoader(),
             )
         )
 
@@ -1469,6 +1571,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                     scope_loader=scope_loader,
                     market_fetcher=market,
                     artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
             payload = provider.fetch_n3_hint_frequency8_source(
@@ -1559,6 +1662,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                         }
                     ),
                     artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
             payload = provider.fetch_n3_hint_frequency8_source(
@@ -1590,6 +1694,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                     config={"database_url": "postgresql://not-used", "artifact_output_root": tmpdir},
                     scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
                     market_fetcher=market,
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
 
@@ -1644,6 +1749,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                     scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
                     market_fetcher=market,
                     artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
 
@@ -1696,6 +1802,7 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                     scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
                     market_fetcher=market,
                     artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
                 )
             )
 
@@ -1840,6 +1947,574 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
                 self.assertIn(expected_reason, payload["blocked_reasons"])
                 self.assertFalse(payload["artifact_written"])
                 self.assertFalse(payload["database_written"])
+
+    def test_passed_target_returns_noop_without_overwriting_candidate_drift(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            HINT_SOURCE_IDEMPOTENT_NOOP_RESULT,
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+        )
+
+        args = _args(for_trade_date="20260701")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                    market_fetcher=MarketAdapter(
+                        rows_by_identity={"board:TDX:881001": [_raw_row_for_date("20260701", "10:21", amount=100)]}
+                    ),
+                    artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
+                )
+            ).fetch_n3_hint_frequency8_source(args=args, report=_report(), dependencies=N3RealIODependencies())
+            payload_path = Path(first["source_artifact_path"])
+            report_path = Path(first["source_report_path"])
+            before = {
+                "payload": payload_path.read_bytes(),
+                "report": report_path.read_bytes(),
+                "payload_mtime": payload_path.stat().st_mtime_ns,
+                "report_mtime": report_path.stat().st_mtime_ns,
+                "payload_inode": payload_path.stat().st_ino,
+                "report_inode": report_path.stat().st_ino,
+            }
+            snapshot_loader = CleanTargetSnapshotLoader(_passed_hint_idempotency_snapshot(first))
+            forbidden_writer = FailIfCalledArtifactWriter()
+            second = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                    market_fetcher=MarketAdapter(
+                        rows_by_identity={"board:TDX:881001": [_raw_row_for_date("20260701", "10:21", amount=999)]}
+                    ),
+                    artifact_writer=forbidden_writer,
+                    target_snapshot_loader=snapshot_loader,
+                )
+            ).fetch_n3_hint_frequency8_source(args=args, report=_report(), dependencies=N3RealIODependencies())
+
+            self.assertEqual(second["result"], HINT_SOURCE_IDEMPOTENT_NOOP_RESULT)
+            self.assertEqual(second["status"], "noop")
+            self.assertEqual(second["idempotency_decision"], "idempotent_pass")
+            self.assertFalse(second["execute_contract_ready"])
+            self.assertFalse(second["idempotent_target_execute_contract_ready"])
+            self.assertTrue(second["candidate_differs_from_persisted"])
+            self.assertEqual(second["payload_hash"], first["payload_hash"])
+            self.assertEqual(second["downstream_refs"]["n4_refs"], 3)
+            self.assertEqual(forbidden_writer.calls, 0)
+            self.assertEqual(len(snapshot_loader.target_run_ids), 1)
+            self.assertIn("_until_1021__", snapshot_loader.target_run_ids[0])
+            self.assertEqual(payload_path.read_bytes(), before["payload"])
+            self.assertEqual(report_path.read_bytes(), before["report"])
+            self.assertEqual(payload_path.stat().st_mtime_ns, before["payload_mtime"])
+            self.assertEqual(report_path.stat().st_mtime_ns, before["report_mtime"])
+            self.assertEqual(payload_path.stat().st_ino, before["payload_inode"])
+            self.assertEqual(report_path.stat().st_ino, before["report_inode"])
+
+            from scripts import run_n3_hint_index_board_1m_source_fetch_once as source_child
+
+            wrapper_report_path = Path(tmpdir) / "tmp" / "source_child_report.json"
+            with patch("builtins.print"):
+                returncode = source_child.main(
+                    [
+                        "--for-trade-date",
+                        "20260701",
+                        "--n4-context-run-id",
+                        args.n4_context_run_id,
+                        "--subscription-run-id",
+                        args.subscription_run_id,
+                        "--source-condition-run-id",
+                        "condition_layer_20260629_source_20260629_for_20260701_v1",
+                        "--target-run-id",
+                        "n3_hint_index_board_1m_source_payload_20260701_until_source_returned_v1",
+                        "--hint-proof-kind",
+                        MIDDAY_BRIDGE_PROOF_KIND,
+                        "--json-report-path",
+                        str(wrapper_report_path),
+                        "--execute",
+                        "--user-confirmed",
+                    ],
+                    layer_runner=lambda **_kwargs: second,
+                )
+            self.assertEqual(returncode, 0)
+            self.assertTrue(wrapper_report_path.is_file())
+            self.assertEqual(payload_path.read_bytes(), before["payload"])
+            self.assertEqual(report_path.read_bytes(), before["report"])
+            self.assertEqual(payload_path.stat().st_mtime_ns, before["payload_mtime"])
+            self.assertEqual(report_path.stat().st_mtime_ns, before["report_mtime"])
+            self.assertEqual(payload_path.stat().st_ino, before["payload_inode"])
+            self.assertEqual(report_path.stat().st_ino, before["report_inode"])
+
+    def test_source_lineage_identity_must_be_canonical_before_artifact_write(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+        )
+
+        mutations = {
+            "source_candidate": {"target_run_id": "wrong"},
+            "n4_context": {"n4_context_run_id": "wrong"},
+        }
+        for name, overrides in mutations.items():
+            with self.subTest(name=name):
+                writer = FailIfCalledArtifactWriter()
+                result = N3HintFrequency8SourceProvider(
+                    backend=N3HintFrequency8SourceBackend(
+                        config={"database_url": "postgresql://not-used"},
+                        scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                        market_fetcher=MarketAdapter(
+                            rows_by_identity={
+                                "board:TDX:881001": [_raw_row_for_date("20260701", "10:21")]
+                            }
+                        ),
+                        artifact_writer=writer,
+                        target_snapshot_loader=CleanTargetSnapshotLoader(),
+                    )
+                ).fetch_n3_hint_frequency8_source(
+                    args=_args(for_trade_date="20260701", **overrides),
+                    report=_report(),
+                    dependencies=N3RealIODependencies(),
+                )
+                self.assertEqual(result["result"], "BLOCKED_N3_HINT_SOURCE_IDEMPOTENCY")
+                self.assertIn("source_lineage_identity_mismatch", result["reason"])
+                self.assertEqual(writer.calls, 0)
+
+    def test_absent_target_reuses_exact_pair_and_blocks_different_candidate(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+        )
+
+        args = _args(for_trade_date="20260701")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def run(amount):
+                return N3HintFrequency8SourceProvider(
+                    backend=N3HintFrequency8SourceBackend(
+                        config={"database_url": "postgresql://not-used"},
+                        scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                        market_fetcher=MarketAdapter(
+                            rows_by_identity={
+                                "board:TDX:881001": [_raw_row_for_date("20260701", "10:21", amount=amount)]
+                            }
+                        ),
+                        artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                        target_snapshot_loader=CleanTargetSnapshotLoader(),
+                    )
+                ).fetch_n3_hint_frequency8_source(args=args, report=_report(), dependencies=N3RealIODependencies())
+
+            first = run(100)
+            payload_path = Path(first["source_artifact_path"])
+            report_path = Path(first["source_report_path"])
+            before = (payload_path.read_bytes(), report_path.read_bytes(), payload_path.stat().st_mtime_ns, report_path.stat().st_mtime_ns)
+            same = run(100)
+            self.assertEqual(same["result"], "EXECUTE_READY_REAL_IO_CONTRACT")
+            self.assertFalse(same["artifact_written"])
+            self.assertTrue(same["artifact_reused"])
+            self.assertEqual(
+                (payload_path.read_bytes(), report_path.read_bytes(), payload_path.stat().st_mtime_ns, report_path.stat().st_mtime_ns),
+                before,
+            )
+            different = run(101)
+            self.assertEqual(different["result"], "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER")
+            self.assertIn("artifact_pair_contract_mismatch", different["reason"])
+            self.assertEqual(
+                (payload_path.read_bytes(), report_path.read_bytes(), payload_path.stat().st_mtime_ns, report_path.stat().st_mtime_ns),
+                before,
+            )
+
+    def test_existing_target_contract_tampering_remains_fail_closed(self) -> None:
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+            classify_n3_hint_existing_target,
+        )
+
+        args = _args(for_trade_date="20260701")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_payload = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                    market_fetcher=MarketAdapter(
+                        rows_by_identity={"board:TDX:881001": [_raw_row_for_date("20260701", "10:21")]}
+                    ),
+                    artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
+                )
+            ).fetch_n3_hint_frequency8_source(args=args, report=_report(), dependencies=N3RealIODependencies())
+            base = _passed_hint_idempotency_snapshot(source_payload)
+            from ashare_v3.market.hint_1m_projection_persistence import build_hint_projection_run_id
+
+            target_run_id = build_hint_projection_run_id(
+                trade_date=source_payload["for_trade_date"],
+                until_hhmm=source_payload["actual_until_hhmm"],
+                source_subscription_run_id=source_payload["subscription_run_id"],
+                proof_kind=MIDDAY_BRIDGE_PROOF_KIND,
+            )
+            base["quality_rows"] = 2
+            base["allowed_warning_rows"] = 1
+            base["allowed_warning_valid_rows"] = 1
+            base["allowed_warning_actual_value"] = "1"
+            base["canonical_quality_actual_value"] = "2"
+            base["run_raw_json"]["proof_rows_input_total"] = 2
+            base["run_raw_json"]["metric_fact_exclusion_count"] = 1
+            passed = classify_n3_hint_existing_target(
+                target_run_id=target_run_id,
+                snapshot=base,
+                candidate_payload=source_payload,
+            )
+            self.assertEqual(passed["decision"], "idempotent_pass")
+
+            mutations = {
+                "failed_run": lambda value: value.update(run_status="failed"),
+                "run_date": lambda value: value.update(run_for_trade_date="20260702"),
+                "run_source_trade_date": lambda value: value.update(run_source_trade_date="20260628"),
+                "run_source_condition": lambda value: value.update(run_source_condition_run_id="condition_layer_wrong"),
+                "run_proof_kind": lambda value: value["run_raw_json"].update(proof_kind="wrong"),
+                "quality_p0": lambda value: value.update(quality_p0_failures=1),
+                "canonical_quality_missing": lambda value: value.update(canonical_quality_rows=0),
+                "canonical_quality_not_passed": lambda value: value.update(canonical_quality_passed_rows=0),
+                "unexpected_quality": lambda value: value.update(unexpected_quality_rows=1),
+                "warning_shape": lambda value: value.update(allowed_warning_valid_rows=0),
+                "canonical_quality_total": lambda value: value.update(canonical_quality_actual_value="3"),
+                "warning_total": lambda value: value.update(allowed_warning_actual_value="2"),
+                "proof_rows_total": lambda value: value["run_raw_json"].update(proof_rows_input_total=3),
+                "exclusion_total": lambda value: value["run_raw_json"].update(metric_fact_exclusion_count=2),
+                "writes_outbox": lambda value: value["run_raw_json"].update(writes_outbox=True),
+                "hash_policy": lambda value: value["run_raw_json"].update(source_artifact_hash_policy="wrong"),
+                "row_count": lambda value: value.update(board_rows=2),
+                "ready_distribution": lambda value: value.update(board_invalid_ready_rows=1),
+                "subscription": lambda value: value.update(board_subscription_run_ids=["wrong"]),
+                "minute": lambda value: value.update(board_metric_minute_labels=["1022"]),
+                "metric_hash": lambda value: value.update(board_artifact_hashes=["wrong"]),
+                "n3_outbox_ref": lambda value: value.update(outbox_refs=1),
+                "n3_inbox_ref": lambda value: value.update(inbox_refs=1),
+                "n3_checkpoint_ref": lambda value: value.update(checkpoint_refs=1),
+                "unexpected_n6_direct_ref": lambda value: value.update(n6_refs=1),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    snapshot = json.loads(json.dumps(base))
+                    mutate(snapshot)
+                    result = classify_n3_hint_existing_target(
+                        target_run_id=target_run_id,
+                        snapshot=snapshot,
+                        candidate_payload=source_payload,
+                    )
+                    self.assertEqual(result["decision"], "blocked")
+
+            partial_absent = dict(CleanTargetSnapshotLoader().snapshot)
+            partial_absent["board_rows"] = 1
+            self.assertEqual(
+                classify_n3_hint_existing_target(
+                    target_run_id=target_run_id,
+                    snapshot=partial_absent,
+                    candidate_payload=source_payload,
+                )["decision"],
+                "blocked",
+            )
+
+    def test_passed_target_with_all_proof_rows_legitimately_excluded_can_noop(self) -> None:
+        from ashare_v3.market.hint_1m_projection_persistence import build_hint_projection_run_id
+        from scripts.n3_combined_child_real_runners import N3RealIODependencies
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            N3HintFrequency8SourceBackend,
+            N3HintFrequency8SourceProvider,
+            classify_n3_hint_existing_target,
+        )
+
+        args = _args(for_trade_date="20260701")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_payload = N3HintFrequency8SourceProvider(
+                backend=N3HintFrequency8SourceBackend(
+                    config={"database_url": "postgresql://not-used"},
+                    scope_loader=ScopeLoader(_scope(index=False, for_trade_date="20260701")),
+                    market_fetcher=MarketAdapter(
+                        rows_by_identity={
+                            "board:TDX:881001": [_raw_row_for_date("20260701", "10:21")]
+                        }
+                    ),
+                    artifact_writer=N3HintFrequency8SourceArtifactWriter(output_root=tmpdir),
+                    target_snapshot_loader=CleanTargetSnapshotLoader(),
+                )
+            ).fetch_n3_hint_frequency8_source(
+                args=args,
+                report=_report(),
+                dependencies=N3RealIODependencies(),
+            )
+            snapshot = _passed_hint_idempotency_snapshot(source_payload)
+            snapshot.update(
+                {
+                    "quality_rows": 2,
+                    "allowed_warning_rows": 1,
+                    "allowed_warning_valid_rows": 1,
+                    "allowed_warning_actual_value": "1",
+                    "canonical_quality_actual_value": "1",
+                    "index_rows": 0,
+                    "index_ready_rows": 0,
+                    "index_not_ready_rows": 0,
+                    "index_invalid_ready_rows": 0,
+                    "board_rows": 0,
+                    "board_ready_rows": 0,
+                    "board_not_ready_rows": 0,
+                    "board_invalid_ready_rows": 0,
+                    "n4_refs": 0,
+                    "n5_refs": 0,
+                }
+            )
+            for asset_kind in ("index", "board"):
+                for suffix in (
+                    "artifact_paths",
+                    "artifact_hashes",
+                    "trade_dates",
+                    "metric_minute_labels",
+                    "subscription_run_ids",
+                    "proof_kinds",
+                ):
+                    snapshot[f"{asset_kind}_{suffix}"] = []
+            snapshot["run_raw_json"]["rows_by_asset"] = {}
+            snapshot["run_raw_json"]["proof_rows_input_total"] = 1
+            snapshot["run_raw_json"]["metric_fact_exclusion_count"] = 1
+            target_run_id = build_hint_projection_run_id(
+                trade_date=source_payload["for_trade_date"],
+                until_hhmm=source_payload["actual_until_hhmm"],
+                source_subscription_run_id=source_payload["subscription_run_id"],
+                proof_kind=MIDDAY_BRIDGE_PROOF_KIND,
+            )
+
+            result = classify_n3_hint_existing_target(
+                target_run_id=target_run_id,
+                snapshot=snapshot,
+                candidate_payload=source_payload,
+            )
+
+            self.assertEqual(result["decision"], "idempotent_pass")
+            self.assertEqual(result["reason"], "noop_existing_hint_target_passed")
+
+    def test_artifact_pair_rejects_identity_and_report_side_effect_tampering_with_rebound_file_sha(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            inspect_n3_hint_artifact_pair,
+        )
+
+        source_target_run_id = (
+            "n3_hint_index_board_1m_source_payload_20260701_until_source_returned_v1"
+        )
+        payload = _hint_source_payload_for_preflight(target_run_id=source_target_run_id)
+        fetch_report = {
+            "actual_until_hhmm": payload["actual_until_hhmm"],
+            "proof_kind": payload["proof_kind"],
+            "market_data_pulled": True,
+            "database_written": False,
+            "writes_outbox": False,
+            "consumes_outbox": False,
+            "updates_inbox_or_checkpoint": False,
+            "starts_worker": False,
+            "touches_n4_n5_n6": False,
+        }
+        mutations = {
+            "payload_trade_date": ("payload", "for_trade_date", "20260702"),
+            "payload_subscription": ("payload", "subscription_run_id", "wrong"),
+            "payload_source_target": ("payload", "target_run_id", "wrong"),
+            "payload_n4_context": ("payload", "n4_context_run_id", "wrong"),
+            "payload_hash_policy": ("payload", "source_artifact_hash_policy", "wrong"),
+            "payload_database_written": ("payload", "database_written", True),
+            "payload_writes_outbox": ("payload", "writes_outbox", True),
+            "report_result": ("report", "result", "wrong"),
+            "report_actual_until_hhmm": ("report", "actual_until_hhmm", "1043"),
+            "report_proof_kind": ("report", "proof_kind", "wrong"),
+            "report_artifact_written": ("report", "artifact_written", False),
+            "report_database_written": ("report", "database_written", True),
+            "report_writes_outbox": ("report", "writes_outbox", True),
+            "report_consumes_outbox": ("report", "consumes_outbox", True),
+            "report_updates_checkpoint": ("report", "updates_inbox_or_checkpoint", True),
+            "report_starts_worker": ("report", "starts_worker", True),
+            "report_touches_downstream": ("report", "touches_n4_n5_n6", True),
+        }
+        for name, (document_kind, field, replacement) in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                artifact = N3HintFrequency8SourceArtifactWriter(output_root=tmpdir).write_n3_hint_frequency8_artifacts(
+                    args=_args(for_trade_date="20260701"),
+                    report=_report(),
+                    dependencies=None,
+                    payload=payload,
+                    fetch_report=fetch_report,
+                    config={},
+                )
+                payload_path = Path(artifact["payload_path"])
+                report_path = Path(artifact["report_path"])
+                persisted_payload = json.loads(payload_path.read_text(encoding="utf-8"))
+                persisted_report = json.loads(report_path.read_text(encoding="utf-8"))
+                target = persisted_payload if document_kind == "payload" else persisted_report
+                target[field] = replacement
+                payload_bytes = json.dumps(
+                    persisted_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    default=str,
+                ).encode("utf-8")
+                rebound_file_sha = hashlib.sha256(payload_bytes).hexdigest()
+                persisted_report["file_sha256"] = rebound_file_sha
+                report_bytes = json.dumps(
+                    persisted_report,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    default=str,
+                ).encode("utf-8")
+                payload_path.write_bytes(payload_bytes)
+                report_path.write_bytes(report_bytes)
+                inspected = inspect_n3_hint_artifact_pair(
+                    payload_path=payload_path,
+                    report_path=report_path,
+                    expected_payload_hash=artifact["payload_hash"],
+                    expected_file_sha256=rebound_file_sha,
+                    expected_for_trade_date=payload["for_trade_date"],
+                    expected_actual_until_hhmm=payload["actual_until_hhmm"],
+                    expected_subscription_run_id=payload["subscription_run_id"],
+                    expected_hint_proof_kind=payload["hint_proof_kind"],
+                    expected_source_target_run_id=payload["target_run_id"],
+                    expected_n4_context_run_id=payload["n4_context_run_id"],
+                )
+                self.assertEqual(inspected["status"], "blocked")
+
+    def test_write_once_writer_blocks_partial_invalid_symlink_and_cleans_second_create_failure(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import N3HintFrequency8SourceArtifactWriter
+
+        payload = _hint_source_payload_for_preflight(
+            target_run_id="n3_hint_index_board_1m_source_payload_20260701_until_source_returned_v1"
+        )
+
+        def write(writer):
+            return writer.write_n3_hint_frequency8_artifacts(
+                args=_args(for_trade_date="20260701"),
+                report=_report(),
+                dependencies=None,
+                payload=payload,
+                fetch_report={"market_data_pulled": True},
+                config={},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3HintFrequency8SourceArtifactWriter(output_root=tmpdir)
+            first = write(writer)
+            payload_path = Path(first["payload_path"])
+            report_path = Path(first["report_path"])
+            original_payload = payload_path.read_bytes()
+            report_path.unlink()
+            partial = write(writer)
+            self.assertEqual(partial["result"], "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER")
+            self.assertIn("artifact_pair_partial", partial["reason"])
+            self.assertEqual(payload_path.read_bytes(), original_payload)
+            self.assertFalse(report_path.exists())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3HintFrequency8SourceArtifactWriter(output_root=tmpdir)
+            first = write(writer)
+            payload_path = Path(first["payload_path"])
+            report_path = Path(first["report_path"])
+            payload_path.write_text("{invalid", encoding="utf-8")
+            invalid_bytes = payload_path.read_bytes()
+            invalid = write(writer)
+            self.assertEqual(invalid["result"], "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER")
+            self.assertIn("artifact_json_invalid", invalid["reason"])
+            self.assertEqual(payload_path.read_bytes(), invalid_bytes)
+            self.assertTrue(report_path.exists())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "20260701"
+            output_dir.mkdir(parents=True)
+            payload_path = output_dir / "N3_hint_index_board_1m_1044_midday_bridge_frequency8_payload.json"
+            report_path = output_dir / "N3_hint_index_board_1m_1044_midday_bridge_frequency8_fetch_report.json"
+            target = output_dir / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            payload_path.symlink_to(target)
+            report_path.write_text("{}", encoding="utf-8")
+            symlink = write(N3HintFrequency8SourceArtifactWriter(output_root=tmpdir))
+            self.assertEqual(symlink["result"], "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER")
+            self.assertIn("payload_artifact_symlink", symlink["reason"])
+            self.assertTrue(payload_path.is_symlink())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3HintFrequency8SourceArtifactWriter(output_root=tmpdir)
+            original_open = Path.open
+
+            def fail_report_open(path, mode="r", *args, **kwargs):
+                if mode == "xb" and path.name.endswith("_fetch_report.json"):
+                    raise OSError("simulated report create failure")
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", new=fail_report_open):
+                failed = write(writer)
+            self.assertEqual(failed["result"], "BLOCKED_N3_HINT_SOURCE_ARTIFACT_WRITER")
+            output_dir = Path(tmpdir) / "20260701"
+            self.assertEqual(list(output_dir.glob("*.json")), [])
+
+    def test_idempotency_loader_uses_repeatable_read_read_only_transaction(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import load_n3_hint_idempotency_snapshot_from_db
+
+        conn = FakeExecuteConnection()
+        with patch("scripts.n3_hint_frequency8_source_provider._connect_db", return_value=conn), patch(
+            "scripts.n3_hint_frequency8_source_provider._load_n3_hint_idempotency_snapshot_with_connection",
+            return_value={"run_exists": 0},
+        ) as loader:
+            snapshot = load_n3_hint_idempotency_snapshot_from_db(
+                args=_args(),
+                dependencies=None,
+                config={"database_url": "postgresql://not-used"},
+                target_run_id="target-run",
+            )
+
+        self.assertEqual(snapshot["run_exists"], 0)
+        self.assertEqual(
+            [" ".join(sql.split()) for sql, _params in conn.statements],
+            ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "SET LOCAL TIME ZONE 'Asia/Shanghai'", "ROLLBACK"],
+        )
+        loader.assert_called_once_with(conn=conn, target_run_id="target-run")
+
+    def test_real_runner_normalizers_preserve_noop_specific_execute_boundary(self) -> None:
+        from scripts.n3_combined_child_production_hooks import _normalize_success
+        from scripts.n3_combined_child_real_runners import (
+            N3RealIODependencies,
+            _normalize_real_runner_payload,
+        )
+
+        args = SimpleNamespace(target_run_id="source-candidate", source_run_id="")
+        raw = {
+            "result": "NOOP_N3_HINT_TARGET_ALREADY_PASSED",
+            "status": "noop",
+            "execution_mode": "noop",
+            "execute_contract_ready": False,
+            "idempotent_target_execute_contract_ready": False,
+            "artifact_written": False,
+            "database_written": False,
+        }
+        hook_payload = _normalize_success(
+            "n3_hint_source_fetch",
+            args=args,
+            report={"target_absence_checked": True},
+            payload=raw,
+        )
+        runner_payload = _normalize_real_runner_payload(
+            step_id="n3_hint_source_fetch",
+            args=args,
+            report={"target_absence_checked": True},
+            dependencies=N3RealIODependencies(),
+            raw_payload=hook_payload,
+        )
+
+        self.assertTrue(runner_payload["execute_contract_ready"])
+        self.assertFalse(runner_payload["idempotent_target_execute_contract_ready"])
+        self.assertEqual(runner_payload["status"], "noop")
+        self.assertEqual(runner_payload["result"], "NOOP_N3_HINT_TARGET_ALREADY_PASSED")
 
 
 if __name__ == "__main__":
