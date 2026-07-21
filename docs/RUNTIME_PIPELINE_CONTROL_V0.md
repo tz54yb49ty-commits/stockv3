@@ -940,6 +940,24 @@ report 缺失、过旧、blocked、已执行 child、任何副作用字段不是
 或下游 worker/consumer 存在时，guard 必须继续阻断。该 allowlist 只改变只读 guard
 判定和报告字段，不授权安装、加载、停止 launchd，也不授权执行 N1-N6 runtime。
 
+唯一的 blocked-report 例外是 poller 因 active lineage 落后于 latest attempted Fast Lane
+而在任何 child 或副作用之前 fail closed。该例外必须同时满足：
+
+```text
+status = blocked
+executed_child_command_count = 0
+N3 reason = BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG
+N3 lineage_config_error starts with BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:
+N4 result = blocked
+N4 error starts with
+  BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG:BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:
+全部 side-effect / forbidden-operation 字段仍精确为 false
+```
+
+其他 blocked reason、缺少精确 stale-lineage 前缀或任何副作用不闭合时仍必须阻断。
+该例外只证明 loaded poller 正在安全等待 lineage 修复，不把 stale lineage 视为 ready，
+也不授权 Fast Lane 之外的 runtime、launchd 或数据库操作。
+
 ## 10. Post-Close Fast Lane Latest Pointer Semantics
 
 `docs/post_close_fastlane/latest` 表示 latest attempted Fast Lane date，而不是 latest

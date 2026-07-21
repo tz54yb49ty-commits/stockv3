@@ -330,6 +330,29 @@ def _require_false(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> str | N
     return None
 
 
+def _is_safe_stale_lineage_blocked_report(
+    *,
+    kind: str,
+    report: Mapping[str, Any],
+) -> bool:
+    if report.get("status") != "blocked":
+        return False
+    if kind == "n3":
+        return (
+            report.get("reason") == "BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG"
+            and str(report.get("lineage_config_error") or "").startswith(
+                "BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:"
+            )
+        )
+    return (
+        report.get("result") == "blocked"
+        and str(report.get("error") or "").startswith(
+            "BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG:"
+            "BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:"
+        )
+    )
+
+
 def _validate_safe_proof_poller_report(
     *,
     worker_name: str,
@@ -366,7 +389,15 @@ def _validate_safe_proof_poller_report(
     evidence["executed_child_command_count"] = child_count
     if child_count != 0:
         return False, evidence, "child_executed"
-    if status not in ("noop", "ready") and result not in ("noop", "ready"):
+    safe_stale_lineage_blocked = _is_safe_stale_lineage_blocked_report(
+        kind=str(allowlisted["kind"]),
+        report=report,
+    )
+    if (
+        not safe_stale_lineage_blocked
+        and status not in ("noop", "ready")
+        and result not in ("noop", "ready")
+    ):
         return False, evidence, "report_status_not_safe"
 
     side_effects = report.get("side_effects")
@@ -418,7 +449,11 @@ def _validate_safe_proof_poller_report(
         if bad_forbidden:
             return False, evidence, "forbidden_operation_" + bad_forbidden
 
-    evidence["classification"] = "loaded_safe_noop_allowlisted"
+    evidence["classification"] = (
+        "loaded_safe_stale_lineage_blocked_allowlisted"
+        if safe_stale_lineage_blocked
+        else "loaded_safe_noop_allowlisted"
+    )
     return True, evidence, ""
 
 

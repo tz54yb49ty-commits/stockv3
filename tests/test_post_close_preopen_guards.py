@@ -154,6 +154,39 @@ class PostClosePreopenGuardsTest(unittest.TestCase):
             },
         }
 
+    def _safe_n3_stale_lineage_blocked_report_payload(self) -> dict:
+        payload = self._safe_n3_noop_report_payload()
+        payload.update(
+            {
+                "status": "blocked",
+                "reason": "BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG",
+                "lineage_config_error": (
+                    "BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:"
+                    "active_for_trade_date=20260611;"
+                    "latest_attempted_for_trade_date=20260612;"
+                    "latest_result=PARTIAL_BLOCKED"
+                ),
+            }
+        )
+        return payload
+
+    def _safe_n4_stale_lineage_blocked_report_payload(self) -> dict:
+        payload = self._safe_n4_noop_report_payload()
+        payload.update(
+            {
+                "status": "blocked",
+                "result": "blocked",
+                "error": (
+                    "BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG:"
+                    "BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:"
+                    "active_for_trade_date=20260611;"
+                    "latest_attempted_for_trade_date=20260612;"
+                    "latest_result=PARTIAL_BLOCKED"
+                ),
+            }
+        )
+        return payload
+
     def test_n4_context_rollback_ready_requires_guarded_scoped_sql(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             rollback = Path(tmp) / "n4_context_rollback.sql"
@@ -342,6 +375,73 @@ class PostClosePreopenGuardsTest(unittest.TestCase):
         self.assertFalse(report["writes_database"])
         self.assertFalse(report["event_ledger_touched"])
         self.assertFalse(report["worker_started"])
+
+    def test_worker_launchd_guard_allows_safe_stale_lineage_blocked_pollers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            n3_report = self._write_worker_report(
+                tmp_path / "n3.json",
+                self._safe_n3_stale_lineage_blocked_report_payload(),
+            )
+            n4_report = self._write_worker_report(
+                tmp_path / "n4.json",
+                self._safe_n4_stale_lineage_blocked_report_payload(),
+            )
+
+            report = build_worker_launchd_guard_report(
+                for_trade_date="20260612",
+                worker_states={
+                    "n3_worker": {
+                        "active": True,
+                        "label": "com.ashare-v3.n3.intraday-proof-poller",
+                        "report_path": n3_report,
+                    },
+                    "n4_worker": {
+                        "active": True,
+                        "label": "com.ashare-v3.n4.proof-discovery-poller",
+                        "report_path": n4_report,
+                    },
+                    "n5_worker": False,
+                    "n6_worker": False,
+                },
+                report_max_age_seconds=300,
+            )
+
+        self.assertEqual(report["result"], "PASS")
+        self.assertEqual(
+            report["worker_guard_classification"]["n3_worker"],
+            "loaded_safe_stale_lineage_blocked_allowlisted",
+        )
+        self.assertEqual(
+            report["worker_guard_classification"]["n4_worker"],
+            "loaded_safe_stale_lineage_blocked_allowlisted",
+        )
+        self.assertFalse(report["launchd_mutated"])
+
+    def test_worker_launchd_guard_rejects_non_stale_blocked_poller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = self._write_worker_report(
+                Path(tmp) / "n3.json",
+                {
+                    **self._safe_n3_stale_lineage_blocked_report_payload(),
+                    "lineage_config_error": "BLOCKED_OTHER_LINEAGE_ERROR",
+                },
+            )
+
+            with self.assertRaises(GuardBlocked) as caught:
+                build_worker_launchd_guard_report(
+                    for_trade_date="20260612",
+                    worker_states={
+                        "n3_worker": {
+                            "active": True,
+                            "label": "com.ashare-v3.n3.intraday-proof-poller",
+                            "report_path": report_path,
+                        }
+                    },
+                    report_max_age_seconds=300,
+                )
+
+        self.assertIn("report_status_not_safe", str(caught.exception))
 
     def test_worker_launchd_guard_allowlist_uses_current_no_date_report_paths(self) -> None:
         self.assertEqual(
