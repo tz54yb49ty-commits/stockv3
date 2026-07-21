@@ -18,6 +18,83 @@ from ashare_v3.ingestion.runtime_hot_cleanup import DIRECT_DELETE_NO_ARCHIVE_CON
 
 
 class RuntimeHotCleanupRunnerTest(unittest.TestCase):
+    def test_process_detectors_tolerate_non_utf8_ps_output(self) -> None:
+        ps_output = b"\n".join(
+            (
+                b"101 00:01 S other other --label=bad-\xff-argv",
+                (
+                    b"102 00:01 S python3 python3 "
+                    b"scripts/run_v3_runtime_archive_keep5_daily_once.py --label=bad-\xfe-argv"
+                ),
+                (
+                    b"103 00:01 S python3 python3 "
+                    b"scripts/run_n4_intraday_proof_discovery_poll_once.py --label=bad-\xfd-argv"
+                ),
+            )
+        )
+        with patch.object(keep5_runner.subprocess, "check_output", side_effect=[ps_output, ps_output]):
+            archive_processes = keep5_runner.detect_active_archive_processes()
+            runtime_writer_processes = keep5_runner.detect_active_runtime_writer_processes()
+
+        self.assertEqual([row["pid"] for row in archive_processes], [102])
+        self.assertEqual([row["pid"] for row in runtime_writer_processes], [103])
+        encoded = json.dumps(
+            {"archive": archive_processes, "runtime_writer": runtime_writer_processes},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.assertIn("\ufffd".encode("utf-8"), encoded)
+
+    def test_process_inspection_failure_is_persisted_fail_closed(self) -> None:
+        for failed_detector in ("archive_process", "runtime_writer_process"):
+            with self.subTest(failed_detector=failed_detector), tempfile.TemporaryDirectory() as tmp:
+                counter_calls: list[str] = []
+                deleter_calls: list[str] = []
+
+                def raise_process_error() -> list[dict[str, object]]:
+                    raise OSError("sensitive process argv must not be persisted")
+
+                archive_detector = raise_process_error if failed_detector == "archive_process" else lambda: []
+                runtime_writer_detector = (
+                    raise_process_error if failed_detector == "runtime_writer_process" else lambda: []
+                )
+                with patch.object(keep5_runner, "cleanup_local_runtime_artifacts") as local_cleanup:
+                    report = run_runtime_hot_keep5_cleanup_once(
+                        report_dir=Path(tmp) / "reports",
+                        local_artifact_project_root=Path(tmp),
+                        archive_root=Path(tmp) / "archive",
+                        direct_delete_no_archive=True,
+                        execute=True,
+                        confirm_token=DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+                        trade_dates=["20260708", "20260709", "20260710", "20260713", "20260714", "20260715"],
+                        archive_process_detector=archive_detector,
+                        runtime_writer_process_detector=runtime_writer_detector,
+                        table_counter=lambda spec, _trade_date: counter_calls.append(spec.table) or 1,
+                        table_deleter=lambda spec, _trade_date: deleter_calls.append(spec.table) or 1,
+                    )
+
+                saved_path = Path(report["docs_report_path"])
+                saved_text = saved_path.read_text(encoding="utf-8")
+                saved = json.loads(saved_text)
+                self.assertEqual(report["result"], "BLOCKED_PROCESS_INSPECTION_FAILED")
+                self.assertEqual(report["failed_stage"], "process_inspection")
+                self.assertEqual(report["failed_detector"], failed_detector)
+                self.assertEqual(report["error_type"], "OSError")
+                self.assertEqual(report["blockers"], ["process_inspection_failed"])
+                self.assertFalse(report["cleanup_success"])
+                self.assertFalse(report["cleanup_executed"])
+                self.assertFalse(report["cleanup_complete"])
+                self.assertFalse(report["database_written"])
+                self.assertEqual(report["deleted_total_rows"], 0)
+                self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
+                self.assertIn("process_inspection_failed", report["local_file_cleanup"]["blockers"])
+                self.assertEqual(counter_calls, [])
+                self.assertEqual(deleter_calls, [])
+                local_cleanup.assert_not_called()
+                self.assertEqual(saved["result"], "BLOCKED_PROCESS_INSPECTION_FAILED")
+                self.assertNotIn("error_message", saved)
+                self.assertNotIn("sensitive process argv", saved_text)
+                self.assertFalse(any(bool(value) for value in saved["side_effects"].values()))
+
     def test_default_run_writes_plan_only_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = run_runtime_dirty_hot_keep2_cleanup_once(

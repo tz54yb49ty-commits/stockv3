@@ -462,8 +462,15 @@ def blocked_already_running_report(*, report_root: Path, execute: bool, error: C
     }
 
 
+def read_process_table() -> str:
+    """Read the process table without assuming every argv byte is valid UTF-8."""
+
+    output = subprocess.check_output(["ps", "-axo", "pid=,etime=,stat=,comm=,args="])
+    return output.decode("utf-8", errors="replace")
+
+
 def detect_active_archive_processes() -> list[dict[str, Any]]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,etime=,stat=,comm=,args="], text=True)
+    output = read_process_table()
     processes: list[dict[str, Any]] = []
     for line in output.splitlines():
         stripped = line.strip()
@@ -486,7 +493,7 @@ def detect_active_archive_processes() -> list[dict[str, Any]]:
 
 
 def detect_active_runtime_writer_processes() -> list[dict[str, Any]]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,etime=,stat=,comm=,args="], text=True)
+    output = read_process_table()
     processes: list[dict[str, Any]] = []
     current_pid = os.getpid()
     for line in output.splitlines():
@@ -514,6 +521,42 @@ def detect_active_runtime_writer_processes() -> list[dict[str, Any]]:
             }
         )
     return processes
+
+
+def blocked_process_inspection_report(
+    *,
+    report_root: Path,
+    execute: bool,
+    direct_delete_no_archive: bool,
+    required_confirm_token: str,
+    failed_detector: str,
+    error: Exception,
+    lock_path: Path,
+) -> dict[str, Any]:
+    side_effects = runtime_archive_side_effects()
+    side_effects["cleanup_local_runtime_files"] = False
+    return {
+        "result": "BLOCKED_PROCESS_INSPECTION_FAILED",
+        "stage": "V3_RUNTIME_HOT_KEEP5_CLEANUP_ONCE",
+        "failed_stage": "process_inspection",
+        "failed_detector": failed_detector,
+        "error_type": type(error).__name__,
+        "execute": bool(execute),
+        "direct_delete_no_archive": bool(direct_delete_no_archive),
+        "required_confirm_token": required_confirm_token,
+        "docs_report_path": str(report_root / "keep5_cleanup_status.json"),
+        "cleanup_authorized": False,
+        "cleanup_executed": False,
+        "cleanup_complete": False,
+        "database_written": False,
+        "deleted_rows": [],
+        "deleted_total_rows": 0,
+        "blockers": ["process_inspection_failed"],
+        "single_flight_lock_policy": "keep5_cleanup_single_flight_v1",
+        "single_flight_lock_acquired": True,
+        "single_flight_lock_path": str(lock_path),
+        "side_effects": side_effects,
+    }
 
 
 def blocked_runtime_writer_active_report(
@@ -680,9 +723,39 @@ def run_runtime_hot_keep5_cleanup_once(
     required_confirm_token = DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN if direct_delete_no_archive else KEEP5_CONFIRM_TOKEN
     try:
         with keep5_cleanup_single_flight_lock(report_root) as lock_path:
-            active_archive_processes = archive_process_detector() if direct_delete_no_archive else []
-            active_runtime_writer_processes = runtime_writer_process_detector() if direct_delete_no_archive else []
-            if active_runtime_writer_processes:
+            active_archive_processes: list[dict[str, Any]] = []
+            active_runtime_writer_processes: list[dict[str, Any]] = []
+            failed_detector = ""
+            process_inspection_error: Exception | None = None
+            if direct_delete_no_archive:
+                try:
+                    active_archive_processes = archive_process_detector()
+                except Exception as exc:
+                    failed_detector = "archive_process"
+                    process_inspection_error = exc
+                if process_inspection_error is None:
+                    try:
+                        active_runtime_writer_processes = runtime_writer_process_detector()
+                    except Exception as exc:
+                        failed_detector = "runtime_writer_process"
+                        process_inspection_error = exc
+
+            if process_inspection_error is not None:
+                report = blocked_process_inspection_report(
+                    report_root=report_root,
+                    execute=execute,
+                    direct_delete_no_archive=direct_delete_no_archive,
+                    required_confirm_token=required_confirm_token,
+                    failed_detector=failed_detector,
+                    error=process_inspection_error,
+                    lock_path=lock_path,
+                )
+                report["local_file_cleanup"] = blocked_local_file_cleanup(
+                    project_root=local_project_root,
+                    execute=execute,
+                    blocker="process_inspection_failed",
+                )
+            elif active_runtime_writer_processes:
                 report = blocked_runtime_writer_active_report(
                     report_root=report_root,
                     execute=execute,
