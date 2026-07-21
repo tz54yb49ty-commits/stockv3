@@ -668,6 +668,30 @@ N3 combined run-once child runner contract:
     index_board_1m_hint_projection_v1_midday_bridge_v1
   legacy index_board_1m_hint_projection_v1 与 unknown suffix 必须 fail closed。
 
+N3P current-source duplicate target / artifact immutability:
+  默认生产 `N3PCurrentSourceArtifactWriter` 必须在 canonical payload/report 落盘前，使用
+  `REPEATABLE READ READ ONLY` 单一数据库快照核对同 HHMM source run 的 status、P0、
+  quality、source payload hash/counts 与 canonical artifact path。显式注入的自定义 writer
+  仅是测试/扩展边界，不取得该默认生产 DB pre-write guarantee，也不得被生产 entrypoint
+  静默选用。
+  canonical payload/report pair 必须 write-once：两者均不存在时才允许使用 exclusive create；
+  两者均存在时，只有 payload self-hash、payload/report hash、file SHA、互引路径、lineage、
+  trade date/HHMM 以及 payload/report `source_payload_counts` 与实际 rows 全部闭合，才允许
+  same-hash reuse，且 bytes、mtime、inode 不变。different hash、partial pair、损坏 JSON、
+  symlink、目录/非普通文件或 create race 必须保留既有文件并 fail closed，禁止覆盖。
+  DB 已有 passed source lineage 时，artifact pair 缺失不得根据新 candidate 重建历史 bytes；
+  DB raw `source_artifact_path` 必须等于该 trade date/HHMM 的 canonical payload path。
+  N3P proof target 已存在时，preflight 必须在同一 `REPEATABLE READ READ ONLY` 快照内严格核对
+  run、P0、quality、stock/index/board rows、ready/not-ready、source run、subscription、minute
+  以及 outbox/inbox/checkpoint=0。全部闭合才返回 `idempotent_pass`/`noop`，不得物化新的
+  contract/preflight artifact，也不得进入 execute；任一 row/ready/hash/lineage 差异均阻断。
+  poller 必须 fail-closed 校验 nested `target_idempotency.decision/reason/checks` 的完整固定集合；
+  `n3p_only` exact noop 只运行 source+preflight children 并总体返回 noop；`both` 模式保留
+  `n3p_status=noop`，继续独立执行 HINT 正常路径或接受 HINT 自身 noop。
+  `docs/N3_20260721_N3P_0932_0935_SOURCE_ARTIFACT_OVERWRITE_ATTESTATION.json` 仅是历史审计；
+  09:32/09:35 原始 source bytes 不可恢复，生产代码不得读取该 attestation 作为
+  execute/noop/reconstruction/supersession 授权，也不得重跑或改写对应历史 target。
+
 N3P transition input 与 amount-chain input 表达规范:
   禁止写 today_virt_amount(M) / today_virt_amount[Q] 这类周期化字段名。
   transition input 必须按 N4 权威 `current_period_avg_with_today[P]` 语义表达:

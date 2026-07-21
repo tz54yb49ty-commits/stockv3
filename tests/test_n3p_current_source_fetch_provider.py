@@ -1,4 +1,5 @@
 import json
+import inspect
 from decimal import Decimal
 from pathlib import Path
 import tempfile
@@ -66,6 +67,7 @@ class _FakeScopeConnection:
             "board_previous_day_minute_cumulative": 240,
         }
         self.commands: list[str] = []
+        self._rows = []
 
     def __enter__(self):
         return self
@@ -79,26 +81,54 @@ class _FakeScopeConnection:
         upper = normalized.upper()
         if upper.startswith(("INSERT", "UPDATE", "DELETE", "TRUNCATE", "ALTER", "CREATE", "DROP")):
             raise AssertionError(f"write SQL forbidden in fake scope loader: {normalized}")
-        if upper.startswith("BEGIN READ ONLY") or upper.startswith("ROLLBACK"):
-            return _FakeCursor([])
+        if upper.startswith(("BEGIN READ ONLY", "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", "ROLLBACK")):
+            rows = []
+            self._rows = rows
+            return _FakeCursor(rows)
         if "FROM COMMON_TRADE_CALENDAR" in upper:
-            return _FakeCursor([(True, "20260629")])
+            rows = [(True, "20260629")]
+            self._rows = rows
+            return _FakeCursor(rows)
         if "FROM COMMON_MARKET_DATA_RUN" in upper:
             run_id = params[0]
-            status = self.subscription_status if str(run_id).startswith("market_data_subscription_") else "passed"
-            return _FakeCursor([(status,)])
+            if "P0_COUNT" in upper and str(run_id).startswith("n3p_mixed_realtime_source_payload_"):
+                rows = []
+            else:
+                status = self.subscription_status if str(run_id).startswith("market_data_subscription_") else "passed"
+                rows = [(status,)]
+            self._rows = rows
+            return _FakeCursor(rows)
         if "FROM COMMON_TRIGGER_RUN" in upper:
-            return _FakeCursor([(self.n4_context_status,)])
+            rows = [(self.n4_context_status,)]
+            self._rows = rows
+            return _FakeCursor(rows)
         for table, count in self.cumulative_counts.items():
             if f"FROM {table.upper()}" in upper:
-                return _FakeCursor([(count,)])
+                rows = [(count,)]
+                self._rows = rows
+                return _FakeCursor(rows)
         if "FROM STOCK_TRIGGER_CONTEXT_SNAPSHOT" in upper:
-            return _FakeCursor(self.stock_rows)
+            rows = self.stock_rows
+            self._rows = list(rows)
+            return _FakeCursor(rows)
         if "FROM INDEX_TRIGGER_CONTEXT_SNAPSHOT" in upper:
-            return _FakeCursor(self.index_rows)
+            rows = self.index_rows
+            self._rows = list(rows)
+            return _FakeCursor(rows)
         if "FROM BOARD_TRIGGER_CONTEXT_SNAPSHOT" in upper:
-            return _FakeCursor(self.board_rows)
+            rows = self.board_rows
+            self._rows = list(rows)
+            return _FakeCursor(rows)
         raise AssertionError(f"unexpected SQL in fake scope loader: {normalized}")
+
+    def cursor(self):
+        return self
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
 
 
 class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
@@ -1246,6 +1276,402 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         self.assertFalse(result["database_written"])
         self.assertFalse(result["writes_outbox"])
 
+    def test_artifact_writer_is_write_once_and_reuses_same_source_hash_without_touching_bytes(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceArtifactWriter
+
+        payload = {
+            "for_trade_date": "20260630",
+            "actual_until_hhmm": "1016",
+            "proof_input_time": "2026-06-30T10:16:00+08:00",
+            "source_payload_run_id": "n3p_mixed_realtime_source_payload_20260630_until_1016_v1",
+            "subscription_run_id": _args().subscription_run_id,
+            "n4_context_run_id": _args().n4_context_run_id,
+            "stock_quote_rows": [{"identity_key": "stock:SH:600000", "price": 10}],
+            "index_board_1m_rows": [{"identity_key": "index:SH:000001", "close": 3000}],
+            "normalization_trace": {"attempt": 1},
+        }
+        fetch_report = {"actual_until_hhmm": "1016", "normalization_trace": {"attempt": 1}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            first = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=payload, fetch_report=fetch_report
+            )
+            payload_path = Path(first["payload_path"])
+            report_path = Path(first["report_path"])
+            before = {
+                "payload": (payload_path.read_bytes(), payload_path.stat().st_mtime_ns, payload_path.stat().st_ino),
+                "report": (report_path.read_bytes(), report_path.stat().st_mtime_ns, report_path.stat().st_ino),
+            }
+            changed_metadata = dict(payload)
+            changed_metadata["normalization_trace"] = {"attempt": 2, "endpoint": "different-audit-metadata"}
+            second = writer.write_n3p_current_source_artifacts(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                payload=changed_metadata,
+                fetch_report={"actual_until_hhmm": "1016", "normalization_trace": changed_metadata["normalization_trace"]},
+            )
+            after = {
+                "payload": (payload_path.read_bytes(), payload_path.stat().st_mtime_ns, payload_path.stat().st_ino),
+                "report": (report_path.read_bytes(), report_path.stat().st_mtime_ns, report_path.stat().st_ino),
+            }
+
+        self.assertTrue(first["artifact_written"])
+        self.assertFalse(first["artifact_reused"])
+        self.assertFalse(second["artifact_written"])
+        self.assertTrue(second["artifact_reused"])
+        self.assertEqual(second["file_sha256"], first["file_sha256"])
+        self.assertEqual(after, before)
+
+    def test_artifact_writer_blocks_different_hash_partial_symlink_and_required_missing_pair(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceArtifactWriter
+
+        base_payload = {
+            "for_trade_date": "20260630",
+            "actual_until_hhmm": "1016",
+            "proof_input_time": "2026-06-30T10:16:00+08:00",
+            "source_payload_run_id": "n3p_mixed_realtime_source_payload_20260630_until_1016_v1",
+            "subscription_run_id": _args().subscription_run_id,
+            "n4_context_run_id": _args().n4_context_run_id,
+            "stock_quote_rows": [{"identity_key": "stock:SH:600000", "price": 10}],
+            "index_board_1m_rows": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            first = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+            payload_file = Path(first["payload_path"])
+            report_file = Path(first["report_path"])
+            before_different = {
+                "payload": (payload_file.read_bytes(), payload_file.stat().st_mtime_ns, payload_file.stat().st_ino),
+                "report": (report_file.read_bytes(), report_file.stat().st_mtime_ns, report_file.stat().st_ino),
+            }
+            changed = dict(base_payload)
+            changed["stock_quote_rows"] = [{"identity_key": "stock:SH:600000", "price": 11}]
+            different = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=changed,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+            after_different = {
+                "payload": (payload_file.read_bytes(), payload_file.stat().st_mtime_ns, payload_file.stat().st_ino),
+                "report": (report_file.read_bytes(), report_file.stat().st_mtime_ns, report_file.stat().st_ino),
+            }
+            Path(first["report_path"]).unlink()
+            partial = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            date_dir = Path(tmpdir) / "20260630"
+            date_dir.mkdir()
+            target = date_dir / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            payload_path = date_dir / "N3P_mixed_realtime_1016_source_fetch_payload.json"
+            report_path = date_dir / "N3P_mixed_realtime_1016_source_fetch_report.json"
+            payload_path.symlink_to(target)
+            report_path.write_text("{}", encoding="utf-8")
+            symlink = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = N3PCurrentSourceArtifactWriter(output_root=tmpdir).write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016", "require_existing_artifact_pair": True},
+            )
+
+        self.assertTrue(str(different["result"]).startswith("BLOCKED"))
+        self.assertIn("artifact_pair_contract_mismatch", different["reason"])
+        self.assertEqual(after_different, before_different)
+        self.assertTrue(partial["reason"].endswith(":artifact_pair_partial"))
+        self.assertTrue(symlink["reason"].endswith(":payload_artifact_symlink"))
+        self.assertTrue(
+            missing["reason"].endswith(
+                ":existing_source_lineage_artifact_pair_missing"
+            )
+        )
+
+    def test_artifact_writer_blocks_tampered_counts_self_hash_nonregular_and_create_race(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceArtifactWriter
+
+        base_payload = {
+            "for_trade_date": "20260630",
+            "actual_until_hhmm": "1016",
+            "proof_input_time": "2026-06-30T10:16:00+08:00",
+            "source_payload_run_id": "n3p_mixed_realtime_source_payload_20260630_until_1016_v1",
+            "subscription_run_id": _args().subscription_run_id,
+            "n4_context_run_id": _args().n4_context_run_id,
+            "stock_quote_rows": [{"identity_key": "stock:SH:600000", "price": 10}],
+            "index_board_1m_rows": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            first = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+            payload_path = Path(first["payload_path"])
+            report_path = Path(first["report_path"])
+            payload_doc = json.loads(payload_path.read_text(encoding="utf-8"))
+            report_doc = json.loads(report_path.read_text(encoding="utf-8"))
+            payload_doc["source_payload_counts"] = {
+                "stock_quote_rows": "not-an-integer",
+                "index_board_1m_rows": 0,
+            }
+            payload_path.write_text(json.dumps(payload_doc, sort_keys=True), encoding="utf-8")
+            import hashlib
+
+            report_doc["file_sha256"] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+            report_path.write_text(json.dumps(report_doc, sort_keys=True), encoding="utf-8")
+            bad_counts = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            first = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+            payload_path = Path(first["payload_path"])
+            report_path = Path(first["report_path"])
+            payload_doc = json.loads(payload_path.read_text(encoding="utf-8"))
+            report_doc = json.loads(report_path.read_text(encoding="utf-8"))
+            payload_doc["payload_hash"] = "0" * 64
+            payload_path.write_text(json.dumps(payload_doc, sort_keys=True), encoding="utf-8")
+            report_doc["file_sha256"] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+            report_path.write_text(json.dumps(report_doc, sort_keys=True), encoding="utf-8")
+            bad_self_hash = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            first = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+            Path(first["payload_path"]).write_text("{malformed", encoding="utf-8")
+            malformed = writer.write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            date_dir = Path(tmpdir) / "20260630"
+            date_dir.mkdir()
+            (date_dir / "N3P_mixed_realtime_1016_source_fetch_payload.json").mkdir()
+            (date_dir / "N3P_mixed_realtime_1016_source_fetch_report.json").write_text("{}", encoding="utf-8")
+            nonregular = N3PCurrentSourceArtifactWriter(output_root=tmpdir).write_n3p_current_source_artifacts(
+                args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                fetch_report={"actual_until_hhmm": "1016"},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = N3PCurrentSourceArtifactWriter(output_root=tmpdir)
+            date_dir = Path(tmpdir) / "20260630"
+            report_path = date_dir / "N3P_mixed_realtime_1016_source_fetch_report.json"
+            original_open = Path.open
+
+            def racing_open(path, mode="r", *args, **kwargs):
+                if path == report_path and mode == "xb" and not report_path.exists():
+                    with original_open(report_path, "xb") as competitor:
+                        competitor.write(b"competitor")
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", new=racing_open):
+                raced = writer.write_n3p_current_source_artifacts(
+                    args=_args(), report=_report(), dependencies=SimpleNamespace(), payload=base_payload,
+                    fetch_report={"actual_until_hhmm": "1016"},
+                )
+            payload_path = date_dir / "N3P_mixed_realtime_1016_source_fetch_payload.json"
+            competitor_bytes = report_path.read_bytes()
+
+        self.assertIn("payload_counts_match_rows", bad_counts["reason"])
+        self.assertIn("embedded_payload_hash_matches", bad_self_hash["reason"])
+        self.assertIn("artifact_json_invalid", malformed["reason"])
+        self.assertTrue(nonregular["reason"].endswith(":payload_artifact_not_regular_file"))
+        self.assertIn("artifact_create_race", raced["reason"])
+        self.assertFalse(payload_path.exists())
+        self.assertEqual(competitor_bytes, b"competitor")
+
+    def test_source_lineage_and_existing_proof_target_classifiers_fail_closed(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            classify_existing_n3p_trigger_proof_target,
+            classify_n3p_current_source_lineage,
+        )
+
+        source_snapshot = {
+            "exists": True,
+            "run_status": "passed",
+            "p0_count": 0,
+            "source_payload_hash": "a" * 64,
+            "source_payload_counts": {"stock_quote_rows": 1, "index_board_1m_rows": 1},
+            "source_artifact_path": "docs/intraday_live_current/20260630/N3P_mixed_realtime_1016_source_fetch_payload.json",
+            "expected_source_artifact_path": "docs/intraday_live_current/20260630/N3P_mixed_realtime_1016_source_fetch_payload.json",
+            "source_artifact_path_matches": True,
+            "quality_count": 1,
+            "quality_passed_count": 1,
+            "quality_p0_failed_count": 0,
+        }
+        source_ok = classify_n3p_current_source_lineage(
+            snapshot=source_snapshot,
+            candidate_payload_hash="a" * 64,
+            candidate_counts={"stock_quote_rows": 1, "index_board_1m_rows": 1},
+        )
+        source_bad = classify_n3p_current_source_lineage(
+            snapshot=source_snapshot,
+            candidate_payload_hash="b" * 64,
+            candidate_counts={"stock_quote_rows": 1, "index_board_1m_rows": 1},
+        )
+        bad_path_snapshot = dict(source_snapshot)
+        bad_path_snapshot.update(
+            {
+                "source_artifact_path": "docs/intraday_live_current/20260630/wrong.json",
+                "source_artifact_path_matches": False,
+            }
+        )
+        source_bad_path = classify_n3p_current_source_lineage(
+            snapshot=bad_path_snapshot,
+            candidate_payload_hash="a" * 64,
+            candidate_counts={"stock_quote_rows": 1, "index_board_1m_rows": 1},
+        )
+        historical_overwrites = {
+            "0932": (
+                "9056caf78cc28507cdfd542ebabcbf987facf5b7f1d4e61d7fce604b19857759",
+                "07dc56a2fb33d14520a38f0d540f19a4604413582e947bd1943e44711ab3c401",
+            ),
+            "0935": (
+                "b9626244cc1d22260b652ac09ee4ca066c7a446b558fc5c09ec9567ee960d0ce",
+                "890e9d539b367a3454e7c9f42267b4084943c40dc3a525b76d4051b053bea9dd",
+            ),
+        }
+        for minute, (registered_hash, overwritten_hash) in historical_overwrites.items():
+            with self.subTest(historical_overwrite_minute=minute):
+                historical_snapshot = dict(source_snapshot)
+                historical_snapshot["source_payload_hash"] = registered_hash
+                historical = classify_n3p_current_source_lineage(
+                    snapshot=historical_snapshot,
+                    candidate_payload_hash=overwritten_hash,
+                    candidate_counts={"stock_quote_rows": 1, "index_board_1m_rows": 1},
+                )
+                self.assertEqual(historical["decision"], "blocked")
+                self.assertIn("payload_hash_matches", historical["reason"])
+        source_run_id = "n3p_mixed_realtime_source_payload_20260630_until_1016_v1"
+        rows_by_asset = {
+            "stock": [{"metric_ready": True}],
+            "index": [{"metric_ready": False}],
+            "board": [],
+        }
+        metric = lambda count, ready: {
+            "row_count": count,
+            "ready_count": ready,
+            "not_ready_count": count - ready,
+            "min_source_snapshot_run_id": source_run_id if count else "",
+            "max_source_snapshot_run_id": source_run_id if count else "",
+            "min_source_subscription_run_id": _args().subscription_run_id if count else "",
+            "max_source_subscription_run_id": _args().subscription_run_id if count else "",
+            "min_metric_minute_label": "10:16" if count else "",
+            "max_metric_minute_label": "10:16" if count else "",
+        }
+        target_snapshot = {
+            "counts": {
+                "common_market_data_run": 1,
+                "stock_action_confirmation_projection_metric": 1,
+                "index_action_confirmation_projection_metric": 1,
+                "board_action_confirmation_projection_metric": 0,
+                "common_market_data_quality_item": 1,
+                "common_event_outbox": 0,
+                "common_event_inbox": 0,
+                "common_event_consumer_checkpoint": 0,
+            },
+            "run": {
+                "exists": True,
+                "status": "passed",
+                "p0_count": 0,
+                "source_scope_row_count": 2,
+                "candidate_row_count": 2,
+                "subscription_row_count": 2,
+                "subscription_object_count": 2,
+            },
+            "metrics": {"stock": metric(1, 1), "index": metric(1, 0), "board": metric(0, 0)},
+            "quality": {"quality_count": 1, "accepted_count": 1, "p0_failed_count": 0},
+        }
+        target_ok = classify_existing_n3p_trigger_proof_target(
+            snapshot=target_snapshot,
+            target_run_id="target",
+            source_payload_run_id=source_run_id,
+            subscription_run_id=_args().subscription_run_id,
+            actual_until_hhmm="1016",
+            rows_by_asset=rows_by_asset,
+            ready_count=1,
+            not_ready_count=1,
+        )
+        dirty_snapshot = json.loads(json.dumps(target_snapshot))
+        dirty_snapshot["counts"]["common_event_outbox"] = 1
+        target_bad = classify_existing_n3p_trigger_proof_target(
+            snapshot=dirty_snapshot,
+            target_run_id="target",
+            source_payload_run_id=source_run_id,
+            subscription_run_id=_args().subscription_run_id,
+            actual_until_hhmm="1016",
+            rows_by_asset=rows_by_asset,
+            ready_count=1,
+            not_ready_count=1,
+        )
+        dirty_row_snapshot = json.loads(json.dumps(target_snapshot))
+        dirty_row_snapshot["metrics"]["stock"]["row_count"] = 2
+        target_bad_row = classify_existing_n3p_trigger_proof_target(
+            snapshot=dirty_row_snapshot,
+            target_run_id="target",
+            source_payload_run_id=source_run_id,
+            subscription_run_id=_args().subscription_run_id,
+            actual_until_hhmm="1016",
+            rows_by_asset=rows_by_asset,
+            ready_count=1,
+            not_ready_count=1,
+        )
+        dirty_ready_snapshot = json.loads(json.dumps(target_snapshot))
+        dirty_ready_snapshot["metrics"]["stock"]["ready_count"] = 0
+        target_bad_ready = classify_existing_n3p_trigger_proof_target(
+            snapshot=dirty_ready_snapshot,
+            target_run_id="target",
+            source_payload_run_id=source_run_id,
+            subscription_run_id=_args().subscription_run_id,
+            actual_until_hhmm="1016",
+            rows_by_asset=rows_by_asset,
+            ready_count=1,
+            not_ready_count=1,
+        )
+
+        self.assertEqual(source_ok["decision"], "reuse_existing")
+        self.assertEqual(source_bad["decision"], "blocked")
+        self.assertEqual(source_bad_path["decision"], "blocked")
+        self.assertIn("source_artifact_path_matches", source_bad_path["reason"])
+        self.assertEqual(target_ok["decision"], "idempotent_pass")
+        self.assertEqual(target_bad["decision"], "blocked")
+        self.assertIn("outbox_zero", target_bad["reason"])
+        self.assertIn("stock_row_count_matches", target_bad_row["reason"])
+        self.assertIn("stock_ready_count_matches", target_bad_ready["reason"])
+
+    def test_source_lineage_and_target_noop_queries_use_repeatable_read_only_transactions(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentSourceFetchBackend,
+            N3PTriggerProofPreflightBackend,
+        )
+
+        transaction = "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        self.assertIn(transaction, inspect.getsource(N3PCurrentSourceFetchBackend.load_n3p_current_source_lineage_snapshot))
+        self.assertIn(transaction, inspect.getsource(N3PTriggerProofPreflightBackend.build_n3p_trigger_proof_preflight))
+
     def test_default_backend_artifact_writer_success_reaches_registration_blocker(self) -> None:
         from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceFetchBackend, N3PCurrentSourceFetchProvider
 
@@ -1295,7 +1721,8 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
             )
             provider = N3PCurrentSourceFetchProvider(backend=backend)
 
-            fetched = provider.fetch_n3p_current_source_payload(args=_args(), report=_report(), dependencies=SimpleNamespace())
+            with patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=_FakeScopeConnection()):
+                fetched = provider.fetch_n3p_current_source_payload(args=_args(), report=_report(), dependencies=SimpleNamespace())
             registered = provider.register_n3p_source_payload_run(
                 args=_args(),
                 report=_report(),
@@ -1516,7 +1943,8 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
             registrar=registrar,
         )
         provider = N3PCurrentSourceFetchProvider(backend=backend)
-        fetched = provider.fetch_n3p_current_source_payload(args=_args(), report=_report(), dependencies=SimpleNamespace())
+        with patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=_FakeScopeConnection()):
+            fetched = provider.fetch_n3p_current_source_payload(args=_args(), report=_report(), dependencies=SimpleNamespace())
         registered = provider.register_n3p_source_payload_run(
             args=_args(),
             report=_report(),
@@ -2165,6 +2593,59 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         self.assertEqual(preflight["target_absence"]["status"], "passed")
         self.assertFalse(preflight["writes_outbox"])
         self.assertTrue(preflight["not_n5_final_proof"])
+
+    def test_n3p_trigger_proof_preflight_provider_preserves_exact_target_noop_without_artifacts(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PTriggerProofPreflightProvider,
+            N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON,
+            N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_RESULT,
+        )
+
+        class Backend:
+            def build_n3p_trigger_proof_preflight(self, *, args, report, dependencies):
+                del report, dependencies
+                return {
+                    "result": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_RESULT,
+                    "status": "noop",
+                    "execution_mode": "noop",
+                    "idempotency_decision": "idempotent_pass",
+                    "reason": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON,
+                    "target_run_id": args.target_run_id,
+                    "source_payload_run_id": args.source_run_id,
+                    "target_idempotency": {
+                        "decision": "idempotent_pass",
+                        "reason": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON,
+                        "checks": {"run_status_passed": True},
+                    },
+                    "preflight_artifacts_materialized": False,
+                    "execute_contract_ready": False,
+                    "database_written": False,
+                    "market_data_pulled": False,
+                    "writes_n3p_metric_rows": False,
+                    "writes_outbox": False,
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            contract_path = Path(tmpdir) / "contract.json"
+            preflight_path = Path(tmpdir) / "preflight.json"
+            payload = N3PTriggerProofPreflightProvider(backend=Backend()).build_n3p_trigger_proof_preflight(
+                args=_args(
+                    source_run_id="n3p_mixed_realtime_source_payload_20260701_until_0946_v1",
+                    target_run_id="target",
+                    contract_path=str(contract_path),
+                    preflight_path=str(preflight_path),
+                ),
+                report={"step_id": "n3p_trigger_proof_preflight"},
+                dependencies=SimpleNamespace(),
+            )
+
+            self.assertFalse(contract_path.exists())
+            self.assertFalse(preflight_path.exists())
+
+        self.assertEqual(payload["status"], "noop")
+        self.assertEqual(payload["idempotency_decision"], "idempotent_pass")
+        self.assertFalse(payload["preflight_artifacts_materialized"])
+        self.assertFalse(payload["database_written"])
 
     def test_n3p_trigger_proof_preflight_provider_blocks_missing_artifact_paths(self) -> None:
         from scripts.n3p_current_source_fetch_provider import N3PTriggerProofPreflightProvider

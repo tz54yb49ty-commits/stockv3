@@ -36,6 +36,8 @@ N3P_SOURCE_ALIGNMENT_RETRY_EXHAUSTED_BLOCKER = "BLOCKED_N3P_SOURCE_CANONICAL_MIN
 N3P_SOURCE_ALIGNMENT_ADJACENT_RACE = "adjacent_minute_source_boundary_race"
 N3P_ROLLBACK_ARTIFACT_MISSING_BLOCKER = "BLOCKED_N3P_ROLLBACK_ARTIFACT_MISSING"
 N3P_ROLLBACK_ARTIFACT_UNSAFE_BLOCKER = "BLOCKED_N3P_ROLLBACK_ARTIFACT_UNSAFE"
+N3P_PREFLIGHT_IDEMPOTENT_NOOP_RESULT = "NOOP_N3P_TARGET_ALREADY_PASSED"
+N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON = "noop_existing_n3p_target_passed"
 HINT_SOURCE_IDEMPOTENT_NOOP_RESULT = "NOOP_N3_HINT_TARGET_ALREADY_PASSED"
 HINT_SOURCE_IDEMPOTENT_NOOP_REASON = "noop_existing_hint_target_passed"
 SOURCE_FETCH_WINDOW_START_HHMM = "0925"
@@ -854,6 +856,15 @@ def _execute_child_sequence(
             "source_payload_run_id": n3p_source_run_id,
             "source_artifact_path": n3p_source_path,
             "source_payload_hash": _extract_string(n3p_source_payload, "source_payload_hash", "payload_hash"),
+            "source_artifact_file_sha256": _extract_string(
+                n3p_source_payload,
+                "source_artifact_file_sha256",
+                "file_sha256",
+            ),
+            "artifact_written": n3p_source_payload.get("artifact_written"),
+            "artifact_reused": n3p_source_payload.get("artifact_reused"),
+            "database_written": n3p_source_payload.get("database_written"),
+            "source_lineage_decision": dict(n3p_source_payload.get("source_lineage_decision") or {}),
             "target_run_id": n3p_target,
         }
         report["n3p_actual_hhmm"] = n3p_hhmm
@@ -887,66 +898,93 @@ def _execute_child_sequence(
             report["n3p_status"] = "blocked"
             flush_progress()
             return blocked
-        n3p_preflight_handoff = _validate_n3p_preflight_artifacts(
-            n3p_preflight_result=n3p_preflight_result,
-            expected_target_run_id=n3p_target,
-        )
-        report["actual_hhmm_handoff"]["n3p"]["preflight_artifacts"] = n3p_preflight_handoff
-        flush_progress()
-        if n3p_preflight_handoff.get("status") != "passed":
-            blocked = _blocked_preflight_artifact_handoff(report, n3p_preflight_handoff)
-            report["n3p_status"] = "blocked"
+        n3p_preflight_payload = n3p_preflight_result.get("json", {})
+        if _is_n3p_preflight_noop_claim(n3p_preflight_payload):
+            n3p_noop_handoff = _validate_n3p_preflight_noop_handoff(
+                n3p_preflight_payload=n3p_preflight_payload,
+                expected_target_run_id=n3p_target,
+                expected_source_payload_run_id=n3p_source_run_id,
+                expected_source_payload_hash=_extract_string(n3p_source_payload, "source_payload_hash", "payload_hash"),
+                expected_hhmm=n3p_hhmm,
+            )
+            report["actual_hhmm_handoff"]["n3p"]["idempotency"] = n3p_noop_handoff
+            if n3p_noop_handoff.get("status") != "passed":
+                report.update(
+                    {
+                        "status": "blocked",
+                        "reason": str(n3p_noop_handoff.get("reason") or "n3p_preflight_noop_handoff_invalid"),
+                        "execution_mode": "blocked",
+                        "n3p_status": "blocked",
+                        "blocked_n3p_preflight_noop_handoff": dict(n3p_noop_handoff),
+                    }
+                )
+                flush_progress()
+                return report
+            report["n3p_status"] = "noop"
+        else:
+            n3p_preflight_handoff = _validate_n3p_preflight_artifacts(
+                n3p_preflight_result=n3p_preflight_result,
+                expected_target_run_id=n3p_target,
+            )
+            report["actual_hhmm_handoff"]["n3p"]["preflight_artifacts"] = n3p_preflight_handoff
             flush_progress()
-            return blocked
+            if n3p_preflight_handoff.get("status") != "passed":
+                blocked = _blocked_preflight_artifact_handoff(report, n3p_preflight_handoff)
+                report["n3p_status"] = "blocked"
+                flush_progress()
+                return blocked
 
-        n3p_execute_step = {
-            "step_id": "n3p_trigger_proof_execute",
-            "runner_path": "scripts/run_v3_realtime_virtual_metric_writer_once.py",
-            "argv": [
-                python_executable,
-                "scripts/run_v3_realtime_virtual_metric_writer_once.py",
-                "--contract-path",
-                str(n3p_preflight_handoff["contract_path"]),
-                "--preflight-path",
-                str(n3p_preflight_handoff["preflight_path"]),
-                "--source-payload-path",
-                n3p_source_path,
-                "--json-report-path",
-                f"tmp/N3P_{for_trade_date}_{n3p_hhmm}_trigger_proof_execute_report.json",
-                "--rollback-sql-path",
-                n3p_rollback_sql_path(for_trade_date, n3p_hhmm),
-                "--execute",
-                "--user-confirmed",
-            ],
-        }
-        n3p_execute_result = _run_child_step(
-            n3p_execute_step,
-            command_runner=command_runner,
-            executed_steps=executed_steps,
-            progress_callback=flush_progress,
-        )
-        if _child_failed(n3p_execute_result):
-            blocked = _blocked_after_child(report, n3p_execute_result)
-            report["n3p_status"] = "blocked"
+            n3p_execute_step = {
+                "step_id": "n3p_trigger_proof_execute",
+                "runner_path": "scripts/run_v3_realtime_virtual_metric_writer_once.py",
+                "argv": [
+                    python_executable,
+                    "scripts/run_v3_realtime_virtual_metric_writer_once.py",
+                    "--contract-path",
+                    str(n3p_preflight_handoff["contract_path"]),
+                    "--preflight-path",
+                    str(n3p_preflight_handoff["preflight_path"]),
+                    "--source-payload-path",
+                    n3p_source_path,
+                    "--json-report-path",
+                    f"tmp/N3P_{for_trade_date}_{n3p_hhmm}_trigger_proof_execute_report.json",
+                    "--rollback-sql-path",
+                    n3p_rollback_sql_path(for_trade_date, n3p_hhmm),
+                    "--execute",
+                    "--user-confirmed",
+                ],
+            }
+            n3p_execute_result = _run_child_step(
+                n3p_execute_step,
+                command_runner=command_runner,
+                executed_steps=executed_steps,
+                progress_callback=flush_progress,
+            )
+            if _child_failed(n3p_execute_result):
+                blocked = _blocked_after_child(report, n3p_execute_result)
+                report["n3p_status"] = "blocked"
+                flush_progress()
+                return blocked
+            n3p_rollback_handoff = _validate_n3p_rollback_artifact(
+                rollback_sql_path=n3p_rollback_sql_path(for_trade_date, n3p_hhmm),
+                expected_target_run_id=n3p_target,
+            )
+            report["actual_hhmm_handoff"]["n3p"]["rollback_artifact"] = n3p_rollback_handoff
             flush_progress()
-            return blocked
-        n3p_rollback_handoff = _validate_n3p_rollback_artifact(
-            rollback_sql_path=n3p_rollback_sql_path(for_trade_date, n3p_hhmm),
-            expected_target_run_id=n3p_target,
-        )
-        report["actual_hhmm_handoff"]["n3p"]["rollback_artifact"] = n3p_rollback_handoff
-        flush_progress()
-        if n3p_rollback_handoff.get("status") != "passed":
-            blocked = _blocked_n3p_rollback_handoff(report, n3p_rollback_handoff)
-            report["n3p_status"] = "blocked"
-            flush_progress()
-            return blocked
-        report["n3p_status"] = "passed"
+            if n3p_rollback_handoff.get("status") != "passed":
+                blocked = _blocked_n3p_rollback_handoff(report, n3p_rollback_handoff)
+                report["n3p_status"] = "blocked"
+                flush_progress()
+                return blocked
+            report["n3p_status"] = "passed"
         flush_progress()
         if branch_mode == "n3p_only":
-            report["status"] = "passed"
-            report["reason"] = ""
-            report["execution_mode"] = "execute"
+            n3p_noop = report["n3p_status"] == "noop"
+            report["status"] = "noop" if n3p_noop else "passed"
+            report["reason"] = N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON if n3p_noop else ""
+            report["execution_mode"] = "noop" if n3p_noop else "execute"
+            if n3p_noop:
+                report["noop_reason"] = N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON
             report["hint_status"] = "skipped"
             report["resolved_target_run_ids"] = {
                 "n3p_source_payload_run_id": n3p_source_run_id,
@@ -1048,6 +1086,15 @@ def _execute_child_sequence(
                     "reason": HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
                     "execution_mode": "noop",
                     "noop_reason": HINT_SOURCE_IDEMPOTENT_NOOP_REASON,
+                }
+            )
+        elif report.get("n3p_status") == "noop":
+            report.update(
+                {
+                    "status": "noop",
+                    "reason": "noop_existing_n3p_and_hint_targets_passed",
+                    "execution_mode": "noop",
+                    "noop_reason": "noop_existing_n3p_and_hint_targets_passed",
                 }
             )
         else:
@@ -1691,6 +1738,116 @@ def _blocked_missing_handoff(report: dict[str, Any], step_id: str, field_name: s
     report["executed_child_command_count"] = len(report.get("executed_child_steps") or [])
     _refresh_closeout_progress(report, blocked_child_step=step_id)
     return report
+
+
+def _validate_n3p_preflight_noop_handoff(
+    *,
+    n3p_preflight_payload: Mapping[str, Any],
+    expected_target_run_id: str,
+    expected_source_payload_run_id: str,
+    expected_source_payload_hash: str,
+    expected_hhmm: str,
+) -> dict[str, Any]:
+    target_idempotency = n3p_preflight_payload.get("target_idempotency")
+    target_idempotency = dict(target_idempotency) if isinstance(target_idempotency, Mapping) else {}
+    target_checks = target_idempotency.get("checks")
+    target_checks = dict(target_checks) if isinstance(target_checks, Mapping) else {}
+    expected_by_asset = target_idempotency.get("expected_by_asset")
+    expected_by_asset = dict(expected_by_asset) if isinstance(expected_by_asset, Mapping) else {}
+    required_target_checks = {
+        "run_count_one",
+        "run_exists",
+        "run_status_passed",
+        "run_p0_zero",
+        "run_scope_count_matches",
+        "run_candidate_count_matches",
+        "run_subscription_row_count_matches",
+        "run_subscription_object_count_matches",
+        "ready_count_contract",
+        "quality_present",
+        "quality_all_accepted",
+        "quality_p0_failed_zero",
+        "outbox_zero",
+        "inbox_zero",
+        "checkpoint_zero",
+    }
+    expected_by_asset_counts_valid = set(expected_by_asset) == {"stock", "index", "board"}
+    for asset in ("stock", "index", "board"):
+        required_target_checks.update(
+            {
+                f"{asset}_row_count_matches",
+                f"{asset}_ready_count_matches",
+                f"{asset}_not_ready_count_matches",
+            }
+        )
+        try:
+            expected_count = int(expected_by_asset.get(asset) or 0)
+        except (TypeError, ValueError):
+            expected_by_asset_counts_valid = False
+            expected_count = 0
+        if expected_count < 0:
+            expected_by_asset_counts_valid = False
+        if expected_count > 0:
+            required_target_checks.update(
+                {
+                    f"{asset}_source_run_matches",
+                    f"{asset}_subscription_matches",
+                    f"{asset}_minute_matches",
+                }
+            )
+    checks = {
+        "result": str(n3p_preflight_payload.get("result") or "") == N3P_PREFLIGHT_IDEMPOTENT_NOOP_RESULT,
+        "status": str(n3p_preflight_payload.get("status") or "") == "noop",
+        "execution_mode": str(n3p_preflight_payload.get("execution_mode") or "") == "noop",
+        "idempotency_decision": str(n3p_preflight_payload.get("idempotency_decision") or "") == "idempotent_pass",
+        "reason": str(n3p_preflight_payload.get("reason") or "") == N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON,
+        "target_idempotency_decision": str(target_idempotency.get("decision") or "") == "idempotent_pass",
+        "target_idempotency_reason": str(target_idempotency.get("reason") or "")
+        == N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON,
+        "target_idempotency_checks_present": bool(target_checks),
+        "target_idempotency_expected_by_asset": expected_by_asset_counts_valid,
+        "target_idempotency_required_checks": required_target_checks.issubset(target_checks),
+        "target_idempotency_checks_all_true": bool(target_checks) and all(value is True for value in target_checks.values()),
+        "target_run_id": str(n3p_preflight_payload.get("target_run_id") or "") == expected_target_run_id,
+        "source_payload_run_id": str(n3p_preflight_payload.get("source_payload_run_id") or "")
+        == expected_source_payload_run_id,
+        "source_payload_hash": bool(expected_source_payload_hash)
+        and str(n3p_preflight_payload.get("source_payload_hash") or "") == expected_source_payload_hash,
+        "actual_until_hhmm": str(n3p_preflight_payload.get("actual_until_hhmm") or "") == expected_hhmm,
+        "preflight_artifacts_materialized": n3p_preflight_payload.get("preflight_artifacts_materialized") is False,
+        "execute_contract_ready": n3p_preflight_payload.get("execute_contract_ready") is False,
+        "market_data_pulled": n3p_preflight_payload.get("market_data_pulled") is False,
+        "database_written": n3p_preflight_payload.get("database_written") is False,
+        "writes_n3p_metric_rows": n3p_preflight_payload.get("writes_n3p_metric_rows") is False,
+        "writes_outbox": n3p_preflight_payload.get("writes_outbox") is False,
+        "not_n5_final_proof": n3p_preflight_payload.get("not_n5_final_proof") is True,
+        "action_confirmation_ready": n3p_preflight_payload.get("action_confirmation_ready") is False,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        return {
+            "status": "blocked",
+            "reason": f"n3p_preflight_noop_contract_mismatch:{','.join(failed)}",
+            "checks": checks,
+        }
+    return {
+        "status": "passed",
+        "reason": N3P_PREFLIGHT_IDEMPOTENT_NOOP_REASON,
+        "checks": checks,
+        "target_run_id": expected_target_run_id,
+        "source_payload_run_id": expected_source_payload_run_id,
+    }
+
+
+def _is_n3p_preflight_noop_claim(n3p_preflight_payload: Mapping[str, Any]) -> bool:
+    return any(
+        (
+            str(n3p_preflight_payload.get("result") or "") == N3P_PREFLIGHT_IDEMPOTENT_NOOP_RESULT,
+            str(n3p_preflight_payload.get("status") or "") == "noop",
+            str(n3p_preflight_payload.get("execution_mode") or "") == "noop",
+            str(n3p_preflight_payload.get("idempotency_decision") or "") == "idempotent_pass",
+        )
+    )
 
 
 def _validate_hint_source_noop_handoff(
