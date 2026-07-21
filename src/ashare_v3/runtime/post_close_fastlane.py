@@ -7,7 +7,7 @@ N4 matchers, N5, N6, workers, or event-consumer status updates.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -69,20 +69,32 @@ def _recovery_artifact_passed(command: ChildCommand) -> bool:
     if command.step_id in execute_pass_steps:
         return any(
             Path(report_path).suffix == ".json"
-            and _json_result(report_path) in {"EXECUTE_PASS", "IDEMPOTENT_PASS", "PASS"}
+            and _recovery_execute_report_passed(
+                command.step_id,
+                _load_json(Path(report_path)),
+            )
             for report_path in command.report_paths
         )
     if command.step_id == "n3_a0_preload_dry_run":
-        return any(Path(report_path).suffix == ".json" and _json_result(report_path) in {"DRY_RUN_PASS", "PASS"} for report_path in command.report_paths)
+        return any(
+            Path(report_path).suffix == ".json"
+            and _recovery_a0_report_passed(_load_json(Path(report_path)))
+            for report_path in command.report_paths
+        )
     if command.step_id == "n3_a1_contract":
-        results = {
-            Path(report_path).name: _json_result(report_path)
+        payloads = {
+            Path(report_path).name: _load_json(Path(report_path))
             for report_path in command.report_paths
             if Path(report_path).suffix == ".json"
         }
         return (
-            results.get("46_n3_a1_preload_contract.json") in {"CONTRACT_PASS", "PASS"}
-            and results.get("47_n3_a1_preload_preflight.json") in {"PREFLIGHT_PASS", "PASS"}
+            _recovery_a1_contract_report_passed(
+                payloads.get("46_n3_a1_preload_contract.json")
+            )
+            and _json_payload_result(
+                payloads.get("47_n3_a1_preload_preflight.json")
+            )
+            in {"PREFLIGHT_PASS", "PASS"}
         )
     if command.step_id != "n1_stock_financial_canonical_source_bundle":
         return False
@@ -91,6 +103,116 @@ def _recovery_artifact_passed(command: ChildCommand) -> bool:
         if path.name.endswith("_preflight.json") and _json_result(path) == "PREFLIGHT_PASS":
             return True
     return False
+
+
+def _json_payload_result(payload: Mapping[str, Any] | None) -> str | None:
+    if not payload:
+        return None
+    result = payload.get("result")
+    return str(result) if result is not None else None
+
+
+def _nested_value(payload: Mapping[str, Any] | None, *keys: str) -> Any:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _recovery_execute_report_passed(
+    step_id: str,
+    payload: Mapping[str, Any] | None,
+) -> bool:
+    result = _json_payload_result(payload)
+    if result in {"EXECUTE_PASS", "IDEMPOTENT_PASS", "PASS"}:
+        return True
+    if not payload:
+        return False
+    if step_id == "n2_condition":
+        return (
+            payload.get("stage") == "N2-E3"
+            and payload.get("writes_performed") is True
+            and _nested_value(payload, "preflight", "execute_allowed") is True
+            and _nested_value(payload, "postcheck", "run_status")
+            in {"passed", "passed_active"}
+            and payload.get("expected_row_counts") == payload.get("actual_row_counts")
+            and _nested_value(payload, "preflight", "quality_summary", "p0_count") == 0
+        )
+    if step_id == "n3_subscription":
+        return (
+            payload.get("stage") == "N3-6"
+            and _nested_value(payload, "side_effects", "writes_performed") is True
+            and _nested_value(payload, "post_execute", "market_data_run_row", "status")
+            == "passed"
+            and _nested_value(payload, "post_execute", "market_data_run_row", "p0_count") == 0
+            and _nested_value(payload, "post_checks", "n3_6_run_status_passed") is True
+        )
+    if step_id == "n3_a1_preload":
+        return (
+            payload.get("stage") == "N3-A1"
+            and _nested_value(payload, "side_effects", "writes_performed") is True
+            and _nested_value(payload, "post_execute", "preload_run_row", "status")
+            == "passed"
+            and _nested_value(payload, "post_execute", "preload_run_row", "p0_count") == 0
+            and _is_positive_int(
+                _nested_value(payload, "write_result", "objects_processed")
+            )
+            and _is_positive_int(
+                _nested_value(payload, "write_result", "minute_rows_written")
+            )
+        )
+    if step_id == "n4_trigger_context_snapshot":
+        return (
+            payload.get("stage") == "N4-3"
+            and _nested_value(payload, "side_effects", "writes_performed") is True
+            and _nested_value(payload, "post_context_summary", "trigger_run", "status")
+            == "passed"
+            and _nested_value(payload, "quality", "p0_count") == 0
+            and _nested_value(payload, "post_checks", "run_id_written") is True
+            and _nested_value(payload, "post_checks", "trigger_run_status_passed") is True
+            and _nested_value(
+                payload,
+                "post_checks",
+                "trigger_state_match_outbox_unchanged",
+            )
+            is True
+        )
+    return False
+
+
+def _recovery_a0_report_passed(payload: Mapping[str, Any] | None) -> bool:
+    result = _json_payload_result(payload)
+    if result in {"DRY_RUN_PASS", "PASS"}:
+        return True
+    return bool(
+        payload
+        and payload.get("stage") == "N3-A0"
+        and payload.get("execute_ready") is True
+        and _nested_value(payload, "source_subscription_plan", "passed") is True
+        and _nested_value(payload, "quality", "p0_count") == 0
+        and _nested_value(payload, "side_effects", "writes_performed") is False
+    )
+
+
+def _recovery_a1_contract_report_passed(
+    payload: Mapping[str, Any] | None,
+) -> bool:
+    result = _json_payload_result(payload)
+    if result in {"CONTRACT_PASS", "PASS"}:
+        return True
+    return bool(
+        payload
+        and payload.get("stage") == "N3-A1-preflight"
+        and _nested_value(payload, "quality", "p0_count") == 0
+        and payload.get("preload_run_id")
+        and payload.get("source_subscription_run_id")
+    )
 
 
 def _report_has_step(report: dict[str, Any] | None, step_id: str) -> bool:
