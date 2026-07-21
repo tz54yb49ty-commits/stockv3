@@ -922,6 +922,12 @@ N3 branch 模式必须 branch-aware：`--branch n3p_only` 只能映射到
 `tmp/N3_intraday_proof_poller_hint_launchd_report.json`。base N3 report 不得替代 branch report
 作为安全证据。
 
+N3 combined 与 split 调度拓扑必须互斥。只要
+`com.ashare-v3.n3.intraday-proof-poller` 与任一 split label（`.n3p` 或 `.hint`）同时
+loaded 或 running，`worker_launchd_guard` 必须在读取 poller report 前 fail closed，登记
+`P0 n3_combined_and_split_poller_active`，且不得操作 launchd。`.n3p` 与 `.hint` 两个 split
+label 同时 active 是预期拓扑；combined 单独 active 仍按既有 report allowlist 严格验证。
+
 但它们只有在最新本地 report 同时证明以下条件时才可被 allowlist：
 
 ```text
@@ -939,6 +945,24 @@ schema_changed = false
 report 缺失、过旧、blocked、已执行 child、任何副作用字段不是 false、旧 label loaded、
 或下游 worker/consumer 存在时，guard 必须继续阻断。该 allowlist 只改变只读 guard
 判定和报告字段，不授权安装、加载、停止 launchd，也不授权执行 N1-N6 runtime。
+
+唯一的 blocked-report 例外是 poller 因 active lineage 落后于 latest attempted Fast Lane
+而在任何 child 或副作用之前 fail closed。该例外必须同时满足：
+
+```text
+status = blocked
+executed_child_command_count = 0
+N3 reason = BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG
+N3 lineage_config_error starts with BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:
+N4 result = blocked
+N4 error starts with
+  BLOCKED_INTRADAY_WORKER_LINEAGE_CONFIG:BLOCKED_STALE_INTRADAY_WORKER_LINEAGE:
+全部 side-effect / forbidden-operation 字段仍精确为 false
+```
+
+其他 blocked reason、缺少精确 stale-lineage 前缀或任何副作用不闭合时仍必须阻断。
+该例外只证明 loaded poller 正在安全等待 lineage 修复，不把 stale lineage 视为 ready，
+也不授权 Fast Lane 之外的 runtime、launchd 或数据库操作。
 
 ## 10. Post-Close Fast Lane Latest Pointer Semantics
 

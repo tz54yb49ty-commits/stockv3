@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ashare_v3.runtime.post_close_fastlane import (
+    ChildCommand,
+    _recovery_artifact_passed,
     _refresh_latest_after_status,
     build_launchd_plist,
     build_oneshot_child_commands,
@@ -1105,6 +1107,148 @@ class PostCloseFastLaneOneShotTest(unittest.TestCase):
             self.assertEqual(report["sub_steps"][0]["step_id"], "n1_source_facts")
             self.assertTrue(report["sub_steps"][0]["skipped"])
             self.assertIn("scripts/plan_stock_financial_canonical_source_bundle_once.py", calls[0])
+
+    def test_recovery_accepts_canonical_layer_report_schemas_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def command(step_id: str, *names: str) -> ChildCommand:
+                return ChildCommand(
+                    step_id=step_id,
+                    layer_role="test",
+                    argv=[],
+                    report_paths=[str(root / name) for name in names],
+                )
+
+            n2_path = root / "30.json"
+            n2_payload = {
+                "stage": "N2-E3",
+                "writes_performed": True,
+                "expected_row_counts": {"stock": 1},
+                "actual_row_counts": {"stock": 1},
+                "preflight": {
+                    "execute_allowed": True,
+                    "quality_summary": {"p0_count": 0},
+                },
+                "postcheck": {"run_status": "passed_active"},
+            }
+            n2_path.write_text(json.dumps(n2_payload), encoding="utf-8")
+            self.assertTrue(_recovery_artifact_passed(command("n2_condition", "30.json")))
+            n2_payload["actual_row_counts"] = {"stock": 0}
+            n2_path.write_text(json.dumps(n2_payload), encoding="utf-8")
+            self.assertFalse(_recovery_artifact_passed(command("n2_condition", "30.json")))
+
+            subscription_path = root / "40.json"
+            subscription_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "N3-6",
+                        "side_effects": {"writes_performed": True},
+                        "post_execute": {
+                            "market_data_run_row": {"status": "passed", "p0_count": 0}
+                        },
+                        "post_checks": {"n3_6_run_status_passed": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                _recovery_artifact_passed(command("n3_subscription", "40.json"))
+            )
+
+            a0_path = root / "45.json"
+            a0_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "N3-A0",
+                        "execute_ready": True,
+                        "source_subscription_plan": {"passed": True},
+                        "quality": {"p0_count": 0},
+                        "side_effects": {"writes_performed": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                _recovery_artifact_passed(command("n3_a0_preload_dry_run", "45.json"))
+            )
+
+            contract_path = root / "46_n3_a1_preload_contract.json"
+            preflight_path = root / "47_n3_a1_preload_preflight.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "N3-A1-preflight",
+                        "preload_run_id": "preload",
+                        "source_subscription_run_id": "subscription",
+                        "quality": {"p0_count": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            preflight_path.write_text(
+                json.dumps({"result": "PREFLIGHT_PASS"}),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                _recovery_artifact_passed(
+                    command(
+                        "n3_a1_contract",
+                        contract_path.name,
+                        preflight_path.name,
+                    )
+                )
+            )
+
+            preload_path = root / "50.json"
+            preload_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "N3-A1",
+                        "side_effects": {"writes_performed": True},
+                        "write_result": {
+                            "objects_processed": 1,
+                            "minute_rows_written": 240,
+                        },
+                        "post_execute": {
+                            "preload_run_row": {"status": "passed", "p0_count": 0}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                _recovery_artifact_passed(command("n3_a1_preload", "50.json"))
+            )
+            preload_payload = json.loads(preload_path.read_text(encoding="utf-8"))
+            preload_payload.pop("write_result")
+            preload_path.write_text(json.dumps(preload_payload), encoding="utf-8")
+            self.assertFalse(
+                _recovery_artifact_passed(command("n3_a1_preload", "50.json"))
+            )
+
+            context_path = root / "52.json"
+            context_path.write_text(
+                json.dumps(
+                    {
+                        "stage": "N4-3",
+                        "side_effects": {"writes_performed": True},
+                        "quality": {"p0_count": 0},
+                        "post_context_summary": {"trigger_run": {"status": "passed"}},
+                        "post_checks": {
+                            "run_id_written": True,
+                            "trigger_run_status_passed": True,
+                            "trigger_state_match_outbox_unchanged": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                _recovery_artifact_passed(
+                    command("n4_trigger_context_snapshot", "52.json")
+                )
+            )
 
     def test_launchd_plist_runs_daily_at_18_without_keepalive(self) -> None:
         plist = build_launchd_plist(
