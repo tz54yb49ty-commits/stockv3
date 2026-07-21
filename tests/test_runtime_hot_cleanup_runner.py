@@ -44,6 +44,28 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         ).encode("utf-8")
         self.assertIn("\ufffd".encode("utf-8"), encoded)
 
+    def test_runtime_writer_detector_ignores_only_readonly_research_bridge(self) -> None:
+        ps_output = b"\n".join(
+            (
+                (
+                    b"201 01:00 S Python Python /tmp/scripts/"
+                    b"run_n6_ai_research_bridge.py --expected-manifest-sha256 abc"
+                ),
+                (
+                    b"202 00:08 S Python Python /tmp/scripts/"
+                    b"run_n6_ai_public_snapshot_once.py --execute"
+                ),
+                (
+                    b"203 00:08 S Python Python /tmp/scripts/"
+                    b"run_n6_b_track_signal_projection_poller_once.py --execute"
+                ),
+            )
+        )
+        with patch.object(keep5_runner.subprocess, "check_output", return_value=ps_output):
+            processes = keep5_runner.detect_active_runtime_writer_processes()
+
+        self.assertEqual([row["pid"] for row in processes], [202, 203])
+
     def test_process_inspection_failure_is_persisted_fail_closed(self) -> None:
         for failed_detector in ("archive_process", "runtime_writer_process"):
             with self.subTest(failed_detector=failed_detector), tempfile.TemporaryDirectory() as tmp:

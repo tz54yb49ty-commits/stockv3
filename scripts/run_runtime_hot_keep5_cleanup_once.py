@@ -66,6 +66,7 @@ RUNTIME_WRITER_EXCLUDE_MARKERS = (
     "scripts/run_runtime_dirty_hot_keep2_cleanup_once.py",
     "scripts/run_v3_runtime_archive_keep5_daily_once.py",
     "run_n6_user_app.py",
+    "run_n6_ai_research_bridge.py",
 )
 
 
