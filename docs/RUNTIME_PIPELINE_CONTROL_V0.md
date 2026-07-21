@@ -922,6 +922,12 @@ N3 branch 模式必须 branch-aware：`--branch n3p_only` 只能映射到
 `tmp/N3_intraday_proof_poller_hint_launchd_report.json`。base N3 report 不得替代 branch report
 作为安全证据。
 
+N3 combined 与 split 调度拓扑必须互斥。只要
+`com.ashare-v3.n3.intraday-proof-poller` 与任一 split label（`.n3p` 或 `.hint`）同时
+loaded 或 running，`worker_launchd_guard` 必须在读取 poller report 前 fail closed，登记
+`P0 n3_combined_and_split_poller_active`，且不得操作 launchd。`.n3p` 与 `.hint` 两个 split
+label 同时 active 是预期拓扑；combined 单独 active 仍按既有 report allowlist 严格验证。
+
 但它们只有在最新本地 report 同时证明以下条件时才可被 allowlist：
 
 ```text

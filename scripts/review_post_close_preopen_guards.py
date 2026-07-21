@@ -314,6 +314,30 @@ def _worker_state_report_path(worker_name: str, value: Any) -> str:
     return str(allowlisted["report_path"]) if allowlisted else ""
 
 
+def _n3_poller_topology(worker_states: Mapping[str, Any]) -> dict[str, Any]:
+    combined_active = _worker_state_active(worker_states.get("n3_worker"))
+    active_split_workers = [
+        worker_name
+        for worker_name in ("n3p_worker", "n3_hint_worker")
+        if _worker_state_active(worker_states.get(worker_name))
+    ]
+    if combined_active and active_split_workers:
+        classification = "combined_and_split_conflict"
+    elif combined_active:
+        classification = "combined_only"
+    elif active_split_workers:
+        classification = "split_only"
+    else:
+        classification = "not_loaded_or_running"
+    return {
+        "policy": "combined_or_split_exclusive_v1",
+        "classification": classification,
+        "combined_worker_active": combined_active,
+        "active_split_workers": active_split_workers,
+        "conflict": combined_active and bool(active_split_workers),
+    }
+
+
 def _nested_child_count(report: Mapping[str, Any]) -> int:
     if "executed_child_command_count" in report:
         return int(report.get("executed_child_command_count") or 0)
@@ -463,6 +487,51 @@ def build_worker_launchd_guard_report(
     worker_states: Mapping[str, Any],
     report_max_age_seconds: int = SAFE_REPORT_MAX_AGE_SECONDS,
 ) -> dict[str, Any]:
+    n3_topology = _n3_poller_topology(worker_states)
+    if n3_topology["conflict"]:
+        conflicting_workers = ["n3_worker", *n3_topology["active_split_workers"]]
+        classifications = {
+            key: (
+                "loaded_topology_conflict_blocked"
+                if key in conflicting_workers
+                else (
+                    "not_loaded_or_running"
+                    if not _worker_state_active(value)
+                    else "not_evaluated_topology_conflict"
+                )
+            )
+            for key, value in sorted(worker_states.items())
+        }
+        blocked_report = {
+            "result": "BLOCKED",
+            "check": "worker_launchd_guard",
+            "layer_role": "runtime_control",
+            "for_trade_date": for_trade_date,
+            "blocked_reason": (
+                "n3_poller_topology_conflict:combined_with_split:"
+                + ",".join(n3_topology["active_split_workers"])
+            ),
+            "p0_count": 1,
+            "quality_items": [
+                {
+                    "severity": "P0",
+                    "code": "n3_combined_and_split_poller_active",
+                    "combined_worker": "n3_worker",
+                    "active_split_workers": n3_topology["active_split_workers"],
+                }
+            ],
+            "worker_guard_policy": "safe_proof_poller_allowlist_v1",
+            "n3_poller_topology": n3_topology,
+            "worker_guard_classification": classifications,
+            "safe_allowlist_evidence": {},
+            "worker_states": dict(worker_states),
+            "writes_database": False,
+            "event_ledger_touched": False,
+            "worker_started": False,
+            "launchd_mutated": False,
+        }
+        raise GuardBlocked(str(blocked_report["blocked_reason"]), report=blocked_report)
+
     classifications: dict[str, str] = {}
     allowlist_evidence: dict[str, Any] = {}
     blockers: list[str] = []
@@ -492,6 +561,7 @@ def build_worker_launchd_guard_report(
             "for_trade_date": for_trade_date,
             "blocked_reason": "worker_loaded_or_running:" + ",".join(blockers),
             "worker_guard_policy": "safe_proof_poller_allowlist_v1",
+            "n3_poller_topology": n3_topology,
             "worker_guard_classification": classifications,
             "safe_allowlist_evidence": allowlist_evidence,
             "worker_states": dict(worker_states),
@@ -508,6 +578,7 @@ def build_worker_launchd_guard_report(
         "for_trade_date": for_trade_date,
         "worker_states": dict(worker_states),
         "worker_guard_policy": "safe_proof_poller_allowlist_v1",
+        "n3_poller_topology": n3_topology,
         "worker_guard_classification": classifications,
         "safe_allowlist_evidence": allowlist_evidence,
         "writes_database": False,

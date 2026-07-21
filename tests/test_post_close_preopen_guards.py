@@ -376,6 +376,88 @@ class PostClosePreopenGuardsTest(unittest.TestCase):
         self.assertFalse(report["event_ledger_touched"])
         self.assertFalse(report["worker_started"])
 
+    def test_worker_launchd_guard_blocks_combined_and_split_n3_topologies(self) -> None:
+        combined = {
+            "active": True,
+            "label": "com.ashare-v3.n3.intraday-proof-poller",
+        }
+        split_states = {
+            "n3p_worker": {
+                "active": True,
+                "label": "com.ashare-v3.n3.intraday-proof-poller.n3p",
+            },
+            "n3_hint_worker": {
+                "active": True,
+                "label": "com.ashare-v3.n3.intraday-proof-poller.hint",
+            },
+        }
+
+        for active_splits in (
+            ("n3p_worker",),
+            ("n3_hint_worker",),
+            ("n3p_worker", "n3_hint_worker"),
+        ):
+            with self.subTest(active_splits=active_splits):
+                worker_states = {"n3_worker": combined}
+                worker_states.update(
+                    {worker_name: split_states[worker_name] for worker_name in active_splits}
+                )
+                with self.assertRaises(GuardBlocked) as caught:
+                    build_worker_launchd_guard_report(
+                        for_trade_date="20260721",
+                        worker_states=worker_states,
+                    )
+
+                report = caught.exception.report
+                self.assertEqual(report["result"], "BLOCKED")
+                self.assertEqual(report["p0_count"], 1)
+                self.assertEqual(
+                    report["quality_items"][0]["code"],
+                    "n3_combined_and_split_poller_active",
+                )
+                self.assertEqual(
+                    report["n3_poller_topology"]["active_split_workers"],
+                    list(active_splits),
+                )
+                self.assertFalse(report["launchd_mutated"])
+
+    def test_worker_launchd_guard_allows_n3p_and_hint_split_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            n3p_report = self._write_worker_report(
+                tmp_path / "n3p.json",
+                self._safe_n3_noop_report_payload(),
+            )
+            hint_report = self._write_worker_report(
+                tmp_path / "hint.json",
+                self._safe_n3_noop_report_payload(),
+            )
+
+            report = build_worker_launchd_guard_report(
+                for_trade_date="20260721",
+                worker_states={
+                    "n3_worker": False,
+                    "n3p_worker": {
+                        "active": True,
+                        "label": "com.ashare-v3.n3.intraday-proof-poller.n3p",
+                        "report_path": n3p_report,
+                    },
+                    "n3_hint_worker": {
+                        "active": True,
+                        "label": "com.ashare-v3.n3.intraday-proof-poller.hint",
+                        "report_path": hint_report,
+                    },
+                },
+                report_max_age_seconds=300,
+            )
+
+        self.assertEqual(report["result"], "PASS")
+        self.assertEqual(
+            report["n3_poller_topology"]["classification"],
+            "split_only",
+        )
+        self.assertFalse(report["n3_poller_topology"]["conflict"])
+
     def test_worker_launchd_guard_allows_safe_stale_lineage_blocked_pollers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
