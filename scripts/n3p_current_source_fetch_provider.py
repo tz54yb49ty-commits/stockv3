@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any
 
 
@@ -24,6 +25,7 @@ N3P_SOURCE_FETCH_PROVIDER_BACKEND_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_PROVIDER_B
 N3P_SOURCE_FETCH_BACKEND_CONFIG_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_BACKEND_CONFIG"
 N3P_SOURCE_FETCH_BACKEND_FETCHER_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_BACKEND_FETCHER"
 N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER"
+N3P_SOURCE_FETCH_LINEAGE_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_LINEAGE"
 N3P_SOURCE_FETCH_BACKEND_REGISTRATION_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_BACKEND_REGISTRATION"
 N3P_SOURCE_SCOPE_NOT_READY_BLOCKER = "BLOCKED_N3P_SOURCE_SCOPE_NOT_READY"
 N3P_SOURCE_FETCH_PRECHECK_BLOCKER = "BLOCKED_N3P_SOURCE_FETCH_PRECHECK"
@@ -46,6 +48,8 @@ N3P_TRIGGER_PROOF_TARGET_ABSENCE_BLOCKER = "BLOCKED_TARGET_ABSENCE_CONTRACT"
 N3P_TRIGGER_PROOF_PREFLIGHT_ARTIFACT_PATH_MISSING_BLOCKER = "BLOCKED_N3P_PREFLIGHT_ARTIFACT_PATH_MISSING"
 N3P_TRIGGER_PROOF_PREFLIGHT_ARTIFACT_CONTRACT_BLOCKER = "BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT"
 N3P_TRIGGER_PROOF_PREFLIGHT_ARTIFACT_MATERIALIZATION_BLOCKER = "BLOCKED_N3P_PREFLIGHT_ARTIFACT_MATERIALIZATION"
+N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_RESULT = "NOOP_N3P_TARGET_ALREADY_PASSED"
+N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON = "noop_existing_n3p_target_passed"
 
 N3P_SOURCE_MODEL = "n3p_trigger_proof_realtime_v1"
 N3P_MAX_CANONICAL_PROOF_HHMM = "1500"
@@ -195,7 +199,7 @@ class N3PCurrentMarketFetchAdapter:
 
 
 class N3PCurrentSourceArtifactWriter:
-    """Local JSON artifact writer for normalized N3P current-source payloads."""
+    """Write-once JSON artifact pair for normalized N3P current-source payloads."""
 
     def __init__(self, *, output_root: str | os.PathLike[str] | None = None) -> None:
         self.output_root = str(output_root) if output_root is not None else ""
@@ -220,15 +224,17 @@ class N3PCurrentSourceArtifactWriter:
                 "for_trade_date and actual_until_hhmm are required for source artifact write",
             )
 
-        output_root = str(
-            self.output_root
-            or config.get("artifact_output_root")
-            or config.get("source_artifact_output_root")
-            or "docs/intraday_live_current"
+        payload_path, report_path = _canonical_n3p_current_source_artifact_paths(
+            output_root=(
+                self.output_root
+                or config.get("artifact_output_root")
+                or config.get("source_artifact_output_root")
+                or "docs/intraday_live_current"
+            ),
+            for_trade_date=for_trade_date,
+            actual_until_hhmm=actual_until_hhmm,
         )
-        output_dir = Path(output_root) / for_trade_date
-        payload_path = output_dir / f"N3P_mixed_realtime_{actual_until_hhmm}_source_fetch_payload.json"
-        report_path = output_dir / f"N3P_mixed_realtime_{actual_until_hhmm}_source_fetch_report.json"
+        output_dir = payload_path.parent
 
         payload_to_write = dict(payload)
         payload_hash = compute_n3p_current_source_payload_hash(payload_to_write)
@@ -245,36 +251,130 @@ class N3PCurrentSourceArtifactWriter:
         if fetch_report.get("source_scope") is not None:
             payload_to_write.setdefault("source_scope", fetch_report.get("source_scope"))
 
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            payload_bytes = _canonical_json_bytes(payload_to_write)
-            payload_path.write_bytes(payload_bytes)
-            file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        payload_bytes = _canonical_json_bytes(payload_to_write)
+        file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        report_to_write = {
+            **dict(fetch_report),
+            "result": N3_READY_RESULT,
+            "validation_result": {"valid": True, "blocked_reasons": []},
+            "payload_hash": payload_hash,
+            "payload_path": str(payload_path),
+            "report_path": str(report_path),
+            "file_sha256": file_sha256,
+            "artifact_written": True,
+            "writes_outbox": False,
+            "writes_n3p_metric_rows": False,
+            "database_written": False,
+            "consumes_outbox": False,
+            "updates_inbox_or_checkpoint": False,
+            "starts_worker": False,
+            "touches_n4_n5_n6": False,
+            "touches_n5_n6": False,
+        }
+        report_to_write["source_payload_counts"] = dict(payload_to_write["source_payload_counts"])
+        report_to_write.setdefault("normalization_trace", payload_to_write.get("normalization_trace") or {})
+        report_bytes = _canonical_json_bytes(report_to_write)
 
-            report_to_write = {
-                **dict(fetch_report),
-                "result": N3_READY_RESULT,
-                "validation_result": {"valid": True, "blocked_reasons": []},
-                "payload_hash": payload_hash,
-                "payload_path": str(payload_path),
-                "report_path": str(report_path),
-                "file_sha256": file_sha256,
-                "artifact_written": True,
-                "writes_outbox": False,
-                "writes_n3p_metric_rows": False,
-                "database_written": False,
-                "consumes_outbox": False,
-                "updates_inbox_or_checkpoint": False,
-                "starts_worker": False,
-                "touches_n4_n5_n6": False,
-                "touches_n5_n6": False,
-            }
-            report_to_write.setdefault("normalization_trace", payload_to_write.get("normalization_trace") or {})
-            report_path.write_bytes(_canonical_json_bytes(report_to_write))
-        except OSError as exc:
+        payload_exists = payload_path.exists() or payload_path.is_symlink()
+        report_exists = report_path.exists() or report_path.is_symlink()
+        if not payload_exists and not report_exists and bool(fetch_report.get("require_existing_artifact_pair")):
             return _blocked(
                 N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER,
-                f"artifact_write_failed:{type(exc).__name__}:{exc}",
+                "existing_source_lineage_artifact_pair_missing",
+                payload_path=str(payload_path),
+                report_path=str(report_path),
+                artifact_written=False,
+            )
+        if payload_exists or report_exists:
+            if payload_exists != report_exists:
+                return _blocked(
+                    N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER,
+                    "artifact_pair_partial",
+                    payload_path=str(payload_path),
+                    report_path=str(report_path),
+                    artifact_written=False,
+                )
+            existing = inspect_n3p_current_source_artifact_pair(
+                payload_path=payload_path,
+                report_path=report_path,
+                expected_payload_hash=payload_hash,
+                expected_file_sha256=file_sha256,
+                expected_for_trade_date=for_trade_date,
+                expected_actual_until_hhmm=actual_until_hhmm,
+                expected_source_payload_run_id=str(payload.get("source_payload_run_id") or ""),
+                expected_subscription_run_id=str(payload.get("subscription_run_id") or ""),
+                expected_n4_context_run_id=str(payload.get("n4_context_run_id") or ""),
+            )
+            if existing.get("status") != "passed":
+                return _blocked(
+                    N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER,
+                    str(existing.get("reason") or "artifact_pair_invalid"),
+                    payload_path=str(payload_path),
+                    report_path=str(report_path),
+                    artifact_validation=dict(existing),
+                    artifact_written=False,
+                )
+            return {
+                "payload_path": str(payload_path),
+                "report_path": str(report_path),
+                "payload_hash": payload_hash,
+                "source_payload_hash": payload_hash,
+                "file_sha256": str(existing.get("file_sha256") or ""),
+                "source_artifact_file_sha256": str(existing.get("file_sha256") or ""),
+                "artifact_written": False,
+                "artifact_reused": True,
+                "database_written": False,
+                "writes_outbox": False,
+                "writes_n3p_metric_rows": False,
+            }
+
+        payload_created_identity: tuple[int, int] | None = None
+        report_created_identity: tuple[int, int] | None = None
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with payload_path.open("xb") as payload_file:
+                payload_stat = os.fstat(payload_file.fileno())
+                payload_created_identity = (payload_stat.st_dev, payload_stat.st_ino)
+                payload_file.write(payload_bytes)
+            with report_path.open("xb") as report_file:
+                report_stat = os.fstat(report_file.fileno())
+                report_created_identity = (report_stat.st_dev, report_stat.st_ino)
+                report_file.write(report_bytes)
+        except FileExistsError as exc:
+            cleanup = _discard_n3p_artifact_pair_created_by_current_attempt(
+                payload_path=payload_path,
+                report_path=report_path,
+                payload_created_identity=payload_created_identity,
+                report_created_identity=report_created_identity,
+            )
+            reason = "artifact_partial_cleanup_failed" if cleanup["status"] != "passed" else f"artifact_create_race:{exc.filename or ''}"
+            return _blocked(
+                N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER,
+                reason,
+                payload_path=str(payload_path),
+                report_path=str(report_path),
+                cleanup=cleanup,
+                artifact_written=False,
+            )
+        except OSError as exc:
+            cleanup = _discard_n3p_artifact_pair_created_by_current_attempt(
+                payload_path=payload_path,
+                report_path=report_path,
+                payload_created_identity=payload_created_identity,
+                report_created_identity=report_created_identity,
+            )
+            reason = (
+                "artifact_partial_cleanup_failed"
+                if cleanup["status"] != "passed"
+                else f"artifact_write_failed:{type(exc).__name__}:{exc}"
+            )
+            return _blocked(
+                N3P_SOURCE_FETCH_BACKEND_ARTIFACT_WRITER_BLOCKER,
+                reason,
+                payload_path=str(payload_path),
+                report_path=str(report_path),
+                cleanup=cleanup,
+                artifact_written=False,
             )
 
         return {
@@ -285,10 +385,164 @@ class N3PCurrentSourceArtifactWriter:
             "file_sha256": file_sha256,
             "source_artifact_file_sha256": file_sha256,
             "artifact_written": True,
+            "artifact_reused": False,
             "database_written": False,
             "writes_outbox": False,
             "writes_n3p_metric_rows": False,
         }
+
+
+def inspect_n3p_current_source_artifact_pair(
+    *,
+    payload_path: str | os.PathLike[str],
+    report_path: str | os.PathLike[str],
+    expected_payload_hash: str,
+    expected_file_sha256: str,
+    expected_for_trade_date: str,
+    expected_actual_until_hhmm: str,
+    expected_source_payload_run_id: str,
+    expected_subscription_run_id: str,
+    expected_n4_context_run_id: str,
+) -> dict[str, Any]:
+    payload_file = Path(payload_path)
+    report_file = Path(report_path)
+    for artifact_kind, path in (("payload", payload_file), ("report", report_file)):
+        if path.is_symlink():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_symlink"}
+        if not path.exists():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_missing"}
+        if not path.is_file():
+            return {"status": "blocked", "reason": f"{artifact_kind}_artifact_not_regular_file"}
+    try:
+        payload_bytes = payload_file.read_bytes()
+        report_bytes = report_file.read_bytes()
+        parsed_payload = json.loads(payload_bytes)
+        parsed_report = json.loads(report_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"status": "blocked", "reason": f"artifact_json_invalid:{type(exc).__name__}"}
+    if not isinstance(parsed_payload, Mapping) or not isinstance(parsed_report, Mapping):
+        return {"status": "blocked", "reason": "artifact_json_root_not_object"}
+
+    observed_payload_hash = compute_n3p_current_source_payload_hash(parsed_payload)
+    observed_file_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    observed_payload_counts = {
+        "stock_quote_rows": len(_rows(parsed_payload, "stock_quote_rows", "stock_quotes_rows")),
+        "index_board_1m_rows": len(
+            _rows(parsed_payload, "index_board_1m_rows", "index_1m_rows", "board_1m_rows")
+        ),
+    }
+    embedded_payload_counts = _artifact_source_payload_counts(parsed_payload)
+    report_payload_counts = _artifact_source_payload_counts(parsed_report)
+    checks = {
+        "payload_hash_present": bool(expected_payload_hash),
+        "embedded_payload_hash_matches": str(parsed_payload.get("payload_hash") or "") == expected_payload_hash,
+        "embedded_source_payload_hash_matches": str(parsed_payload.get("source_payload_hash") or "") == expected_payload_hash,
+        "recomputed_payload_hash_matches": observed_payload_hash == expected_payload_hash,
+        "report_payload_hash_matches": str(parsed_report.get("payload_hash") or "") == expected_payload_hash,
+        "report_file_sha256_matches": str(parsed_report.get("file_sha256") or "") == observed_file_sha256,
+        "payload_counts_match_rows": embedded_payload_counts == observed_payload_counts,
+        "report_counts_match_payload": report_payload_counts == embedded_payload_counts,
+        "report_payload_path_matches": str(parsed_report.get("payload_path") or "") == str(payload_file),
+        "report_path_matches": str(parsed_report.get("report_path") or "") == str(report_file),
+        "payload_for_trade_date_matches": str(parsed_payload.get("for_trade_date") or "") == expected_for_trade_date,
+        "payload_actual_until_hhmm_matches": str(parsed_payload.get("actual_until_hhmm") or "") == expected_actual_until_hhmm,
+        "payload_source_payload_run_id_matches": str(parsed_payload.get("source_payload_run_id") or "") == expected_source_payload_run_id,
+        "payload_subscription_run_id_matches": str(parsed_payload.get("subscription_run_id") or "") == expected_subscription_run_id,
+        "payload_n4_context_run_id_matches": str(parsed_payload.get("n4_context_run_id") or "") == expected_n4_context_run_id,
+        "report_result_ready": str(parsed_report.get("result") or "") == N3_READY_RESULT,
+        "report_actual_until_hhmm_matches": str(parsed_report.get("actual_until_hhmm") or "") == expected_actual_until_hhmm,
+        "report_artifact_written_true": parsed_report.get("artifact_written") is True,
+        "report_database_written_false": parsed_report.get("database_written") is False,
+        "report_writes_outbox_false": parsed_report.get("writes_outbox") is False,
+        "report_writes_n3p_metric_rows_false": parsed_report.get("writes_n3p_metric_rows") is False,
+        "report_consumes_outbox_false": parsed_report.get("consumes_outbox") is False,
+        "report_updates_inbox_or_checkpoint_false": parsed_report.get("updates_inbox_or_checkpoint") is False,
+        "report_starts_worker_false": parsed_report.get("starts_worker") is False,
+        "report_touches_n4_n5_n6_false": parsed_report.get("touches_n4_n5_n6") is False,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        return {
+            "status": "blocked",
+            "reason": f"artifact_pair_contract_mismatch:{','.join(failed)}",
+            "checks": checks,
+            "observed_payload_hash": observed_payload_hash,
+            "observed_file_sha256": observed_file_sha256,
+        }
+    return {
+        "status": "passed",
+        "reason": "artifact_pair_closed",
+        "checks": checks,
+        "payload_hash": expected_payload_hash,
+        "file_sha256": observed_file_sha256,
+        "payload_path": str(payload_file),
+        "report_path": str(report_file),
+    }
+
+
+def _canonical_n3p_current_source_artifact_paths(
+    *,
+    output_root: str | os.PathLike[str],
+    for_trade_date: str,
+    actual_until_hhmm: str,
+) -> tuple[Path, Path]:
+    output_dir = Path(output_root) / for_trade_date
+    return (
+        output_dir / f"N3P_mixed_realtime_{actual_until_hhmm}_source_fetch_payload.json",
+        output_dir / f"N3P_mixed_realtime_{actual_until_hhmm}_source_fetch_report.json",
+    )
+
+
+def _artifact_source_payload_counts(document: Mapping[str, Any]) -> dict[str, int | None]:
+    raw_counts = document.get("source_payload_counts")
+    raw_counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+    output: dict[str, int | None] = {}
+    for name in ("stock_quote_rows", "index_board_1m_rows"):
+        value = raw_counts.get(name)
+        try:
+            output[name] = int(value)
+        except (TypeError, ValueError):
+            output[name] = None
+    return output
+
+
+def _discard_n3p_artifact_pair_created_by_current_attempt(
+    *,
+    payload_path: Path,
+    report_path: Path,
+    payload_created_identity: tuple[int, int] | None,
+    report_created_identity: tuple[int, int] | None,
+) -> dict[str, Any]:
+    cleanup: dict[str, str] = {}
+    failed = False
+    for artifact_kind, identity, path in (
+        ("report", report_created_identity, report_path),
+        ("payload", payload_created_identity, payload_path),
+    ):
+        if identity is None:
+            cleanup[artifact_kind] = "not_created_by_current_attempt"
+            continue
+        try:
+            observed = path.lstat()
+        except FileNotFoundError:
+            cleanup[artifact_kind] = "already_absent"
+            continue
+        except OSError as exc:
+            cleanup[artifact_kind] = f"lstat_failed:{type(exc).__name__}:{exc}"
+            failed = True
+            continue
+        if not stat.S_ISREG(observed.st_mode) or (observed.st_dev, observed.st_ino) != identity:
+            cleanup[artifact_kind] = "identity_changed_preserved"
+            failed = True
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            cleanup[artifact_kind] = f"unlink_failed:{type(exc).__name__}:{exc}"
+            failed = True
+            continue
+        cleanup[artifact_kind] = "removed_current_attempt_file"
+    return {"status": "blocked" if failed else "passed", "artifacts": cleanup}
 
 
 class N3PCurrentSourcePayloadRegistrar:
@@ -399,6 +653,7 @@ class N3PCurrentSourceFetchBackend:
         self.config = dict(config or {})
         self.scope_loader = scope_loader
         self.market_fetcher = market_fetcher
+        self._uses_default_artifact_writer = artifact_writer is None
         self.artifact_writer = artifact_writer if artifact_writer is not None else N3PCurrentSourceArtifactWriter()
         self.registrar = registrar if registrar is not None else N3PCurrentSourcePayloadRegistrar()
 
@@ -491,6 +746,106 @@ class N3PCurrentSourceFetchBackend:
             fetch_report=fetch_report,
             config=config,
         )
+
+    def load_n3p_current_source_lineage_snapshot(
+        self,
+        *,
+        args: Any,
+        report: Mapping[str, Any],
+        dependencies: Any,
+        source_payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        del args, report, dependencies
+        config = self._resolve_config()
+        if _is_blocked(config):
+            return config
+        source_payload_run_id = str(source_payload.get("source_payload_run_id") or "")
+        if not source_payload_run_id:
+            return _blocked(N3P_SOURCE_FETCH_LINEAGE_BLOCKER, "missing_source_payload_run_id", artifact_written=False)
+        if not self._uses_default_artifact_writer:
+            return {
+                "status": "passed",
+                "exists": False,
+                "source_payload_run_id": source_payload_run_id,
+                "database_written": False,
+            }
+        for_trade_date = str(source_payload.get("for_trade_date") or "")
+        actual_until_hhmm = _source_payload_canonical_hhmm(
+            source_payload,
+            source_payload_run_id=source_payload_run_id,
+        )
+        expected_payload_path, _ = _canonical_n3p_current_source_artifact_paths(
+            output_root=(
+                getattr(self.artifact_writer, "output_root", "")
+                or config.get("artifact_output_root")
+                or config.get("source_artifact_output_root")
+                or "docs/intraday_live_current"
+            ),
+            for_trade_date=for_trade_date,
+            actual_until_hhmm=actual_until_hhmm,
+        )
+        try:
+            with _connect_db(config) as conn:
+                conn.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        SELECT status, p0_count, raw_json
+                        FROM common_market_data_run
+                        WHERE run_id = %s
+                        LIMIT 1
+                        """,
+                        (source_payload_run_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {
+                            "status": "passed",
+                            "exists": False,
+                            "source_payload_run_id": source_payload_run_id,
+                            "database_written": False,
+                        }
+                    raw_json = _registration_raw_json(_row_value(row, 2, "raw_json"))
+                    cur.execute(
+                        """
+                        SELECT
+                          count(*)::bigint AS quality_count,
+                          count(*) FILTER (WHERE status = 'passed')::bigint AS passed_count,
+                          count(*) FILTER (WHERE severity = 'P0' AND status <> 'passed')::bigint AS p0_failed_count
+                        FROM common_market_data_quality_item
+                        WHERE run_id = %s
+                        """,
+                        (source_payload_run_id,),
+                    )
+                    quality = cur.fetchone()
+                    source_artifact_path = str(raw_json.get("source_artifact_path") or "")
+                    return {
+                        "status": "passed",
+                        "exists": True,
+                        "source_payload_run_id": source_payload_run_id,
+                        "run_status": str(_row_value(row, 0, "status") or ""),
+                        "p0_count": int(_row_value(row, 1, "p0_count") or 0),
+                        "source_payload_hash": _existing_source_payload_hash(raw_json),
+                        "source_payload_counts": dict(raw_json.get("source_payload_counts") or {}),
+                        "source_artifact_path": source_artifact_path,
+                        "expected_source_artifact_path": str(expected_payload_path),
+                        "source_artifact_path_matches": bool(source_artifact_path)
+                        and source_artifact_path == str(expected_payload_path),
+                        "quality_count": int(_row_value(quality, 0, "quality_count") or 0),
+                        "quality_passed_count": int(_row_value(quality, 1, "passed_count") or 0),
+                        "quality_p0_failed_count": int(_row_value(quality, 2, "p0_failed_count") or 0),
+                        "database_written": False,
+                    }
+                finally:
+                    conn.execute("ROLLBACK")
+        except Exception as exc:
+            return _blocked(
+                N3P_SOURCE_FETCH_LINEAGE_BLOCKER,
+                f"source_lineage_read_failed:{type(exc).__name__}:{exc}",
+                source_payload_run_id=source_payload_run_id,
+                artifact_written=False,
+            )
 
     def register_n3p_source_payload_run(
         self,
@@ -696,6 +1051,38 @@ class N3PCurrentSourceFetchProvider:
             "normalization_trace": normalization_trace,
             "source_minute_alignment": source_minute_alignment,
         }
+        computed_payload_hash = compute_n3p_current_source_payload_hash(payload)
+        lineage_snapshot_loader = getattr(self.backend, "load_n3p_current_source_lineage_snapshot", None)
+        lineage_decision = {"decision": "write_new", "reason": "source_payload_run_absent"}
+        if callable(lineage_snapshot_loader):
+            lineage_snapshot = dict(
+                lineage_snapshot_loader(
+                    args=args,
+                    report=report,
+                    dependencies=dependencies,
+                    source_payload=payload,
+                )
+                or {}
+            )
+            if _is_blocked(lineage_snapshot):
+                return lineage_snapshot
+            lineage_decision = classify_n3p_current_source_lineage(
+                snapshot=lineage_snapshot,
+                candidate_payload_hash=computed_payload_hash,
+                candidate_counts=counts,
+            )
+            if lineage_decision["decision"] == "blocked":
+                return _blocked(
+                    N3P_SOURCE_FETCH_LINEAGE_BLOCKER,
+                    str(lineage_decision.get("reason") or "source_lineage_invalid"),
+                    source_payload_run_id=payload["source_payload_run_id"],
+                    candidate_payload_hash=computed_payload_hash,
+                    source_lineage_snapshot=lineage_snapshot,
+                    source_lineage_decision=lineage_decision,
+                    artifact_written=False,
+                    database_written=False,
+                )
+            fetch_report["require_existing_artifact_pair"] = lineage_decision["decision"] == "reuse_existing"
         artifact = (
             dict(artifact_writer(args=args, report=report, dependencies=dependencies, payload=payload, fetch_report=fetch_report) or {})
             if callable(artifact_writer)
@@ -703,7 +1090,6 @@ class N3PCurrentSourceFetchProvider:
         )
         if _is_blocked(artifact):
             return artifact
-        computed_payload_hash = compute_n3p_current_source_payload_hash(payload)
         artifact_payload_hash = str(artifact.get("payload_hash") or artifact.get("source_payload_hash") or "")
         if artifact_payload_hash and artifact_payload_hash != computed_payload_hash:
             return _blocked(
@@ -725,6 +1111,9 @@ class N3PCurrentSourceFetchProvider:
                 "source_artifact_file_sha256": str(artifact.get("file_sha256") or artifact.get("source_artifact_file_sha256") or ""),
                 "source_scope": _source_scope_counts(scope),
                 "source_payload_counts": counts,
+                "source_lineage_decision": dict(lineage_decision),
+                "artifact_written": bool(artifact.get("artifact_written")),
+                "artifact_reused": bool(artifact.get("artifact_reused")),
                 "market_data_pulled": True,
                 "database_written": False,
             }
@@ -825,7 +1214,7 @@ class N3PTriggerProofPreflightBackend:
 
         try:
             with _connect_db(config) as conn:
-                conn.execute("BEGIN READ ONLY")
+                conn.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 try:
                     from psycopg.rows import dict_row
 
@@ -1221,10 +1610,61 @@ def _build_n3p_trigger_proof_preflight_with_cursor(
     target_absence_counts = writer.fetch_target_absence_counts(cur, target_run_id)
     target_absence = writer.build_target_absence_report(target_run_id=target_run_id, counts=target_absence_counts)
     if target_absence.get("status") == "blocked":
+        target_idempotency = classify_existing_n3p_trigger_proof_target(
+            snapshot=_load_existing_n3p_trigger_proof_target_snapshot(
+                cur=cur,
+                writer=writer,
+                target_run_id=target_run_id,
+            ),
+            target_run_id=target_run_id,
+            source_payload_run_id=source_payload_run_id,
+            subscription_run_id=subscription_run_id,
+            actual_until_hhmm=actual_until_hhmm,
+            rows_by_asset=rows_by_asset,
+            ready_count=ready_count,
+            not_ready_count=not_ready_count,
+        )
+        if target_idempotency.get("decision") == "idempotent_pass":
+            output = {
+                "result": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_RESULT,
+                "status": "noop",
+                "execution_mode": "noop",
+                "idempotency_decision": "idempotent_pass",
+                "reason": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON,
+                "target_run_id": target_run_id,
+                "proposed_n3p_metric_target_run_id": target_run_id,
+                "source_payload_run_id": source_payload_run_id,
+                "source_payload_hash": source_payload_hash,
+                "for_trade_date": for_trade_date,
+                "source_trade_date": source_trade_date,
+                "n4_context_run_id": n4_context_run_id,
+                "subscription_run_id": subscription_run_id,
+                "proof_input_time": proof_input_time,
+                "actual_until_hhmm": actual_until_hhmm,
+                "plan_only_row_counts": {
+                    **{asset: len(rows_by_asset.get(asset) or []) for asset in ("stock", "index", "board")},
+                    "total": total_count,
+                },
+                "metric_ready": ready_count,
+                "metric_not_ready": not_ready_count,
+                "target_absence": target_absence,
+                "target_idempotency": target_idempotency,
+                "preflight_artifacts_materialized": False,
+                "execute_contract_ready": False,
+                "database_written": False,
+                "market_data_pulled": False,
+                "writes_n3p_metric_rows": False,
+                "writes_outbox": False,
+                "not_n5_final_proof": True,
+                "action_confirmation_ready": False,
+            }
+            _apply_forbidden_side_effect_guards(output)
+            return output
         return _blocked(
             N3P_TRIGGER_PROOF_TARGET_ABSENCE_BLOCKER,
-            "target_not_empty",
+            str(target_idempotency.get("reason") or "target_not_empty"),
             target_absence=target_absence,
+            target_idempotency=target_idempotency,
         )
 
     try:
@@ -1316,6 +1756,166 @@ def _build_n3p_trigger_proof_preflight_with_cursor(
     }
     _apply_forbidden_side_effect_guards(output)
     return output
+
+
+def _load_existing_n3p_trigger_proof_target_snapshot(
+    *,
+    cur: Any,
+    writer: Any,
+    target_run_id: str,
+) -> dict[str, Any]:
+    counts = writer.fetch_target_absence_counts(cur, target_run_id)
+    cur.execute(
+        """
+        SELECT status, p0_count, p1_count, source_scope_row_count,
+               candidate_row_count, subscription_row_count, subscription_object_count
+        FROM common_market_data_run
+        WHERE run_id = %s
+        LIMIT 1
+        """,
+        (target_run_id,),
+    )
+    run = cur.fetchone()
+    metrics: dict[str, dict[str, Any]] = {}
+    for asset_kind, table_name in writer.METRIC_TABLES.items():
+        cur.execute(
+            f"""
+            SELECT
+              count(*)::bigint AS row_count,
+              count(*) FILTER (WHERE metric_ready IS TRUE)::bigint AS ready_count,
+              count(*) FILTER (WHERE metric_ready IS NOT TRUE)::bigint AS not_ready_count,
+              min(source_snapshot_run_id) AS min_source_snapshot_run_id,
+              max(source_snapshot_run_id) AS max_source_snapshot_run_id,
+              min(source_subscription_run_id) AS min_source_subscription_run_id,
+              max(source_subscription_run_id) AS max_source_subscription_run_id,
+              min(metric_minute_label) AS min_metric_minute_label,
+              max(metric_minute_label) AS max_metric_minute_label
+            FROM {table_name}
+            WHERE projection_run_id = %s
+            """,
+            (target_run_id,),
+        )
+        row = cur.fetchone()
+        metrics[asset_kind] = {
+            "row_count": int(_row_value(row, 0, "row_count") or 0),
+            "ready_count": int(_row_value(row, 1, "ready_count") or 0),
+            "not_ready_count": int(_row_value(row, 2, "not_ready_count") or 0),
+            "min_source_snapshot_run_id": str(_row_value(row, 3, "min_source_snapshot_run_id") or ""),
+            "max_source_snapshot_run_id": str(_row_value(row, 4, "max_source_snapshot_run_id") or ""),
+            "min_source_subscription_run_id": str(_row_value(row, 5, "min_source_subscription_run_id") or ""),
+            "max_source_subscription_run_id": str(_row_value(row, 6, "max_source_subscription_run_id") or ""),
+            "min_metric_minute_label": str(_row_value(row, 7, "min_metric_minute_label") or ""),
+            "max_metric_minute_label": str(_row_value(row, 8, "max_metric_minute_label") or ""),
+        }
+    cur.execute(
+        """
+        SELECT
+          count(*)::bigint AS quality_count,
+          count(*) FILTER (WHERE status IN ('passed', 'warning'))::bigint AS accepted_count,
+          count(*) FILTER (WHERE severity = 'P0' AND status <> 'passed')::bigint AS p0_failed_count
+        FROM common_market_data_quality_item
+        WHERE run_id = %s
+        """,
+        (target_run_id,),
+    )
+    quality = cur.fetchone()
+    return {
+        "counts": counts,
+        "run": {
+            "exists": run is not None,
+            "status": str(_row_value(run, 0, "status") or ""),
+            "p0_count": int(_row_value(run, 1, "p0_count") or 0),
+            "p1_count": int(_row_value(run, 2, "p1_count") or 0),
+            "source_scope_row_count": int(_row_value(run, 3, "source_scope_row_count") or 0),
+            "candidate_row_count": int(_row_value(run, 4, "candidate_row_count") or 0),
+            "subscription_row_count": int(_row_value(run, 5, "subscription_row_count") or 0),
+            "subscription_object_count": int(_row_value(run, 6, "subscription_object_count") or 0),
+        },
+        "metrics": metrics,
+        "quality": {
+            "quality_count": int(_row_value(quality, 0, "quality_count") or 0),
+            "accepted_count": int(_row_value(quality, 1, "accepted_count") or 0),
+            "p0_failed_count": int(_row_value(quality, 2, "p0_failed_count") or 0),
+        },
+    }
+
+
+def classify_existing_n3p_trigger_proof_target(
+    *,
+    snapshot: Mapping[str, Any],
+    target_run_id: str,
+    source_payload_run_id: str,
+    subscription_run_id: str,
+    actual_until_hhmm: str,
+    rows_by_asset: Mapping[str, Sequence[Mapping[str, Any]]],
+    ready_count: int,
+    not_ready_count: int,
+) -> dict[str, Any]:
+    counts = dict(snapshot.get("counts") or {})
+    run = dict(snapshot.get("run") or {})
+    metrics = dict(snapshot.get("metrics") or {})
+    quality = dict(snapshot.get("quality") or {})
+    expected_by_asset = {asset: len(rows_by_asset.get(asset) or []) for asset in ("stock", "index", "board")}
+    expected_ready_by_asset = {
+        asset: sum(1 for row in rows_by_asset.get(asset) or [] if bool(row.get("metric_ready")))
+        for asset in ("stock", "index", "board")
+    }
+    expected_total = sum(expected_by_asset.values())
+    expected_label = f"{actual_until_hhmm[:2]}:{actual_until_hhmm[2:]}" if len(actual_until_hhmm) == 4 else actual_until_hhmm
+    checks = {
+        "run_count_one": int(counts.get("common_market_data_run") or 0) == 1,
+        "run_exists": run.get("exists") is True,
+        "run_status_passed": str(run.get("status") or "") == "passed",
+        "run_p0_zero": int(run.get("p0_count") or 0) == 0,
+        "run_scope_count_matches": int(run.get("source_scope_row_count") or 0) == expected_total,
+        "run_candidate_count_matches": int(run.get("candidate_row_count") or 0) == expected_total,
+        "run_subscription_row_count_matches": int(run.get("subscription_row_count") or 0) == expected_total,
+        "run_subscription_object_count_matches": int(run.get("subscription_object_count") or 0) == expected_total,
+        "ready_count_contract": int(ready_count) + int(not_ready_count) == expected_total,
+        "quality_present": int(quality.get("quality_count") or 0) >= 1,
+        "quality_all_accepted": int(quality.get("accepted_count") or 0) == int(quality.get("quality_count") or 0),
+        "quality_p0_failed_zero": int(quality.get("p0_failed_count") or 0) == 0,
+        "outbox_zero": int(counts.get("common_event_outbox") or 0) == 0,
+        "inbox_zero": int(counts.get("common_event_inbox") or 0) == 0,
+        "checkpoint_zero": int(counts.get("common_event_consumer_checkpoint") or 0) == 0,
+    }
+    for asset in ("stock", "index", "board"):
+        observed = dict(metrics.get(asset) or {})
+        expected_count = expected_by_asset[asset]
+        checks[f"{asset}_row_count_matches"] = int(observed.get("row_count") or 0) == expected_count
+        checks[f"{asset}_ready_count_matches"] = int(observed.get("ready_count") or 0) == expected_ready_by_asset[asset]
+        checks[f"{asset}_not_ready_count_matches"] = int(observed.get("not_ready_count") or 0) == expected_count - expected_ready_by_asset[asset]
+        if expected_count:
+            checks[f"{asset}_source_run_matches"] = (
+                str(observed.get("min_source_snapshot_run_id") or "") == source_payload_run_id
+                and str(observed.get("max_source_snapshot_run_id") or "") == source_payload_run_id
+            )
+            checks[f"{asset}_subscription_matches"] = (
+                str(observed.get("min_source_subscription_run_id") or "") == subscription_run_id
+                and str(observed.get("max_source_subscription_run_id") or "") == subscription_run_id
+            )
+            checks[f"{asset}_minute_matches"] = (
+                str(observed.get("min_metric_minute_label") or "") == expected_label
+                and str(observed.get("max_metric_minute_label") or "") == expected_label
+            )
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        return {
+            "decision": "blocked",
+            "reason": f"existing_n3p_target_contract_mismatch:{','.join(failed)}",
+            "target_run_id": target_run_id,
+            "checks": checks,
+            "expected_by_asset": expected_by_asset,
+        }
+    return {
+        "decision": "idempotent_pass",
+        "reason": N3P_TRIGGER_PROOF_IDEMPOTENT_NOOP_REASON,
+        "target_run_id": target_run_id,
+        "checks": checks,
+        "expected_by_asset": expected_by_asset,
+        "metric_ready": int(ready_count),
+        "metric_not_ready": int(not_ready_count),
+    }
 
 
 def validate_n3p_current_source_payload(
@@ -1897,6 +2497,56 @@ def _scope_identity_keys(scope: Mapping[str, Any], key: str) -> set[str]:
 
 def _source_payload_hash(source_payload: Mapping[str, Any]) -> str:
     return str(source_payload.get("source_payload_hash") or source_payload.get("payload_hash") or "")
+
+
+def classify_n3p_current_source_lineage(
+    *,
+    snapshot: Mapping[str, Any],
+    candidate_payload_hash: str,
+    candidate_counts: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed before a canonical N3P source artifact can be created or reused."""
+
+    if snapshot.get("exists") is False:
+        return {"decision": "write_new", "reason": "source_payload_run_absent"}
+    expected_counts = {
+        "stock_quote_rows": int(candidate_counts.get("stock_quote_rows") or 0),
+        "index_board_1m_rows": int(candidate_counts.get("index_board_1m_rows") or 0),
+    }
+    observed_counts = {
+        "stock_quote_rows": int((snapshot.get("source_payload_counts") or {}).get("stock_quote_rows") or 0),
+        "index_board_1m_rows": int((snapshot.get("source_payload_counts") or {}).get("index_board_1m_rows") or 0),
+    }
+    checks = {
+        "run_exists": snapshot.get("exists") is True,
+        "run_status_passed": str(snapshot.get("run_status") or "") == "passed",
+        "p0_zero": int(snapshot.get("p0_count") or 0) == 0,
+        "payload_hash_matches": bool(candidate_payload_hash)
+        and str(snapshot.get("source_payload_hash") or "") == candidate_payload_hash,
+        "payload_counts_match": observed_counts == expected_counts,
+        "source_artifact_path_matches": snapshot.get("source_artifact_path_matches") is True
+        and bool(snapshot.get("expected_source_artifact_path"))
+        and str(snapshot.get("source_artifact_path") or "")
+        == str(snapshot.get("expected_source_artifact_path") or ""),
+        "quality_count_one": int(snapshot.get("quality_count") or 0) == 1,
+        "quality_passed_one": int(snapshot.get("quality_passed_count") or 0) == 1,
+        "quality_p0_failed_zero": int(snapshot.get("quality_p0_failed_count") or 0) == 0,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        return {
+            "decision": "blocked",
+            "reason": f"source_lineage_contract_mismatch:{','.join(failed)}",
+            "checks": checks,
+            "expected_counts": expected_counts,
+            "observed_counts": observed_counts,
+        }
+    return {
+        "decision": "reuse_existing",
+        "reason": "same_hhmm_same_source_hash",
+        "checks": checks,
+        "expected_counts": expected_counts,
+    }
 
 
 def _existing_source_payload_run(cur: Any, source_payload_run_id: str) -> tuple[str, Any] | None:
