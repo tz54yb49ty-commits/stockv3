@@ -1,0 +1,3156 @@
+{
+  "closure_version": "N6_MIGRATION_LINEAGE_040_075_DEPENDENCY_CLOSURE_V1",
+  "layer_role": "runtime_control",
+  "result": "DIRECT_BUNDLE_REGISTERED_TRANSITIVE_REVIEW_REQUIRED",
+  "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+  "counts": {
+    "migration_identities": 36,
+    "sql_files": 71,
+    "introduction_commits": 34,
+    "direct_bundle_paths": 176,
+    "top_level": {
+      "docs": 33,
+      "scripts": 12,
+      "sql": 71,
+      "src": 15,
+      "tests": 45
+    }
+  },
+  "tiers": {
+    "T0_SQL_AUTHORITY": {
+      "status": "complete",
+      "record_source": "registration manifest migrations[]"
+    },
+    "T1_INTRODUCTION_BUNDLE": {
+      "status": "complete",
+      "path_count": 176
+    },
+    "T2_FOLLOWUP_REPAIR": {
+      "status": "planned_not_executed",
+      "required_method": "For each T1 path enumerate descendant commits through its authority source; add only paths with explicit semantic dependency edges."
+    },
+    "T3_RUNTIME_TEST_DEPENDENCY": {
+      "status": "planned_not_executed",
+      "required_method": "Resolve Python imports, template references, runner entrypoints, contract references and test targets; unresolved or cross-layer edges remain blocked."
+    }
+  },
+  "completion_contract": {
+    "unresolved_dependency_count_required": 0,
+    "cross_layer_auto_include_count_required": 0,
+    "missing_source_blob_count_required": 0,
+    "hash_mismatch_count_required": 0,
+    "unknown_execution_status_allowed": true,
+    "unknown_execution_status_must_not_be_promoted": true
+  },
+  "introduction_commits": [
+    {
+      "commit": "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+      "subject": "feat(n6): add four-slot shadow schedule gate",
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "changed_path_count": 13
+    },
+    {
+      "commit": "1052e14ab236d2406ca932d1311b91f01dff3a73",
+      "subject": "n6: integrate qualified extrema function fix",
+      "migration_identities": [
+        "060_n6_ai_qualified_extrema_function_fix"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "2011e7ca0167042f46e350a1ae0b1860b54b1977",
+      "subject": "n6: add virtual quote persistence",
+      "migration_identities": [
+        "040_n6_virtual_quote_snapshot_schema"
+      ],
+      "changed_path_count": 4
+    },
+    {
+      "commit": "2a8fc45e2f0003fc781519780eb20fae6d08c4f6",
+      "subject": "n6: add AI context memory hash contract",
+      "migration_identities": [
+        "058_n6_ai_context_memory_hash_contract"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "384e85a02ebfe3d3dece371e20a795331116e60a",
+      "subject": "fix(n6): bound shadow context to latest signal grain",
+      "migration_identities": [
+        "070_n6_ai_shadow_context_latest_grain_and_strategy_scope"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "4186e12e0cccfae5dba5be7d1b276a8fd9d83884",
+      "subject": "feat(n6): provision human virtual accounts",
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "changed_path_count": 10
+    },
+    {
+      "commit": "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+      "subject": "feat(n6): enable all-day current-date manual buys",
+      "migration_identities": [
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "539bd7895a54211770b2c11d87d676c7c73bf9a3",
+      "subject": "n6: add multi-user quote writer scope",
+      "migration_identities": [
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "changed_path_count": 7
+    },
+    {
+      "commit": "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497",
+      "subject": "n6: guard proposal trading session",
+      "migration_identities": [
+        "052_n6_btrack_proposal_trading_session"
+      ],
+      "changed_path_count": 6
+    },
+    {
+      "commit": "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+      "subject": "n6: fix proposal timestamp and error UX",
+      "migration_identities": [
+        "053_n6_btrack_proposal_timestamp_syntax_fix"
+      ],
+      "changed_path_count": 7
+    },
+    {
+      "commit": "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+      "subject": "n6: allow actionable manual buys without target price",
+      "migration_identities": [
+        "063_n6_btrack_manual_actionable_buy"
+      ],
+      "changed_path_count": 7
+    },
+    {
+      "commit": "78bea7c61e560d01cb781b07f682ffc17e0125c8",
+      "subject": "perf(n6): add projection read model",
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+      "subject": "n6: add proposal scope and executor claim next",
+      "migration_identities": [
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41",
+      "subject": "fix(n6): keep current-date buy scope active",
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "changed_path_count": 5
+    },
+    {
+      "commit": "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+      "subject": "feat(n6): add display-only strategy center",
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "changed_path_count": 14
+    },
+    {
+      "commit": "922025982fff593b1067244d84b228448d02012f",
+      "subject": "n6: add guarded scope write controls",
+      "migration_identities": [
+        "044_n6_btrack_scope_write_source_validation"
+      ],
+      "changed_path_count": 9
+    },
+    {
+      "commit": "996b93356cfc3981efec3adaf44ffdf4ecd7825c",
+      "subject": "n6: register legacy human principals",
+      "migration_identities": [
+        "043_n6_btrack_legacy_principal_registration"
+      ],
+      "changed_path_count": 4
+    },
+    {
+      "commit": "a01afad60ce6458fcf2e227d4e260e0607ead249",
+      "subject": "n6: add B-track product v3 P0 policy",
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema"
+      ],
+      "changed_path_count": 11
+    },
+    {
+      "commit": "a5e2e899e0c5577a41567680094386110d0cd4c6",
+      "subject": "fix(n6): restore Mootdx quote writer compatibility",
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat"
+      ],
+      "changed_path_count": 6
+    },
+    {
+      "commit": "a959510206211fdbdae03abfda4766b19195d9fb",
+      "subject": "n6: add multi-user virtual account bootstrap",
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "aacd48d74a57814837b7415ea1014c1b09e56d8a",
+      "subject": "n6: integrate strategy policy migration artifacts",
+      "migration_identities": [
+        "059_n6_ai_investor_strategy_policy_v1"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "subject": "fix(n6): normalize Mootdx time and skip unready proposals",
+      "migration_identities": [
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "changed_path_count": 6
+    },
+    {
+      "commit": "c0795fa1dce4a9a9ff5222bed9d60161a0a83f6b",
+      "subject": "n6: fix shadow decision risk state and qualified extrema",
+      "migration_identities": [
+        "061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "c9f0f2109f9bdabb654f874429b508298f0b1dd9",
+      "subject": "fix(n6): create principals for web users",
+      "migration_identities": [
+        "072_n6_web_user_principal_backfill"
+      ],
+      "changed_path_count": 4
+    },
+    {
+      "commit": "cbf416e41c3a3692885622f39811954508250181",
+      "subject": "n6: add b-track database role policy",
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "d4c290699b236d1b277cadbd420fe4467492b712",
+      "subject": "fix(n6): remove future calendar dependency from T+1 lots",
+      "migration_identities": [
+        "069_n6_btrack_t1_natural_day_unlock"
+      ],
+      "changed_path_count": 4
+    },
+    {
+      "commit": "d754e308324a004ce8eb1c3fc8f01df5b3535660",
+      "subject": "n6: add virtual executor persistence interface",
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply"
+      ],
+      "changed_path_count": 8
+    },
+    {
+      "commit": "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb",
+      "subject": "feat(n6): add nine-slot database preflight migration",
+      "migration_identities": [
+        "071_n6_ai_shadow_nine_slot_schedule_preflight"
+      ],
+      "changed_path_count": 3
+    },
+    {
+      "commit": "e2263341588709516eaf35746dde6d0022e1deab",
+      "subject": "n6: add AI simulated investor foundation",
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "changed_path_count": 24
+    },
+    {
+      "commit": "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a",
+      "subject": "n6: add virtual stop loss evaluator",
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "changed_path_count": 9
+    },
+    {
+      "commit": "e5e531c6af9ae87dd43d479e1844e70f67b86d73",
+      "subject": "n6: freeze monitor scope lineage",
+      "migration_identities": [
+        "045_n6_btrack_monitor_lineage_freeze"
+      ],
+      "changed_path_count": 7
+    },
+    {
+      "commit": "e5f4b2737b2f801767a810d68471e5fc6011d5e3",
+      "subject": "fix(n6): restore regular-session manual virtual buys",
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "changed_path_count": 7
+    },
+    {
+      "commit": "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb",
+      "subject": "feat(n6): add shadow observation audit",
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "changed_path_count": 9
+    },
+    {
+      "commit": "f1f54c9153fdead1ff9e14609503e3e7e2197ec4",
+      "subject": "n6: add filter-result bulk scope",
+      "migration_identities": [
+        "054_n6_btrack_filter_bulk_scope"
+      ],
+      "changed_path_count": 9
+    }
+  ],
+  "direct_bundle_paths": [
+    {
+      "path": "docs/N6_AI_AGENT_V1_CONTRACT.json",
+      "git_blob": "e2e74573bcf863b69efb3adfa8e43b459573b942",
+      "sha256": "038099b3695b1f7e6a17ac016dd44fc9bf4e7d5f30d6edd1ed54184db17de452",
+      "size_bytes": 8418,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_AI_AGENT_V1_SYSTEM_GUIDE.md",
+      "git_blob": "151f197461300803eecb39af4544643a9e572d19",
+      "sha256": "8f6ac5741a343a9ee72e9f755bf724f963d01e94e95030c3b6d30d0af1e65ffb",
+      "size_bytes": 13642,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_AI_DEEPSEEK_V4_PRO_ADAPTER_CONTRACT.json",
+      "git_blob": "56400d5754cfe634f394e0233d7f77de70e89ac4",
+      "sha256": "5c260d3d935ded2da439dc5b258d8c50a10b69c3a1f0449b3852f2fd83687645",
+      "size_bytes": 14416,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_AI_INVESTOR_STRATEGY_POLICY_V1_IMPLEMENTATION_CONTRACT.md",
+      "git_blob": "1736f52212487fe7d1261d98eeafcace8a613225",
+      "sha256": "fa80c86106dbfb1cdc0a5261260f298ff172f0513d084248a12e350ec2dc19b3",
+      "size_bytes": 19626,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "aacd48d74a57814837b7415ea1014c1b09e56d8a"
+      ],
+      "migration_identities": [
+        "059_n6_ai_investor_strategy_policy_v1"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_AI_SHADOW_OBSERVATION_ACCEPTANCE_CONTRACT.json",
+      "git_blob": "86db1c791d564574b18b118697a14ea45e0dd880",
+      "sha256": "ccc22ec48551f432f55122f3cb6b9030f93a2942354827f2a140ecfe46c15f05",
+      "size_bytes": 3810,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_AI_SHADOW_OPEN_TRADE_DATE_FOUR_SLOTS_067_CONTRACT.json",
+      "git_blob": "49f398dbc72baadc0f7d0443264883bbfb9c3992",
+      "sha256": "aa10f84db4af2d3024656b60f085adec7140e45f5392c5441ff92c999b5bd5dd",
+      "size_bytes": 3288,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_CURRENT_DATE_BATCH_SCOPE_FIX_065_CONTRACT.json",
+      "git_blob": "c966ef9597017b50a33b474533e422033d816168",
+      "sha256": "2cb5315112631db9217195c42521d3860e2a5c164d4df8a0e77f84e6039c01f8",
+      "size_bytes": 1416,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41"
+      ],
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_FILTER_BULK_SCOPE_CONTRACT.json",
+      "git_blob": "1049cdfe23349555caac2762695959b19a4318aa",
+      "sha256": "ae95455ec6975729ca7262a68d59bdfe10b9e276fdb5969d9b42980e3da4099b",
+      "size_bytes": 2463,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "054_n6_btrack_filter_bulk_scope"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_DB_ROLE_POLICY_042_CONTRACT.json",
+      "git_blob": "a7b0fe0bf0fcf1dc7b586cf83fb53a450312db1a",
+      "sha256": "f124dc5b9420b32e8b7009f9f2ae99c469c20f37fccd482001581d8582ca0368",
+      "size_bytes": 2065,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "cbf416e41c3a3692885622f39811954508250181"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_DB_ROLE_POLICY_042_CONTRACT.md",
+      "git_blob": "ad6e2031d004ccc58cbd185c7886411ff291b328",
+      "sha256": "5184ba1bd156dbda87da828f4c0a948219a75a2e465fa233283a9218224db786",
+      "size_bytes": 3218,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "cbf416e41c3a3692885622f39811954508250181"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_LEGACY_PRINCIPAL_REGISTRATION_CONTRACT.json",
+      "git_blob": "5a50213817affd35c5c7d4e4e14cdfadc203b679",
+      "sha256": "80470d8e3b16a315b6e13c9e96dc841e9114d92f7c7ba71f30485003e6d7afcb",
+      "size_bytes": 2981,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "996b93356cfc3981efec3adaf44ffdf4ecd7825c"
+      ],
+      "migration_identities": [
+        "043_n6_btrack_legacy_principal_registration"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_MANUAL_ACTIONABLE_BUY_063_CONTRACT.json",
+      "git_blob": "1029d1d43a18d7afd112228282cc5de2cc6f2b16",
+      "sha256": "95afd4b61f2944b8577fcc3fae56b0518790f950fd2ea5a48706486fcf933948",
+      "size_bytes": 6759,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b"
+      ],
+      "migration_identities": [
+        "063_n6_btrack_manual_actionable_buy"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_MONITOR_LINEAGE_FREEZE_045_CONTRACT.json",
+      "git_blob": "c9c6a297910c1b40ab50c18c08f867fcd5d8b061",
+      "sha256": "f58dc65bc989c4f758cb77b771637596b2a7649cecc0a150a324bd867503f77e",
+      "size_bytes": 2751,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73"
+      ],
+      "migration_identities": [
+        "045_n6_btrack_monitor_lineage_freeze"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_MONITOR_LINEAGE_FREEZE_045_CONTRACT.md",
+      "git_blob": "f13e0b3a6f89ead78646ff8aa88bc66181e6b497",
+      "sha256": "8642b2f25f657f1e4646e9753e64b1be4ea1cf998e3fb44ad8957988ad56fed4",
+      "size_bytes": 3675,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73"
+      ],
+      "migration_identities": [
+        "045_n6_btrack_monitor_lineage_freeze"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_MULTI_USER_VIRTUAL_ACCOUNT_BOOTSTRAP_047_CONTRACT.json",
+      "git_blob": "8ee4992355a9351b9d533151ec850d746caa44dc",
+      "sha256": "04d771cd26ffaf053a7a151d0b031463173371d1012e37126a115476b0e44c4c",
+      "size_bytes": 4781,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_MULTI_USER_VIRTUAL_ACCOUNT_BOOTSTRAP_047_CONTRACT.md",
+      "git_blob": "72e50f0a12209190d982c169effaacb77977223e",
+      "sha256": "bfd270ee225e8d121187bc65ccc487bf74f77a76d3e651190f9a2e13a645b18d",
+      "size_bytes": 4284,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_PROPOSAL_SCOPE_AND_EXECUTOR_CLAIM_NEXT_048_CONTRACT.json",
+      "git_blob": "faa75e0c01fb9e3b2591186237518ec108623013",
+      "sha256": "6697b0bd7af32de9bbd7a4864ad70749f162ce9dc3faee90a293c343e12c4cc6",
+      "size_bytes": 4097,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5"
+      ],
+      "migration_identities": [
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_PROPOSAL_SCOPE_AND_EXECUTOR_CLAIM_NEXT_048_CONTRACT.md",
+      "git_blob": "4de05f5eee3d93d821a5da78463a47c97e661de5",
+      "sha256": "cbe0e1c8990af9d8925ece6155adcbc15e489efaaebc8f269d8f60d095ab1b78",
+      "size_bytes": 4891,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5"
+      ],
+      "migration_identities": [
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_PROPOSAL_TIMESTAMP_SYNTAX_FIX_CONTRACT.json",
+      "git_blob": "66f30e613abee5542d27ce2c0046b2f7407b07c5",
+      "sha256": "0a218e46aad30a9816fd1c250a747b09791918c8291c739f74ec89e06091960f",
+      "size_bytes": 2204,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c"
+      ],
+      "migration_identities": [
+        "053_n6_btrack_proposal_timestamp_syntax_fix"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_PROPOSAL_TRADING_SESSION_CONTRACT.json",
+      "git_blob": "113ec25b80360214915a1b660f9735d23f6fd4e9",
+      "sha256": "adb630c692c183a2c3249dc3f8676f53cb71b3b2737bbaede11519c4b94a3355",
+      "size_bytes": 3085,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497"
+      ],
+      "migration_identities": [
+        "052_n6_btrack_proposal_trading_session"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_QUOTE_WRITER_CONTRACT.json",
+      "git_blob": "927ae4e8f2e5ef7ed21a7c215398e7ace87f7b2e",
+      "sha256": "bfdcf1003a7928492b8a4b5deea194b3ff722add95df94c6309bfad0c87ab63b",
+      "size_bytes": 4494,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3"
+      ],
+      "migration_identities": [
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_SCOPE_WRITE_SOURCE_VALIDATION_044_CONTRACT.json",
+      "git_blob": "4ee917b06ff8a96452001c4220c407dcb8983912",
+      "sha256": "7b34d7833a59f5e76f1a9a5bab0f8e736d6d49a2774a8063775b05d85f44189a",
+      "size_bytes": 1810,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "922025982fff593b1067244d84b228448d02012f"
+      ],
+      "migration_identities": [
+        "044_n6_btrack_scope_write_source_validation"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_SCOPE_WRITE_SOURCE_VALIDATION_044_CONTRACT.md",
+      "git_blob": "f48ee39ab8c8f8a0c630c948a4e0393c0e4901c6",
+      "sha256": "3f946d1733e1a7fdc9595bc7a31c65fb565372f611f74abf7b46d8a550b2922e",
+      "size_bytes": 2803,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "922025982fff593b1067244d84b228448d02012f"
+      ],
+      "migration_identities": [
+        "044_n6_btrack_scope_write_source_validation"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_TRADE_DATE_ALL_DAY_BUY_064_CONTRACT.json",
+      "git_blob": "c3a74562723d466be987880e1c13e2971ce4dce2",
+      "sha256": "89c5468d453c63be447036b16b7eb900c9557841a25398a57fcc5571b9780df0",
+      "size_bytes": 8749,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e"
+      ],
+      "migration_identities": [
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_VIRTUAL_EXECUTOR_046_CONTRACT.json",
+      "git_blob": "eeab22591dba4e882d9c147cd9470b3454a49e61",
+      "sha256": "528139f563a3899017ecf9bafc1127f3281f01412e348911224e66223fc79d95",
+      "size_bytes": 4038,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_VIRTUAL_EXECUTOR_046_CONTRACT.md",
+      "git_blob": "b04ca56cf9084c8ae5f1fe834cbc46aa9b10dacf",
+      "sha256": "d3d8a60c892ec1d77b440c976455cb2d3c20fbb5bf14dbc0b50925d1c079a7cc",
+      "size_bytes": 5326,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_VIRTUAL_STOP_LOSS_049_CONTRACT.json",
+      "git_blob": "96edeabf31828fe14e2e37f425439b79f4f9d136",
+      "sha256": "89e078b956fbc001e0f8b4097b622a6e7ebe984e51e3d42b5d5042281126ff94",
+      "size_bytes": 2881,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_PRODUCT_V3_VIRTUAL_STOP_LOSS_049_CONTRACT.md",
+      "git_blob": "bdd0a1235fc455526dfd482453f62c920673b834",
+      "sha256": "5f91c757b4a66096c0dacfa41463982c5dc8c48865fcdf0c2001ffe12dcf8c06",
+      "size_bytes": 4044,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_REGULAR_SESSION_MANUAL_BUY_066_CONTRACT.json",
+      "git_blob": "eae57d5e673f9ae3752dd4c79552656e4b35de02",
+      "sha256": "2e4ea77195bfc43b1acd438f79dc183d42b11302881a14bf1314b6bde98a332a",
+      "size_bytes": 2590,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3"
+      ],
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_B_TRACK_T1_NATURAL_DAY_UNLOCK_069_CONTRACT.json",
+      "git_blob": "9b5100edf8fd4f673968f9886ab42fa0ebb82080",
+      "sha256": "b9fb016e88cbbcdce5adbc5b415af549ab1543005de1c7f269dd315c245a1efb",
+      "size_bytes": 3623,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d4c290699b236d1b277cadbd420fe4467492b712"
+      ],
+      "migration_identities": [
+        "069_n6_btrack_t1_natural_day_unlock"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_HUMAN_VIRTUAL_ACCOUNT_PROVISIONING_074_CONTRACT.md",
+      "git_blob": "37a7fd1180fe1b3632c01b963d890c2545868c79",
+      "sha256": "eeb0843bbdcd09314ddb036689179ad5acc33b467a747e01238b517f14b2b67d",
+      "size_bytes": 4312,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_QUOTE_COMPAT_AND_EXECUTOR_READINESS_075_CONTRACT.json",
+      "git_blob": "c81e89cf4e2c9d3158867dce18dc2e7d0130c55b",
+      "sha256": "4b6b6d6b5bcad3254518696823ac9a8a10074249d3f546d2fb3e4e80556ae07a",
+      "size_bytes": 2762,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "docs/N6_QUOTE_WRITER_MOOTDX_COMPAT_068_CONTRACT.json",
+      "git_blob": "8459e073060ae5f6909387bb23be5470764be50c",
+      "sha256": "1158f276a04851c2b2afc7b654f54639b95515cee233b6274ead99bbc4c6d923",
+      "size_bytes": 2233,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a5e2e899e0c5577a41567680094386110d0cd4c6"
+      ],
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat"
+      ],
+      "layer_classification": "N6_user_contract_or_document",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/backfill_n6_projection_read_model_once.py",
+      "git_blob": "6e041c1703f60d07e0a91fdd11e710c783458a8d",
+      "sha256": "4bcfe50d5e9febab95931072d976224a09760fc45f410e7a37549e44c141f6e6",
+      "size_bytes": 10676,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/check_n6_ai_shadow_observation_acceptance.py",
+      "git_blob": "a62248779cdc968684dd1fd10d2b33786ac77d85",
+      "sha256": "8f2d6da27613671072eb976a231608fc0106bbb63617465cb62e6b4d741b56dc",
+      "size_bytes": 18396,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/plan_n6_ai_shadow_launchd.py",
+      "git_blob": "983609f43896b4f30d5eea97811ba6d3f733ca9c",
+      "sha256": "45a1d07acd9574421fe09c9c5b2a75e532702cd80bdd590f142950a74dcd862d",
+      "size_bytes": 23199,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_ai_agent_once.py",
+      "git_blob": "1347d3798de3b771762d123b441da42efdb47696",
+      "sha256": "1d02a6aefc4ddeebc829c140b6ab334c8327cd5007d5b5ce4cd681e8e5d99e15",
+      "size_bytes": 40550,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "062_n6_ai_shadow_observation_run_audit",
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_ai_daily_summary_once.py",
+      "git_blob": "41265762547d2a752053b1ebd5a20a69574d7374",
+      "sha256": "d0e30187a108c083f99e4b380ef3f03321a7b655cd209e02ffdd0d6548aa5b84",
+      "size_bytes": 3429,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_b_track_signal_projection_poller_once.py",
+      "git_blob": "7ff3efe7e826ca12bdaacc039e4b615ef7bf01ab",
+      "sha256": "ce817f893de7f0d0544215cfc9adabf31dd29e483f369e41fb053d520e287b4c",
+      "size_bytes": 77622,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_human_virtual_account_provisioning_once.py",
+      "git_blob": "cca88e8806048ed210bd7facc431c30aa31bc878",
+      "sha256": "acb78b8e0019ac1c3bc0323d122ff1e7b4634e62b8349eda73dfeb9f9d6ad234",
+      "size_bytes": 215,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_strategy_center_once.py",
+      "git_blob": "4758b7911227f5f4d745ddbd2ff884feb37dfa67",
+      "sha256": "15917530a0b00bea083a9bf5666a846f4842bc56dc8212f399b41abbba720767",
+      "size_bytes": 2704,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_virtual_account_bootstrap_once.py",
+      "git_blob": "6d90f87b0b74112aa627ff688904894fa6988313",
+      "sha256": "0141535d1be35f6c4807e8cc51342035c6df701074dd89f4a1f6a815edc45987",
+      "size_bytes": 206,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_virtual_executor_once.py",
+      "git_blob": "cb22b3d635d21b5d0db923a2189d3f5fd866a431",
+      "sha256": "49865528fbc429d0decf3919ed65ddc00198fdd06f461fe96bee992349c180bd",
+      "size_bytes": 3349,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply",
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_virtual_quote_once.py",
+      "git_blob": "5b2bb6c87e692ce824c6ec8ae79931f5c5fb8d1f",
+      "sha256": "e7712ca2308535094b495c4bf9db76cb8d6af2653818e9dd1818f6562732d3cd",
+      "size_bytes": 7446,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2011e7ca0167042f46e350a1ae0b1860b54b1977",
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "040_n6_virtual_quote_snapshot_schema",
+        "041_n6_b_track_product_v3_schema",
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "scripts/run_n6_virtual_stop_loss_once.py",
+      "git_blob": "6b568db26fd4f7357e52311fcac9a81625332889",
+      "sha256": "af7904764377fe84f29d8ce2a2575b55666f17d1573207ca6248bf2909a15316",
+      "size_bytes": 3210,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_runner",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/040_n6_virtual_quote_snapshot_schema.sql",
+      "git_blob": "1f297be923d59c2490b71e1e469a01838a7f6029",
+      "sha256": "9b22b4b41ecfad08da28a0fd74ae23c1d1af8803377368e97e329a79c97bcfd1",
+      "size_bytes": 4727,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2011e7ca0167042f46e350a1ae0b1860b54b1977"
+      ],
+      "migration_identities": [
+        "040_n6_virtual_quote_snapshot_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/041_n6_b_track_product_v3_schema.sql",
+      "git_blob": "a6f3c1ff0120b70bc48e712b417ea8fdb1a4ccec",
+      "sha256": "66570d441cfe6249389d2bfb5412d2fe76b3e9e3bc1cbb6d9a54859bab068c67",
+      "size_bytes": 10038,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/041_n6_b_track_product_v3_schema_rollback.sql",
+      "git_blob": "1bae7d2fcc8531c4f2a1d0faa698067a33289a61",
+      "sha256": "6e5713399786a11933d99a931d0ed440835dcb68113e9f52f09fda5b041ac567",
+      "size_bytes": 3059,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/042_n6_b_track_db_role_policy_rollback.sql",
+      "git_blob": "8be5635f901ab671a49a1d7d9fe44e46b499ba72",
+      "sha256": "19223cebc3953089e6cc1b705cc4c6eacaede994656f9061a27d4f15fcdeb1aa",
+      "size_bytes": 3503,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "cbf416e41c3a3692885622f39811954508250181"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/042_n6_b_track_db_role_policy_schema.sql",
+      "git_blob": "9820eebae305fc27f7f0dbb8d012e7b4a2286ef8",
+      "sha256": "0c2cb29d938390178201d865f815294e6e399625e60951dc1f75c81848e4a561",
+      "size_bytes": 37029,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "cbf416e41c3a3692885622f39811954508250181"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/043_n6_btrack_legacy_principal_registration.sql",
+      "git_blob": "6f51ca6d308fb3c2a89e91176f5cba6e1391b0b6",
+      "sha256": "c6bd6e3589196849ceab9b481b7741219900932c5e3f5afd683fbcb9041f2f5c",
+      "size_bytes": 9119,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "996b93356cfc3981efec3adaf44ffdf4ecd7825c"
+      ],
+      "migration_identities": [
+        "043_n6_btrack_legacy_principal_registration"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/043_n6_btrack_legacy_principal_registration_rollback.sql",
+      "git_blob": "d4e08352c60cd63313e97de0e1aa4ca45bf15fa8",
+      "sha256": "c9193dba8eae96def0b1e4e77cf03b128b8ec56a01b944109875dab46eec7b6f",
+      "size_bytes": 7877,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "996b93356cfc3981efec3adaf44ffdf4ecd7825c"
+      ],
+      "migration_identities": [
+        "043_n6_btrack_legacy_principal_registration"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/044_n6_btrack_scope_write_source_validation.sql",
+      "git_blob": "255a8647de2ebbf70c1a4a7b6f1cd8a53ceddf35",
+      "sha256": "a86e69805fa50f7393df009b440064d269cfa3affaf2d994daf78ec7b73e757f",
+      "size_bytes": 11665,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "922025982fff593b1067244d84b228448d02012f"
+      ],
+      "migration_identities": [
+        "044_n6_btrack_scope_write_source_validation"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/044_n6_btrack_scope_write_source_validation_rollback.sql",
+      "git_blob": "d3de8e983754a05e375da568f5d0c02ca8916240",
+      "sha256": "b7bdaec3074fe13e136a02ac53bda0d95f53bd97bba1ddcafa5d80266045ac0f",
+      "size_bytes": 6363,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "922025982fff593b1067244d84b228448d02012f"
+      ],
+      "migration_identities": [
+        "044_n6_btrack_scope_write_source_validation"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/045_n6_btrack_monitor_lineage_freeze.sql",
+      "git_blob": "074284465ad14211cae513da7f07ae9a503968c9",
+      "sha256": "130ea00a00569b52cbac6c723042ae4b539db1b80c89be6022fa60697978c61a",
+      "size_bytes": 9333,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73"
+      ],
+      "migration_identities": [
+        "045_n6_btrack_monitor_lineage_freeze"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/045_n6_btrack_monitor_lineage_freeze_rollback.sql",
+      "git_blob": "984dc042b1ab2f05cb405fd3c6c369363f88ccd9",
+      "sha256": "a9cfcad841e5efd8893b1442f65db5353afb50c3e99a872e059e2fbf01ebb833",
+      "size_bytes": 5898,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73"
+      ],
+      "migration_identities": [
+        "045_n6_btrack_monitor_lineage_freeze"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/046_n6_btrack_virtual_executor_apply.sql",
+      "git_blob": "8d5805ba6c24dc871a39ebdc03d42e347229c5bb",
+      "sha256": "94d6c73de0e11b5ffda50a42650405baa34f6ebfacee5d97a5b8aa42272a3eb5",
+      "size_bytes": 26802,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/046_n6_btrack_virtual_executor_apply_rollback.sql",
+      "git_blob": "7dfda60cdb2a9c0332c5f0077c277f7fe3889a39",
+      "sha256": "a63b874f33914ea0246c3ded6c7905fd38c04526357fecc80379704613afb388",
+      "size_bytes": 342,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/047_n6_virtual_account_bootstrap.sql",
+      "git_blob": "09e6ac4dd2b746289b9f5c6d649f30146dee5859",
+      "sha256": "8cae88f049292041a6e844bee8f66c7332ee9ac1911a4facc9f15799bb1de2bf",
+      "size_bytes": 23570,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/047_n6_virtual_account_bootstrap_rollback.sql",
+      "git_blob": "0e2bd35ba7e536378fd6e6e38371d2871adf1915",
+      "sha256": "0e96b2e6b9b66b1f3489696b997c8320e7e72729a06a1d80da6897d5f3aa92d8",
+      "size_bytes": 18041,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/048_n6_btrack_proposal_scope_and_executor_claim_next.sql",
+      "git_blob": "12bb9680f838a095def309ad26a48ad84678ff91",
+      "sha256": "6e2f785a51e5b04810ed1d956074bdf32c6a1e3614d493cd77fd741b25f9b573",
+      "size_bytes": 19355,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5"
+      ],
+      "migration_identities": [
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/048_n6_btrack_proposal_scope_and_executor_claim_next_rollback.sql",
+      "git_blob": "37230975487d186eb1e75c769c80bbb25fba27c2",
+      "sha256": "acfa04572c93287c79c35db499bdeed2c1cec4335e0c4c6f54a4ac70aaab43b1",
+      "size_bytes": 6447,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5"
+      ],
+      "migration_identities": [
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/049_n6_virtual_stop_loss_freeze_evaluate_execute.sql",
+      "git_blob": "6102fe00795fe79e1135b550b2729bdbfa7a5539",
+      "sha256": "acdd1c1401399ab92bdf6dc0b1d48d91c82893aae9b9146d17441a0614f333e0",
+      "size_bytes": 54617,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/049_n6_virtual_stop_loss_freeze_evaluate_execute_rollback.sql",
+      "git_blob": "ffc0283d0a9c784061113eadd1003914a70fee5d",
+      "sha256": "f6149e6a7af77ab620dd05fac8d6e9bd9ff36e4ac0b17ac1ca2199e3b3b5d11e",
+      "size_bytes": 27100,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/051_n6_virtual_quote_writer_policy.sql",
+      "git_blob": "d9b7d34768d343091c5f5422c16517ceb78a2b61",
+      "sha256": "cb4957f79f65258111c3953b5ed9fcdd33258d0bc3c5dfd7107446e2864059f0",
+      "size_bytes": 33192,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3"
+      ],
+      "migration_identities": [
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/051_n6_virtual_quote_writer_policy_rollback.sql",
+      "git_blob": "a76ab346bd58e6b61826e746a50a5a7d57615cce",
+      "sha256": "56ba8aaed3870789fad6ca6a0cc83dd2ceba1c6dc4b5bc99e308601589139440",
+      "size_bytes": 1270,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3"
+      ],
+      "migration_identities": [
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/052_n6_btrack_proposal_trading_session.sql",
+      "git_blob": "fe3e9b31ffd49645892fcb025a066a860cb23677",
+      "sha256": "990f76424fa381cb2cd15777a1b91a6eb18c220a0697d7d6faa9b8b9183e9d1b",
+      "size_bytes": 15828,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497"
+      ],
+      "migration_identities": [
+        "052_n6_btrack_proposal_trading_session"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/052_n6_btrack_proposal_trading_session_rollback.sql",
+      "git_blob": "7361cc18516f019705d45ff6258747239318b323",
+      "sha256": "0ade16f033c1531271e84f402eadd36def02abb2821b60401dcdd5325b07f511",
+      "size_bytes": 15402,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497"
+      ],
+      "migration_identities": [
+        "052_n6_btrack_proposal_trading_session"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/053_n6_btrack_proposal_timestamp_syntax_fix.sql",
+      "git_blob": "453e06f2e49de7c5964ba63029123411c23a0aa7",
+      "sha256": "386d26dbf8614f619240ccf5f258b318f6ca258f7d339e2f9818bd181c5f9317",
+      "size_bytes": 15826,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c"
+      ],
+      "migration_identities": [
+        "053_n6_btrack_proposal_timestamp_syntax_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/053_n6_btrack_proposal_timestamp_syntax_fix_rollback.sql",
+      "git_blob": "c4d24c6a180a7a5516f0d70c2437708b4b4a513f",
+      "sha256": "4c9962f2fc5e8c7dc69da358218cd4d98b4d011e367e4acec75d05b7bcbd8b05",
+      "size_bytes": 15848,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c"
+      ],
+      "migration_identities": [
+        "053_n6_btrack_proposal_timestamp_syntax_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/054_n6_btrack_filter_bulk_scope.sql",
+      "git_blob": "3aa4154de841b8444c31cb09d5352c89cf3d16a0",
+      "sha256": "728e5b4defc6ed5c2d79db4dbf27a8741244d0d8a34131cbd3a6d3edaccab292",
+      "size_bytes": 24288,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "054_n6_btrack_filter_bulk_scope"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/054_n6_btrack_filter_bulk_scope_rollback.sql",
+      "git_blob": "aca949adf4e401d385f5b31c36407dfcdaf3e375",
+      "sha256": "4759ddd8082b21c40f97a23415bb933da28a5a7f44ad66593f9feb5dada6b8db",
+      "size_bytes": 796,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "054_n6_btrack_filter_bulk_scope"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/055_n6_ai_agent_v1_schema.sql",
+      "git_blob": "edb85c3f7058884aeb20e101108ed6e6dd8bd07a",
+      "sha256": "ad13f8d0a1db3a91b01dd154e69f74abf1cee5458572f2210343f5d3c07d34a8",
+      "size_bytes": 173661,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/055_n6_ai_agent_v1_schema_rollback.sql",
+      "git_blob": "42a52562d874b15b1f1844aa2efba8b7491e1959",
+      "sha256": "ade3a697305bff71c3f2edff6ac023451a016abd3acdaa5c9440f5ec64d7f653",
+      "size_bytes": 16911,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/056_n6_ai_agent_v1_identity_account_seed.sql",
+      "git_blob": "b51847637459fa9f3f99245092d2cd1af1f14426",
+      "sha256": "5cb4cc1fb2997bdf817043e36fff83adfe6e6d01fc3c61a4cacc79db03150cef",
+      "size_bytes": 13307,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/056_n6_ai_agent_v1_identity_account_seed_rollback.sql",
+      "git_blob": "5f4d954e7e5c2c24be07198e64ee94fc64896de1",
+      "sha256": "27bfafbde2da719bbbaf3e1224fd1d62d6bf29466e0ae5cc9e0992eea23cdd28",
+      "size_bytes": 9818,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/057_n6_ai_agent_execution_compat.sql",
+      "git_blob": "ed8eb910d7060fcf0b3777f758b36b871a5fa5a4",
+      "sha256": "4088461ce77de9cd1d6cfd084c51d34b0ff9ccf79fb6310e657345ef5f8b7da8",
+      "size_bytes": 82339,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/057_n6_ai_agent_execution_compat_rollback.sql",
+      "git_blob": "cdee4cf93e772c0f195f7aa233b11609d6a93a0f",
+      "sha256": "a2ac36417f40846f71afc3f12a0e658a78e1a8133bfbd2c84fac599d1d7d0b20",
+      "size_bytes": 72135,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/058_n6_ai_context_memory_hash_contract.sql",
+      "git_blob": "564da2aaa398aa2616dfbab09e828945e4dc6886",
+      "sha256": "e9be877e437d471b63181f0bf1e1d14c10373f184a0ba2cf104bd1e9ef80d4e0",
+      "size_bytes": 9680,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2a8fc45e2f0003fc781519780eb20fae6d08c4f6"
+      ],
+      "migration_identities": [
+        "058_n6_ai_context_memory_hash_contract"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/058_n6_ai_context_memory_hash_contract_rollback.sql",
+      "git_blob": "207c4f72918755f43593d194b856d99b6be77a17",
+      "sha256": "33385a23448ca700d58443f7e572e30c5f7813ac0c4980a629222861aa140ba9",
+      "size_bytes": 1252,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2a8fc45e2f0003fc781519780eb20fae6d08c4f6"
+      ],
+      "migration_identities": [
+        "058_n6_ai_context_memory_hash_contract"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/059_n6_ai_investor_strategy_policy_v1.sql",
+      "git_blob": "dba40a6ecbf5756cbe0e7f7c00d6d5214597f707",
+      "sha256": "783c7abbefdb1f28bf950a48a731fe560cd9f10f9aa6bdf3189e25ab098c8d0f",
+      "size_bytes": 103680,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "aacd48d74a57814837b7415ea1014c1b09e56d8a"
+      ],
+      "migration_identities": [
+        "059_n6_ai_investor_strategy_policy_v1"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/059_n6_ai_investor_strategy_policy_v1_rollback.sql",
+      "git_blob": "d700a04a5d40d730a9c546408cfe6d7d20e55c70",
+      "sha256": "d1f0f17cd17fac28397be86822c210e002a54e23d68bb7d338a4166d654c4b01",
+      "size_bytes": 6704,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "aacd48d74a57814837b7415ea1014c1b09e56d8a"
+      ],
+      "migration_identities": [
+        "059_n6_ai_investor_strategy_policy_v1"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/060_n6_ai_qualified_extrema_function_fix.sql",
+      "git_blob": "6edd623ce0ba774f63971210048f3b300561e81b",
+      "sha256": "1b19618c87fb74442dc0d80bab76dc13df12e6e259f35f14f9b5ce65a139a865",
+      "size_bytes": 114675,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "1052e14ab236d2406ca932d1311b91f01dff3a73"
+      ],
+      "migration_identities": [
+        "060_n6_ai_qualified_extrema_function_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/060_n6_ai_qualified_extrema_function_fix_rollback.sql",
+      "git_blob": "97495ca0bb4aacea4dbeea78a0a26cb3a178c0cf",
+      "sha256": "c373016295aa1fec2be1f77873add7f337980547af715a563c4aa87959a0c2f6",
+      "size_bytes": 114846,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "1052e14ab236d2406ca932d1311b91f01dff3a73"
+      ],
+      "migration_identities": [
+        "060_n6_ai_qualified_extrema_function_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix.sql",
+      "git_blob": "d435101dd78850cce24fe51b28d358c030f2887c",
+      "sha256": "be7b28e8771877af5a928cac94d27a6799c6b70db0ec3ba8f39d7084663f57d8",
+      "size_bytes": 138086,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "c0795fa1dce4a9a9ff5222bed9d60161a0a83f6b"
+      ],
+      "migration_identities": [
+        "061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix_rollback.sql",
+      "git_blob": "2d0cda80471dcb9da2aaed9b272f0bac31cd8d76",
+      "sha256": "0fcdbb531dc78d329e5862c9c87324ea259dd498a69666e4e5676fdf1517912c",
+      "size_bytes": 137153,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "c0795fa1dce4a9a9ff5222bed9d60161a0a83f6b"
+      ],
+      "migration_identities": [
+        "061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/062_n6_ai_shadow_observation_run_audit.sql",
+      "git_blob": "d18c880851bd1c634f76f1b58983c17a7360ae54",
+      "sha256": "69e7c9b882b397aa419e26e6f96e512939db857cb2cbd4d7627415202fe3628c",
+      "size_bytes": 41643,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/062_n6_ai_shadow_observation_run_audit_rollback.sql",
+      "git_blob": "3037b9b0287d31509bfc53cf1d90ac29345b36e8",
+      "sha256": "5be8b6f37e6afc37d7e89bbb3ab4a3f2125ee4ef96fa6ec41e7d8545d652a173",
+      "size_bytes": 5028,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/063_n6_btrack_manual_actionable_buy.sql",
+      "git_blob": "44699fdd9cb8bd8ba9ac0359d3e9d28f2d9f29c4",
+      "sha256": "7fad2da102226d23c4416cf7791c27b73be60bc137b2f8f77f75d9d2e1289822",
+      "size_bytes": 54511,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b"
+      ],
+      "migration_identities": [
+        "063_n6_btrack_manual_actionable_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/063_n6_btrack_manual_actionable_buy_rollback.sql",
+      "git_blob": "66af727be6f2b35278ec5baba33f6f395040c38f",
+      "sha256": "a89d777b3ec7e7452a03dd1b0cb37987b1985e3f7676080585211fdd936f6dee",
+      "size_bytes": 50066,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b"
+      ],
+      "migration_identities": [
+        "063_n6_btrack_manual_actionable_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/064_n6_btrack_trade_date_all_day_buy.sql",
+      "git_blob": "33b8250be2d0b242d3e791efa158590b23214cde",
+      "sha256": "e08b86989b8897ecc3d4b2f1a748bc7d876e6c8e95c4abda2899bcc41b76f494",
+      "size_bytes": 65469,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e"
+      ],
+      "migration_identities": [
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/064_n6_btrack_trade_date_all_day_buy_rollback.sql",
+      "git_blob": "3114d63183948d167823ae9294ed6789dcd603dd",
+      "sha256": "d4930a866ce48b2e51fe1a090be55ee9e49552cafc56811b23ae20456fcd9fef",
+      "size_bytes": 50559,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e"
+      ],
+      "migration_identities": [
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/065_n6_btrack_current_date_batch_scope_fix.sql",
+      "git_blob": "720cbcc0a2c3834d0738996bb1f4598f0ffc67f5",
+      "sha256": "fdd2bd299e7c4e862dd8c86b9bbbde273b72fb7a8939da50cbc2ed96d7894040",
+      "size_bytes": 10676,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41"
+      ],
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/065_n6_btrack_current_date_batch_scope_fix_rollback.sql",
+      "git_blob": "7abf6fed1215bba21be9b8ba7f59f5ada69cad17",
+      "sha256": "f7f39a000dc8058d2f9e21e44270337bb3f702a59478628ed8c827f9ccdb6dbd",
+      "size_bytes": 7957,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41"
+      ],
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/066_n6_btrack_regular_session_manual_buy.sql",
+      "git_blob": "5e9083916e56f3f3bc5ab0af81f77c40c2f33613",
+      "sha256": "fe8e03b31e98cfbccd4f58097b31b2286a33c868abf19d31f21b1e6ee4e8e5fc",
+      "size_bytes": 19815,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3"
+      ],
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/066_n6_btrack_regular_session_manual_buy_rollback.sql",
+      "git_blob": "82697dbefcc3d5586d4aab9a43e9cd3573426d45",
+      "sha256": "f71c877e73bf1cbb67d1d0fad3a009b6230fa84e2be4790b33e835696f3360f2",
+      "size_bytes": 18877,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3"
+      ],
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/067_n6_ai_shadow_schedule_preflight.sql",
+      "git_blob": "a52e5a04805b872610f116ea547a5e6c5b758907",
+      "sha256": "b06dd8574b1dfd736cc07809f059969ced41f52beb116a3c72792a5700ed7c0c",
+      "size_bytes": 11122,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/067_n6_ai_shadow_schedule_preflight_rollback.sql",
+      "git_blob": "14cdd6b0f861f0d2e1b89e8ac7463798d3cb02b8",
+      "sha256": "03b9ea5c28b53d50b7aa097e95d5f08504b6554aa74e816e7a4d9f85bef31dcf",
+      "size_bytes": 4751,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/068_n6_quote_writer_mootdx_compat.sql",
+      "git_blob": "1dc420093fded0ae379647e05e443d76b128add2",
+      "sha256": "53680e3f800939b4e8edf0b11f0175c44f373205475f9fea382ed7485c992f34",
+      "size_bytes": 11416,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a5e2e899e0c5577a41567680094386110d0cd4c6"
+      ],
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/068_n6_quote_writer_mootdx_compat_rollback.sql",
+      "git_blob": "9c564ceacc54455dc3321bc5029108327efd2753",
+      "sha256": "583656665b585823c58e90aa8c55453e84145f37fb88513e557108ebfbcef64e",
+      "size_bytes": 9419,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a5e2e899e0c5577a41567680094386110d0cd4c6"
+      ],
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/069_n6_btrack_t1_natural_day_unlock.sql",
+      "git_blob": "27c2f8d81439afdc7f3894dc405582460d1e60b0",
+      "sha256": "a7ac5d6016503891b011f75034339425b83179f44870ec238199e6c13a33eee1",
+      "size_bytes": 10433,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d4c290699b236d1b277cadbd420fe4467492b712"
+      ],
+      "migration_identities": [
+        "069_n6_btrack_t1_natural_day_unlock"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/069_n6_btrack_t1_natural_day_unlock_rollback.sql",
+      "git_blob": "da802407938dcba791b9cb7957b97743407f59ca",
+      "sha256": "c3bbb9684fbeb88db2c213c527b2029c99cd8bea96fc48a6720c2a964691b780",
+      "size_bytes": 10734,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d4c290699b236d1b277cadbd420fe4467492b712"
+      ],
+      "migration_identities": [
+        "069_n6_btrack_t1_natural_day_unlock"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/070_n6_ai_shadow_context_latest_grain_and_strategy_scope.sql",
+      "git_blob": "f46752f3e2ed8228852a1ee66396e178ea0aa0dc",
+      "sha256": "db379013dd33e7ee3c66ebfe40f660c9fba92ef2553fef1e149fcc08655204cc",
+      "size_bytes": 60216,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "384e85a02ebfe3d3dece371e20a795331116e60a"
+      ],
+      "migration_identities": [
+        "070_n6_ai_shadow_context_latest_grain_and_strategy_scope"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/070_n6_ai_shadow_context_latest_grain_and_strategy_scope_rollback.sql",
+      "git_blob": "5832828d97d6d42df37de901f05bb8cd2d75e631",
+      "sha256": "6cd5f755901ad9f01928f5740752a66dbd7e89d7cf3821129cb78f3d498d026d",
+      "size_bytes": 60663,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "384e85a02ebfe3d3dece371e20a795331116e60a"
+      ],
+      "migration_identities": [
+        "070_n6_ai_shadow_context_latest_grain_and_strategy_scope"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight.sql",
+      "git_blob": "cb064dd13c42ebb2c4edebae92f6d51a0d29fab5",
+      "sha256": "801e0a0f174c3969fc71e03850e54ea08cfecddb66d3ea14543e5176b74c1fd7",
+      "size_bytes": 18061,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb"
+      ],
+      "migration_identities": [
+        "071_n6_ai_shadow_nine_slot_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight_rollback.sql",
+      "git_blob": "90be342a521e5855291a1b94f135229faeb9af6b",
+      "sha256": "4526267b2ce54df8ad09e89249f9489af78a447a552b57e40a19dcb826f0806b",
+      "size_bytes": 13708,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb"
+      ],
+      "migration_identities": [
+        "071_n6_ai_shadow_nine_slot_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/072_n6_web_user_principal_backfill.sql",
+      "git_blob": "4731ed76d77467470d7d331b8a6b45b3a79c471c",
+      "sha256": "446ce5d7043cc6fada675f9489582128facf8d899cd8211dc134ce9e9d49674a",
+      "size_bytes": 5069,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "c9f0f2109f9bdabb654f874429b508298f0b1dd9"
+      ],
+      "migration_identities": [
+        "072_n6_web_user_principal_backfill"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/072_n6_web_user_principal_backfill_rollback.sql",
+      "git_blob": "1fcad1d79b752576610e52a8d43c15834d0f8757",
+      "sha256": "3d4b0fa15074a5cfeda95060c4ad230c211789ac41c23308a5476a7c69e3cf8a",
+      "size_bytes": 10329,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "c9f0f2109f9bdabb654f874429b508298f0b1dd9"
+      ],
+      "migration_identities": [
+        "072_n6_web_user_principal_backfill"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/073_n6_projection_read_performance.sql",
+      "git_blob": "92e558403de209772018dbd92fa208e659788810",
+      "sha256": "6ac1ab048e64defe75a9641ef2dc2c48f9294fad600991adb801668843be0c1e",
+      "size_bytes": 14643,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/073_n6_projection_read_performance_rollback.sql",
+      "git_blob": "9c2a4f28c3e211c41172305cb5be131a7143786e",
+      "sha256": "ae5f8fa781f886d2111e8f7fae3176161d47ca6a0ea879e11174c0246615d1ce",
+      "size_bytes": 1113,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/073_n6_strategy_center_schema.sql",
+      "git_blob": "45592977614ada18ef1515c49540b3ef90ef4904",
+      "sha256": "1a13caa8f6baa91a18fdfbc7c6a349bd6a2a7ecf40da598b2327965771220bb6",
+      "size_bytes": 45869,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/073_n6_strategy_center_schema_rollback.sql",
+      "git_blob": "63a28c38cb1f8fd17bb6c42f82e20421b361eefc",
+      "sha256": "25a32840d2d14478aa730a10e1a15ab28e94b248bc3d72860f8d8952dc2fa637",
+      "size_bytes": 4346,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/074_n6_human_virtual_account_provisioning.sql",
+      "git_blob": "b540e3aeffe92120d8956babb84476b23e1ca38b",
+      "sha256": "3bfc3eb7ee3b12a1793ed1f6c60171d9eb1adbf3ebae1d1e9eb92a181560ec9d",
+      "size_bytes": 12829,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/074_n6_human_virtual_account_provisioning_rollback.sql",
+      "git_blob": "e5f5f559dd550a062068f581935bd7455239c361",
+      "sha256": "5fd07252f81c610b99a4d58cb2e59f5d46dd68a2fada094b778775ccea8af8c6",
+      "size_bytes": 16345,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/075_n6_executor_quote_ready_claim.sql",
+      "git_blob": "6daf5e4aafa487de4e3641a179e8df4390eb5935",
+      "sha256": "c17ec2ef97a6eb9001ce9945344314633520c8d2586581eb8ad874f3271f492a",
+      "size_bytes": 8228,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "sql/075_n6_executor_quote_ready_claim_rollback.sql",
+      "git_blob": "4289767511c27442fb56c506134fd3452397c10c",
+      "sha256": "5c61fde1112249297380ad5f90a784c7b4e8d349957f0f53925fc4e16e36e56c",
+      "size_bytes": 6874,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_sql_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/ai_agent.py",
+      "git_blob": "9574e4ea949ff377ac741514c27e58f58b4ebfcc",
+      "sha256": "3e1a3956539b49ec22e1d3831743f1543b400244b5b732c14e735b11c8c5570b",
+      "size_bytes": 66615,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "062_n6_ai_shadow_observation_run_audit",
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/human_virtual_account_provisioning.py",
+      "git_blob": "e7d691be69a96a66db37fb12c3c3a142f1dff13a",
+      "sha256": "af12d64fbafdb2c6138a635563421e5c58ee1dca656829cf82d5573ff60f2edb",
+      "size_bytes": 8345,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/n6_virtual_quote_client.py",
+      "git_blob": "60f56143016e9302aab99f641457e89e1bc2be65",
+      "sha256": "d62de24d4b62423bb4239b9b18ca7135b066739d5d6669d3ad56d641c652e687",
+      "size_bytes": 13139,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a5e2e899e0c5577a41567680094386110d0cd4c6",
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat",
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/strategy_center.py",
+      "git_blob": "5f5fd65888654ca16c3fd4180e9012a73b1034b3",
+      "sha256": "75da96ee815300a0c2a932a6baccbd531c206abb6aa39e470715394479ec0e6e",
+      "size_bytes": 18722,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/strategy_center_repository.py",
+      "git_blob": "94a75e159c5c608599496a92c81b1e7bd02c0c4c",
+      "sha256": "cbe6f18fa8315f20d377d4b61271352b3415bb5fe1d35e7c95d24969448fd452",
+      "size_bytes": 7996,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/strategy_center_worker.py",
+      "git_blob": "1906c5c78f897867a65278f8ac48daa1bdf93e51",
+      "sha256": "75ae422fd6cef7d9b2fbbfd7688316aa84e77fda477d4c2635c26173d15c691e",
+      "size_bytes": 31797,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/virtual_account_bootstrap_v3.py",
+      "git_blob": "fcb1f8637f3e821e3d142f8164e0661823fa052d",
+      "sha256": "5f95c6c7d5cd5face9930fac055c0ec29d4cdde87f28ffc81749fbdacd101239",
+      "size_bytes": 11467,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/virtual_account_v3.py",
+      "git_blob": "780d3998076923acb0fa038154fd7059513ed181",
+      "sha256": "fb6708a19e970d118edca150fe5b420e9a584ca707fde8166aa65017cb157734",
+      "size_bytes": 8960,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/virtual_executor.py",
+      "git_blob": "63c7162dcbbf14727efe81cd99dad097877dd8a5",
+      "sha256": "1455121c94653a90774e8af8f8aae071fac8e8560871b8ced973fdb8ba293fce",
+      "size_bytes": 2759,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply",
+        "048_n6_btrack_proposal_scope_and_executor_claim_next"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/virtual_quote_persistence.py",
+      "git_blob": "9400928405ab0def4ea06ac99dd0b83fdf101a62",
+      "sha256": "c7e033ddc50ec109585ec45e0221441778a0ddc4c93db1c51999b59313d051a5",
+      "size_bytes": 22483,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2011e7ca0167042f46e350a1ae0b1860b54b1977",
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "040_n6_virtual_quote_snapshot_schema",
+        "041_n6_b_track_product_v3_schema",
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/user/virtual_stop_loss.py",
+      "git_blob": "9772cdcb1b22ae197f1f7bb805187ba3a6ee7348",
+      "sha256": "7e61ab9061ece9c6bbe0fa9b93b6c207db373d88d1951e3e84f476db8d6338cc",
+      "size_bytes": 6645,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/web/n6_app_v1.py",
+      "git_blob": "a8b3d34ab29e80de710c1522a0db4092d0430b68",
+      "sha256": "43d74479dd79e8f4cb7e6af795428012f4992e7baa30f9e0a406c9f59dd1f8c8",
+      "size_bytes": 226135,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+        "922025982fff593b1067244d84b228448d02012f",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema",
+        "044_n6_btrack_scope_write_source_validation",
+        "054_n6_btrack_filter_bulk_scope",
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "064_n6_btrack_trade_date_all_day_buy",
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/web/n6_btrack_authority.py",
+      "git_blob": "db0d50a328dcfe8a96c5ee7d3ec05dd1373ccbba",
+      "sha256": "a2ecc60204c451bd68122389f7c2325dd8a849c26927229dcc53e7e6acfbac45",
+      "size_bytes": 13496,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "cbf416e41c3a3692885622f39811954508250181",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema",
+        "054_n6_btrack_filter_bulk_scope",
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/web/n6_user_app.py",
+      "git_blob": "d7ca4cfb64e82d67a47720f1a4fa5d3f2c38645a",
+      "sha256": "24cbfd32432d4869fc5170f4e67d07695fa9bbdd44b7453ce555d051f996477b",
+      "size_bytes": 566366,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884",
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8",
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+        "922025982fff593b1067244d84b228448d02012f",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249",
+        "c9f0f2109f9bdabb654f874429b508298f0b1dd9",
+        "cbf416e41c3a3692885622f39811954508250181",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema",
+        "042_n6_b_track_db_role_policy_schema",
+        "044_n6_btrack_scope_write_source_validation",
+        "045_n6_btrack_monitor_lineage_freeze",
+        "053_n6_btrack_proposal_timestamp_syntax_fix",
+        "054_n6_btrack_filter_bulk_scope",
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "072_n6_web_user_principal_backfill",
+        "073_projection_read_performance",
+        "073_strategy_center_schema",
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "src/ashare_v3/web/templates/n6_app_shell.html",
+      "git_blob": "95b9f0fc4df4ac56241ce984c811a849ff1f91f4",
+      "sha256": "e46d4b2aa3527fad3b5362a7d13dbd25493945ea9251a98a3cd36a1fe877ba9f",
+      "size_bytes": 146408,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884",
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497",
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+        "922025982fff593b1067244d84b228448d02012f",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema",
+        "044_n6_btrack_scope_write_source_validation",
+        "052_n6_btrack_proposal_trading_session",
+        "053_n6_btrack_proposal_timestamp_syntax_fix",
+        "054_n6_btrack_filter_bulk_scope",
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "063_n6_btrack_manual_actionable_buy",
+        "064_n6_btrack_trade_date_all_day_buy",
+        "066_n6_btrack_regular_session_manual_buy",
+        "073_strategy_center_schema",
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_source",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_064_postgres_integration.py",
+      "git_blob": "90c131d7c3b3446bd9606c96c220a9a66d29c00b",
+      "sha256": "d15f28508bac7c526da20779d0e31def60b1412b0a55597b33224154aba1e2e7",
+      "size_bytes": 51856,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e"
+      ],
+      "migration_identities": [
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_065_current_date_batch_scope_fix.py",
+      "git_blob": "fe88b388ffde54e76f2ed952e5d05a06a2caac35",
+      "sha256": "8e568e4efe972330a73e7a185bec5eb47787bf7277bc6274eac3f4f05211a6fd",
+      "size_bytes": 2812,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41"
+      ],
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_065_postgres_integration.py",
+      "git_blob": "1188c3db4312ceda1487389c98b4ffcb6a797e5e",
+      "sha256": "ca5a38b31dd89e0f9eede03da44f67819050171ac105dfd6523170bf69824f6a",
+      "size_bytes": 7071,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41"
+      ],
+      "migration_identities": [
+        "065_n6_btrack_current_date_batch_scope_fix"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_066_postgres_integration.py",
+      "git_blob": "c26b3450bd065729f81edfedf4faa5b1de355c99",
+      "sha256": "fbd37032cfaa1c5e15c3c433dc70e0f2d82ce8bd1d530ffa05897c3c1a6d5699",
+      "size_bytes": 7934,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3"
+      ],
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_066_regular_session_manual_buy.py",
+      "git_blob": "a9d8281b1b4e1d9a842caa5707b584b2aaec65f8",
+      "sha256": "d1672ceec28cda88eb1dd5d5a1b4f7a621975085738e85769c555d01923ac11c",
+      "size_bytes": 7030,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3"
+      ],
+      "migration_identities": [
+        "066_n6_btrack_regular_session_manual_buy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_068_quote_writer_mootdx_compat.py",
+      "git_blob": "502b8c7d2219f2bd33a7a903e689507b73d1e8ee",
+      "sha256": "23fbd7f61964a25c778443086e2fef029ddd3289c9412b629c4ebb737028e9af",
+      "size_bytes": 4637,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a5e2e899e0c5577a41567680094386110d0cd4c6"
+      ],
+      "migration_identities": [
+        "068_n6_quote_writer_mootdx_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_069_t1_natural_day_unlock.py",
+      "git_blob": "4d636b64635f4574d7cc41b41a2e2ed977fadf20",
+      "sha256": "767da9a782c28616f210be965be579972b923b9c58490e233fcf4ab08854a884",
+      "size_bytes": 52434,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d4c290699b236d1b277cadbd420fe4467492b712"
+      ],
+      "migration_identities": [
+        "069_n6_btrack_t1_natural_day_unlock"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_074_postgres_integration.py",
+      "git_blob": "35783714d19801f3c4fc1a9dc7c6d18deb12e73f",
+      "sha256": "a6e590d053125765cd957c10d75de2d3138a4f06ad857a4cc106bfa26e6a223a",
+      "size_bytes": 1854,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_075_quote_ready_claim.py",
+      "git_blob": "ac07cb6e5a2f464a38ef99d1e43e7a8208310205",
+      "sha256": "4ec19120b08923fe9b27629aae14adca0f884413a6371a4f995d4e1505a6d483",
+      "size_bytes": 15899,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_agent.py",
+      "git_blob": "1d06de132acc39db9136ff7b0cdb500e08efbcd7",
+      "sha256": "e4ad491421e616e5f810071219d12402aac861382131d7ab1c576bec9c8c00e7",
+      "size_bytes": 54817,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_agent_execution_compat.py",
+      "git_blob": "2019915658abf25d2d0435225069c34f0e4780d4",
+      "sha256": "2ea8d2cd52f318a1a4474cc01ad7ce0786cebfb4a1d3dba9303e496b99b4e122",
+      "size_bytes": 11039,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_agent_identity_seed.py",
+      "git_blob": "ea124b9c556a429ff44c4ac12058fb4f2b7bdc86",
+      "sha256": "96f6c6bf3417d18e71c14173a127fc342586eada09519f5bd25660e81facc2cb",
+      "size_bytes": 6341,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_agent_schema.py",
+      "git_blob": "67a65369838a00edeb6ba36b0e7334b6b85f6c2f",
+      "sha256": "6645765b8b6c4f4dcc3cd4fc3d1e9258abaeb2de6cd214f8f65304ab08525457",
+      "size_bytes": 45817,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_context_memory_hash_contract.py",
+      "git_blob": "7afc4d90abecc2a5fda674e8dd29a0d02fbca369",
+      "sha256": "1e815e175e9c0cc57e1d9f0db4259c00b5b84da6961b80432743dbb5771b20a6",
+      "size_bytes": 8759,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2a8fc45e2f0003fc781519780eb20fae6d08c4f6"
+      ],
+      "migration_identities": [
+        "058_n6_ai_context_memory_hash_contract"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_deepseek_adapter.py",
+      "git_blob": "f6524157d5f2254e3fbb1639490963332aa7cd72",
+      "sha256": "c006239b104044fb8f0a6f201bbaaa63998697b7b5ee19302dadb40badf6cfdd",
+      "size_bytes": 119670,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit",
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_openai_adapter.py",
+      "git_blob": "6e82b1dc75a1a97f7f98bbb7e3b99b6fc82e4e7f",
+      "sha256": "cabe31175f3e069fb41ac5b4a8ca8bae0e871bfe6840c484da6b2b020ddd9329",
+      "size_bytes": 11208,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_qualified_extrema_function_fix_schema.py",
+      "git_blob": "18362e6738b0ddaa040a88361a2527426cea2cfa",
+      "sha256": "f61f07b89f8a7a84ed8e0d0caf00a7cf736f7bf09265a9e6e99740d8b18be32f",
+      "size_bytes": 19751,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "1052e14ab236d2406ca932d1311b91f01dff3a73"
+      ],
+      "migration_identities": [
+        "060_n6_ai_qualified_extrema_function_fix"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_context_latest_grain_and_strategy_scope_070.py",
+      "git_blob": "10eb5af7a7f18c37a95f14c226b2c21bd84d56e5",
+      "sha256": "6b435951799c0d3c350eb0746dae5b8742138bd08eb4245398da96e4638ac026",
+      "size_bytes": 20708,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "384e85a02ebfe3d3dece371e20a795331116e60a"
+      ],
+      "migration_identities": [
+        "070_n6_ai_shadow_context_latest_grain_and_strategy_scope"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix_schema.py",
+      "git_blob": "9173ef23e3a48f57ceee62a9b9af76965092ead7",
+      "sha256": "0335f88c4b46fed1f9e04bb4a91d3243c0d046fde45cfd8216a5cd62cc0b4c3b",
+      "size_bytes": 24308,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "c0795fa1dce4a9a9ff5222bed9d60161a0a83f6b"
+      ],
+      "migration_identities": [
+        "061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_launchd_plan.py",
+      "git_blob": "73ac7e37250ee037a299677e81ce94854cc99a71",
+      "sha256": "de7f380fe772542e9511a5ac086569afdc6694421be044a1bdf123367a3bd3d2",
+      "size_bytes": 30094,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_observation_acceptance.py",
+      "git_blob": "84dfcdc231e6074170dcf2072b5706dbe3e41663",
+      "sha256": "eb6cf3d534c5341c1c85b52f6b4f5e06cafa7937d78084819db881bdc328238c",
+      "size_bytes": 18626,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit",
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_observation_run_audit_schema.py",
+      "git_blob": "1e2ac086591172238005de165b0c7067fa802d94",
+      "sha256": "acd63a21e4e1a01281c7e51ec2ae4948749ff205670977f49e60c751f52ac919",
+      "size_bytes": 35612,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb"
+      ],
+      "migration_identities": [
+        "062_n6_ai_shadow_observation_run_audit"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_schedule_067.py",
+      "git_blob": "21ce6dc015958e2d4a30afe93ecac8cfcc1c7ed1",
+      "sha256": "def11f6dcbfcc8a4349fe5c803dd9b14a8046a46f1a6afc78f1342ee78db3958",
+      "size_bytes": 7729,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "030a4b7b3c7b795575139dde3579ca82b0894b0c"
+      ],
+      "migration_identities": [
+        "067_n6_ai_shadow_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_ai_shadow_schedule_071_sql.py",
+      "git_blob": "7eb3992993a63b5e5dc8e3beb9df101678d8be43",
+      "sha256": "a3ceb0a917d016745e112d448e434516f90df958fbe356710c2df5a27795bb84",
+      "size_bytes": 9588,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb"
+      ],
+      "migration_identities": [
+        "071_n6_ai_shadow_nine_slot_schedule_preflight"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_b_track_signal_projection_poller.py",
+      "git_blob": "16673855f2d090d4afd226c63e57adca8a1d8913",
+      "sha256": "d012be73fa7bbc65ba291ffc7823f10b00f045393e3d6c7c7ee91185cf085322",
+      "size_bytes": 57735,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_btrack_db_role_policy.py",
+      "git_blob": "614060726bfe5bcebe271b6947f115a3127333b9",
+      "sha256": "cc7f8e40b3eefcac13c97c08c6e8532d40167c487d0226bf4f652e01d80d215e",
+      "size_bytes": 78058,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497",
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+        "922025982fff593b1067244d84b228448d02012f",
+        "cbf416e41c3a3692885622f39811954508250181",
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660",
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a",
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "042_n6_b_track_db_role_policy_schema",
+        "044_n6_btrack_scope_write_source_validation",
+        "045_n6_btrack_monitor_lineage_freeze",
+        "046_n6_btrack_virtual_executor_apply",
+        "048_n6_btrack_proposal_scope_and_executor_claim_next",
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute",
+        "052_n6_btrack_proposal_trading_session",
+        "053_n6_btrack_proposal_timestamp_syntax_fix",
+        "054_n6_btrack_filter_bulk_scope",
+        "063_n6_btrack_manual_actionable_buy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_btrack_principal_registration.py",
+      "git_blob": "05445040cedd286c2ec92b3e6c278b79aaf087c5",
+      "sha256": "39b20ed0423a947cd32b3f5979ae5d832ba242ee4d939e8241e8330772c95a25",
+      "size_bytes": 9647,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "996b93356cfc3981efec3adaf44ffdf4ecd7825c"
+      ],
+      "migration_identities": [
+        "043_n6_btrack_legacy_principal_registration"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_canonical_schema_migration_draft.py",
+      "git_blob": "ef48bdbb804a968d539d39a8ef42787d1419cd7d",
+      "sha256": "18d3ffd0abe4b4e3f5eb4f5d4eaa774c0fda7ef613a3d93422eeb3d74ede3f66",
+      "size_bytes": 6351,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_delivery_schema_alignment_migration.py",
+      "git_blob": "a6af6741f8ef30936e67cb57e477a921d00f6eeb",
+      "sha256": "4bc1c3159b17516a70a99f3f27315ca862cb693437227d8dbccf308a2d6a5bf1",
+      "size_bytes": 3694,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_human_virtual_account_provisioning.py",
+      "git_blob": "2ddf79b439a047267e9d4cb9937f6220be4f3611",
+      "sha256": "a05aff6c612c9e77f64f04f4204ff03131740daa0ac825c9bdeefac81b51bf21",
+      "size_bytes": 8363,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884"
+      ],
+      "migration_identities": [
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_owner_principal_initialization.py",
+      "git_blob": "aee7cf51acde432c890323004d9fc06d4222c93c",
+      "sha256": "7f561ab917be613d2f1d08426afc5a3ff7b885212c76e46ab7f212fa44cd5d67",
+      "size_bytes": 8316,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_projection_execute.py",
+      "git_blob": "69a9a7fb33b45b49d1384cc65e2191b06127ce96",
+      "sha256": "547b6724fb1bbe2e97136b9ea3f99f67842f109075ab25d1770e1857354fb275",
+      "size_bytes": 41208,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e2263341588709516eaf35746dde6d0022e1deab"
+      ],
+      "migration_identities": [
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_projection_read_performance_schema.py",
+      "git_blob": "30b11598845200c493e881eb4411dae042719e54",
+      "sha256": "c707fea43df887dea85dfb5dec115ad7523a290b8a778f4e7f4a96c2394d296f",
+      "size_bytes": 6545,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8"
+      ],
+      "migration_identities": [
+        "073_projection_read_performance"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_strategy_center_api.py",
+      "git_blob": "1de5af5b153839f0de2bc411eeb4950c357caf9b",
+      "sha256": "492529db88031e52513b0a568c21d3c275e1552cc176e44646a975ec5d5be239",
+      "size_bytes": 24193,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_strategy_center_matcher.py",
+      "git_blob": "2abe73c87da30dc7fa5b2281d554c025cc716bd6",
+      "sha256": "7215ff982a65b2612c7c9fd559827c2a2904896a45ed03a67eb9ae9434966298",
+      "size_bytes": 17380,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_strategy_center_schema_073.py",
+      "git_blob": "0471ba80179625fea0a79518c684aad9bbf6887c",
+      "sha256": "88d2f3d48478ad5d25aa6dc30fecd8b362a2786e30458cb6915b1e8ee29c53da",
+      "size_bytes": 15403,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_strategy_center_worker.py",
+      "git_blob": "8aa1196c85b8cbd4c7d8b44ea471eadde1b102cd",
+      "sha256": "c9e53eedf33f7d2d71355bc17f767a4f965ad3168a5e75cf8c5b4a92b0fb6d2f",
+      "size_bytes": 9683,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff"
+      ],
+      "migration_identities": [
+        "073_strategy_center_schema"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_user_app.py",
+      "git_blob": "0a17b91c810ffc8d5d9466342643fd9953b47ef9",
+      "sha256": "94318929c714c4c41b5ef11516bfb0e9ec78d5ce0dc711efb7deb963aae9e174",
+      "size_bytes": 836677,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4186e12e0cccfae5dba5be7d1b276a8fd9d83884",
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+        "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497",
+        "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+        "78bea7c61e560d01cb781b07f682ffc17e0125c8",
+        "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+        "922025982fff593b1067244d84b228448d02012f",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249",
+        "c9f0f2109f9bdabb654f874429b508298f0b1dd9",
+        "cbf416e41c3a3692885622f39811954508250181",
+        "e2263341588709516eaf35746dde6d0022e1deab",
+        "e5e531c6af9ae87dd43d479e1844e70f67b86d73",
+        "e5f4b2737b2f801767a810d68471e5fc6011d5e3",
+        "f1f54c9153fdead1ff9e14609503e3e7e2197ec4"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema",
+        "042_n6_b_track_db_role_policy_schema",
+        "044_n6_btrack_scope_write_source_validation",
+        "045_n6_btrack_monitor_lineage_freeze",
+        "052_n6_btrack_proposal_trading_session",
+        "053_n6_btrack_proposal_timestamp_syntax_fix",
+        "054_n6_btrack_filter_bulk_scope",
+        "055_n6_ai_agent_v1_schema",
+        "056_n6_ai_agent_v1_identity_account_seed",
+        "057_n6_ai_agent_execution_compat",
+        "063_n6_btrack_manual_actionable_buy",
+        "064_n6_btrack_trade_date_all_day_buy",
+        "066_n6_btrack_regular_session_manual_buy",
+        "072_n6_web_user_principal_backfill",
+        "073_projection_read_performance",
+        "073_strategy_center_schema",
+        "074_n6_human_virtual_account_provisioning"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_account_bootstrap_v3.py",
+      "git_blob": "94025ae2ea060d0f6843ac89d01a9e950146247a",
+      "sha256": "582b406dedfa276bd749cdca2d5502862a88dc469227b90987ce46cfedf77b7b",
+      "size_bytes": 15564,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_account_seed.py",
+      "git_blob": "0155690bbe06dc44d57b4a15eb8ab17e432ad5e9",
+      "sha256": "c4a8ed141bf9e6d6c74f4c7baf08a104de631b42768ee335f89a74e0028007ce",
+      "size_bytes": 11203,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a959510206211fdbdae03abfda4766b19195d9fb"
+      ],
+      "migration_identities": [
+        "047_n6_virtual_account_bootstrap"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_account_v3.py",
+      "git_blob": "c69d69d3d93e4921abcfbea5204127b98e2d1b45",
+      "sha256": "7e1267d4fe5a44b5aa601c539de13b7f1e668f30bbaab571abb14e5f00a45a37",
+      "size_bytes": 8542,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "a01afad60ce6458fcf2e227d4e260e0607ead249"
+      ],
+      "migration_identities": [
+        "041_n6_b_track_product_v3_schema"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_executor.py",
+      "git_blob": "d28dc9d85bc1c2038f7c0dadd3a81727ff72d7a2",
+      "sha256": "ca718b03c3217ae9d9a6bc7f932cc8d2084f6f6282f01e48bfecb9bf91799e5a",
+      "size_bytes": 69101,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+        "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+        "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+        "d754e308324a004ce8eb1c3fc8f01df5b3535660",
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "046_n6_btrack_virtual_executor_apply",
+        "048_n6_btrack_proposal_scope_and_executor_claim_next",
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute",
+        "063_n6_btrack_manual_actionable_buy",
+        "064_n6_btrack_trade_date_all_day_buy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_quote_persistence.py",
+      "git_blob": "b21be186fb02a1f2fe55387ddd96d03d25b50107",
+      "sha256": "339e725fd9a2781a6b97683491f68da9b1d42b0e3a2c7d7298fe97daf94c549c",
+      "size_bytes": 41033,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "2011e7ca0167042f46e350a1ae0b1860b54b1977",
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3",
+        "a01afad60ce6458fcf2e227d4e260e0607ead249",
+        "a5e2e899e0c5577a41567680094386110d0cd4c6",
+        "af16803fd0f3411ad302b0df36b46b995c9c284c"
+      ],
+      "migration_identities": [
+        "040_n6_virtual_quote_snapshot_schema",
+        "041_n6_b_track_product_v3_schema",
+        "051_n6_virtual_quote_writer_policy",
+        "068_n6_quote_writer_mootdx_compat",
+        "075_n6_executor_quote_ready_claim"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_quote_writer_policy.py",
+      "git_blob": "9ab4e12e021a06a11c8463f8754fea53fb25aa45",
+      "sha256": "f02bd0efcfd80de8783bed6bf16cd64d98c6afb597bf16f9ea04097ef8dd6113",
+      "size_bytes": 10936,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "539bd7895a54211770b2c11d87d676c7c73bf9a3"
+      ],
+      "migration_identities": [
+        "051_n6_virtual_quote_writer_policy"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    },
+    {
+      "path": "tests/test_n6_virtual_stop_loss.py",
+      "git_blob": "b82085f9e53e0d26a844400202106cb39e979348",
+      "sha256": "8100026f3a639811a9e9772e7d381d307b8ad9b22fc523545e5644bb9ac5ebe3",
+      "size_bytes": 12352,
+      "authority_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_commits": [
+        "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a"
+      ],
+      "migration_identities": [
+        "049_n6_virtual_stop_loss_freeze_evaluate_execute"
+      ],
+      "layer_classification": "N6_user_test",
+      "registration_action": "candidate_dependency_requires_N6_user_review"
+    }
+  ],
+  "decision": "Provenance registration only; not an N6 source-restoration allowlist."
+}
