@@ -33,6 +33,7 @@ from ashare_v3.user.projection_plan import (
     action_state_for_event,
     build_base_report,
     build_card_summary,
+    build_event_projection_quality_summary,
     build_planned_row_counts,
     build_projection_report,
     events_for_user_message_filter,
@@ -43,6 +44,11 @@ from ashare_v3.user.projection_plan import (
     normalize_jsonable,
     notification_source_for_event,
     parse_expected_n5_outbox_counts,
+    partition_pct_projection_events,
+    pct_projection_payload_fields,
+    is_projection_message_contract_event,
+    projection_code_for_event,
+    projection_name_for_event,
     projection_policy_for_event,
     utc_now_iso,
 )
@@ -546,7 +552,9 @@ def build_write_plan(
 ) -> ProjectionWritePlan:
     source_events = list(snapshot.input_snapshot.events)
     filter_result = normalize_user_message_event_filter(user_message_event_filter)
-    events = events_for_user_message_filter(source_events, filter_result["event_types"])
+    filtered_events = events_for_user_message_filter(source_events, filter_result["event_types"])
+    pct_partition = partition_pct_projection_events(filtered_events)
+    events = pct_partition["projectable_events"]
     quality_summary = {
         "p0_count": preflight_report["quality"]["p0_count"],
         "p1_count": preflight_report["quality"]["p1_count"],
@@ -564,6 +572,7 @@ def build_write_plan(
         },
         "source_event_count": len(source_events),
         "user_message_event_count": len(events),
+        "event_projection_quality": build_event_projection_quality_summary(pct_partition),
     }
     projection_rows = [build_projection_row(event, projection_run_id, snapshot) for event in events]
     card_rows = [build_card_row(event, projection_run_id, snapshot) for event in events]
@@ -645,6 +654,7 @@ def build_projection_row(event: ProjectionEvent, projection_run_id: str, snapsho
     payload = event.payload_json or {}
     missing = row_missing_fields(event)
     trace = canonical_trace_fields(event)
+    pct_fields = pct_projection_payload_fields(event)
     return {
         "user_projection_run_id": projection_run_id,
         "user_id": snapshot.input_snapshot.admin.user_id if snapshot.input_snapshot.admin else None,
@@ -668,14 +678,14 @@ def build_projection_row(event: ProjectionEvent, projection_run_id: str, snapsho
         "projection_policy": trace["projection_policy"],
         "asset_kind": event.asset_kind,
         "identity_key": event.identity_key,
-        "code": event.code or event.identity_key,
-        "name": event.name or event.identity_key,
+        "code": projection_code_for_event(event),
+        "name": projection_name_for_event(event),
         "direction": str(payload.get("direction") or ""),
         "signal_type": str(payload.get("signal_type") or ""),
         "target_price": decimal_or_none(event.target_price),
         "current_price": decimal_or_none(event.current_price),
         "expected_return_pct": decimal_or_none(event.expected_return_pct),
-        "board_identity_key": None,
+        "board_identity_key": event.board_identity_key,
         "board_code": event.board_code,
         "board_name": event.board_name,
         "source_display_table": event.source_display_table,
@@ -698,6 +708,7 @@ def build_projection_row(event: ProjectionEvent, projection_run_id: str, snapsho
             "source_condition_display_run_id": event.display_run_id,
             "missing_fields": missing,
             "shadow_projection": True,
+            **pct_fields,
         },
     }
 
@@ -705,7 +716,8 @@ def build_projection_row(event: ProjectionEvent, projection_run_id: str, snapsho
 def build_card_row(event: ProjectionEvent, projection_run_id: str, snapshot: ProjectionExecuteSnapshot) -> dict[str, Any]:
     payload = event.payload_json or {}
     trace = canonical_trace_fields(event)
-    title = f"{event.name or event.identity_key} {payload.get('signal_type') or ''}".strip()
+    pct_fields = pct_projection_payload_fields(event)
+    title = f"{projection_name_for_event(event) or ''} {payload.get('signal_type') or ''}".strip()
     return {
         "user_projection_run_id": projection_run_id,
         "user_id": snapshot.input_snapshot.admin.user_id if snapshot.input_snapshot.admin else None,
@@ -716,8 +728,8 @@ def build_card_row(event: ProjectionEvent, projection_run_id: str, snapshot: Pro
         "summary": build_card_summary(event),
         "asset_kind": event.asset_kind,
         "identity_key": event.identity_key,
-        "code": event.code or event.identity_key,
-        "name": event.name or event.identity_key,
+        "code": projection_code_for_event(event),
+        "name": projection_name_for_event(event),
         "direction": str(payload.get("direction") or ""),
         "signal_type": str(payload.get("signal_type") or ""),
         "target_price": decimal_or_none(event.target_price),
@@ -750,6 +762,7 @@ def build_card_row(event: ProjectionEvent, projection_run_id: str, snapshot: Pro
             "real_trade_allowed": False,
             "trigger_period": payload.get("trigger_period"),
             "missing_fields": row_missing_fields(event),
+            **pct_fields,
         },
     }
 
@@ -757,7 +770,7 @@ def build_card_row(event: ProjectionEvent, projection_run_id: str, snapshot: Pro
 def build_notification_row(event: ProjectionEvent, projection_run_id: str, snapshot: ProjectionExecuteSnapshot) -> dict[str, Any]:
     payload = event.payload_json or {}
     trace = canonical_trace_fields(event)
-    title = f"{event.name or event.identity_key} {payload.get('signal_type') or ''}".strip()
+    title = f"{projection_name_for_event(event) or ''} {payload.get('signal_type') or ''}".strip()
     return {
         "user_id": snapshot.input_snapshot.admin.user_id if snapshot.input_snapshot.admin else None,
         "user_projection_run_id": projection_run_id,
@@ -1146,17 +1159,18 @@ def duplicate_source_event_count(events: Sequence[ProjectionEvent]) -> int:
 
 def row_missing_fields(event: ProjectionEvent) -> list[str]:
     missing: list[str] = []
-    if event.display_basis_id is None:
+    projection_message = is_projection_message_contract_event(event)
+    if not projection_message and event.display_basis_id is None:
         missing.append("display_basis")
-    if not event.code or not event.name:
+    if not projection_code_for_event(event) or not projection_name_for_event(event):
         missing.append("code_or_name")
-    if event.current_price is None:
+    if not projection_message and event.current_price is None:
         missing.append("current_price")
     if event.target_price is None:
         missing.append("target_price")
     if event.expected_return_pct is None:
         missing.append("expected_return_pct")
-    if not event.board_code or not event.board_name:
+    if not projection_message and (not event.board_code or not event.board_name):
         missing.append("board_context")
     return missing
 

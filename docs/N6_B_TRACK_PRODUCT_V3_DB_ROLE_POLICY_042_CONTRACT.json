@@ -1,0 +1,66 @@
+{
+  "contract_version": "n6_b_track_db_role_policy_042_v1",
+  "status": "implementation_draft_flags_disabled",
+  "authority": {
+    "browser_inputs": ["opaque_session_cookie"],
+    "database_input": "server_sha256_session_token_hash",
+    "requires": [
+      "active_user_session",
+      "active_user_account",
+      "exactly_one_persistent_active_owned_principal"
+    ],
+    "forbidden": [
+      "client_principal_id",
+      "client_principal_type",
+      "client_user_id",
+      "principal_guc",
+      "session_scoped_fallback_principal"
+    ]
+  },
+  "roles": {
+    "n6_btrack_web": {
+      "direct_table_privileges": [],
+      "functions": [
+        "n6_btrack_resolve_authority",
+        "n6_btrack_monitor_list",
+        "n6_btrack_monitor_upsert",
+        "n6_btrack_monitor_remove",
+        "n6_btrack_realtime_list",
+        "n6_btrack_realtime_upsert",
+        "n6_btrack_realtime_remove",
+        "n6_btrack_proposal_list",
+        "n6_btrack_proposal_create",
+        "n6_btrack_proposal_confirm",
+        "n6_btrack_virtual_trade_list"
+      ],
+      "proposal_transitions": ["insert_pending", "pending_to_confirmed", "pending_to_expired"]
+    },
+    "n6_virtual_executor": {
+      "direct_table_privileges": [],
+      "functions": ["n6_executor_claim_proposal", "n6_executor_finish_proposal"],
+      "proposal_transitions": ["confirmed_to_processing", "processing_to_executed", "processing_to_failed"]
+    }
+  },
+  "security_definer": {
+    "fixed_search_path": "pg_catalog",
+    "fully_qualified_objects": true,
+    "dynamic_sql": false,
+    "public_execute": false
+  },
+  "feature_flags": {
+    "scope_write_enabled_default": false,
+    "proposal_write_enabled_default": false
+  },
+  "migration_forbidden": [
+    "role_creation_or_alteration",
+    "credential_material",
+    "dsn_literal",
+    "base_trade_executor",
+    "runtime_or_scheduler_change"
+  ],
+  "rollback": {
+    "preserves_schema_041": true,
+    "preserves_business_history": true,
+    "blockers": ["active_web_connections", "active_executor_connections", "processing_proposals"]
+  }
+}

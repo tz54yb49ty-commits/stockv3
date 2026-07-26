@@ -898,3 +898,39 @@ N3 market_data_subscription
 N4 trigger_context_snapshot
 N5 action_fact / action_event
 ```
+
+## 8. N3N6Q：N6 虚拟账户报价窄接口
+
+`N3N6Q` 是一个由 `N3_market_data` 拥有、仅供 B轨 N6 虚拟账户 one-shot 调用的同步只读 facade。它是 `N3 -> N6` 标准事件链路之外的窄例外，不改变 `MarketDisplaySnapshotUpdated -> user_market_projection` 的 canonical 展示链路，也不成为 N4/N5 输入。
+
+```text
+N6 virtual-position scope
+  -> N6 按 identity_key 去重
+  -> N3N6Q.fetch_quotes(QuoteIdentity[])
+  -> Mootdx std quotes
+  -> N3N6Q QuoteBatch v1
+  -> N6 trade_date/freshness validation
+  -> N6-only quote snapshot / valuation / stop-loss policy
+```
+
+Authority：
+
+| 能力 | Owner | 边界 |
+|---|---|---|
+| scope、跨账户去重、调度 | N6 | 不向 N3N6Q 传账户或持仓字段 |
+| 外部报价与 source identity 校验 | N3N6Q | stateless；不写 DB、不生成事件 |
+| trade_date、fresh/stale、持久化 | N6 | 只写 N6-owned quote tables |
+| 止损冻结、proposal、虚拟卖出 | N6 | 不回写 N1-N5 |
+| 合同与发布治理 | runtime_control | 只登记和审查，不执行 provider/runtime |
+
+冻结边界：
+
+```text
+N3-A1 / N3-B1 / N3-B2 / N3-C1 / N3P / N3T
+全部现有 N3 poller / worker / LaunchAgent plan
+全部现有 N3 schema / fact / event / outbox / inbox / checkpoint
+```
+
+N3N6Q 不得读取 `minute_target_scope`、`market_data_subscription`、N3 facts 或 N6 position tables。N6 只把标准股票身份列表交给 facade。接口请求只能包含 `identity_key / exchange / stock_code`；响应必须符合 `N3N6Q_FOR_N6_VIRTUAL_ACCOUNT_QUOTE_CONTRACT`。
+
+A轨、admin/status 和浏览器页面不得直接调用 N3N6Q。本例外不开放 HTTP 业务路由，不授权真实交易、券商、语音、N4/N5 变更或跨层回写。

@@ -1,0 +1,120 @@
+{
+  "contract_version": "n6_ai_shadow_observation_acceptance_v1",
+  "migration_identity": "062_n6_ai_shadow_observation_run_audit",
+  "purpose": "Read-only acceptance of the latest continuous DeepSeek system-fingerprint shadow-observation window.",
+  "window": {
+    "selector": "latest_qualified_audit_row_system_fingerprint",
+    "continuity": "maximal_contiguous_suffix_with_current_system_fingerprint",
+    "reset_on_fingerprint_change": true,
+    "historical_windows_are_audit_only": true,
+    "historical_windows_contribute_to_current_readiness": false
+  },
+  "denominator": {
+    "field": "decision_call_attempted",
+    "included_value": true,
+    "identity_probe_excluded": true,
+    "no_new_input_excluded": true,
+    "zero_denominator_rate": null,
+    "zero_denominator_ready": false
+  },
+  "thresholds": {
+    "minimum_open_trade_date_count": 10,
+    "minimum_decision_call_attempt_count": 50,
+    "minimum_structure_valid_rate": 0.99,
+    "accepted_decision_missing_risk_count": 0,
+    "invalid_structure_accepted_count": 0,
+    "maximum_side_effect_count_each": 0,
+    "authority_conflict_count": 0,
+    "unexplained_state_count": 0
+  },
+  "side_effect_fields": {
+    "proposal": "proposal_created_count",
+    "order": "order_created_count",
+    "trade": "trade_created_count",
+    "position": "position_mutation_count",
+    "lot": "lot_mutation_count",
+    "cash": "cash_mutation_count"
+  },
+  "allowed_one_shot_statuses": [
+    "decision_record_rejected",
+    "decision_structure_invalid",
+    "failed_closed",
+    "no_new_input",
+    "shadow_decision_recorded"
+  ],
+  "required_report_fields": [
+    "contract_version",
+    "ready",
+    "current_system_fingerprint",
+    "window_started_at",
+    "window_trade_dates",
+    "open_trade_date_count",
+    "audit_row_count",
+    "decision_call_attempt_count",
+    "structure_valid_count",
+    "structure_valid_rate",
+    "accepted_decision_count",
+    "accepted_decision_missing_risk_count",
+    "invalid_structure_accepted_count",
+    "side_effects",
+    "gaps",
+    "evidence_sha256"
+  ],
+  "evidence_input": {
+    "boundary": "approved_function_only_read_entrypoint_or_injected_repository",
+    "injected_method": "load_shadow_observation_acceptance_evidence",
+    "requires_source_complete": true,
+    "requires_source_order_proven": true,
+    "requires_expected_enabled_one_shot_count": true,
+    "open_dates_source": "approved_trade_calendar_function_only_result",
+    "base_table_reads": false,
+    "direct_sql": false,
+    "dml": false
+  },
+  "forbidden_sources": [
+    "direct_audit_table_select",
+    "direct_trade_calendar_select",
+    "base_table_or_sequence_access",
+    "web_or_executor_credentials",
+    "runtime_stdout_history_as_acceptance_source",
+    "prompt_or_model_content",
+    "human_identity_data"
+  ],
+  "forbidden_output_fields": [
+    "prompt",
+    "content",
+    "reasoning",
+    "response_id",
+    "credential",
+    "session",
+    "identity_key",
+    "stock_code",
+    "person_name"
+  ],
+  "exit_codes": {
+    "ready": 0,
+    "not_ready_or_invalid_evidence": 2
+  },
+  "serialization": {
+    "format": "stable_sorted_compact_json",
+    "wall_clock_fields": false,
+    "random_fields": false,
+    "same_input_same_bytes": true
+  },
+  "safety_boundaries": {
+    "read_only": true,
+    "executes_migration_or_rollback": false,
+    "connects_without_injected_repository": false,
+    "starts_runtime_or_strategy_runner": false,
+    "modifies_start_interval_or_launch_agent": false,
+    "autonomous_trading": false,
+    "real_trading": false,
+    "production_agent_usable": false
+  },
+  "rollback_boundary": {
+    "acceptance_artifacts_are_code_only": true,
+    "migration_rollback_is_not_executed": true,
+    "nonempty_062_audit_history_must_be_preserved": true,
+    "phase_055_through_061_objects_are_untouched": true
+  }
+}

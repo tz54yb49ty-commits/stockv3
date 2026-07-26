@@ -1,0 +1,68 @@
+{
+  "contract_version": "n6_btrack_regular_session_manual_buy_066_v1",
+  "layer_role": "N6_user",
+  "status": "implementation_ready_not_deployed",
+  "scope": {
+    "purpose": "Restore manual virtual trading to Shanghai regular trading sessions while retaining the 065B current-date scope and confirmed proposal fixes.",
+    "open_trade_date_required": true,
+    "shanghai_sessions": [
+      "09:30:00-11:30:00",
+      "13:00:00-15:00:00"
+    ],
+    "gated_operations": [
+      "proposal_create",
+      "proposal_confirm",
+      "executor_claim",
+      "executor_apply"
+    ]
+  },
+  "manual_signal_buy": {
+    "action_states": [
+      "eligible",
+      "executed"
+    ],
+    "fresh_quote_max_age_seconds": 120,
+    "quote_quality_status": "passed",
+    "quote_quality_reason": "ok",
+    "quote_identity_must_match": true,
+    "same_day_last_quote_fallback": false,
+    "signal_reference_price_fill_fallback": false,
+    "fill_policy_id": "n6_066_fresh_quote_fill_v1",
+    "executor_policy_version": "n6_btrack_regular_session_manual_buy_066_v1",
+    "proposal_generation_lineage_preserved": "n6_btrack_trade_date_all_day_buy_064_v1"
+  },
+  "preserved_rules": [
+    "two explicit user actions and 60-second pending confirmation window",
+    "current Asia/Shanghai open trade date and current projection",
+    "personal monitor scope and virtual account authority",
+    "server-side 300000 CNY buy budget and 100-share rounding",
+    "cash sufficiency and T+1 lot availability",
+    "eligible uses trigger_price and executed uses action_price",
+    "missing target price opens with target_price_status=not_ready",
+    "existing position target price state is not overwritten by an add-on buy",
+    "AI account, sell and stop-loss rules remain fail-closed"
+  ],
+  "stop_loss": {
+    "changed": false,
+    "first_day_day_low_quote_window": "14:55:00-15:05:00",
+    "effective_from": "next_open_trade_date",
+    "synthetic_stop_price_allowed": false
+  },
+  "existing_positions": {
+    "historical_rows_rewritten": false,
+    "existing_cash_positions_and_t1_lots_retained": true,
+    "missing_first_day_day_low_backfilled": false
+  },
+  "interfaces": {
+    "api_changed": false,
+    "client_price_quantity_account_or_date_input_allowed": false,
+    "real_broker_connected": false
+  },
+  "migration": {
+    "forward": "sql/066_n6_btrack_regular_session_manual_buy.sql",
+    "rollback": "sql/066_n6_btrack_regular_session_manual_buy_rollback.sql",
+    "business_row_dml": false,
+    "deployment_authorized_by_this_contract": false,
+    "virtual_trade_smoke_authorized_by_this_contract": false
+  }
+}

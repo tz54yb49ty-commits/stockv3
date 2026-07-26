@@ -541,6 +541,25 @@ previous_seen OR today_match = true
 
 正向存在性证据不依赖完整负向覆盖：`ready + seen=true` 可以同时保留 `coverage_status=incomplete` 和缺失交易日用于审计。后续未命中日必须保留首次/最近命中日期及 latest source ref；负向结论只有覆盖完整时才允许成为 `not_seen`。N2 禁止从 N3/N4/N5 状态累积或反推，N4 只能消费该冻结 JSON 或本地化副本，不得回查 N1 或自行重算。
 
+#### 3.3.4 N2 条件投影上下文
+
+`period_trigger_baseline_json` 同时承载 N2 拥有、供 N4/N5/N6 原样透传的版本化对象：
+
+```text
+condition_projection_context
+contract_version = N2-condition-projection-context-v1
+```
+
+公共字段为 `name / close / up_reference_period / buy_target_price / buy_expected_return_pct / down_reference_period / sell_target_price / sell_expected_return_pct / clear_sell_ref_period / up_secondary_target_price / up_secondary_expected_return_pct`；stock 额外包含 `score / pe_core`。board 的 `name` 来源为 `board_name`。
+
+`close` 只使用 `condition_basis.raw_json.close`，并必须与 `period_trigger_baseline_json.periods.D.current_close_seed` Decimal 等值；它代表 `source_trade_date` 收盘价，不是盘中实时价。所有数值以无多余尾零的 Decimal 字符串冻结。参考周期只允许 `Y/Q/M/W/D`。
+
+核心合同为 version、source_layer、asset_kind、identity_key、source/for trade date、非空 name、正数 close 及 close 双来源一致性。核心不满足时 `status=not_ready` 并记录稳定 `not_ready_reasons`；其他字段缺失时保留 key、值为 `null`，并进入 `nullable_fields`。`clear_sell_ref_period` 与 `up_sell_reference_period` 必须同时为空或取值相等。
+
+`context_hash` 对排除自身后的完整 payload 使用 canonical sorted JSON SHA256。相同 N2 输入重跑必须得到相同 hash。该对象由 basis 一次生成，pool、scope 和 execute 只能复制完整 `period_trigger_baseline_json`，不得重新组装或解释字段。历史 run 缺少该子对象时只按冻结旧合同读取，不回填、不改写。
+
+该扩展使用现有 JSONB 列，不新增物理列，不需要 schema migration；不得改变 condition rule、signal type、N3 subscription grain 或下游 dedup。
+
 
 不允许事项：
 

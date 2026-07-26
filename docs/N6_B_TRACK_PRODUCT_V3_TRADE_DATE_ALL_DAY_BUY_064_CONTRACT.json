@@ -1,0 +1,243 @@
+{
+  "contract_id": "N6_B_TRACK_PRODUCT_V3_TRADE_DATE_ALL_DAY_BUY_064",
+  "status": "implementation_ready_not_deployed",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "base_commit": "d40f6ccb368e1e635473a9d6fb54316d0c7684cb",
+  "policy_version": "n6_btrack_trade_date_all_day_buy_064_v1",
+  "scope": {
+    "principal_types": [
+      "admin",
+      "human_user"
+    ],
+    "source_type": "signal",
+    "side": "buy",
+    "asset_kind": "stock",
+    "action_states": {
+      "eligible": {
+        "button_label": "买入准备",
+        "frozen_reference_kind": "trigger_price"
+      },
+      "executed": {
+        "button_label": "买入确认",
+        "frozen_reference_kind": "action_price"
+      }
+    },
+    "for_trade_date": "must_equal_Asia_Shanghai_current_date",
+    "calendar": "common_trade_calendar_current_date_exactly_one_is_open_true",
+    "allowed_clock_window": "00:00:00_through_23:59:59",
+    "cross_midnight": "fail_closed",
+    "excluded": [
+      "signal_sell",
+      "manual_position_sell",
+      "stop_loss",
+      "ai_user",
+      "ai_risk"
+    ]
+  },
+  "server_revalidation": {
+    "stages": [
+      "proposal_create",
+      "proposal_confirm",
+      "executor_apply"
+    ],
+    "checks": [
+      "current_open_trade_date",
+      "proposal_for_trade_date_current",
+      "current_user_projection",
+      "eligible_or_executed_action_state",
+      "reference_kind_matches_action_state",
+      "positive_finite_frozen_reference_price",
+      "active_principal_owned_by_user",
+      "exact_active_virtual_account",
+      "current_condition_display_basis_identity",
+      "current_open_position_or_personal_monitor_scope"
+    ],
+    "private_helper": {
+      "function": "public.n6_btrack_manual_signal_buy_current_scope(bigint,text,bigint,bigint,bigint,text,text,numeric,text)",
+      "security_definer": true,
+      "search_path": "pg_catalog",
+      "direct_execute_roles": [],
+      "public_execute": false
+    }
+  },
+  "proposal_and_confirmation": {
+    "create_function": "public.n6_btrack_proposal_create(text,text,bigint)",
+    "confirm_function": "public.n6_btrack_proposal_confirm(text,bigint,text)",
+    "allowed_role": "n6_btrack_web",
+    "pending_ttl_seconds": 60,
+    "two_explicit_actions_preserved": true,
+    "idempotent_confirmation_preserved": true,
+    "confirmation_generation": {
+      "source": "server_generated_uuid_per_create_or_rearm",
+      "public_field": "confirmation_generation_token",
+      "transport": "existing_Idempotency-Key_header",
+      "format": "n6v3:<confirmation_generation_token>:<confirmation_nonce>",
+      "server_binding_required_for_pending_and_confirmed": true,
+      "old_or_missing_generation": "fail_closed_proposal_generation_mismatch",
+      "mismatch_recovery": "reload_latest_proposal_and_replace_cached_generation_token",
+      "api_path_or_body_change": false
+    },
+    "client_payload_fields": [
+      "source_type",
+      "source_id"
+    ],
+    "forbidden_client_payload_fields": [
+      "price",
+      "quantity",
+      "account",
+      "trade_date",
+      "target_price"
+    ],
+    "expired_retry": {
+      "list_effective_status": "raw_pending_or_confirmed_with_expires_at_not_after_now_is_expired",
+      "storage_rule": "rearm_same_proposal_row",
+      "rearmable_raw_statuses": [
+        "expired",
+        "failed",
+        "rejected",
+        "expired_pending",
+        "expired_confirmed"
+      ],
+      "never_rearm": [
+        "active_pending",
+        "active_confirmed",
+        "processing",
+        "executed",
+        "any_order_exists",
+        "any_trade_exists"
+      ],
+      "rearm_effect": [
+        "new_60_second_pending_window",
+        "new_confirmation_generation_token",
+        "refresh_current_frozen_signal_reference",
+        "refresh_current_target_candidate",
+        "clear_confirmation_and_executor_terminal_fields",
+        "append_manual_retry_audit"
+      ],
+      "preserve_unconditional_signal_once_unique_index": true,
+      "delete_or_duplicate_history": false,
+      "confirm_expiry_check_precedes_confirmed_idempotency": true
+    }
+  },
+  "fill_price_policy": {
+    "executor_function": "public.n6_executor_apply_claimed_proposal(bigint,text)",
+    "allowed_role": "n6_virtual_executor",
+    "priority": [
+      {
+        "rank": 1,
+        "source": "quote_current_price",
+        "requirements": [
+          "same_identity_and_exchange",
+          "same_Asia_Shanghai_trade_date",
+          "quote_minute_in_regular_session",
+          "quality_status_passed",
+          "quality_reason_ok",
+          "positive_finite_current_price",
+          "quote_and_fetch_not_future",
+          "quote_and_fetch_age_at_most_2_minutes"
+        ],
+        "fill_quote_snapshot_id": "quote.virtual_quote_snapshot_id",
+        "fill_policy_version": "n6_064_fresh_quote_fill_v1"
+      },
+      {
+        "rank": 2,
+        "source": "same_day_last_quote_current_price",
+        "clock_scope": "lunch_break_or_after_15:00",
+        "requirements": [
+          "same_identity_and_exchange",
+          "same_Asia_Shanghai_trade_date",
+          "quote_minute_in_regular_session",
+          "quality_status_passed",
+          "quality_reason_ok",
+          "positive_finite_current_price",
+          "fetch_not_before_quote"
+        ],
+        "fill_quote_snapshot_id": "quote.virtual_quote_snapshot_id",
+        "fill_policy_version": "n6_064_same_day_last_quote_fill_v1"
+      },
+      {
+        "rank": 3,
+        "source": "signal_reference_price",
+        "fields": {
+          "eligible": "trigger_price",
+          "executed": "action_price"
+        },
+        "fill_quote_snapshot_id": null,
+        "fill_policy_version": "n6_064_signal_reference_fill_v1"
+      }
+    ],
+    "lineage_fields": [
+      "fill_quote_snapshot_id",
+      "fill_price_source",
+      "fill_price_field",
+      "fill_fallback_reason",
+      "fill_policy_version",
+      "for_trade_date"
+    ],
+    "non_manual_buy_behavior": "preserve_063_regular_session_and_fresh_quote_fail_closed"
+  },
+  "position_policy": {
+    "buy_budget_cny": 300000,
+    "round_lot": 100,
+    "cash_check": true,
+    "t_plus_1_lot": true,
+    "new_or_reopened_with_positive_target": {
+      "locked_target_price": "proposal.locked_target_price",
+      "target_price_status": "frozen",
+      "target_price_source_signal_projection_id": "proposal.source_signal_projection_id"
+    },
+    "new_or_reopened_without_positive_target": {
+      "locked_target_price": null,
+      "target_price_status": "not_ready",
+      "target_price_source_signal_projection_id": null
+    },
+    "same_episode_add": "preserve_existing_target_fields",
+    "target_related_sell_behavior": "fail_closed_until_separate_N6_target_gate"
+  },
+  "browser": {
+    "pending_message": "准备完成，请再次确认",
+    "trade_fill_labels": {
+      "quote_current_price": "行情成交价",
+      "trigger_price": "触发价虚拟成交",
+      "action_price": "动作价虚拟成交"
+    },
+    "explicit_errors": [
+      "proposal_trade_date_not_current",
+      "current_open_trade_date_required",
+      "signal_reference_price_invalid",
+      "signal_not_in_effective_scope",
+      "proposal_generation_mismatch",
+      "proposal_expired",
+      "proposal_retry_scope_mismatch"
+    ]
+  },
+  "preserved_boundaries": {
+    "quote_writer_schedule_changed": false,
+    "mootdx_change_is_direct_root_cause": false,
+    "n1_n5_writeback": false,
+    "real_broker_connected": false,
+    "real_order_created": false
+  },
+  "rollback": {
+    "restore_exact_063_proposal_create_sha256": "9c48b25da0b8e25dfcb0887c57f0c947a57d5d647d2fe2df9d66bdf210e1189f",
+    "restore_exact_042_proposal_list_sha256": "cb8347a41f10cdf8b0a74da7307ead67b35cca533cfd8cbd4478bb73990df8ce",
+    "restore_exact_042_proposal_confirm_sha256": "a2ded4aee0885c8ca29fe05d528ce28f29ea2f26d183cb02e0bf009ffff2b22c",
+    "restore_exact_042_transition_guard_sha256": "3551fd5d1137dab8eff8185fe8f9ab5e48e65b8f316f3c11abb75e80f88254f2",
+    "restore_exact_063_executor_sha256": "2ba49faf1d4f6cf5f3765b8eb892c9e900f81f6f7add6013e4e6022f10bedce3",
+    "drop_private_064_helper": true,
+    "restore_owner_security_definer_search_path_and_acl": true,
+    "preserve_historical_proposals_orders_trades_cash_lots_positions_and_events": true
+  },
+  "runtime": {
+    "active_database_read_only_preflight_performed": true,
+    "active_database_write_performed": false,
+    "active_migration_executed_in_this_gate": false,
+    "isolated_postgresql_16_migration_roundtrip_passed": true,
+    "isolated_postgresql_16_business_acceptance_passed": true,
+    "release_built_or_switched_in_this_gate": false,
+    "proposal_or_confirm_sent_in_this_gate": false,
+    "executor_started_in_this_gate": false,
+    "broker_or_real_order_touched_in_this_gate": false
+  }
+}

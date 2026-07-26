@@ -18,8 +18,9 @@ from ashare_v3.condition.scope import (
 
 
 def period_trigger_baseline_json() -> dict[str, object]:
-    return {
+    baseline = {
         "baseline_version": "N2-R4-period-trigger-baseline-v1",
+        "condition_projection_context": condition_projection_context(),
         "periods": {
             period: {
                 "baseline_ready": True,
@@ -42,6 +43,24 @@ def period_trigger_baseline_json() -> dict[str, object]:
             }
             for period in ("Y", "Q", "M", "W", "D")
         },
+    }
+    baseline["period_escalation_context"] = {
+        "contract_version": "N2-period-escalation-context-v1",
+        "generation_mode": "directional_incremental_v1",
+        "context_hash": "test-context-hash",
+    }
+    return baseline
+
+
+def condition_projection_context() -> dict[str, object]:
+    return {
+        "contract_version": "N2-condition-projection-context-v1",
+        "source_layer": "N2_condition",
+        "status": "ready",
+        "fields": {"name": "fixture", "close": "11"},
+        "nullable_fields": [],
+        "not_ready_reasons": [],
+        "context_hash": "condition-projection-context-hash",
     }
 
 
@@ -162,6 +181,15 @@ class MinuteTargetScopeTest(unittest.TestCase):
         self.assertTrue(sell_row["previous_day_minute_required"])
         self.assertEqual(sell_row["market_data_consumer"], "both")
         self.assertEqual(row["period_trigger_baseline_json"]["baseline_version"], "N2-R4-period-trigger-baseline-v1")
+        self.assertEqual(row["period_trigger_baseline_json"], pool_report["pool_preview"]["stock"]["pool_rows"][0]["period_trigger_baseline_json"])
+        self.assertEqual(
+            row["period_trigger_baseline_json"]["condition_projection_context"],
+            condition_projection_context(),
+        )
+        self.assertEqual(
+            row["period_trigger_baseline_json"]["period_escalation_context"]["generation_mode"],
+            "directional_incremental_v1",
+        )
         self.assertEqual(scope["previous_day_minute_date_mismatch_count"], 0)
 
     def test_index_and_board_scope_are_built_from_condition_pool_rows(self) -> None:
@@ -255,6 +283,10 @@ class MinuteTargetScopeTest(unittest.TestCase):
         self.assertTrue(index_scope["scope_rows"][0]["previous_day_minute_required"])
         self.assertEqual(index_scope["scope_rows"][0]["market_data_consumer"], "both")
         self.assertEqual(index_scope["scope_rows"][0]["period_trigger_baseline_json"]["baseline_version"], "N2-R4-period-trigger-baseline-v1")
+        self.assertEqual(
+            index_scope["scope_rows"][0]["period_trigger_baseline_json"]["condition_projection_context"],
+            condition_projection_context(),
+        )
         self.assertEqual(index_scope["scope_rows"][1]["condition_key"], "BUY:M")
         self.assertTrue(index_scope["scope_rows"][1]["minute_required"])
         self.assertTrue(index_scope["scope_rows"][1]["previous_day_minute_required"])
@@ -270,6 +302,10 @@ class MinuteTargetScopeTest(unittest.TestCase):
         self.assertTrue(board_scope["scope_rows"][0]["previous_day_minute_required"])
         self.assertEqual(board_scope["scope_rows"][0]["market_data_consumer"], "both")
         self.assertEqual(board_scope["scope_rows"][0]["period_trigger_baseline_json"]["baseline_version"], "N2-R4-period-trigger-baseline-v1")
+        self.assertEqual(
+            board_scope["scope_rows"][0]["period_trigger_baseline_json"]["condition_projection_context"],
+            condition_projection_context(),
+        )
         self.assertEqual(board_scope["scope_rows"][1]["condition_key"], "SELL:W,D")
         self.assertTrue(board_scope["scope_rows"][1]["minute_required"])
         self.assertTrue(board_scope["scope_rows"][1]["previous_day_minute_required"])

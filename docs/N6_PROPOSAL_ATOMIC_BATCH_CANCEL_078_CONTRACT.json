@@ -1,0 +1,92 @@
+{
+  "contract_version": "n6-proposal-atomic-batch-cancel-078-v1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "result": "IMPLEMENTATION_READY",
+  "baseline": {
+    "commit": "356bbcbd09caaba1b9f4c87404c5db5f969119b2",
+    "tree": "7377208ebd637dd3c2140c95aec3a2c4589433de",
+    "highest_migration": "077",
+    "candidate_migration": "078",
+    "cancel_function": "absent",
+    "transition_guard_source_sha256": "c93231dd1bd456c34c954769016442d7e7fb04f0c040a18ca3a346b6e9745a9c"
+  },
+  "database_interface": {
+    "signature": "public.n6_btrack_proposals_cancel(text,bigint[])",
+    "source_sha256": "38560d8887b0ca6f626a51f4114f36e1de1c1864442b3bedd8db2a0541722b09",
+    "owner": "ashare_v3_user",
+    "security_definer": true,
+    "volatility": "VOLATILE",
+    "parallel": "UNSAFE",
+    "search_path": "pg_catalog",
+    "execute_roles": [
+      "ashare_v3_user",
+      "n6_btrack_web"
+    ],
+    "web_table_dml": false,
+    "max_proposal_ids": 100,
+    "fixed_lock_order": "proposal_id_ascending",
+    "single_transaction": true
+  },
+  "cancellation_policy": {
+    "policy_version": "n6_btrack_proposal_cancel_078_v1",
+    "input_fields": [
+      "proposal_ids"
+    ],
+    "server_resolved_fields": [
+      "user_id",
+      "principal_id",
+      "principal_type",
+      "virtual_account_id"
+    ],
+    "cancelable_statuses": [
+      "pending",
+      "confirmed"
+    ],
+    "cancelled_status": "rejected",
+    "failure_reason": "cancelled_by_user",
+    "audit_path": "source_lineage_json.cancellation_audit[]",
+    "audit_fields": [
+      "cancelled_at",
+      "cancelled_by_principal_id",
+      "cancellation_policy_version"
+    ],
+    "all_or_zero": true,
+    "all_same_owner_cancelled_retry_is_idempotent": true,
+    "mixed_cancelled_and_cancelable_is_fail_closed": true
+  },
+  "transition_guard": {
+    "old_source_sha256": "c93231dd1bd456c34c954769016442d7e7fb04f0c040a18ca3a346b6e9745a9c",
+    "new_source_sha256": "8c0e5f213c7c3e83eb7c488bb3302f94de86db98c4a95901f4776e44aec2ebf8",
+    "minimal_new_transition": "pending_or_confirmed_to_rejected_by_controlled_web_function",
+    "other_transitions_preserved": true
+  },
+  "web_api": {
+    "method": "POST",
+    "path": "/api/n6/app/v3/virtual-account/proposals/cancel",
+    "csrf_required": true,
+    "authenticated_session_required": true,
+    "body_schema": {
+      "proposal_ids": "non_empty_unique_positive_bigint_array_max_100"
+    },
+    "extra_fields_rejected": true,
+    "one_database_call": true
+  },
+  "rollback": {
+    "drops_cancel_function": true,
+    "restores_transition_guard_source_sha256": "c93231dd1bd456c34c954769016442d7e7fb04f0c040a18ca3a346b6e9745a9c",
+    "restores_guard_owner_acl_security_and_search_path": true,
+    "restores_cancelled_proposals": false,
+    "deletes_cancellation_audit": false
+  },
+  "side_effect_boundary": {
+    "deploys": false,
+    "connects_active_database": false,
+    "cancels_existing_proposals": false,
+    "starts_executor": false,
+    "creates_or_confirms_proposal": false,
+    "modifies_order_trade_cash_position_lot": false,
+    "real_trade": false
+  }
+}

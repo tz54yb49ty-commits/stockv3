@@ -1,0 +1,67 @@
+{
+  "contract_version": "n6_quote_writer_mootdx_compat_068_v1",
+  "layer_role": "N6_user",
+  "status": "implementation_ready_not_deployed",
+  "n3n6q_boundary": {
+    "shared_contract_frozen": true,
+    "shared_source_files_modified": false,
+    "source_time_semantics": "provider_intraday_time_without_trade_date",
+    "n6_owned_adapter_only": true
+  },
+  "endpoint_protocol_probe": {
+    "sentinel_stock_code": "600000",
+    "market": 1,
+    "servertime_type": "string",
+    "servertime_format": "HH:MM|HH:MM:SS|HH:MM:SS.fraction",
+    "positive_finite_fields": [
+      "price",
+      "low"
+    ],
+    "invalid_endpoint_action": "close_and_failover"
+  },
+  "numeric_persistence": {
+    "fields": [
+      "price",
+      "last_close",
+      "open",
+      "high",
+      "low"
+    ],
+    "postgres_type": "numeric(24,8)",
+    "canonical_scale": 8,
+    "rounding": "ROUND_HALF_UP",
+    "nonfinite_or_overflow": "fail_closed_provider_error",
+    "idempotent_compare_compatible": true
+  },
+  "quote_scope": {
+    "positions_unchanged": true,
+    "pending_proposal_requires_unexpired": true,
+    "ai_confirmed_proposal_requires_unexpired": true,
+    "human_confirmed_current_day_manual_signal_buy_survives_expiry": true,
+    "current_scope_helper": "n6_btrack_manual_signal_buy_current_scope",
+    "open_trade_date_required": true,
+    "shanghai_sessions": [
+      "09:30:00-11:30:00",
+      "13:00:00-15:00:00"
+    ]
+  },
+  "proposal_impact": {
+    "proposal_ids": [5, 6, 7],
+    "identities": [
+      "stock:SZ:301285",
+      "stock:SZ:301571",
+      "stock:SZ:300747"
+    ],
+    "deployment_effect": "If still confirmed and current-scope-valid, they re-enter quote scope; after a fresh passed quote, the persistent executor can claim and fill them automatically, oldest first.",
+    "deployment_requires_explicit_authorization": true,
+    "automatic_execution_authorized_by_this_contract": false
+  },
+  "migration": {
+    "forward": "sql/068_n6_quote_writer_mootdx_compat.sql",
+    "rollback": "sql/068_n6_quote_writer_mootdx_compat_rollback.sql",
+    "business_row_dml": false,
+    "historical_rows_deleted": false,
+    "deployment_authorized_by_this_contract": false,
+    "virtual_trade_smoke_authorized_by_this_contract": false
+  }
+}

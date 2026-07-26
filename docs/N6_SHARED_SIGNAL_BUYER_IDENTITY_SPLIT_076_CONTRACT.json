@@ -1,0 +1,122 @@
+{
+  "contract_version": "N6_SHARED_SIGNAL_BUYER_IDENTITY_SPLIT_076_V1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "kernel_check": "ACCEPT",
+  "baseline": {
+    "commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+    "tree": "c10ddfcac50ec34edf1630f39fbd50499ddb6470",
+    "highest_migration": "075",
+    "helper_signature": "public.n6_btrack_manual_signal_buy_current_scope(bigint,text,bigint,bigint,bigint,text,text,numeric,text)",
+    "helper_source_sha256": "a12ae3e8e8040ecb7459d08c69d263feb578b10b86d150fdb11488f6b7779d49"
+  },
+  "migration": {
+    "number": "076",
+    "forward_file": "sql/076_n6_shared_signal_buyer_identity_split.sql",
+    "rollback_file": "sql/076_n6_shared_signal_buyer_identity_split_rollback.sql",
+    "new_helper_source_sha256": "fa772cb72c1751060032552865350dc6f8dedcdc413bcab5a4e5e789600bcd3a",
+    "rewritten_function_source_sha256": {
+      "n6_btrack_proposal_create": "a8a87ee9e97fdd3b8f865f90947fc6caf593d81f23174b0351365f8f3897cbff",
+      "n6_executor_claim_proposal": "f5e8fadd1b27576726e819cdc696324732b1930652590c9c13dd8151297bb5e3",
+      "n6_executor_claim_next_proposal": "f4bfb58c249441c5d4c4af72b163e22ce1f85edcc6abe634314b2c12805c78c6"
+    },
+    "business_row_dml": false,
+    "table_or_schema_change": false,
+    "deployment_authorized_by_this_contract": false
+  },
+  "shared_signal_source_authority": {
+    "relation": "public.n6_ai_shared_signal_projection",
+    "required_shared_status": "active",
+    "exact_match_fields": [
+      "source_signal_projection_id",
+      "user_projection_run_id",
+      "source_event_id",
+      "source_outbox_id",
+      "source_action_event_id",
+      "source_action_run_id",
+      "for_trade_date",
+      "asset_kind",
+      "identity_key",
+      "code",
+      "name",
+      "direction",
+      "signal_type",
+      "action_state",
+      "action_mark",
+      "trigger_price",
+      "action_price"
+    ],
+    "projection_owner_is_not_buyer_authority": true,
+    "source_projection_run_must_remain_passed_n5_b_track": true,
+    "copy_shared_projection": false
+  },
+  "buyer_authority": {
+    "source": "server_authenticated_session",
+    "required_principal_status": "active",
+    "required_virtual_account_status": "active",
+    "required_effective_scope_any_of": [
+      "open_virtual_position",
+      "current_reviewed_user_monitor_stock",
+      "active_user_realtime_monitor_scope"
+    ],
+    "proposal_owner_fields": [
+      "user_id",
+      "principal_id",
+      "virtual_account_id"
+    ],
+    "client_identity_fields_forbidden": [
+      "user_id",
+      "principal_id",
+      "virtual_account_id",
+      "source_user_id",
+      "projection_user_id"
+    ]
+  },
+  "revalidation": {
+    "shared_helper_is_reused_by": [
+      "proposal_create",
+      "proposal_retry",
+      "proposal_confirm",
+      "executor_explicit_claim",
+      "executor_claim_next",
+      "executor_apply"
+    ],
+    "fail_closed_on_shared_or_buyer_drift": true
+  },
+  "api": {
+    "route": "POST /api/n6/app/v3/virtual-account/proposals",
+    "unchanged": true,
+    "allowed_client_fields": [
+      "source_type",
+      "source_id"
+    ],
+    "client_price_quantity_account_or_identity_forbidden": true
+  },
+  "preserved_rules": {
+    "current_open_trade_date": true,
+    "regular_trade_session": true,
+    "fresh_passed_quote": true,
+    "server_budget_cny": 300000,
+    "board_lot_size": 100,
+    "cash_check": true,
+    "t_plus_one": true,
+    "real_broker_connection": false,
+    "real_order_execution": false
+  },
+  "existing_data": {
+    "rewrite_proposal_order_trade_cash_position_or_lot": false,
+    "claim_or_execute_existing_confirmed_proposals": false,
+    "executor_must_remain_unloaded_during_deployment": true
+  },
+  "rollback": {
+    "restores_helper_source_sha256": "a12ae3e8e8040ecb7459d08c69d263feb578b10b86d150fdb11488f6b7779d49",
+    "restores_owner": "ashare_v3_user",
+    "security_definer": true,
+    "volatility": "VOLATILE",
+    "parallel": "UNSAFE",
+    "search_path": "pg_catalog",
+    "execute_acl": "owner_only",
+    "deletes_history": false
+  }
+}

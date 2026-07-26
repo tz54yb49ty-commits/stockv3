@@ -11,10 +11,20 @@ from ashare_v3.user.projection_execute import (
     PREFLIGHT_JSON_PATH,
     ROLLBACK_SQL_PATH,
     ProjectionExecuteSnapshot,
-    run_projection_shadow_execute,
+    build_card_row,
+    build_projection_row,
+    build_write_plan,
+    run_projection_shadow_execute as production_run_projection_shadow_execute,
     validate_design_artifacts,
 )
-from test_n6_projection_plan import FakeProjectionRepository, default_snapshot, projection_event
+from test_n6_projection_plan import (
+    FakeProjectionRepository,
+    add_projection_message_contract,
+    default_snapshot,
+    freeze_stock_industry_context,
+    industry_membership_row,
+    projection_event,
+)
 
 
 class FakeExecuteRepository:
@@ -40,6 +50,131 @@ class FakeExecuteRepository:
 
 
 class N6ProjectionExecuteTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._temporary_directory = tempfile.TemporaryDirectory()
+        artifact_root = Path(cls._temporary_directory.name)
+        cls.contract_path = str(artifact_root / "contract.json")
+        cls.preflight_path = str(artifact_root / "preflight.json")
+        Path(cls.contract_path).write_text(
+            json.dumps(
+                {
+                    "result": "CONTRACT_PASS",
+                    "notification_queue_policy": "immediate",
+                    "user_message_event_filter": {
+                        "include_event_types": ["ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped"]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        Path(cls.preflight_path).write_text(json.dumps({"result": "PREFLIGHT_PASS"}), encoding="utf-8")
+        globals()["run_projection_shadow_execute"] = cls.run_projection_shadow_execute
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        del globals()["run_projection_shadow_execute"]
+        cls._temporary_directory.cleanup()
+
+    @classmethod
+    def run_projection_shadow_execute(cls, **kwargs):
+        kwargs.setdefault("contract_json_path", cls.contract_path)
+        kwargs.setdefault("preflight_json_path", cls.preflight_path)
+        return production_run_projection_shadow_execute(**kwargs)
+
+    def test_projection_message_rows_preserve_payload_and_frozen_industry(self) -> None:
+        event = projection_event(
+            event_id="evt_projection_message_industry",
+            event_type="ActionExecuted",
+            direction="buy",
+            signal_type="B_BUY",
+            action_mark="normal",
+        )
+        add_projection_message_contract(event)
+        event.code = "forbidden-legacy-code"
+        event.name = "forbidden legacy name"
+        event = freeze_stock_industry_context(
+            [event],
+            [industry_membership_row(event.identity_key, "board:TDX:880001", "880001", "银行")],
+        )[0]
+        snapshot = default_execute_snapshot()
+
+        projection = build_projection_row(event, DEFAULT_PROJECTION_RUN_ID, snapshot)
+        card = build_card_row(event, DEFAULT_PROJECTION_RUN_ID, snapshot)
+
+        self.assertIs(projection["source_payload_json"]["payload_json"], event.payload_json)
+        self.assertEqual(projection["code"], "600000")
+        self.assertEqual(projection["name"], "浦发银行")
+        self.assertEqual(projection["board_identity_key"], "board:TDX:880001")
+        self.assertEqual(projection["board_code"], "880001")
+        self.assertEqual(projection["board_name"], "银行")
+        for output in (projection["display_payload_json"], card["card_payload_json"]):
+            self.assertIs(output["condition_projection_context"], event.payload_json["condition_projection_context"])
+            self.assertEqual(output["trigger_pct"], "999.123456")
+            self.assertEqual(output["action_pct"], "888.654321")
+            self.assertEqual(output["industry_status"], "ready")
+            self.assertEqual(output["industry_provenance"]["source_relation"], "v_n6_board_membership_fact")
+
+    def test_projection_message_industry_not_ready_keeps_core_rows(self) -> None:
+        event = projection_event(
+            event_id="evt_projection_message_industry_missing",
+            event_type="ActionEligible",
+            direction="buy",
+            signal_type="B_BUY",
+        )
+        add_projection_message_contract(event)
+        event = freeze_stock_industry_context([event], [])[0]
+        snapshot = default_execute_snapshot()
+
+        projection = build_projection_row(event, DEFAULT_PROJECTION_RUN_ID, snapshot)
+        card = build_card_row(event, DEFAULT_PROJECTION_RUN_ID, snapshot)
+
+        self.assertIsNone(projection["board_identity_key"])
+        self.assertIsNone(projection["board_code"])
+        self.assertIsNone(projection["display_payload_json"]["action_price"])
+        self.assertIsNone(projection["display_payload_json"]["action_pct"])
+        self.assertEqual(card["card_payload_json"]["industry_status"], "not_ready")
+        self.assertEqual(
+            card["card_payload_json"]["industry_provenance"]["reason"],
+            "industry_membership_missing",
+        )
+
+    def test_write_plan_skips_only_invalid_marked_event(self) -> None:
+        valid = projection_event(
+            event_id="evt_projection_valid",
+            event_type="ActionEligible",
+            direction="buy",
+            signal_type="B_BUY",
+        )
+        invalid = projection_event(
+            event_id="evt_projection_invalid",
+            event_type="ActionEligible",
+            direction="sell",
+            signal_type="S_SELL",
+        )
+        add_projection_message_contract(valid)
+        add_projection_message_contract(invalid)
+        invalid.payload_json["projection_message_contract_hash"] = "tampered"
+        snapshot = default_execute_snapshot()
+        snapshot.input_snapshot.events = [valid, invalid]
+        preflight_report = {
+            "quality": {"p0_count": 0, "p1_count": 0, "p2_count": 0},
+            "event_summary": {"by_event_type": {"ActionEligible": 2}},
+        }
+
+        plan = build_write_plan(
+            snapshot,
+            preflight_report,
+            projection_run_id=DEFAULT_PROJECTION_RUN_ID,
+            source_action_run_id=valid.source_run_id,
+            user_message_event_filter=["ActionEligible"],
+        )
+
+        self.assertEqual(plan.write_counts["user_signal_projection"], 1)
+        self.assertEqual(plan.write_counts["user_signal_card"], 1)
+        self.assertEqual(plan.quality_summary["event_projection_quality"]["skipped_event_count"], 1)
+        self.assertEqual(plan.projection_rows[0]["source_event_id"], valid.event_id)
+
     def test_missing_execute_blocks_before_repository_read(self) -> None:
         repo = FakeExecuteRepository(default_execute_snapshot())
 
@@ -736,11 +871,7 @@ class N6ProjectionExecuteTest(unittest.TestCase):
                 self.assertNotIn(marker, sql)
 
     def test_20260602_execute_final_artifact_statuses_are_accepted(self) -> None:
-        errors = validate_design_artifacts(
-            "docs/N6_20260602_action_confirmation_projection_contract.json",
-            "docs/N6_20260602_action_confirmation_projection_preflight.json",
-            ROLLBACK_SQL_PATH,
-        )
+        errors = validate_design_artifacts(self.contract_path, self.preflight_path, ROLLBACK_SQL_PATH)
 
         self.assertEqual(errors, [])
 
@@ -774,8 +905,10 @@ class N6ProjectionExecuteTest(unittest.TestCase):
     def test_default_contract_paths_are_canonical(self) -> None:
         self.assertEqual(CONTRACT_JSON_PATH, "docs/N6_canonical_projection_execute_contract.json")
         self.assertEqual(PREFLIGHT_JSON_PATH, "docs/N6_canonical_projection_execute_preflight.json")
-        self.assertTrue(Path(CONTRACT_JSON_PATH).exists())
-        self.assertTrue(Path(PREFLIGHT_JSON_PATH).exists())
+        self.assertEqual(
+            validate_design_artifacts(CONTRACT_JSON_PATH, PREFLIGHT_JSON_PATH, ROLLBACK_SQL_PATH),
+            ["missing_or_invalid_contract_json", "missing_or_invalid_preflight_json"],
+        )
 
 
 def default_execute_snapshot(*, admin_missing: bool = False) -> ProjectionExecuteSnapshot:

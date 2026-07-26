@@ -1,0 +1,161 @@
+{
+  "package_id": "N6_SC_TEMPORAL_CONFLUENCE_V2_CANDIDATE_20260723",
+  "strategy_version": "N6_STRATEGY_CENTER_TEMPORAL_CONFLUENCE_V2",
+  "candidate_status": "IMPLEMENTED_NOT_ACTIVATED",
+  "base_policy": "n6_strategy_center_matcher_v1",
+  "proposed_policy": "n6_strategy_center_matcher_v2",
+  "package_versions": {
+    "package_1": "v2",
+    "package_2": "v2"
+  },
+  "rules": {
+    "direction_match_required": true,
+    "time_basis": "a_share_trading_minutes",
+    "time_precision": "trading_seconds",
+    "valid_sessions": [
+      "09:30:00-11:30:00",
+      "13:00:00-15:00:00"
+    ],
+    "exclude_midday_break": true,
+    "event_time_authority": "n5_standard_event_time_only",
+    "invalid_or_midday_event_time_policy": "fail_closed",
+    "cross_trade_date_allowed": false,
+    "coherence_levels": {
+      "STRONG": "0-15",
+      "MEDIUM": "16-30",
+      "WEAK": "31-60",
+      "EXPIRED": ">60"
+    },
+    "qualified_levels": ["STRONG", "MEDIUM"],
+    "weak_policy": "display_only_not_qualified",
+    "candidate_stale_after_trading_minutes": 30,
+    "freshness_statuses": ["fresh", "stale"],
+    "observation_retention": "same_trade_date_close",
+    "stale_policy": "observation_until_trade_date_close",
+    "observation_reasons": [
+      "weak_span",
+      "stale_after_confirmation"
+    ],
+    "event_selection": "first_confirmation_then_minimum_span",
+    "confirmation_time": "latest_required_event_time",
+    "lookahead_allowed": false,
+    "arrival_order_authority": "user_signal_projection_id_monotonic",
+    "frozen_episode_authority": "persisted_match_or_observation_projection",
+    "successive_episode_trigger": "new_qualification_parent_projection_only",
+    "cross_surface_uniqueness": "one_coherence_episode_one_surface",
+    "mixed_package_level_policy": "qualified_if_any_package_qualified_weak_evidence_retained",
+    "heat_evidence_frozen_per_episode": true,
+    "stock_state_upgrade_creates_episode": false,
+    "event_lineage_frozen": true,
+    "eligible_to_executed_policy": "same_coherence_episode_state_update_without_parent_reselection",
+    "new_parent_evidence_policy": "new_coherence_episode_without_overwrite",
+    "signal_dto_policy": "canonical_signals_dto_byte_equivalent",
+    "strategy_fields_surface": "top_level_confluence",
+    "sse_surface_kinds": [
+      "qualified_match",
+      "observation"
+    ]
+  },
+  "market_heat_indices": [
+    "index:SH:000001",
+    "index:SZ:399001"
+  ],
+  "market_heat_policy": {
+    "membership_required": false,
+    "creates_candidate": false,
+    "freshness_window_trading_minutes": 30,
+    "event_selection": "latest_not_after_confirmation",
+    "affects": ["heat_label", "candidate_ranking"],
+    "states": [
+      "MARKET_HEAT_SUPPORTIVE",
+      "MARKET_HEAT_ADVERSE",
+      "MARKET_HEAT_MIXED",
+      "MARKET_HEAT_NEUTRAL"
+    ],
+    "rank_order": [
+      "MARKET_HEAT_SUPPORTIVE",
+      "MARKET_HEAT_NEUTRAL",
+      "MARKET_HEAT_MIXED",
+      "MARKET_HEAT_ADVERSE"
+    ]
+  },
+  "membership_indices": [
+    "index:SH:000016",
+    "index:SH:000300",
+    "index:SH:000688",
+    "index:SH:000852",
+    "index:SH:000905",
+    "index:SZ:399006",
+    "index:SZ:399303"
+  ],
+  "package_1_rule": {
+    "requires": [
+      "stock_signal",
+      "member_board_signal",
+      "at_least_one_member_index_signal"
+    ],
+    "same_direction_required": true,
+    "maximum_qualified_span": 30,
+    "maximum_qualified_span_seconds": 1800
+  },
+  "package_2_rule": {
+    "requires": [
+      "stock_signal",
+      "member_board_signal"
+    ],
+    "same_direction_required": true,
+    "maximum_qualified_span": 30,
+    "maximum_qualified_span_seconds": 1800
+  },
+  "risk_boundaries": {
+    "display_only": true,
+    "shadow_only": true,
+    "proposal_authorized": false,
+    "order_authorized": false,
+    "trade_authorized": false,
+    "position_or_cash_mutation_authorized": false,
+    "autonomous_trading_authorized": false,
+    "real_trading_authorized": false,
+    "missing_lineage_or_time_policy": "fail_closed",
+    "scheduler_scope": "single_principal_user_revision_per_tick",
+    "version_migration": "v1_grandfathered_v2_per_user_pending_atomic_switch"
+  },
+  "deployment_gates": {
+    "selection_write_quiesce_during_schema_release_transition": true,
+    "per_user_compensation_gate": "owner_only_append_only_v1_revision_or_pending_v2_abandonment",
+    "v1_grandfather_activation": "separate_gate_after_v2_runtime_ready",
+    "catalog_activation_migration": "083_owner_only_fail_closed"
+  },
+  "rollback_conditions": [
+    "direction_or_timestamp_lineage_not_provable",
+    "trading_minute_calculation_boundary_failure",
+    "membership_as_of_ambiguity",
+    "non_deterministic_replay_or_duplicate_projection",
+    "persisted_frozen_episode_rewrite",
+    "coherence_episode_present_on_multiple_surfaces",
+    "per_user_compensation_path_unavailable",
+    "single_scope_scheduler_boundary_violation",
+    "any_proposal_order_trade_position_or_cash_side_effect"
+  ],
+  "test_requirements": [
+    "same_direction_and_opposite_direction_truth_table",
+    "15_30_60_minute_boundary_tests",
+    "midday_break_trading_minute_test",
+    "cross_trade_date_rejection",
+    "event_arrival_order_and_no_lookahead",
+    "batch_and_incremental_arrival_replay_equivalence",
+    "market_heat_four_state_truth_table",
+    "seven_index_membership_as_of_tests",
+    "package_1_and_package_2_full_truth_tables",
+    "stale_and_new_episode_tests",
+    "late_earlier_parent_and_late_heat_do_not_rewrite_frozen_episode",
+    "mixed_package_level_single_surface_tests",
+    "canonical_signal_dto_byte_equivalence",
+    "v1_v2_coexistence_and_per_user_atomic_switch",
+    "pending_v2_abandon_and_active_v2_to_v1_compensation_tests",
+    "qualified_and_observation_surface_sse_tests",
+    "deterministic_replay_and_idempotency",
+    "single_scope_scheduler_rejection_of_all_users_transaction",
+    "zero_proposal_order_trade_position_lot_cash_mutation"
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "contract_version": "n6_btrack_virtual_account_bootstrap_047_v1",
+  "status": "implementation_draft_execute_not_authorized",
+  "layer_role": "N6_user",
+  "policy_version": "n6_btrack_virtual_account_bootstrap_047_policy_v1",
+  "policy_hash": "62dddda28c79963ee67e204bc2c8e3dd21dce79411b36d90cce93c696a28c63b",
+  "initial_cash": "100000000.0000",
+  "target_principals": [
+    {
+      "principal_id": 1,
+      "principal_type": "admin",
+      "mode": "audit_top_up"
+    },
+    {
+      "principal_id": 3,
+      "principal_type": "human_user",
+      "mode": "create"
+    },
+    {
+      "principal_id": 4,
+      "principal_type": "human_user",
+      "mode": "create"
+    },
+    {
+      "principal_id": 5,
+      "principal_type": "human_user",
+      "mode": "create"
+    },
+    {
+      "principal_id": 6,
+      "principal_type": "human_user",
+      "mode": "create"
+    }
+  ],
+  "principal_authority": {
+    "required_status": "active",
+    "allowed_types": [
+      "admin",
+      "human_user"
+    ],
+    "exactly_one_per_target": true,
+    "owner_user_must_equal_principal": true,
+    "rejected_types": [
+      "system",
+      "ai_user"
+    ],
+    "rejected_statuses": [
+      "disabled",
+      "deleted",
+      "system_reserved"
+    ]
+  },
+  "cash_authority": {
+    "active_virtual_account_per_principal": 1,
+    "active_cash_snapshot_per_account": 1,
+    "account_pointer_must_equal_active_snapshot": true,
+    "human_seed_ledger_type": "initial_deposit",
+    "admin_top_up_ledger_type": "adjustment",
+    "admin_existing_initial_cash": "1000000.0000",
+    "admin_adjustment": "99000000.0000",
+    "admin_old_financial_values_immutable": true,
+    "admin_old_snapshot_lifecycle_transition": "active_to_superseded_only"
+  },
+  "idempotency": {
+    "transactional_advisory_lock": true,
+    "table_locks": true,
+    "target_principal_rows_for_update": true,
+    "transactional_exactly_one_account_recheck": true,
+    "transactional_exactly_one_cash_authority_recheck": true,
+    "schema_index_or_constraint_change": false,
+    "exact_rerun_added_rows": 0,
+    "partial_or_drifted_state": "blocked"
+  },
+  "allowed_dml_tables": [
+    "n6_virtual_account",
+    "n6_virtual_cash_ledger",
+    "n6_virtual_cash_snapshot"
+  ],
+  "forbidden_dml_tables": [
+    "user_monitor_stock",
+    "user_monitor_index",
+    "user_monitor_board",
+    "user_realtime_monitor_scope",
+    "user_projection_run",
+    "user_signal_projection",
+    "user_signal_card",
+    "n6_virtual_quote_run",
+    "n6_virtual_quote_snapshot",
+    "n6_virtual_trade_proposal",
+    "n6_virtual_order",
+    "n6_virtual_trade",
+    "n6_virtual_position",
+    "n6_virtual_position_lot",
+    "n6_virtual_position_event",
+    "n6_virtual_pnl_snapshot",
+    "common_event_outbox",
+    "common_event_inbox",
+    "common_event_consumer_checkpoint"
+  ],
+  "runner": {
+    "default_mode": "read_only_local_plan",
+    "default_database_connections": 0,
+    "execute_flags": [
+      "--execute",
+      "--user-confirmed"
+    ],
+    "owner_service": "ashare_v3_owner",
+    "expected_database": "ashare_v3",
+    "expected_database_owner": "ashare_v3_user",
+    "service_and_passfile_path_policy": "absolute_path_without_nul_cr_lf_content_not_read",
+    "credential_provisioning_status": "future_runtime_control_gate_required",
+    "argv_forbids": [
+      "dsn",
+      "password"
+    ],
+    "environment_forbids": [
+      "PGPASSWORD",
+      "ASHARE_V3_POSTGRES_DSN",
+      "DATABASE_URL",
+      "PG_DSN",
+      "POSTGRES_DSN",
+      "ASHARE_V3_N6_BTRACK_DSN",
+      "ASHARE_V3_N6_BTRACK_PASSWORD"
+    ]
+  },
+  "rollback": {
+    "human_account_delete_requires_exact_047_provenance": true,
+    "human_account_delete_requires_no_business_dependencies": true,
+    "admin_history_delete": false,
+    "admin_default": "blocked",
+    "admin_explicit_override_setting": "n6.bootstrap_047_allow_admin_reverse_adjustment",
+    "admin_reverse_mode": "new_negative_adjustment_ledger_and_new_snapshot",
+    "sequence_rewind": false,
+    "physical_delete_referenced_history": false
+  },
+  "file_allowlist": [
+    "sql/047_n6_virtual_account_bootstrap.sql",
+    "sql/047_n6_virtual_account_bootstrap_rollback.sql",
+    "docs/N6_B_TRACK_PRODUCT_V3_MULTI_USER_VIRTUAL_ACCOUNT_BOOTSTRAP_047_CONTRACT.md",
+    "docs/N6_B_TRACK_PRODUCT_V3_MULTI_USER_VIRTUAL_ACCOUNT_BOOTSTRAP_047_CONTRACT.json",
+    "src/ashare_v3/user/virtual_account_bootstrap_v3.py",
+    "scripts/run_n6_virtual_account_bootstrap_once.py",
+    "tests/test_n6_virtual_account_bootstrap_v3.py",
+    "tests/test_n6_virtual_account_seed.py"
+  ],
+  "not_authorized": [
+    "database_connection_in_this_gate",
+    "migration_execute",
+    "rollback_execute",
+    "runtime_or_8786",
+    "scheduler_or_executor",
+    "feature_flags",
+    "outbox",
+    "N1_to_N5",
+    "stage",
+    "commit"
+  ]
+}

@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import json
 import tempfile
@@ -18,6 +19,7 @@ ACTION_RUN_ID = "n5-live-action-run"
 SOURCE_TRIGGER_RUN_ID = "n4-trigger-run"
 SOURCE_METRIC_RUN_ID = "n3-metric-run"
 CONSUMER_NAME = "n5-live-consumer"
+N4_PROJECTION_CONTEXT_POLICY_HASH = "2cd95d3d427ec07ccd208bc7b939081d104415f6b9da3c4bf78e40b78a6d279e"
 
 
 def trigger_matched(
@@ -89,6 +91,69 @@ def trigger_state_changed_true(match_row, event_id="n4-state-true-1", *, event_t
         "dedup_key": f"n4:{event_id}",
         "payload_json": payload,
     }
+
+
+def with_condition_projection_context(
+    row,
+    *,
+    close="10",
+    status="ready",
+    contract_version="N2-condition-projection-context-v1",
+    field_overrides=None,
+):
+    asset_kind = row["asset_kind"]
+    identity_key = row["identity_key"]
+    fields = {
+        "name": "projection context fixture",
+        "close": close,
+        "up_reference_period": None,
+        "buy_target_price": None,
+        "buy_expected_return_pct": None,
+        "down_reference_period": None,
+        "sell_target_price": None,
+        "sell_expected_return_pct": None,
+        "clear_sell_ref_period": None,
+        "up_secondary_target_price": None,
+        "up_secondary_expected_return_pct": None,
+    }
+    if asset_kind == "stock":
+        fields.update({"score": None, "pe_core": None})
+    fields.update(field_overrides or {})
+    nullable_fields = [key for key, value in fields.items() if key not in {"name", "close"} and value is None]
+    context = {
+        "contract_version": contract_version,
+        "source_layer": "N2_condition",
+        "asset_kind": asset_kind,
+        "identity_key": identity_key,
+        "source_trade_date": "20260701",
+        "for_trade_date": TRADE_DATE,
+        "status": status,
+        "fields": fields,
+        "nullable_fields": nullable_fields,
+        "not_ready_reasons": [] if status == "ready" else ["fixture_not_ready"],
+    }
+    context["context_hash"] = hashlib.sha256(
+        json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    row["payload_json"].update(
+        {
+            "condition_projection_context": context,
+            "condition_projection_context_status": status,
+            "condition_projection_context_trace": {
+                "policy_version": "N4-condition-projection-passthrough-v1",
+                "policy_hash": N4_PROJECTION_CONTEXT_POLICY_HASH,
+                "status": status,
+                "source_context_hash": context["context_hash"],
+            },
+        }
+    )
+    return context
 
 
 def action_executed_event(match_row, *, event_id="n5-executed-1", event_time="2026-07-02T10:01:00+08:00"):
@@ -396,6 +461,254 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(event["payload_json"]["confirmation_status"], "pending")
         self.assertEqual(plan["summary"]["action_eligible_count"], 1)
 
+    def test_condition_projection_message_covers_all_assets_and_directions(self):
+        identities = {
+            "stock": "stock:SH:600000",
+            "index": "index:SH:000300",
+            "board": "board:TDX:880001",
+        }
+        cases = (
+            ("buy", "B_BUY", "BUY:W", "11", "10.000000", 12, "20.000000"),
+            ("sell", "S_SELL", "SELL:W", "9", "-10.000000", 8, "-20.000000"),
+        )
+        for asset_kind, identity_key in identities.items():
+            for direction, signal_type, condition_key, trigger_price, trigger_pct, action_price, action_pct in cases:
+                with self.subTest(asset_kind=asset_kind, direction=direction):
+                    row = trigger_matched(
+                        event_id=f"n4-{asset_kind}-{direction}",
+                        identity_key=identity_key,
+                        condition_key=condition_key,
+                        signal_type=signal_type,
+                        direction=direction,
+                    )
+                    row["asset_kind"] = asset_kind
+                    row["payload_json"].update(
+                        {"asset_kind": asset_kind, "trigger_price": trigger_price}
+                    )
+                    context = with_condition_projection_context(
+                        row,
+                        field_overrides={
+                            "up_reference_period": "W",
+                            "buy_expected_return_pct": "12.345678",
+                            "down_reference_period": "M",
+                            "sell_expected_return_pct": "-8.765432",
+                            "up_secondary_expected_return_pct": "3.210000",
+                            **(
+                                {"score": "88.000000", "pe_core": "15.500000"}
+                                if asset_kind == "stock"
+                                else {}
+                            ),
+                        },
+                    )
+                    metric = passing_buy_metric()
+                    metric.update(
+                        {
+                            "asset_kind": asset_kind,
+                            "identity_key": identity_key,
+                            "direction": direction,
+                            "signal_type": signal_type,
+                            "condition_key": condition_key,
+                            "current_price": action_price,
+                        }
+                    )
+                    if direction == "sell":
+                        metric.update(
+                            {
+                                "previous_120m_body_low": 10,
+                                "previous_30m_body_low": 10,
+                                "previous_5m_body_low": 10,
+                                "previous_1m_body_low": 10,
+                                "current_5m_virtual_amount": 40,
+                                "previous_5m_full_amount": 60,
+                                "current_1m_amount": 5,
+                                "previous_1m_amount": 10,
+                                "current_30m_virtual_amount": 100,
+                                "previous_day_same_window_amount": 200,
+                            }
+                        )
+
+                    plan = self.build_plan([row], metric_rows=[metric])
+                    payloads = {
+                        event["event_type"]: event["payload_json"]
+                        for event in plan["action_events"]
+                    }
+                    eligible = payloads["ActionEligible"]
+                    executed = payloads["ActionExecuted"]
+
+                    self.assertEqual(eligible["pct_contract_version"], "N5-trigger-action-pct-context-v1")
+                    self.assertEqual(eligible["condition_projection_context"], context)
+                    self.assertEqual(eligible["trigger_price"], trigger_price)
+                    self.assertEqual(eligible["trigger_pct"], trigger_pct)
+                    self.assertEqual(eligible["trigger_pct_status"], "ready")
+                    self.assertEqual(
+                        eligible["projection_message_contract_version"],
+                        "N5-n6-projection-message-v1",
+                    )
+                    self.assertEqual(
+                        eligible["projection_message_contract_hash"],
+                        "572078a71de8cf00963f718bc812fbe3a1ae09652a3faaa8bb3774f51b882025",
+                    )
+                    self.assertEqual(eligible["projection_message_status"], "ready")
+                    self.assertEqual(eligible["projection_message_not_ready_reasons"], [])
+                    self.assertNotIn("action_price", eligible)
+                    self.assertNotIn("action_pct", eligible)
+                    self.assertNotIn("action_pct_status", eligible)
+                    self.assertEqual(eligible["asset_code"], identity_key.split(":")[2])
+                    self.assertEqual(eligible["asset_name"], context["fields"]["name"])
+                    if asset_kind == "stock":
+                        self.assertEqual(eligible["score"], "88.000000")
+                        self.assertEqual(eligible["pe_core"], "15.500000")
+                    else:
+                        self.assertNotIn("score", eligible)
+                        self.assertNotIn("pe_core", eligible)
+                    self.assertEqual(executed["action_price"], action_price)
+                    self.assertEqual(executed["action_pct"], action_pct)
+                    self.assertEqual(executed["action_pct_status"], "ready")
+                    self.assertEqual(executed["projection_message_status"], "ready")
+
+    def test_projection_message_manifest_and_pct_rounding_are_canonical(self):
+        self.assertEqual(
+            len(poller.N5_N6_PROJECTION_MESSAGE_CONTRACT_JSON.encode("utf-8")),
+            2653,
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                poller.N5_N6_PROJECTION_MESSAGE_CONTRACT_JSON.encode("utf-8")
+            ).hexdigest(),
+            "572078a71de8cf00963f718bc812fbe3a1ae09652a3faaa8bb3774f51b882025",
+        )
+        cases = (
+            ("8.0987654", "8", "1.234568"),
+            ("9", "10", "-10.000000"),
+            ("10", "10", "0.000000"),
+        )
+        for index, (trigger_price, close, expected_pct) in enumerate(cases):
+            row = trigger_matched(event_id=f"n4-rounding-{index}")
+            row["payload_json"]["trigger_price"] = trigger_price
+            with_condition_projection_context(row, close=close)
+
+            payload = self.build_plan([row])["action_events"][0]["payload_json"]
+
+            self.assertEqual(payload["trigger_pct"], expected_pct)
+
+    def test_latest_state_context_cannot_pollute_immutable_entry_snapshot(self):
+        matched = trigger_matched("n4-entry", event_time="2026-07-02T09:55:00+08:00")
+        matched["payload_json"]["trigger_price"] = "11"
+        entry_context = with_condition_projection_context(
+            matched,
+            close="10",
+            field_overrides={"name": "entry authority"},
+        )
+        entry_plan = self.build_plan([matched])
+
+        changed = trigger_state_changed_true(
+            matched,
+            "n4-latest-state",
+            event_time="2026-07-02T10:00:00+08:00",
+        )
+        changed["payload_json"]["trigger_price"] = "40"
+        latest_context = with_condition_projection_context(
+            changed,
+            close="20",
+            field_overrides={"name": "forbidden latest state"},
+        )
+        metric = passing_buy_metric(metric_time="2026-07-02T10:00:00+08:00")
+        metric.update({"metric_minute_label": "10:00", "current_price": 12})
+
+        confirmed = self.build_plan(
+            [changed],
+            active_tracking_rows=entry_plan["tracking_updates"],
+            metric_rows=[metric],
+        )
+
+        self.assertEqual([event["event_type"] for event in confirmed["action_events"]], ["ActionExecuted"])
+        payload = confirmed["action_events"][0]["payload_json"]
+        self.assertEqual(payload["trigger_price"], "11")
+        self.assertEqual(payload["trigger_pct"], "10.000000")
+        self.assertEqual(payload["condition_projection_context"], entry_context)
+        self.assertEqual(payload["asset_name"], "entry authority")
+        self.assertEqual(payload["action_price"], 12)
+        self.assertEqual(payload["action_pct"], "20.000000")
+        self.assertEqual(payload["projection_message_status"], "ready")
+        self.assertEqual(
+            payload["source_n4_payload"]["condition_projection_context"],
+            latest_context,
+        )
+        self.assertNotEqual(payload["condition_projection_context"], latest_context)
+
+    def test_missing_and_tampered_context_fail_closed_without_lifecycle_or_dedup_change(self):
+        valid = trigger_matched("n4-authority-check")
+        valid["payload_json"]["trigger_price"] = "12"
+        with_condition_projection_context(valid)
+        tampered = trigger_matched("n4-authority-check")
+        tampered["payload_json"]["trigger_price"] = "12"
+        with_condition_projection_context(tampered)
+        tampered["payload_json"]["condition_projection_context"]["fields"]["name"] = "tampered"
+        missing = trigger_matched("n4-authority-check")
+        missing["payload_json"]["trigger_price"] = "12"
+        metric = passing_buy_metric()
+
+        valid_plan = self.build_plan([valid], metric_rows=[metric])
+        tampered_plan = self.build_plan([tampered], metric_rows=[metric])
+        missing_plan = self.build_plan([missing], metric_rows=[metric])
+
+        for plan in (tampered_plan, missing_plan):
+            self.assertEqual(
+                [event["event_type"] for event in plan["action_events"]],
+                ["ActionEligible", "ActionExecuted"],
+            )
+            self.assertEqual(
+                [event["event_id"] for event in plan["action_events"]],
+                [event["event_id"] for event in valid_plan["action_events"]],
+            )
+            self.assertEqual(
+                [event["dedup_key"] for event in plan["action_events"]],
+                [event["dedup_key"] for event in valid_plan["action_events"]],
+            )
+            self.assertEqual(plan["tracking_updates"][-1]["action_state"], "executed")
+            self.assertEqual(plan["tracking_updates"][-1]["raw_json"]["action_mark"], "30m_volume")
+        tampered_eligible = tampered_plan["action_events"][0]["payload_json"]
+        missing_eligible = missing_plan["action_events"][0]["payload_json"]
+        self.assertEqual(tampered_eligible["projection_message_status"], "not_ready")
+        self.assertIn(
+            "condition_projection_context_hash_mismatch",
+            tampered_eligible["projection_message_not_ready_reasons"],
+        )
+        self.assertEqual(missing_eligible["projection_message_status"], "not_ready")
+        self.assertIn(
+            "condition_projection_context_missing",
+            missing_eligible["projection_message_not_ready_reasons"],
+        )
+        self.assertNotIn("action_price", tampered_eligible)
+        self.assertNotIn("action_price", missing_eligible)
+
+    def test_projection_message_optional_nulls_remain_ready(self):
+        row = trigger_matched("n4-nullable")
+        row["payload_json"]["trigger_price"] = "12"
+        with_condition_projection_context(row)
+
+        payload = self.build_plan([row])["action_events"][0]["payload_json"]
+
+        self.assertEqual(payload["projection_message_status"], "ready")
+        self.assertEqual(payload["projection_message_not_ready_reasons"], [])
+        self.assertIsNone(payload["buy_expected_return_pct"])
+        self.assertIsNone(payload["score"])
+        self.assertIsNone(payload["pe_core"])
+
+    def test_projection_fields_do_not_change_existing_event_schema_or_dedup(self):
+        without_context = trigger_matched("n4-dedup-context")
+        without_context["payload_json"]["trigger_price"] = "11"
+        with_context = trigger_matched("n4-dedup-context")
+        with_context["payload_json"]["trigger_price"] = "11"
+        with_condition_projection_context(with_context)
+
+        old_event = self.build_plan([without_context])["action_events"][0]
+        new_event = self.build_plan([with_context])["action_events"][0]
+
+        self.assertEqual(new_event["event_key"], old_event["event_key"])
+        self.assertEqual(new_event["event_id"], old_event["event_id"])
+        self.assertEqual(new_event["event_schema_version"], old_event["event_schema_version"])
+
     def test_repeated_one_shot_does_not_duplicate_action_eligible(self):
         first = self.build_plan([trigger_matched()])
         second = self.build_plan(
@@ -407,6 +720,163 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(first["summary"]["action_eligible_count"], 1)
         self.assertEqual(second["summary"]["action_eligible_count"], 0)
         self.assertEqual(second["action_events"], [])
+
+    def test_new_trigger_matched_reopens_expired_tracking_ref(self):
+        original = trigger_matched(
+            "n4-match-old",
+            event_time="2026-07-02T09:51:00+08:00",
+        )
+        first = self.build_plan([original])
+        expired_state = dict(first["tracking_updates"][0])
+        expired_state.update(
+            {
+                "action_state": "expired",
+                "confirmation_status": "expired",
+                "tracking_status": "expired",
+                "planned_output_event_type": None,
+                "expired_reason": "window_expired",
+                "expired_at": "2026-07-02T10:00:00+08:00",
+                "last_checked_minute_label": "09:59",
+            }
+        )
+        expired_state["raw_json"] = {
+            **expired_state["raw_json"],
+            "next_unchecked_minute_label": "10:00",
+        }
+        latest = trigger_matched(
+            "n4-match-new",
+            event_time="2026-07-02T13:53:00+08:00",
+        )
+
+        reopened = self.build_plan(
+            [latest],
+            active_tracking_rows=[expired_state],
+            existing_event_keys={first["action_events"][0]["event_key"]},
+        )
+
+        self.assertEqual([event["event_type"] for event in reopened["action_events"]], ["ActionEligible"])
+        reopened_event = reopened["action_events"][0]
+        self.assertEqual(reopened_event["payload_json"]["source_trigger_event_id"], "n4-match-new")
+        self.assertNotEqual(reopened_event["event_key"], first["action_events"][0]["event_key"])
+        self.assertTrue(reopened_event["event_key"].endswith("|n4-match-new"))
+        self.assertEqual(reopened["consumed_n4_event_ids"], ["n4-match-new"])
+        self.assertEqual(len(reopened["tracking_updates"]), 1)
+        update = reopened["tracking_updates"][0]
+        self.assertEqual(update["action_state"], "eligible")
+        self.assertEqual(update["confirmation_status"], "pending")
+        self.assertEqual(update["tracking_status"], "tracking")
+        self.assertEqual(update["source_trigger_event_id"], "n4-match-new")
+        self.assertEqual(update["latest_n4_event_time"], "2026-07-02T13:53:00+08:00")
+        self.assertIsNone(update["last_checked_minute_label"])
+        self.assertIsNone(update["expired_reason"])
+        self.assertIsNone(update["expired_at"])
+        self.assertTrue(update["raw_json"]["terminal_ref_reopen_allowed"])
+        self.assertEqual(
+            update["raw_json"]["terminal_ref_reopen_trace"]["prior_source_trigger_event_id"],
+            "n4-match-old",
+        )
+        ref = reopened["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+        self.assertEqual(ref["source_trigger_event_id"], "n4-match-new")
+        self.assertEqual(ref["next_unchecked_minute_label"], "13:53")
+
+    def test_inactive_then_new_trigger_matched_emits_new_action_eligible_episode(self):
+        original = trigger_matched(
+            "n4-match-1316",
+            event_time="2026-07-02T13:16:00+08:00",
+        )
+        first = self.build_plan([original])
+        inactive = trigger_state_changed_false(original, "n4-state-false-1326")
+        inactive["event_time"] = "2026-07-02T13:26:00+08:00"
+        expired = self.build_plan(
+            [inactive],
+            active_tracking_rows=first["tracking_updates"],
+        )
+        latest = trigger_matched(
+            "n4-match-1333",
+            event_time="2026-07-02T13:33:00+08:00",
+        )
+
+        reopened = self.build_plan(
+            [latest],
+            active_tracking_rows=expired["tracking_updates"],
+            existing_event_keys={first["action_events"][0]["event_key"]},
+        )
+
+        self.assertEqual(expired["tracking_updates"][0]["action_state"], "expired")
+        self.assertEqual([event["event_type"] for event in reopened["action_events"]], ["ActionEligible"])
+        self.assertEqual(
+            reopened["action_events"][0]["payload_json"]["source_trigger_event_id"],
+            "n4-match-1333",
+        )
+        self.assertNotEqual(
+            reopened["action_events"][0]["event_key"],
+            first["action_events"][0]["event_key"],
+        )
+
+    def test_same_batch_inactive_then_new_match_emits_two_eligible_episodes(self):
+        original = trigger_matched(
+            "n4-match-1316",
+            event_time="2026-07-02T13:16:00+08:00",
+        )
+        inactive = trigger_state_changed_false(original, "n4-state-false-1326")
+        inactive["event_time"] = "2026-07-02T13:26:00+08:00"
+        latest = trigger_matched(
+            "n4-match-1333",
+            event_time="2026-07-02T13:33:00+08:00",
+        )
+
+        plan = self.build_plan([original, inactive, latest])
+
+        self.assertEqual(plan["consumed_n4_event_ids"], [
+            "n4-match-1316",
+            "n4-state-false-1326",
+            "n4-match-1333",
+        ])
+        self.assertEqual(
+            [event["payload_json"]["source_trigger_event_id"] for event in plan["action_events"]],
+            ["n4-match-1316", "n4-match-1333"],
+        )
+        self.assertEqual(len(plan["tracking_updates"]), 1)
+        update = plan["tracking_updates"][0]
+        self.assertEqual(update["action_state"], "eligible")
+        self.assertEqual(update["source_trigger_event_id"], "n4-match-1333")
+        self.assertTrue(update["raw_json"]["terminal_ref_reopen_allowed"])
+
+    def test_same_trigger_matched_event_does_not_reopen_expired_tracking_ref(self):
+        row = trigger_matched(
+            "n4-match-same",
+            event_time="2026-07-02T13:53:00+08:00",
+        )
+        first = self.build_plan([row])
+        expired_state = dict(first["tracking_updates"][0])
+        expired_state.update(
+            {
+                "action_state": "expired",
+                "confirmation_status": "expired",
+                "tracking_status": "expired",
+            }
+        )
+
+        repeated = self.build_plan([row], active_tracking_rows=[expired_state])
+
+        self.assertEqual(repeated["tracking_updates"], [])
+        self.assertEqual(repeated["active_scope_snapshot_artifact"]["scope_rows"], [])
+
+    def test_new_trigger_matched_does_not_reopen_executed_tracking_ref(self):
+        original = trigger_matched("n4-match-executed")
+        executed = self.build_plan([original], metric_rows=[passing_buy_metric()])
+        executed_state = next(
+            row for row in executed["tracking_updates"] if row["action_state"] == "executed"
+        )
+        latest = trigger_matched(
+            "n4-match-after-executed",
+            event_time="2026-07-02T13:53:00+08:00",
+        )
+
+        repeated = self.build_plan([latest], active_tracking_rows=[executed_state])
+
+        self.assertEqual(repeated["tracking_updates"], [])
+        self.assertEqual(repeated["active_scope_snapshot_artifact"]["scope_rows"], [])
 
     def test_same_invocation_emits_action_eligible_then_action_executed(self):
         plan = self.build_plan([trigger_matched()], metric_rows=[passing_buy_metric()])
@@ -812,9 +1282,16 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(repaired["active_scope_snapshot_artifact"]["scope_rows"], [])
         self.assertEqual(repaired["active_scope_snapshot_artifact"]["active_tracking_ref_count"], 0)
 
-    def test_trigger_state_changed_true_can_execute_without_action_eligible_and_traces_latest_n4_event(self):
+    def test_trigger_state_changed_true_without_trigger_matched_entry_cannot_execute(self):
+        matched = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        matched["payload_json"].update(
+            {
+                "primary_trigger_period": "M",
+                "all_trigger_periods": ["M", "W"],
+            }
+        )
         row = trigger_state_changed_true(
-            trigger_matched(event_time="2026-07-02T09:55:00+08:00"),
+            matched,
             "n4-state-true-1352",
             event_time="2026-07-02T13:52:00+08:00",
         )
@@ -823,16 +1300,197 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
 
         plan = self.build_plan([row], metric_rows=[metric])
 
-        self.assertEqual([event["event_type"] for event in plan["action_events"]], ["ActionExecuted"])
-        payload = plan["action_events"][0]["payload_json"]
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
+        self.assertEqual(plan["summary"]["action_executed_count"], 0)
+        update = plan["tracking_updates"][0]
+        self.assertEqual(update["source_trigger_event_type"], "TriggerStateChanged")
+        self.assertFalse(update["raw_json"]["action_eligible_entry_allowed"])
+        self.assertFalse(update["raw_json"]["action_confirmation_entry_verified"])
+        self.assertNotIn("action_entry_trigger_matched_ref", update["raw_json"])
+        self.assertEqual(
+            update["raw_json"]["latest_trigger_state_changed_ref"]["source_trigger_event_id"],
+            "n4-state-true-1352",
+        )
+
+    def test_trigger_matched_entry_then_state_changed_refresh_can_execute_and_preserves_escalation_trace(self):
+        matched = trigger_matched(
+            event_id="n4-match-entry-0955",
+            event_time="2026-07-02T09:55:00+08:00",
+        )
+        entry_trace = {
+            "policy_version": "N4-ordinary-period-escalation-v1",
+            "policy_hash": "entry-policy-hash",
+            "periods": {"W": {"prerequisite_period": "D", "gate_pass": True}},
+        }
+        matched["payload_json"].update(
+            {
+                "primary_trigger_period": "W",
+                "all_trigger_periods": ["W"],
+                "prerequisite_periods": ["D"],
+                "period_escalation_trace": entry_trace,
+                "rule_proof": {
+                    "triggered_period_details": [
+                        {
+                            "period": "W",
+                            "prerequisite_periods": ["D"],
+                            "period_escalation_trace": entry_trace["periods"]["W"],
+                        }
+                    ]
+                },
+            }
+        )
+        entry = self.build_plan([matched])
+        self.assertEqual([event["event_type"] for event in entry["action_events"]], ["ActionEligible"])
+
+        changed = trigger_state_changed_true(
+            matched,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        latest_trace = {
+            "policy_version": "N4-ordinary-period-escalation-v1",
+            "policy_hash": "latest-policy-hash",
+            "periods": {"M": {"prerequisite_period": "W", "gate_pass": True}},
+        }
+        changed["payload_json"].update(
+            {
+                "primary_trigger_period": "M",
+                "all_trigger_periods": ["M"],
+                "triggered_periods": ["M"],
+                "prerequisite_periods": ["W"],
+                "period_escalation_trace": latest_trace,
+            }
+        )
+        metric = passing_buy_metric(metric_time="2026-07-02T13:52:00+08:00")
+        metric["metric_minute_label"] = "13:52"
+
+        confirmed = self.build_plan(
+            [changed],
+            active_tracking_rows=entry["tracking_updates"],
+            metric_rows=[metric],
+        )
+
+        self.assertEqual([event["event_type"] for event in confirmed["action_events"]], ["ActionExecuted"])
+        payload = confirmed["action_events"][0]["payload_json"]
         self.assertEqual(payload["source_trigger_event_type"], "TriggerStateChanged")
         self.assertEqual(payload["source_trigger_event_id"], "n4-state-true-1352")
-        self.assertEqual(payload["source_trigger_event_time"], "2026-07-02T13:52:00+08:00")
-        self.assertEqual(payload["trigger_time"], "2026-07-02T13:52:00+08:00")
-        self.assertEqual(payload["source_n4_payload"]["triggered_periods"], ["D"])
-        self.assertEqual(payload["trace_json"]["source_n4_payload"]["trigger_price"], 12.34)
-        self.assertEqual(plan["summary"]["action_eligible_count"], 0)
-        self.assertEqual(plan["summary"]["action_executed_count"], 1)
+        self.assertEqual(payload["primary_trigger_period"], "M")
+        self.assertEqual(payload["all_trigger_periods"], ["M"])
+        self.assertNotIn("W", payload["all_trigger_periods"])
+        self.assertEqual(payload["source_n4_payload"]["prerequisite_periods"], ["W"])
+        self.assertEqual(payload["source_n4_payload"]["period_escalation_trace"], latest_trace)
+        entry_ref = payload["action_entry_trigger_matched_ref"]
+        latest_ref = payload["latest_trigger_state_changed_ref"]
+        self.assertEqual(entry_ref["source_trigger_event_id"], "n4-match-entry-0955")
+        self.assertEqual(entry_ref["source_n4_payload"]["period_escalation_trace"], entry_trace)
+        self.assertEqual(latest_ref["source_trigger_event_id"], "n4-state-true-1352")
+        self.assertEqual(latest_ref["source_n4_payload"]["period_escalation_trace"], latest_trace)
+        self.assertEqual(payload["trace_json"]["action_entry_trigger_matched_ref"], entry_ref)
+        self.assertEqual(payload["trace_json"]["latest_trigger_state_changed_ref"], latest_ref)
+        self.assertEqual(confirmed["summary"]["action_eligible_count"], 0)
+        self.assertEqual(confirmed["summary"]["action_executed_count"], 1)
+
+        recomputed = self.build_plan(
+            [changed],
+            active_tracking_rows=entry["tracking_updates"],
+            metric_rows=[metric],
+        )
+        self.assertEqual(
+            recomputed["action_events"][0]["event_key"],
+            confirmed["action_events"][0]["event_key"],
+        )
+        replay = self.build_plan(
+            [changed],
+            active_tracking_rows=entry["tracking_updates"],
+            metric_rows=[metric],
+            existing_event_keys={confirmed["action_events"][0]["event_key"]},
+        )
+        self.assertEqual(replay["action_events"], [])
+
+    def test_trigger_state_changed_only_is_attention_for_all_assets_and_directions(self):
+        for asset_kind in ("stock", "index", "board"):
+            for direction, signal_type, condition_key in (
+                ("buy", "B_BUY", "BUY:W"),
+                ("sell", "S_SELL", "SELL:W"),
+            ):
+                with self.subTest(asset_kind=asset_kind, direction=direction):
+                    identity_key = f"{asset_kind}:TEST:{direction}"
+                    matched = trigger_matched(
+                        event_id=f"n4-match-{asset_kind}-{direction}",
+                        identity_key=identity_key,
+                        condition_key=condition_key,
+                        signal_type=signal_type,
+                        direction=direction,
+                    )
+                    matched["asset_kind"] = asset_kind
+                    matched["payload_json"]["asset_kind"] = asset_kind
+                    matched["payload_json"].update(
+                        {
+                            "primary_trigger_period": "W",
+                            "all_trigger_periods": ["W"],
+                            "prerequisite_periods": ["D"],
+                            "period_escalation_trace": {
+                                "policy_version": "N4-ordinary-period-escalation-v1",
+                                "periods": {"W": {"prerequisite_period": "D"}},
+                            },
+                        }
+                    )
+                    changed = trigger_state_changed_true(
+                        matched,
+                        f"n4-state-{asset_kind}-{direction}",
+                    )
+
+                    plan = self.build_plan([changed])
+
+                    self.assertEqual(plan["action_events"], [])
+                    ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+                    self.assertEqual(ref["asset_kind"], asset_kind)
+                    self.assertEqual(ref["direction"], direction)
+                    self.assertFalse(ref["action_eligible_entry_allowed"])
+                    self.assertFalse(ref["action_confirmation_entry_verified"])
+                    self.assertEqual(ref["all_trigger_periods"], ["W"])
+                    self.assertEqual(ref["source_n4_payload"]["prerequisite_periods"], ["D"])
+
+    def test_active_scope_period_fields_round_trip_and_legacy_ref_recovery(self):
+        matched = trigger_matched(event_time="2026-07-02T09:55:00+08:00")
+        matched["payload_json"].update(
+            {
+                "primary_trigger_period": "M",
+                "all_trigger_periods": ["M", "W"],
+            }
+        )
+        row = trigger_state_changed_true(
+            matched,
+            "n4-state-true-1352",
+            event_time="2026-07-02T13:52:00+08:00",
+        )
+        entry = self.build_plan([matched])
+        first = self.build_plan([row], active_tracking_rows=entry["tracking_updates"])
+        ref = first["active_scope_snapshot_artifact"]["scope_rows"][0]["active_tracking_refs"][0]
+
+        self.assertEqual(ref["primary_trigger_period"], "M")
+        self.assertEqual(ref["all_trigger_periods"], ["M", "W"])
+        self.assertEqual(ref["triggered_periods"], ["M", "W"])
+
+        legacy_ref = dict(ref)
+        legacy_ref["trade_date"] = TRADE_DATE
+        legacy_ref.pop("primary_trigger_period")
+        legacy_ref.pop("all_trigger_periods")
+        metric = passing_buy_metric(metric_time="2026-07-02T13:52:00+08:00")
+        metric["metric_minute_label"] = "13:52"
+
+        second = self.build_plan(
+            [],
+            active_tracking_rows=[legacy_ref],
+            metric_rows=[metric],
+        )
+
+        payload = second["action_events"][0]["payload_json"]
+        self.assertEqual(payload["trigger_period"], "M")
+        self.assertEqual(payload["primary_trigger_period"], "M")
+        self.assertEqual(payload["all_trigger_periods"], ["M", "W"])
+        self.assertEqual(payload["triggered_periods"], ["M", "W"])
 
     def test_trigger_matched_after_attention_ref_still_creates_action_eligible(self):
         first = self.build_plan([trigger_state_changed_true(trigger_matched())])
@@ -922,6 +1580,51 @@ class N5LiveTrackingPollerTests(unittest.TestCase):
         self.assertEqual(executed_events[0]["payload_json"]["signal_type"], "B_BUY")
         self.assertEqual(executed_events[0]["payload_json"]["condition_key"], "BUY_HINT:Y,Q,M,W,D")
         self.assertEqual(executed_events[0]["payload_json"]["original_condition_key"], "BUY_HINT:Y,Q,M,W,D")
+
+    def test_hint_keeps_30m_trigger_period_outside_formal_period_set(self):
+        matched = trigger_matched(
+            "n4-hint-period-shape",
+            identity_key="index:SH:000300",
+            condition_key="BUY_HINT:W",
+            signal_type="B_BUY",
+            direction="buy",
+        )
+        matched["asset_kind"] = "index"
+        matched["payload_json"].update(
+            {
+                "asset_kind": "index",
+                "trigger_period": "30m",
+                "primary_trigger_period": None,
+                "all_trigger_periods": [],
+                "triggered_periods": [],
+                "trigger_price": "11",
+            }
+        )
+        with_condition_projection_context(matched)
+        metric = passing_buy_metric(metric_time="2026-07-02T10:00:00+08:00")
+        metric.update(
+            {
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY_HINT:W",
+            }
+        )
+
+        plan = self.build_plan([matched], metric_rows=[metric])
+        payloads = {event["event_type"]: event["payload_json"] for event in plan["action_events"]}
+
+        for payload in payloads.values():
+            self.assertEqual(payload["trigger_period"], "30m")
+            self.assertIsNone(payload["primary_trigger_period"])
+            self.assertEqual(payload["all_trigger_periods"], [])
+            self.assertEqual(payload["triggered_periods"], [])
+        tracking = plan["tracking_updates"][0]
+        self.assertEqual(tracking["trigger_period"], "30m")
+        self.assertIsNone(tracking["primary_trigger_period"])
+        self.assertEqual(tracking["all_trigger_periods"], [])
+        self.assertEqual(tracking["triggered_periods"], ["30m"])
 
     def test_active_scope_snapshot_collapses_same_object_to_active_tracking_refs(self):
         rows = [
@@ -1646,6 +2349,123 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             *extra,
         ]
 
+    def test_proof_to_action_latency_uses_matching_n3t_closed_proof(self):
+        class FakeCursor:
+            def __init__(self):
+                self.params = None
+
+            def execute(self, _sql, params):
+                self.params = params
+
+            def fetchall(self):
+                return [
+                    {
+                        "projection_run_id": "n3t-proof-300144",
+                        "identity_key": "stock:SZ:300144",
+                        "proof_created_at": datetime.now().astimezone().replace(microsecond=0),
+                    }
+                ]
+
+        cursor = FakeCursor()
+        latency_ms = poller_script._proof_to_action_latency_ms(
+            cursor,
+            [
+                {
+                    "event_type": "ActionExecuted",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:300144",
+                    "payload_json": {"source_metric_run_id": "n3t-proof-300144"},
+                }
+            ],
+        )
+
+        self.assertEqual(cursor.params, (["n3t-proof-300144"], ["stock:SZ:300144"]))
+        self.assertIsNotNone(latency_ms)
+        self.assertGreaterEqual(latency_ms, 0)
+        self.assertLess(latency_ms, 2000)
+
+    def test_active_scope_candidates_prioritize_latest_n4_trigger(self):
+        args = SimpleNamespace(
+            action_run_id="n5_live_tracking_20260710__active_set_a__fastlane_v1",
+            for_trade_date="20260710",
+        )
+        rows = [
+            {
+                "run_id": args.action_run_id,
+                "trade_date": "20260710",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:000001",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W",
+                "source_trigger_event_id": "evt-old",
+                "latest_n4_event_time": "2026-07-10T09:31:00+08:00",
+                "next_unchecked_minute_label": "09:31",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+            },
+            {
+                "run_id": args.action_run_id,
+                "trade_date": "20260710",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W",
+                "source_trigger_event_id": "evt-new",
+                "latest_n4_event_time": "2026-07-10T13:07:00+08:00",
+                "next_unchecked_minute_label": "13:07",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+            },
+        ]
+
+        candidates = poller_script._active_scope_rows_to_executed_candidates(args, rows)
+
+        self.assertEqual(
+            [candidate["identity_key"] for candidate in candidates],
+            ["stock:SH:600000", "stock:SZ:000001"],
+        )
+
+    def test_exact_ready_n3t_proof_discovery_is_batched_by_asset_table(self):
+        class FakeCursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchall(self):
+                return [
+                    {
+                        "candidate_index": 1,
+                        "projection_run_id": "n3t-proof-new",
+                    }
+                ]
+
+        cursor = FakeCursor()
+        result = poller_script._discover_exact_ready_n3t_metric_run_ids(
+            cursor,
+            "20260710",
+            candidates=[
+                {
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SZ:000001",
+                    "target_minute_label": "09:31",
+                },
+                {
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:600000",
+                    "target_minute_label": "13:07",
+                },
+            ],
+        )
+
+        self.assertEqual(result, {1: "n3t-proof-new"})
+        self.assertEqual(len(cursor.calls), 1)
+        self.assertIn("candidate_targets", cursor.calls[0][0])
+        self.assertIn("N3T_C1_CLOSED", cursor.calls[0][0])
+
     def test_plan_only_does_not_call_writer(self):
         calls = {"provider": 0, "writer": 0}
 
@@ -1853,11 +2673,36 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             )
 
             cursor = LatestActiveScopeCursor()
-            with patch.object(
-                poller_script,
-                "_build_executed_candidate_plan",
-                return_value={"summary": {"action_executed_count": 1, "tracking_upsert_count": 1}},
-            ) as build_plan:
+            current_tracking_row = {
+                "run_id": ACTION_RUN_ID,
+                "trade_date": TRADE_DATE,
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:002745",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:M,W,D",
+                "source_trigger_run_id": "trigger_provisional_ordinary_20260702_until_0951",
+                "source_trigger_event_id": "evt-n4-002745",
+                "state_key": "state-key-002745",
+                "latest_n4_event_time": "2026-07-02T10:21:00+08:00",
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+                "trigger_live": True,
+                "current_status": "matched",
+                "raw_json": {"next_unchecked_minute_label": "10:21"},
+            }
+            with (
+                patch.object(
+                    poller_script,
+                    "_fetch_active_tracking_rows_by_state_keys",
+                    return_value=[current_tracking_row],
+                ) as fetch_rows,
+                patch.object(
+                    poller_script,
+                    "_build_executed_candidate_plan",
+                    return_value={"summary": {"action_executed_count": 1, "tracking_upsert_count": 1}},
+                ) as build_plan,
+            ):
                 runtime_inputs = poller_script._discover_executed_runtime_inputs(
                     cursor,
                     SimpleNamespace(
@@ -1870,6 +2715,12 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
         self.assertEqual(runtime_inputs["state_key"], "state-key-002745")
         self.assertEqual(runtime_inputs["source_metric_run_id"], metric_run_id)
         self.assertEqual(cursor.object_minute_params[:3], (TRADE_DATE, "stock:SZ:002745", "10:21"))
+        fetch_rows.assert_called_once_with(
+            cursor,
+            unittest.mock.ANY,
+            action_run_id=ACTION_RUN_ID,
+            state_keys=["state-key-002745"],
+        )
         build_plan.assert_called_once()
 
     def test_active_scope_artifact_rows_use_object_minute_hash_not_shared_n4_run_hash(self):
@@ -2465,7 +3316,37 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             self.assertFalse(payload["full_market_fallback_allowed"])
             self.assertEqual(manifest["active_scope_artifact_write_result"]["path"], str(artifact_path))
 
-    def test_executed_phase_explicit_active_scope_artifact_is_authoritative_input(self):
+    def test_active_scope_artifact_atomic_replace_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            existing = b'{"artifact_type":"n5_active_scope_snapshot_v1","scope_count":7}\n'
+            artifact_path.write_bytes(existing)
+            args = SimpleNamespace(
+                active_scope_artifact_path=str(artifact_path),
+                action_run_id=ACTION_RUN_ID,
+                for_trade_date=TRADE_DATE,
+                source_trigger_run_id=SOURCE_TRIGGER_RUN_ID,
+                user_confirmed=True,
+                write_active_scope_artifact=True,
+            )
+            plan = {
+                "active_scope_snapshot_artifact": {
+                    "artifact_type": "n5_active_scope_snapshot_v1",
+                    "scope_count": 1,
+                }
+            }
+
+            with patch(
+                "ashare_v3.runtime.bounded_worker_control.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    poller_script._write_active_scope_artifact(args, plan)
+
+            self.assertEqual(artifact_path.read_bytes(), existing)
+            self.assertEqual(list(artifact_path.parent.glob(f".{artifact_path.name}.tmp.*")), [])
+
+    def test_executed_phase_explicit_active_scope_is_allowlist_and_db_state_is_authoritative(self):
         state_key = poller.build_action_tracking_state_key(
             trade_date=TRADE_DATE,
             asset_kind="stock",
@@ -2509,6 +3390,15 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
                 }
             ],
         }
+        current_db_ref = {
+            **active_ref,
+            "trade_date": TRADE_DATE,
+            "last_checked_minute_label": "10:00",
+            "raw_json": {
+                **active_ref["raw_json"],
+                "next_unchecked_minute_label": "10:01",
+            },
+        }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
@@ -2528,6 +3418,11 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
                 patch.object(poller_script.psycopg, "connect") as connect,
                 patch.object(poller_script, "_fetch_active_tracking_rows", return_value=[]),
                 patch.object(poller_script, "_fetch_active_scope_tracking_rows", return_value=[]),
+                patch.object(
+                    poller_script,
+                    "_fetch_active_tracking_rows_by_state_keys",
+                    return_value=[current_db_ref],
+                ) as fetch_rows,
                 patch.object(poller_script, "_fetch_metric_rows", return_value=[]),
                 patch.object(poller_script, "_fetch_existing_action_event_keys", return_value=set()),
                 patch.object(
@@ -2552,7 +3447,17 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
         kwargs = build_plan.call_args.kwargs
         self.assertEqual(kwargs["active_tracking_rows"][0]["state_key"], state_key)
         self.assertEqual(kwargs["active_tracking_rows"][0]["trade_date"], TRADE_DATE)
+        self.assertEqual(
+            kwargs["active_tracking_rows"][0]["raw_json"]["next_unchecked_minute_label"],
+            "10:01",
+        )
         self.assertEqual(kwargs["active_scope_tracking_rows"][0]["state_key"], state_key)
+        fetch_rows.assert_called_once_with(
+            unittest.mock.ANY,
+            args,
+            action_run_id=ACTION_RUN_ID,
+            state_keys=[state_key],
+        )
 
     def test_executed_discovery_builds_candidates_from_explicit_active_scope_artifact(self):
         state_key = poller.build_action_tracking_state_key(
@@ -2618,7 +3523,7 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
         )
         self.assertEqual(candidates[0]["active_tracking_row"]["state_key"], state_key)
 
-    def test_executed_candidate_plan_uses_explicit_active_scope_row_not_db_terminal_state(self):
+    def test_executed_active_scope_candidates_rehydrate_db_cursor_and_filter_terminal(self):
         state_key = poller.build_action_tracking_state_key(
             trade_date=TRADE_DATE,
             asset_kind="stock",
@@ -2627,7 +3532,15 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             signal_type="B_BUY",
             condition_key="BUY_MAIN",
         )
-        active_row = {
+        terminal_state_key = poller.build_action_tracking_state_key(
+            trade_date=TRADE_DATE,
+            asset_kind="stock",
+            identity_key="stock:SH:600001",
+            direction="buy",
+            signal_type="B_BUY",
+            condition_key="BUY_MAIN",
+        )
+        stale_artifact_row = {
             "run_id": ACTION_RUN_ID,
             "state_key": state_key,
             "trade_date": TRADE_DATE,
@@ -2640,56 +3553,82 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             "action_state": "eligible",
             "confirmation_status": "pending",
             "tracking_status": "tracking",
+            "last_checked_minute_label": "09:59",
             "raw_json": {"next_unchecked_minute_label": "10:00"},
         }
-        artifact = {
-            "artifact_type": "n5_active_scope_snapshot_v1",
-            "for_trade_date": TRADE_DATE,
-            "action_run_id": ACTION_RUN_ID,
-            "scope_rows": [
-                {
-                    "asset_kind": "stock",
-                    "identity_key": "stock:SH:600000",
-                    "direction": "buy",
-                    "active_tracking_refs": [active_row],
-                }
-            ],
+        stale_terminal_row = {
+            **stale_artifact_row,
+            "state_key": terminal_state_key,
+            "identity_key": "stock:SH:600001",
         }
+        current_db_row = {
+            **stale_artifact_row,
+            "last_checked_minute_label": "10:00",
+            "raw_json": {"next_unchecked_minute_label": "10:01"},
+        }
+        args = SimpleNamespace(for_trade_date=TRADE_DATE)
+        candidates = poller_script._active_scope_rows_to_executed_candidates(
+            args,
+            [stale_artifact_row, stale_terminal_row],
+        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            artifact_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
-            artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
-            args = SimpleNamespace(
-                fastlane_phase="executed",
-                active_scope_artifact_path=str(artifact_path),
-                for_trade_date=TRADE_DATE,
-                action_run_id=ACTION_RUN_ID,
-                consumer_name=CONSUMER_NAME,
-                max_events=10,
+        with patch.object(
+            poller_script,
+            "_fetch_active_tracking_rows_by_state_keys",
+            return_value=[current_db_row],
+        ) as fetch_rows:
+            rehydrated = poller_script._rehydrate_active_scope_executed_candidates(
+                None,
+                args,
+                candidates,
             )
-            candidate = {
+
+        self.assertEqual(len(rehydrated), 1)
+        self.assertEqual(rehydrated[0]["state_key"], state_key)
+        self.assertEqual(rehydrated[0]["target_minute_label"], "1001")
+        self.assertEqual(
+            rehydrated[0]["active_tracking_row"]["raw_json"]["next_unchecked_minute_label"],
+            "10:01",
+        )
+        fetch_rows.assert_called_once_with(
+            None,
+            args,
+            action_run_id=ACTION_RUN_ID,
+            state_keys=[state_key, terminal_state_key],
+        )
+
+    def test_executed_batch_plan_does_not_restore_stale_artifact_terminal_row(self):
+        candidate = {
+            "run_id": ACTION_RUN_ID,
+            "state_key": "stale-terminal-state-key",
+            "source_trigger_run_id": "",
+            "source_metric_run_id": SOURCE_METRIC_RUN_ID,
+            "active_tracking_row": {
                 "run_id": ACTION_RUN_ID,
-                "state_key": state_key,
-                "source_trigger_run_id": "",
-                "active_tracking_row": active_row,
-            }
+                "state_key": "stale-terminal-state-key",
+                "trade_date": TRADE_DATE,
+                "action_state": "eligible",
+                "tracking_status": "tracking",
+            },
+        }
+        args = SimpleNamespace(
+            for_trade_date=TRADE_DATE,
+            consumer_name=CONSUMER_NAME,
+        )
 
-            with (
-                patch.object(poller_script, "_fetch_active_tracking_rows", side_effect=AssertionError("db active state must not be fetched")),
-                patch.object(poller_script, "_fetch_active_scope_tracking_rows", side_effect=AssertionError("db active scope must not be fetched")),
-                patch.object(poller_script, "_fetch_metric_rows", return_value=[]),
-                patch.object(poller_script, "_fetch_existing_action_event_keys", return_value=set()),
-                patch.object(
-                    poller_script,
-                    "build_live_tracking_plan",
-                    return_value={"summary": {"tracking_upsert_count": 0, "action_executed_count": 0}},
-                ) as build_plan,
+        with (
+            patch.object(poller_script, "_fetch_active_tracking_rows_by_state_keys", return_value=[]),
+            patch.object(
+                poller_script,
+                "build_live_tracking_plan",
+                side_effect=AssertionError("stale artifact row must not reach planner"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                poller_script.N5LiveTrackingBlocked,
+                "active_tracking_rows_required_for_executed_batch",
             ):
-                poller_script._build_executed_candidate_plan(None, args, candidate, SOURCE_METRIC_RUN_ID)
-
-        kwargs = build_plan.call_args.kwargs
-        self.assertEqual(kwargs["active_tracking_rows"][0]["state_key"], state_key)
-        self.assertEqual(kwargs["active_scope_tracking_rows"][0]["state_key"], state_key)
+                poller_script._build_executed_batch_candidate_plan(None, args, [candidate])
 
     def test_rebuild_from_n4_day_events_runner_writes_local_final_a_artifact(self):
         match = trigger_matched(
@@ -2963,6 +3902,71 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
         self.assertIn("triggered_periods", cursor.sql)
         self.assertEqual(len(cursor.values[0]), cursor.sql.count("%s"))
 
+    def test_tracking_upsert_orders_rows_by_tracking_unique_key(self):
+        first = trigger_matched("n4-match-z", identity_key="stock:SH:600001")
+        second = trigger_matched("n4-match-a", identity_key="stock:SH:600000")
+        plan = poller.build_live_tracking_plan(
+            n4_event_rows=[first, second],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id=ACTION_RUN_ID,
+            source_trigger_run_id=SOURCE_TRIGGER_RUN_ID,
+            source_metric_run_id=SOURCE_METRIC_RUN_ID,
+            consumer_name=CONSUMER_NAME,
+            for_trade_date=TRADE_DATE,
+        )
+        cursor = TrackingUpsertCursor()
+
+        poller_script._upsert_tracking_states(cursor, list(reversed(plan["tracking_updates"])))
+
+        keys = [(values[0], values[7]) for values in cursor.values]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_default_execute_writer_retries_deadlock_without_partial_second_write(self):
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+                self.commits = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.commits += 1
+
+        first = FakeConnection()
+        second = FakeConnection()
+        args = SimpleNamespace(dsn="postgresql:///unused", fastlane_phase="intake")
+        plan = {"tracking_updates": [{"run_id": ACTION_RUN_ID, "state_key": "state-1"}], "action_events": []}
+        deadlock = poller_script.psycopg.errors.DeadlockDetected("deadlock")
+
+        with (
+            patch.object(poller_script.psycopg, "connect", side_effect=[first, second]) as connect,
+            patch.object(poller_script, "_upsert_tracking_states", side_effect=[deadlock, 1]),
+            patch.object(poller_script, "_insert_action_outbox_events", return_value=0),
+            patch.object(poller_script.time, "sleep") as sleep,
+        ):
+            result = poller_script._default_execute_writer(args, plan)
+
+        self.assertEqual(result["common_action_tracking_state"], 1)
+        self.assertEqual(connect.call_count, 2)
+        self.assertEqual(first.commits, 0)
+        self.assertEqual(second.commits, 1)
+        sleep.assert_called_once_with(0.05)
+
     def test_tracking_upsert_sql_preserves_newer_cursor_on_stale_worker_update(self):
         plan = poller.build_live_tracking_plan(
             n4_event_rows=[trigger_matched()],
@@ -2988,6 +3992,71 @@ class N5LiveTrackingPollerScriptTests(unittest.TestCase):
             "EXCLUDED.latest_n4_event_time >= common_action_tracking_state.latest_n4_event_time",
             cursor.sql,
         )
+
+    def test_tracking_upsert_sql_allows_only_explicit_expired_ref_reopen(self):
+        plan = poller.build_live_tracking_plan(
+            n4_event_rows=[trigger_matched()],
+            active_tracking_rows=[],
+            metric_rows=[],
+            action_run_id=ACTION_RUN_ID,
+            source_trigger_run_id=SOURCE_TRIGGER_RUN_ID,
+            source_metric_run_id=SOURCE_METRIC_RUN_ID,
+            consumer_name=CONSUMER_NAME,
+        )
+        cursor = TrackingUpsertCursor()
+
+        poller_script._upsert_tracking_states(cursor, plan["tracking_updates"])
+
+        self.assertIn("common_action_tracking_state.action_state = 'expired'", cursor.sql)
+        self.assertIn("EXCLUDED.action_state = 'eligible'", cursor.sql)
+        self.assertIn("terminal_ref_reopen_allowed", cursor.sql)
+        self.assertIn("EXCLUDED.source_trigger_event_type = 'TriggerMatched'", cursor.sql)
+        self.assertIn(
+            "EXCLUDED.source_trigger_event_id IS DISTINCT FROM common_action_tracking_state.source_trigger_event_id",
+            cursor.sql,
+        )
+        self.assertIn(
+            "WHEN common_action_tracking_state.action_state = 'executed' THEN common_action_tracking_state.action_state",
+            cursor.sql,
+        )
+
+    def test_active_set_a_intake_fetches_terminal_rows_for_reopen_decision(self):
+        class FetchCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = None
+
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+
+            def fetchall(self):
+                return []
+
+        cursor = FetchCursor()
+        args = SimpleNamespace(
+            for_trade_date=TRADE_DATE,
+            action_run_id=ACTION_RUN_ID,
+            source_trigger_run_id="",
+            fastlane_ref_state_key="",
+        )
+
+        with patch.object(poller_script, "_is_fastlane_executed_phase", return_value=False), patch.object(
+            poller_script,
+            "_is_active_set_a_intake",
+            return_value=True,
+        ):
+            rows = poller_script._fetch_active_tracking_rows(
+                cursor,
+                args,
+                n4_event_rows=[trigger_matched()],
+            )
+
+        self.assertEqual(rows, [])
+        self.assertIn("state_key = ANY", cursor.sql)
+        self.assertNotIn("action_state = 'eligible'", cursor.sql)
+        self.assertNotIn("tracking_status = 'tracking'", cursor.sql)
+        self.assertIn("latest_n4_event_time DESC NULLS LAST", cursor.sql)
 
     def test_candidate_target_minute_ignores_stale_raw_json_cursor_behind_checked_label(self):
         candidate = {

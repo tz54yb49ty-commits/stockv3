@@ -1,9 +1,26 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-06-05
+更新日期：2026-07-22
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
+
+### 2026-07-22 N6 B 轨 virtual-executor 前向路线
+
+本节只登记 `N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` 的后续 gate 顺序，不授权本文件所在会话执行任何 runtime：
+
+```text
+G1 runtime_control 治理规则单一提交
+-> G2 N6_user migration + immutable release deployment
+-> G3 N6_user bounded explicit proposal smoke
+-> G4 confirmed 队列精确治理 + bootout 停用方案冻结
+-> G5 N6_user persistent virtual-executor enablement
+-> G6 自然周期审计与异常停用验证
+```
+
+每一阶段均要求用户显式授权、版本化合同、preflight、精确 rollback 和精确影响范围。G3 必须 PASS，G4 必须完成，才允许进入 G5。持续 executor 只消费两阶段人工确认的 N6 虚拟申请，并在 claim/apply 两层 fail-closed 校验开放交易日、交易时段、两分钟报价、本人主体/账户/范围、现金、100 股取整和 T+1。真实券商、真实订单、自动申请、跨层写入和 AI autonomous real trading 不在路线内。
+
+此前路线图中的“不授权 N6 execute/worker”均是对应历史 gate 的边界证据，继续保留；本节仅前向 supersede 生效后的 N6 B 轨虚拟执行器权限，不扩大到其他层或其他 worker。
 
 | 阶段 | layer_role | 状态 | 当前判断 |
 |---|---|---|---|
@@ -999,3 +1016,27 @@ N2-Web-3：todo，8782 增加 display_basis 只读展示。
 ```
 
 回滚 gate：`condition_display_basis` 必须与同一 N2 run_id 的 basis/pool/scope 同生命周期回滚；不得单独补写到旧 active run。
+
+## N3N6Q：N6 虚拟账户股票报价窄接口
+
+状态：`contract_registered_design_only`。
+
+边界已冻结：
+
+```text
+N3-A1 / N3-B1 / N3-B2 / N3-C1 / N3P / N3T unchanged
+existing N3 poller / worker / schema / outbox / inbox / checkpoint unchanged
+N3N6Q database writes = 0
+N3N6Q events = 0
+A-track calls = 0
+```
+
+推荐路线：
+
+1. `N3_market_data` 在独立 worktree 仅新增 `src/ashare_v3/n3n6q/` 与 fake-adapter tests。
+2. provider contract/test 通过后，另开 read-only Mootdx live probe；不得在 provider gate 拉行情。
+3. `N6_user` 另开 quote schema/persistence gate，独占调度、trade_date/freshness、N6 snapshot。
+4. portfolio 估值、首日止损冻结、stop proposal、confirm/虚拟卖出分别独立 gate。
+5. runtime 发布与 LaunchAgent 必须最后由 `runtime_control` 另行授权；当前合同不安装、不启动。
+
+仍禁止：修改或调用既有 N3 模块、写 N3/N6 DB、生成 N3 event、启动 poller/worker、真实交易、券商、跨层回写。

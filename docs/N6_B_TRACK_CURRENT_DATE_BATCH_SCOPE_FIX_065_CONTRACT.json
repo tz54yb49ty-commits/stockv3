@@ -1,0 +1,25 @@
+{
+  "contract": "n6-btrack-current-date-batch-scope-fix-065-v1",
+  "layer_role": "N6_user",
+  "status": "implementation_ready_not_deployed",
+  "problem": "The 064 scope helper selected the global maximum for_trade_date, so a prepared next-day condition batch invalidated still-current same-day manual BUY proposals.",
+  "behavior": {
+    "approved_batch_selection": "Select the unique approved condition batch whose for_trade_date equals the current Asia/Shanghai date.",
+    "preserved_checks": [
+      "current Asia/Shanghai date is an open trade day",
+      "signal projection and card remain current and actionable",
+      "principal, virtual account and personal scope remain valid",
+      "signal reference price remains finite, positive and unchanged"
+    ],
+    "executor_policy_version": "n6_btrack_current_date_batch_scope_fix_065_v1"
+  },
+  "changed_functions": [
+    "public.n6_btrack_manual_signal_buy_current_scope(bigint,text,bigint,bigint,bigint,text,text,numeric,text)",
+    "public.n6_executor_apply_claimed_proposal(bigint,text)"
+  ],
+  "interfaces_changed": false,
+  "tables_changed": false,
+  "business_rows_written_by_migration": false,
+  "real_broker_connected": false,
+  "rollback": "065_n6_btrack_current_date_batch_scope_fix_rollback.sql restores the exact 064 function bodies, owner, SECURITY DEFINER, fixed search_path, ACL and policy marker without deleting historical business rows."
+}

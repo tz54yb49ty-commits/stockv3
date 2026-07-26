@@ -1,9 +1,37 @@
 # A股监控系统 v3 当前任务看板
 
-更新日期：2026-06-03
+更新日期：2026-07-22
 范围：最小可落地任务看板。本文档不授权数据库写入、行情 execute、worker、语音、sim、前端或真实交易。
 
 ## P0 当前优先级
+
+### T0.GOV-N6. N6 B 轨 virtual-executor 权限治理 v1
+
+状态：governance registration ready；runtime not executed。
+
+目标：以前向规则 `N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` 将 N6 虚拟账户 runtime 从 blanket reject 调整为严格条件下的独立 gate，同时保持真实交易和跨层写入永久禁止。
+
+执行顺序：
+
+```text
+1. runtime_control 只提交治理文档
+2. 切换 N6_user 部署版本化 migration 和不可变 release
+3. 单条显式 proposal bounded smoke PASS
+4. confirmed 队列精确治理完成
+5. 冻结并验证立即 bootout 停用方案
+6. 另行授权持续 virtual-executor
+7. 自然周期验证全链审计和异常停用
+```
+
+验收硬条件：
+
+- proposal 只能由真人两阶段显式创建、确认；executor 不得创建或确认。
+- claim/apply 双层校验开放交易日、交易时段、两分钟内 `passed/ok` 报价、本人 principal/account/scope、现金、服务端预算、100 股取整和 T+1。
+- 独立 service role；proposal/order/trade/cash/position/lot 全审计；可立即 bootout。
+- 版本化合同、preflight、精确 rollback、不可变 release、精确影响范围全部通过。
+- bounded smoke PASS、confirmed 队列治理完成、停用方案冻结后，才可启用持续 executor。
+
+禁止事项：本治理任务不连接数据库、不执行 migration、不修改 release/plist、不启动 executor、不处理 proposal；真实券商、真实订单、N6 回写 N1-N5、未经授权的申请、自动创建交易申请、AI autonomous real trading 和无 preflight/rollback 的长期 worker 始终禁止。历史 gate 与历史 BLOCKED 证据不得改写。
 
 ### T0. Runtime pipeline state machine / dashboard v0/v0.2
 
@@ -3722,3 +3750,46 @@ local-only disclaimer and safety flags
 - 当前可人工使用 / 演示。
 - 如需更真实历史全量源，另开 `N6_REPLAY_HISTORICAL_SOURCE_CONNECTOR_DESIGN_GATE`。
 - 如需 shadow DB，另开独立隔离设计 gate；不得混入当前 local-only 模式。
+
+## N3N6Q 专项任务
+
+### T-N3N6Q-0. Cross-layer contract registration
+
+状态：`ready_for_review`。
+
+验收：
+
+- authority matrix 明确 N3N6Q 只拥有外部股票报价与 source identity 校验。
+- QuoteIdentity 输入仅 `identity_key / exchange / stock_code`。
+- QuoteBatch v1 字段、质量枚举、批量上限与 fail-closed 规则已冻结。
+- A1/B1/B2/C1/N3P/N3T 和全部现有 poller/worker/schema/event infrastructure 均为 denylist。
+- N6 独占 scope、调度、trade_date/freshness、持久化和止损策略。
+- A轨/admin/status、页面和浏览器不调用 N3N6Q。
+
+### T-N3N6Q-1. Provider and fake-adapter gate
+
+状态：`not_started`；`layer_role=N3_market_data`。
+
+精确候选文件：
+
+```text
+src/ashare_v3/n3n6q/__init__.py
+src/ashare_v3/n3n6q/contract.py
+src/ashare_v3/n3n6q/provider.py
+src/ashare_v3/n3n6q/mootdx_adapter.py
+tests/test_n3n6q_quote_provider.py
+```
+
+禁止修改任何现有文件；provider gate 不拉行情、不写 DB、不生成事件。
+
+### T-N3N6Q-2. Read-only live probe
+
+状态：`blocked_until_T-N3N6Q-1_reviewed`；`layer_role=N3_market_data`。
+
+只验证 Mootdx SH/SZ/BJ 身份映射、每批最多 80、响应 code/market、价格和 source time；不写 DB。BJ 映射未证明时必须 `not_ready`。
+
+### T-N3N6Q-3. N6 quote persistence and stop-loss chain
+
+状态：`blocked_until_T-N3N6Q-2_reviewed`；`layer_role=N6_user`。
+
+按独立 gate 依次实现 N6 quote schema、one-shot、portfolio 估值、首日止损冻结、proposal evaluator、confirm transaction。任何 gate 不自动授权真实交易、券商、语音、N4/N5 修改或 runtime 发布。

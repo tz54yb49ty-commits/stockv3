@@ -1,15 +1,26 @@
+import hashlib
+import inspect
+import json
 import unittest
 
 from ashare_v3.user.projection_plan import (
     CANONICAL_EVENT_TYPES,
     EXPECTED_N5_OUTBOX_COUNTS,
+    IndustryMembershipRow,
     LEGACY_EXPECTED_N5_OUTBOX_COUNTS,
     LEGACY_EVENT_TYPES,
+    N5_PROJECTION_MESSAGE_CONTRACT_HASH,
+    N5_PROJECTION_MESSAGE_CONTRACT_VERSION,
+    N6_INDUSTRY_READ_ROLE,
+    N6_INDUSTRY_SOURCE_RELATION,
     AdminUser,
     FilterProfile,
+    PostgresProjectionPlanRepository,
     ProjectionEvent,
     ProjectionInputSnapshot,
     build_parser,
+    evaluate_projection_message_contract,
+    freeze_stock_industry_context,
     parse_expected_n5_outbox_counts,
     run_projection_dry_run,
 )
@@ -310,6 +321,174 @@ class N6ProjectionPlanTest(unittest.TestCase):
         self.assertEqual(report["result"], "BLOCKED")
         self.assertIn("unsupported_user_message_event_filter", report["blockers"])
 
+    def test_projection_message_contract_projects_n5_payload_without_recalculation(self) -> None:
+        events: list[ProjectionEvent] = []
+        for asset_kind in ("stock", "index", "board"):
+            for event_type in ("ActionEligible", "ActionExecuted"):
+                event = projection_event(
+                    event_id=f"evt_{asset_kind}_{event_type}",
+                    event_type=event_type,
+                    direction="buy",
+                    signal_type="B_BUY",
+                    action_mark="normal" if event_type == "ActionExecuted" else None,
+                )
+                set_event_asset(event, asset_kind)
+                add_projection_message_contract(event)
+                events.append(event)
+        events = freeze_stock_industry_context(
+            events,
+            [industry_membership_row("stock:SH:600000", "board:TDX:880001", "880001", "银行")],
+        )
+        expected = {"ActionEligible:pending": 3, "ActionExecuted:pending": 3}
+
+        report = run_projection_dry_run(
+            repository=FakeProjectionRepository(default_snapshot(n5_outbox_counts=expected, events=events)),
+            expected_n5_outbox_counts=expected,
+            user_message_event_filter=["ActionEligible", "ActionExecuted"],
+        )
+
+        self.assertEqual(report["result"], "DRY_RUN_PASS")
+        self.assertEqual(report["planned_row_counts"]["user_signal_projection"], 6)
+        samples = {sample["source_event_id"]: sample for sample in report["sample_plans"]}
+        for event in events:
+            for output in (samples[event.event_id]["projection"], samples[event.event_id]["card"]):
+                self.assertEqual(output["condition_projection_context"], event.payload_json["condition_projection_context"])
+                self.assertEqual(output["projection_message_contract_hash"], N5_PROJECTION_MESSAGE_CONTRACT_HASH)
+                self.assertEqual(output["trigger_pct"], "999.123456")
+                self.assertEqual(output["code"], event.payload_json["asset_code"])
+                self.assertEqual(output["name"], event.payload_json["asset_name"])
+                if event.event_type == "ActionExecuted":
+                    self.assertEqual(output["action_pct"], "888.654321")
+                else:
+                    self.assertIsNone(output["action_price"])
+                    self.assertIsNone(output["action_pct"])
+            expected_industry_status = "ready" if event.asset_kind == "stock" else "not_applicable"
+            self.assertEqual(samples[event.event_id]["card"]["industry_status"], expected_industry_status)
+
+    def test_projection_message_tamper_is_event_scoped(self) -> None:
+        valid = projection_event(event_id="evt_message_ready", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        invalid = projection_event(event_id="evt_message_tampered", event_type="ActionEligible", direction="sell", signal_type="S_SELL")
+        add_projection_message_contract(valid)
+        add_projection_message_contract(invalid)
+        invalid.payload_json["projection_message_contract_hash"] = "tampered"
+        expected = {"ActionEligible:pending": 2}
+
+        report = run_projection_dry_run(
+            repository=FakeProjectionRepository(default_snapshot(n5_outbox_counts=expected, events=[valid, invalid])),
+            expected_n5_outbox_counts=expected,
+            user_message_event_filter=["ActionEligible"],
+        )
+
+        self.assertEqual(report["result"], "DRY_RUN_PASS_WITH_EVENT_P0_SKIPS")
+        self.assertEqual(report["planned_row_counts"]["user_signal_projection"], 1)
+        self.assertEqual(report["event_projection_quality"]["skipped_event_count"], 1)
+        reasons = report["event_projection_quality"]["items"][0]["details"]["reasons"]
+        self.assertIn("projection_message_contract_hash_mismatch", reasons)
+
+    def test_projection_message_marker_version_status_and_pct_fail_closed(self) -> None:
+        mutations = {
+            "projection_message_contract_version_mismatch": (
+                "projection_message_contract_version",
+                "wrong-version",
+            ),
+            "projection_message_status_not_ready": ("projection_message_status", "not_ready"),
+            "trigger_pct_format_invalid": ("trigger_pct", "1.2"),
+        }
+        for expected_reason, (field, value) in mutations.items():
+            event = projection_event(
+                event_id=f"evt_{expected_reason}",
+                event_type="ActionEligible",
+                direction="buy",
+                signal_type="B_BUY",
+            )
+            add_projection_message_contract(event)
+            event.payload_json[field] = value
+
+            evaluation = evaluate_projection_message_contract(event)
+
+            self.assertFalse(evaluation["projectable"], expected_reason)
+            self.assertIn(expected_reason, evaluation["reasons"])
+
+    def test_stock_industry_freeze_uses_exact_distinct_view_mapping(self) -> None:
+        ready = projection_event(event_id="evt_industry_ready", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        missing = projection_event(event_id="evt_industry_missing", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        ambiguous = projection_event(event_id="evt_industry_ambiguous", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        for event, code in ((ready, "600000"), (missing, "600001"), (ambiguous, "600002")):
+            event.identity_key = f"stock:SH:{code}"
+            event.partition_key = event.identity_key
+            event.payload_json["asset_kind"] = "stock"
+            event.payload_json["identity_key"] = event.identity_key
+            event.board_identity_key = "board:TDX:999999"
+            event.board_code = "999999"
+            event.board_name = "forbidden legacy pollution"
+            add_projection_message_contract(event)
+
+        duplicate = industry_membership_row("stock:SH:600000", "board:TDX:880001", "880001", "银行")
+        rows = [
+            duplicate,
+            duplicate,
+            industry_membership_row("stock:SH:600002", "board:TDX:880002", "880002", "证券"),
+            industry_membership_row("stock:SH:600002", "board:TDX:880003", "880003", "保险"),
+        ]
+
+        frozen = freeze_stock_industry_context([ready, missing, ambiguous], rows)
+
+        self.assertEqual(frozen[0].industry_status, "ready")
+        self.assertEqual(frozen[0].board_identity_key, "board:TDX:880001")
+        self.assertEqual(frozen[0].board_code, "880001")
+        self.assertEqual(frozen[0].board_name, "银行")
+        self.assertEqual(frozen[0].industry_provenance["source_relation"], N6_INDUSTRY_SOURCE_RELATION)
+        self.assertEqual(frozen[0].industry_provenance["read_role"], N6_INDUSTRY_READ_ROLE)
+        self.assertEqual(frozen[0].industry_provenance["distinct_mapping_count"], 1)
+        self.assertEqual(frozen[1].industry_status, "not_ready")
+        self.assertIsNone(frozen[1].board_code)
+        self.assertEqual(frozen[1].industry_provenance["reason"], "industry_membership_missing")
+        self.assertEqual(frozen[2].industry_status, "not_ready")
+        self.assertIsNone(frozen[2].board_code)
+        self.assertEqual(frozen[2].industry_provenance["reason"], "industry_membership_ambiguous")
+
+    def test_industry_not_ready_does_not_block_core_projection(self) -> None:
+        event = projection_event(event_id="evt_industry_not_ready", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        add_projection_message_contract(event)
+        event = freeze_stock_industry_context([event], [])[0]
+        expected = {"ActionEligible:pending": 1}
+
+        report = run_projection_dry_run(
+            repository=FakeProjectionRepository(default_snapshot(n5_outbox_counts=expected, events=[event])),
+            expected_n5_outbox_counts=expected,
+            user_message_event_filter=["ActionEligible"],
+        )
+
+        self.assertEqual(report["result"], "DRY_RUN_PASS")
+        self.assertEqual(report["planned_row_counts"]["user_signal_projection"], 1)
+        self.assertEqual(report["sample_plans"][0]["card"]["industry_status"], "not_ready")
+
+    def test_industry_query_uses_reviewed_view_and_exact_filters(self) -> None:
+        source = inspect.getsource(PostgresProjectionPlanRepository._fetch_reviewed_industry_rows)
+
+        self.assertIn("SELECT DISTINCT", source)
+        self.assertIn("FROM v_n6_board_membership_fact", source)
+        self.assertIn("stock_identity_key = ANY(%s)", source)
+        self.assertIn("trade_date = ANY(%s)", source)
+        self.assertIn("board_type = 'tdx_industry'", source)
+        self.assertNotIn("n6_board_membership_display_cache", source)
+        self.assertNotIn("n6_display_cache_run", source)
+        self.assertNotIn("FROM board_membership_fact", source)
+
+    def test_historical_event_without_marker_keeps_legacy_output_shape(self) -> None:
+        event = projection_event(event_id="evt_no_marker", event_type="ActionEligible", direction="buy", signal_type="B_BUY")
+        expected = {"ActionEligible:pending": 1}
+
+        report = run_projection_dry_run(
+            repository=FakeProjectionRepository(default_snapshot(n5_outbox_counts=expected, events=[event])),
+            expected_n5_outbox_counts=expected,
+            user_message_event_filter=["ActionEligible"],
+        )
+
+        self.assertEqual(report["result"], "DRY_RUN_PASS")
+        self.assertNotIn("projection_message_contract_version", report["sample_plans"][0]["card"])
+        self.assertNotIn("industry_status", report["sample_plans"][0]["card"])
+
     def test_legacy_action_event_and_hint_event_remain_compatible(self) -> None:
         snapshot = default_snapshot(
             n5_outbox_counts=dict(LEGACY_EXPECTED_N5_OUTBOX_COUNTS),
@@ -472,6 +651,137 @@ def projection_event(
         board_code=None,
         board_name=None,
     )
+
+
+def set_event_asset(event: ProjectionEvent, asset_kind: str) -> None:
+    identity_key, code, name = {
+        "stock": ("stock:SH:600000", "600000", "浦发银行"),
+        "index": ("index:SH:000300", "000300", "沪深300"),
+        "board": ("board:TDX:880001", "880001", "银行"),
+    }[asset_kind]
+    event.asset_kind = asset_kind
+    event.identity_key = identity_key
+    event.partition_key = identity_key
+    event.code = code
+    event.name = name
+    event.payload_json["asset_kind"] = asset_kind
+    event.payload_json["identity_key"] = identity_key
+
+
+def add_pct_contract(event: ProjectionEvent) -> dict:
+    fields = {
+        "name": event.name or event.identity_key,
+        "close": "10",
+        "up_reference_period": "W",
+        "buy_target_price": "11",
+        "buy_expected_return_pct": "10.000000",
+        "down_reference_period": "M",
+        "sell_target_price": "9",
+        "sell_expected_return_pct": "-10.000000",
+        "clear_sell_ref_period": "W",
+        "up_secondary_target_price": None,
+        "up_secondary_expected_return_pct": None,
+    }
+    if event.asset_kind == "stock":
+        fields.update({"score": "88", "pe_core": "10.5"})
+    context_payload = {
+        "contract_version": "N2-condition-projection-context-v1",
+        "source_layer": "N2_condition",
+        "asset_kind": event.asset_kind,
+        "identity_key": event.identity_key,
+        "source_trade_date": "20260524",
+        "for_trade_date": event.trade_date,
+        "status": "ready",
+        "fields": fields,
+        "nullable_fields": [
+            key for key, value in fields.items() if value is None
+        ],
+        "not_ready_reasons": [],
+    }
+    context = {
+        **context_payload,
+        "context_hash": stable_context_hash(context_payload),
+    }
+    event.event_schema_version = "v2"
+    event.payload_json.update(
+        {
+            "pct_contract_version": "N5-trigger-action-pct-context-v1",
+            "condition_projection_context": context,
+            "condition_projection_context_status": "ready",
+            "condition_projection_context_trace": {
+                "policy_version": "N4-condition-projection-passthrough-v1",
+                "policy_hash": "2cd95d3d427ec07ccd208bc7b939081d104415f6b9da3c4bf78e40b78a6d279e",
+                "status": "ready",
+                "source_context_hash": context["context_hash"],
+            },
+            "trigger_price": "10.5",
+            "trigger_pct": "999.123456",
+            "trigger_pct_status": "ready",
+        }
+    )
+    if event.event_type == "ActionExecuted":
+        event.payload_json.update(
+            {
+                "action_price": "10.8",
+                "action_pct": "888.654321",
+                "action_pct_status": "ready",
+            }
+        )
+    return context
+
+
+def add_projection_message_contract(event: ProjectionEvent) -> dict:
+    context = add_pct_contract(event)
+    fields = context["fields"]
+    event.payload_json.update(
+        {
+            "projection_message_contract_version": N5_PROJECTION_MESSAGE_CONTRACT_VERSION,
+            "projection_message_contract_hash": N5_PROJECTION_MESSAGE_CONTRACT_HASH,
+            "projection_message_status": "ready",
+            "projection_message_not_ready_reasons": [],
+            "asset_code": event.identity_key.split(":")[-1],
+            "asset_name": fields["name"],
+            "buy_expected_return_pct": fields["buy_expected_return_pct"],
+            "sell_expected_return_pct": fields["sell_expected_return_pct"],
+            "up_secondary_expected_return_pct": fields["up_secondary_expected_return_pct"],
+            "up_reference_period": fields["up_reference_period"],
+            "down_reference_period": fields["down_reference_period"],
+            "primary_trigger_period": "D",
+            "all_trigger_periods": ["D"],
+        }
+    )
+    if event.asset_kind == "stock":
+        event.payload_json.update({"score": fields["score"], "pe_core": fields["pe_core"]})
+    event.target_price = fields["buy_target_price"]
+    event.expected_return_pct = fields["buy_expected_return_pct"]
+    return context
+
+
+def industry_membership_row(
+    stock_identity_key: str,
+    board_identity_key: str,
+    board_code: str,
+    board_name: str,
+) -> IndustryMembershipRow:
+    return IndustryMembershipRow(
+        trade_date="20260524",
+        stock_identity_key=stock_identity_key,
+        board_identity_key=board_identity_key,
+        board_code=board_code,
+        board_name=board_name,
+    )
+
+
+def stable_context_hash(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 if __name__ == "__main__":

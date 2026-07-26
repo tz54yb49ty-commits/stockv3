@@ -1,0 +1,98 @@
+{
+  "contract_version": "n6_btrack_filter_bulk_scope_v1",
+  "migration": "054_n6_btrack_filter_bulk_scope",
+  "maximum_identity_count": 10000,
+  "selection_token": {
+    "algorithm": "HMAC-SHA256",
+    "ttl_seconds": 300,
+    "binds": [
+      "session",
+      "user",
+      "principal",
+      "target_scope",
+      "asset_kind",
+      "for_trade_date",
+      "source_run_id",
+      "canonical_filters_without_sort",
+      "sorted_identity_set_sha256",
+      "identity_count"
+    ],
+    "client_identity_list_allowed": false
+  },
+  "routes": {
+    "preview": "GET /api/n6/app/v3/filter-scope-bulk-preview",
+    "monitor_execute": "POST /api/n6/app/v3/monitor-items/bulk",
+    "realtime_execute": "POST /api/n6/app/v3/realtime-scope-items/bulk"
+  },
+  "database_functions": [
+    "public.n6_btrack_scope_bulk_preview(text,text,text,text[],text,text,text)",
+    "public.n6_btrack_monitor_bulk_upsert(text,text,text[],text,text,text)",
+    "public.n6_btrack_realtime_bulk_upsert(text,text,text[],text,text,text)"
+  ],
+  "source_views": [
+    "public.v_n6_stock_condition_display_basis",
+    "public.v_n6_index_condition_display_basis",
+    "public.v_n6_board_condition_display_basis"
+  ],
+  "direction_policy": {
+    "stock_monitor": [
+      "buy"
+    ],
+    "index_monitor": [
+      "buy",
+      "sell"
+    ],
+    "board_monitor": [
+      "buy",
+      "sell"
+    ],
+    "realtime_effective_message_scope": {
+      "stock": [
+        "buy"
+      ],
+      "index": [
+        "buy",
+        "sell"
+      ],
+      "board": [
+        "buy",
+        "sell"
+      ]
+    }
+  },
+  "atomicity": {
+    "browser_request_count_per_target": 1,
+    "server_recomputes_selection_before_write": true,
+    "stale_selection_zero_dml": true,
+    "set_based_sql": true
+  },
+  "history": {
+    "monitor_removed_row": "preserve_and_insert_new_active_row",
+    "realtime_deleted_row": "reactivate_existing_row",
+    "bulk_remove_supported": false,
+    "rollback_deletes_business_history": false
+  },
+  "authority": {
+    "web_role": "n6_btrack_web",
+    "public_execute": false,
+    "direct_table_privileges": false,
+    "direct_sequence_privileges": false,
+    "feature_flag": "ASHARE_V3_N6_SCOPE_BULK_WRITE_ENABLED"
+  },
+  "forbidden_writes": [
+    "proposal",
+    "order",
+    "trade",
+    "position",
+    "cash",
+    "N1",
+    "N2",
+    "N3",
+    "N4",
+    "N5"
+  ],
+  "release_canary": {
+    "auto_execute_current_filter": false,
+    "requires_narrow_reversible_selection": true
+  }
+}

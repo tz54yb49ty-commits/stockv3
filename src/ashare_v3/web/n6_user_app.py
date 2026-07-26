@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+import asyncio
+import base64
+import binascii
+import copy
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import hmac
 from io import BytesIO
 import json
 import os
 from pathlib import Path
 import re
 import secrets
-from typing import Any, Callable, Protocol
+import stat
+import threading
+import time
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -21,9 +29,9 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -35,14 +43,13 @@ from ashare_v3.user.membership_drilldown import (
     get_index_membership_stocks,
 )
 from ashare_v3.user.stale_active_lineage import stale_source_action_run_ids
-from ashare_v3.user.virtual_buy_execution import (
-    VirtualBuyRejected,
-    VirtualBuyRequest,
-    execute_virtual_buy,
-)
 from ashare_v3.web.n6_app_v1 import (
+    POSTGRES_SIGNED_BIGINT_MAX,
     DEFAULT_REALTIME_SCOPE_INDEXES,
     app_account_model,
+    app_ai_agent_public_decision_detail_model,
+    app_ai_agent_public_model,
+    app_ai_agent_public_section_model,
     app_ai_users_model,
     app_dashboard_model,
     app_empty_planned_model,
@@ -59,6 +66,7 @@ from ashare_v3.web.n6_app_v1 import (
     app_v2_expected_return_value_text,
     app_v2_filter_linked_stocks_model,
     app_v2_filter_members_model,
+    app_v2_filter_api_model,
     app_v2_filter_model,
     app_v2_level_up_recommendation_value,
     app_v2_buy_messages_model,
@@ -68,9 +76,17 @@ from ashare_v3.web.n6_app_v1 import (
     app_v2_message_projection_status_model,
     app_v2_monitor_model,
     app_signal_detail_model,
+    app_signal_item,
+    app_signal_sse_data_model,
     app_signals_model,
     app_status_monitor_model,
+    app_strategy_center_change_batch_model,
+    app_strategy_center_model,
+    app_strategy_center_selection_result_model,
+    app_trade_proposals_model,
+    app_virtual_trades_model,
     app_watchlist_model,
+    canonical_bigint_id,
     V2_FILTER_VISIBLE_FIELDS_BY_ASSET,
 )
 from ashare_v3.web.n6_ui_v1 import (
@@ -96,6 +112,10 @@ from ashare_v3.web.n6_ui_v1 import (
     status_monitor_model,
     virtual_account_summary_model,
 )
+from ashare_v3.web.n6_btrack_authority import (
+    N6BTrackAuthorityRepository,
+    PostgresN6BTrackAuthorityRepository,
+)
 from ashare_v3.web.post_close_fastlane_status import read_post_close_fastlane_status
 from ashare_v3.web.rag_status import read_rag_status_answer
 from ashare_v3.web.runtime_archive_status import read_runtime_archive_status
@@ -106,6 +126,10 @@ SESSION_HASH_ALGO = "sha256"
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DSN = "postgresql://ashare_v3_user@127.0.0.1:5432/ashare_v3"
+N6_BTRACK_WEB_DB_SERVICE = "n6_btrack_web"
+N6_CSRF_SECRET_MAX_BYTES = 4096
+N6_SCOPE_BULK_SELECTION_TTL_SECONDS = 5 * 60
+N6_SCOPE_BULK_MAX_IDENTITIES = 10000
 DEFAULT_B_TRACK_ENTRY = "/n6/app"
 DEFAULT_A_TRACK_ADMIN_ENTRY = "/n6/post-close-fastlane-status"
 DEFAULT_POST_CLOSE_FASTLANE_DOCS_ROOT = str(PROJECT_ROOT / "docs/post_close_fastlane")
@@ -118,6 +142,44 @@ DEFAULT_PROFILE_NAME = "MVP default"
 DEFAULT_SIM_ACCOUNT_NAME = "MVP T+1 shadow account"
 DEFAULT_INITIAL_CASH = 1000000000
 DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+APP_V3_PUBLIC_BIGINT_FIELDS = frozenset(
+    {
+        "monitor_id",
+        "principal_id",
+        "user_id",
+        "realtime_scope_id",
+        "proposal_id",
+        "source_signal_projection_id",
+        "source_virtual_position_id",
+        "virtual_account_id",
+        "virtual_position_id",
+        "virtual_position_lot_id",
+        "virtual_order_id",
+        "virtual_trade_id",
+        "source_virtual_trade_id",
+        "virtual_cash_snapshot_id",
+        "virtual_cash_ledger_id",
+        "virtual_quote_snapshot_id",
+        "fill_quote_snapshot_id",
+        "stop_loss_source_quote_snapshot_id",
+    }
+)
+
+
+def app_v3_public_payload(value: Any) -> Any:
+    if isinstance(value, list):
+        return [app_v3_public_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [app_v3_public_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    output: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in APP_V3_PUBLIC_BIGINT_FIELDS:
+            output[key] = canonical_bigint_id(item, field_name=key)
+        else:
+            output[key] = app_v3_public_payload(item)
+    return output
 
 
 def runtime_archive_status_model(data: dict[str, Any]) -> dict[str, Any]:
@@ -177,13 +239,336 @@ N5_LEGACY_EVENT_TYPES = ("ActionEvent", "HintEvent", "RiskEvent", "PositionEvent
 N5_ALL_EVENT_TYPES = N5_STANDARD_EVENT_TYPES + N5_LEGACY_EVENT_TYPES
 N5_ACTION_DISPLAY_EVENT_TYPES = ("ActionExecuted", "ActionEligible")
 N5_MESSAGE_DEFAULT_LIMIT = 200
+N6_SIGNAL_PAGE_DEFAULT_LIMIT = 50
+N6_SIGNAL_PAGE_MAX_LIMIT = 100
+N6_SIGNAL_SSE_BATCH_LIMIT = 100
+N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS = 2.0
+N6_SIGNAL_SSE_HEARTBEAT_SECONDS = 15.0
+N6_SIGNAL_SSE_RETRY_MILLISECONDS = 5000
+N6_SIGNAL_SSE_MAX_CURSOR = POSTGRES_SIGNED_BIGINT_MAX
+N6_SIGNAL_SSE_MAX_CURSOR_TEXT = str(POSTGRES_SIGNED_BIGINT_MAX)
+N6_SIGNAL_COMPACT_FIELDS = (
+    "user_signal_projection_id",
+    "user_signal_card_id",
+    "user_projection_run_id",
+    "event_type",
+    "event_time",
+    "event_label",
+    "trade_date",
+    "identity_key",
+    "asset_kind",
+    "asset_kind_label",
+    "display_code",
+    "display_name",
+    "industry_code",
+    "industry_name",
+    "direction",
+    "direction_label",
+    "signal_type",
+    "condition_key",
+    "triggered_periods",
+    "primary_trigger_period",
+    "target_price",
+    "buy_target",
+    "current_price",
+    "trigger_price",
+    "action_price",
+    "expected_return_pct",
+    "buy_return",
+    "secondary_return",
+    "sell_return",
+    "up_ref",
+    "down_ref",
+    "score",
+    "pe_core",
+    "trigger_pct",
+    "action_pct",
+    "projection_message_status",
+    "action_state",
+    "action_state_label",
+    "action_mark",
+    "blocked_reason",
+    "blocked_reason_label",
+    "quality_status",
+    "source_run_id",
+    "projection_run_id",
+)
+N6_STRATEGY_SSE_BATCH_LIMIT = 100
+N6_STRATEGY_SSE_DB_READ_INTERVAL_SECONDS = 2.0
+N6_STRATEGY_SSE_HEARTBEAT_SECONDS = 15.0
+N6_STRATEGY_SSE_RETRY_MILLISECONDS = 5000
+
+
+def encode_n6_signal_page_cursor(row: Mapping[str, Any]) -> str:
+    projection_id = canonical_bigint_id(
+        row.get("user_signal_projection_id"),
+        field_name="user_signal_projection_id",
+        required=True,
+    )
+    created_at = row.get("created_at")
+    if not isinstance(created_at, datetime):
+        raise ValueError("invalid_signal_page_cursor")
+    payload = json.dumps(
+        [created_at.isoformat(), projection_id],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def parse_n6_signal_page_cursor(value: Any) -> tuple[datetime, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) > 160 or not re.fullmatch(r"[A-Za-z0-9_-]+", text):
+        raise ValueError("invalid_signal_page_cursor")
+    try:
+        padding = "=" * (-len(text) % 4)
+        decoded = base64.urlsafe_b64decode((text + padding).encode("ascii"))
+        created_at_text, projection_id_raw = json.loads(decoded.decode("ascii"))
+        created_at = datetime.fromisoformat(str(created_at_text))
+        projection_id = int(projection_id_raw)
+    except (ValueError, TypeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise ValueError("invalid_signal_page_cursor") from exc
+    if (
+        created_at.tzinfo is None
+        or projection_id <= 0
+        or projection_id > N6_SIGNAL_SSE_MAX_CURSOR
+    ):
+        raise ValueError("invalid_signal_page_cursor")
+    return created_at, projection_id
+
+
+def n6_signal_keyset_page(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    page_limit = max(1, min(int(limit), N6_SIGNAL_PAGE_MAX_LIMIT))
+    items = rows[:page_limit]
+    has_more = len(rows) > page_limit
+    next_cursor = encode_n6_signal_page_cursor(items[-1]) if has_more and items else ""
+    watermark = max(
+        (
+            int(row["user_signal_projection_id"])
+            for row in items
+            if row.get("user_signal_projection_id") is not None
+        ),
+        default=0,
+    )
+    return items, {
+        "limit": page_limit,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "watermark": str(watermark),
+    }
+
+
+def n6_compact_signal_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        field: item.get(field)
+        for field in N6_SIGNAL_COMPACT_FIELDS
+        if field in item
+    }
+    condition_trace = item.get("condition_trace")
+    if isinstance(condition_trace, Mapping):
+        compact["condition_rendering_policy"] = condition_trace.get("rendering_policy")
+    elif "condition_rendering_policy" in item:
+        compact["condition_rendering_policy"] = item.get("condition_rendering_policy")
+    return compact
+
+
+def n6_compact_signal_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    compact = dict(payload)
+    compact["items"] = [
+        n6_compact_signal_item(item)
+        for item in list(payload.get("items") or [])
+    ]
+    return compact
+
+
+def n6_compact_message_dashboard_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    compact = dict(payload)
+    compact.pop("items_preview", None)
+    compact["groups"] = [
+        {
+            key: value
+            for key, value in dict(group).items()
+            if key != "items_preview"
+        }
+        for group in list(payload.get("groups") or [])
+    ]
+    return compact
+
+
+def n6_signal_response_etag(
+    *,
+    principal_id: int,
+    filters: Mapping[str, Any],
+    pagination: Mapping[str, Any],
+) -> str:
+    fingerprint = json.dumps(
+        {
+            "principal_id": int(principal_id),
+            "filters": {
+                key: value
+                for key, value in sorted(filters.items())
+                if key not in {"before_created_at", "before_id"}
+            },
+            "pagination": dict(pagination),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    )
+    return f'"{hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()}"'
+
+
+def n6_signal_json_response(
+    request: Request,
+    payload: dict[str, Any],
+    *,
+    etag: str,
+    watermark: str,
+) -> Response:
+    headers = {
+        "ETag": etag,
+        "X-N6-Watermark": watermark,
+        "Cache-Control": "private, no-cache",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(payload, headers=headers)
+
+
+def parse_n6_signal_sse_cursor(*, last_event_id: Any, after_id: Any) -> int:
+    candidate = last_event_id if last_event_id is not None and str(last_event_id).strip() else after_id
+    if candidate is None or not str(candidate).strip():
+        return 0
+    text = str(candidate).strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        raise ValueError("invalid_signal_sse_cursor")
+    value = int(text)
+    if value > N6_SIGNAL_SSE_MAX_CURSOR:
+        raise ValueError("invalid_signal_sse_cursor")
+    return value
+
+
+def encode_n6_signal_sse_event(payload: dict[str, Any]) -> str:
+    signal = dict(payload.get("signal") or {})
+    raw_projection_id = signal.get("user_signal_projection_id")
+    if (
+        not isinstance(raw_projection_id, str)
+        or not re.fullmatch(r"[1-9][0-9]*", raw_projection_id)
+        or len(raw_projection_id) > len(N6_SIGNAL_SSE_MAX_CURSOR_TEXT)
+        or (
+            len(raw_projection_id) == len(N6_SIGNAL_SSE_MAX_CURSOR_TEXT)
+            and raw_projection_id > N6_SIGNAL_SSE_MAX_CURSOR_TEXT
+        )
+    ):
+        raise ValueError("invalid_signal_sse_event_id")
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return f"event: signal\nid: {raw_projection_id}\ndata: {data}\n\n"
+
+
+def encode_n6_signal_sse_heartbeat(current_time: datetime) -> str:
+    return f": heartbeat {current_time.astimezone(timezone.utc).isoformat()}\n\n"
+
+
+async def iter_n6_signal_sse(
+    *,
+    after_id: int,
+    read_batch: Callable[[int, int], Any],
+    is_disconnected: Callable[[], Any],
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    now: Callable[[], datetime] | None = None,
+) -> Any:
+    current_time = now or (lambda: datetime.now(timezone.utc))
+    cursor = int(after_id)
+    heartbeat_at = monotonic() + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
+    yield f"retry: {N6_SIGNAL_SSE_RETRY_MILLISECONDS}\n\n"
+    while True:
+        if await is_disconnected():
+            return
+        try:
+            rows = await read_batch(cursor, N6_SIGNAL_SSE_BATCH_LIMIT)
+        except Exception:
+            return
+        for row in rows:
+            projection_id = row.get("user_signal_projection_id")
+            if isinstance(projection_id, bool) or not isinstance(projection_id, int):
+                return
+            if projection_id <= cursor or projection_id > N6_SIGNAL_SSE_MAX_CURSOR:
+                return
+            payload = app_signal_sse_data_model(row)
+            yield encode_n6_signal_sse_event(payload)
+            cursor = projection_id
+        if len(rows) >= N6_SIGNAL_SSE_BATCH_LIMIT:
+            continue
+        current_tick = monotonic()
+        if current_tick >= heartbeat_at:
+            yield encode_n6_signal_sse_heartbeat(current_time())
+            heartbeat_at = current_tick + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
+        await sleep(N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS)
+
+
+def encode_n6_strategy_center_sse_event(payload: Mapping[str, Any]) -> str:
+    change_id = str(payload.get("change_id") or "")
+    event_type = str(payload.get("event") or "")
+    surface_kind = str(payload.get("surface_kind") or "")
+    if (
+        not re.fullmatch(r"[1-9][0-9]*", change_id)
+        or int(change_id) > N6_SIGNAL_SSE_MAX_CURSOR
+        or event_type not in {"upsert", "remove", "reset"}
+        or surface_kind not in {"qualified_match", "observation"}
+    ):
+        raise ValueError("invalid_strategy_center_sse_event")
+    data = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return f"event: {event_type}\nid: {change_id}\ndata: {data}\n\n"
+
+
+async def iter_n6_strategy_center_sse(
+    *,
+    after_id: int,
+    read_batch: Callable[[int, int], Any],
+    is_disconnected: Callable[[], Any],
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    now: Callable[[], datetime] | None = None,
+) -> Any:
+    current_time = now or (lambda: datetime.now(timezone.utc))
+    cursor = int(after_id)
+    heartbeat_at = monotonic() + N6_STRATEGY_SSE_HEARTBEAT_SECONDS
+    yield f"retry: {N6_STRATEGY_SSE_RETRY_MILLISECONDS}\n\n"
+    while True:
+        if await is_disconnected():
+            return
+        try:
+            batch = await read_batch(cursor, N6_STRATEGY_SSE_BATCH_LIMIT)
+            events = list(batch.get("events") or [])
+        except Exception:
+            return
+        for event in events:
+            change_id = int(str(event.get("change_id") or "0"))
+            if change_id <= cursor or change_id > N6_SIGNAL_SSE_MAX_CURSOR:
+                return
+            yield encode_n6_strategy_center_sse_event(event)
+            cursor = change_id
+        if bool(batch.get("has_more")):
+            continue
+        current_tick = monotonic()
+        if current_tick >= heartbeat_at:
+            yield encode_n6_signal_sse_heartbeat(current_time())
+            heartbeat_at = current_tick + N6_STRATEGY_SSE_HEARTBEAT_SECONDS
+        await sleep(N6_STRATEGY_SSE_DB_READ_INTERVAL_SECONDS)
 
 
 def _sql_text_literal(value: object) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-B_TRACK_BUY_SIGNAL_ACTION_TYPES = ("buy", "sell", "all")
 V3_20260612_ACTIVE_N4_SOURCE_RUN_ID = "v3_n4_trigger_replay_20260612_after_trigger_period_baseline_fix_v1"
 V3_20260612_ACTIVE_N5_SOURCE_RUN_ID = "v3_n5_action_replay_20260612_after_n4_trigger_period_baseline_fix_v1"
 V3_20260622_ACTIVE_N4_SOURCE_RUN_ID = (
@@ -433,97 +818,6 @@ def n5_action_display_item(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def b_track_buy_signal_read_only_side_effects() -> dict[str, Any]:
-    return {
-        "writes_database": False,
-        "outbox_status_updates": 0,
-        "inbox_writes": 0,
-        "checkpoint_writes": 0,
-        "user_projection_writes": 0,
-        "user_card_writes": 0,
-        "virtual_account_writes": 0,
-        "order_writes": 0,
-        "position_writes": 0,
-        "sim_written": False,
-        "real_trade_submitted": False,
-        "voice_triggered": False,
-        "mobile_triggered": False,
-    }
-
-
-def b_track_buy_signal_empty_model(*, filters: dict[str, Any], limit: int) -> dict[str, Any]:
-    action_type = normalize_b_track_buy_signal_action_type(filters.get("action_type"))
-    return {
-        "ok": True,
-        "component": "B Track Buy Signals",
-        "title": "B轨买入信号",
-        "source_layer": "N5_action",
-        "action_run_id": "",
-        "total_count": 0,
-        "filtered_count": 0,
-        "returned_count": 0,
-        "default_limit": limit,
-        "filters": {
-            key: value
-            for key, value in {
-                "action_run_id": str(filters.get("action_run_id") or ""),
-                "action_type": action_type,
-                "q": str(filters.get("q") or ""),
-            }.items()
-            if value
-        },
-        "filter_inputs": {
-            "action_run_id": str(filters.get("action_run_id") or ""),
-            "action_type": action_type,
-            "q": str(filters.get("q") or ""),
-        },
-        "action_types": list(B_TRACK_BUY_SIGNAL_ACTION_TYPES),
-        "summary": {
-            "total": 0,
-            "buy": 0,
-            "sell": 0,
-            "ActionEligible": 0,
-            "ActionExecuted": 0,
-            "ActionBlocked": 0,
-            "ActionSkipped": 0,
-        },
-        "items": [],
-        "side_effects": b_track_buy_signal_read_only_side_effects(),
-    }
-
-
-def b_track_buy_signal_item(row: dict[str, Any]) -> dict[str, Any]:
-    payload = row.get("payload_json") or {}
-    if not isinstance(payload, dict):
-        payload = {}
-    return {
-        "outbox_id": row.get("outbox_id"),
-        "event_id": str(row.get("event_id") or ""),
-        "event_time": format_datetime(row.get("event_time")),
-        "trade_date": str(row.get("trade_date") or ""),
-        "action_run_id": str(row.get("source_run_id") or ""),
-        "source_run_id": str(row.get("source_run_id") or ""),
-        "asset_kind": str(row.get("asset_kind") or ""),
-        "identity_key": str(row.get("identity_key") or ""),
-        "event_type": str(row.get("event_type") or ""),
-        "status": str(row.get("status") or ""),
-        "action_type": str(payload.get("action_type") or ""),
-        "action_state": str(payload.get("action_state") or ""),
-        "signal_type": str(payload.get("signal_type") or ""),
-        "condition_key": str(payload.get("condition_key") or ""),
-        "projection_30m_type": str(payload.get("projection_30m_type") or ""),
-        "trigger_mark_candidate": str(payload.get("trigger_mark_candidate") or ""),
-        "projection_run_id": str(payload.get("projection_run_id") or ""),
-        "projection_id": str(payload.get("projection_id") or ""),
-        "source_trigger_run_id": str(payload.get("source_trigger_run_id") or ""),
-        "source_trigger_event_id": str(payload.get("source_trigger_event_id") or ""),
-        "provisional": bool(payload.get("provisional")),
-        "action_confirmation_mode": str(payload.get("action_confirmation_mode") or ""),
-        "payload_json": payload,
-        "payload_json_text": json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-    }
-
-
 STRATEGY_FILTER_OPTIONS = (
     {"key": "chase", "label": "追涨", "profile_key": "enable_chase"},
     {"key": "ultra_short", "label": "超短", "profile_key": "enable_ultra_short"},
@@ -591,7 +885,7 @@ APP_V2_FILTER_DEFAULT_ROWS_BY_ASSET = {
     "stock": 100,
 }
 N6_TRADING_SESSION_HISTORY_BLOCKER = "historical_query_disabled_during_trading_session"
-N6_TRADING_SESSION_HISTORY_MESSAGE = "交易时段仅显示当前交易日，历史查询收盘后可用"
+N6_TRADING_SESSION_HISTORY_MESSAGE = "实时消息页仅显示当前交易日；历史消息必须使用独立只读归档入口"
 N6_TRADING_SESSION_START = (9, 25)
 N6_TRADING_SESSION_END = (15, 0)
 
@@ -616,6 +910,11 @@ class N6UserWebConfig:
     rag_docs_root: str = DEFAULT_RAG_DOCS_ROOT
     rag_sql_root: str = DEFAULT_RAG_SQL_ROOT
     replay_docs_root: str = DEFAULT_REPLAY_DOCS_ROOT
+    scope_write_enabled: bool = False
+    scope_bulk_write_enabled: bool = False
+    proposal_write_enabled: bool = False
+    strategy_center_write_enabled: bool = False
+    csrf_secret_file: str = ""
 
 
 def build_app_v2_message_dashboard(
@@ -663,6 +962,7 @@ def n6_trade_date_access_policy(
     current_trade_date: str | None,
     requested_trade_date: str | None,
     now: datetime | None = None,
+    live_only: bool = False,
 ) -> dict[str, Any]:
     current = normalize_filter_value(current_trade_date)
     requested = normalize_filter_value(requested_trade_date)
@@ -671,7 +971,7 @@ def n6_trade_date_access_policy(
         current
         and requested
         and requested != current
-        and n6_is_trading_session_for_trade_date(current, now=now)
+        and (live_only or n6_is_trading_session_for_trade_date(current, now=now))
     )
     if blocked:
         effective = current
@@ -878,14 +1178,6 @@ class N6UserRepository(Protocol):
     ) -> dict[str, Any]:
         ...
 
-    def fetch_b_track_buy_signals(
-        self,
-        *,
-        filters: dict[str, Any] | None = None,
-        limit: int,
-    ) -> dict[str, Any]:
-        ...
-
     def fetch_index_board_c1_minute_rows(self, trade_date: str) -> dict[str, list[dict[str, Any]]]:
         ...
 
@@ -950,6 +1242,9 @@ class N6UserRepository(Protocol):
     def fetch_app_cash_snapshot(self, virtual_account_id: int) -> dict[str, Any] | None:
         ...
 
+    def fetch_app_positions(self, principal_id: int, principal_type: str) -> list[dict[str, Any]]:
+        ...
+
     def fetch_app_signals(
         self,
         *,
@@ -961,6 +1256,38 @@ class N6UserRepository(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
+    def fetch_strategy_center_state(
+        self, session_token_hash: str
+    ) -> dict[str, Any] | None:
+        ...
+
+    def fetch_strategy_center_changes(
+        self, session_token_hash: str, *, after_id: int, limit: int
+    ) -> dict[str, Any] | None:
+        ...
+
+    def put_strategy_center_selection(
+        self,
+        session_token_hash: str,
+        *,
+        selected_package_keys: list[str],
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        ...
+
+    def fetch_app_signal_events(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        filters: dict[str, Any],
+        after_id: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        ...
+
     def fetch_app_signal_detail(
         self,
         *,
@@ -968,7 +1295,11 @@ class N6UserRepository(Protocol):
         principal_type: str,
         user_id: int,
         user_signal_projection_id: int,
+        trade_date: str | None = None,
     ) -> dict[str, Any] | None:
+        ...
+
+    def fetch_app_current_signal_trade_date(self) -> str | None:
         ...
 
     def fetch_app_signal_scope_metadata(
@@ -977,6 +1308,7 @@ class N6UserRepository(Protocol):
         principal_id: int,
         principal_type: str,
         user_id: int,
+        trade_date: str | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -989,12 +1321,6 @@ class N6UserRepository(Protocol):
     ) -> dict[str, Any]:
         ...
 
-    def fetch_app_positions(self, principal_id: int, principal_type: str) -> list[dict[str, Any]]:
-        ...
-
-    def fetch_app_pnl_snapshots(self, principal_id: int, principal_type: str, limit: int) -> list[dict[str, Any]]:
-        ...
-
     def fetch_app_filter_items(
         self,
         *,
@@ -1004,7 +1330,17 @@ class N6UserRepository(Protocol):
         asset_kind: str,
         filters: dict[str, Any],
         limit: int,
-        include_all_fields: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    def fetch_app_current_filter_identity(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
     ) -> dict[str, Any]:
         ...
 
@@ -1067,6 +1403,20 @@ class N6UserRepository(Protocol):
         asset_kind: str,
         identity_key: str,
         direction: str,
+        source: str = "single_row",
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        ...
+
+    def add_app_monitor_directions(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+        directions: tuple[str, ...],
         source: str = "single_row",
         for_trade_date: str = "",
     ) -> dict[str, Any]:
@@ -1166,6 +1516,48 @@ class N6UserRepository(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def fetch_app_trade_proposals(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        ...
+
+    def create_app_trade_proposal(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        source_type: str,
+        source_id: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def confirm_app_trade_proposal(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        proposal_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def fetch_app_virtual_trades(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        ...
+
 
 PasswordVerifier = Callable[[str, str, str], bool]
 PasswordHasher = Callable[[str], HashResult]
@@ -1182,6 +1574,46 @@ class PostgresN6UserRepository:
         self.dsn = dsn
         self._app_v2_monitor_column_cache: dict[str, set[str]] = {}
         self._app_v2_filter_column_cache: dict[str, set[str]] = {}
+        self._app_v2_relation_existence_cache: dict[str, bool] = {}
+        self._app_v1_signal_schema_capability_cache: dict[str, frozenset[str]] | None = None
+        self._app_v1_signal_schema_capability_lock = threading.Lock()
+        self._app_user_scope_cache: dict[tuple[int, str, int, str], tuple[float, dict[str, Any]]] = {}
+        self._app_user_scope_cache_lock = threading.Lock()
+        self._app_filter_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._app_membership_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._app_shared_cache_lock = threading.Lock()
+
+    def _app_shared_cache_get(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+    ) -> dict[str, Any] | None:
+        with self._app_shared_cache_lock:
+            value = cache.get(key)
+            return copy.deepcopy(value) if value is not None else None
+
+    def _app_shared_cache_set(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+        value: dict[str, Any],
+    ) -> None:
+        with self._app_shared_cache_lock:
+            cache[key] = copy.deepcopy(value)
+            while len(cache) > 256:
+                cache.pop(next(iter(cache)))
+
+    def invalidate_app_user_scope_cache(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+    ) -> None:
+        with self._app_user_scope_cache_lock:
+            for key in list(self._app_user_scope_cache):
+                if key[:3] == (int(principal_id), str(principal_type), int(user_id)):
+                    self._app_user_scope_cache.pop(key, None)
 
     def fetch_user_for_login(self, login_name: str) -> UserAccount | None:
         with self._readonly_connection() as conn, conn.cursor() as cur:
@@ -1320,6 +1752,55 @@ class PostgresN6UserRepository:
                 LIMIT %s
                 """,
                 (user_id, limit),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def fetch_app_signal_events(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        filters: dict[str, Any],
+        after_id: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not self._app_v1_signal_scope_relations_ready():
+            return []
+        where_sql, params = self._app_v1_signal_where(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=user_id,
+            filters=filters,
+            include_monitor_scope=False,
+        )
+        params["after_id"] = int(after_id)
+        params["limit"] = min(max(int(limit), 1), N6_SIGNAL_SSE_BATCH_LIMIT)
+        scope_cte_sql = self._app_v1_web_signal_scope_cte(
+            include_expired=False,
+            include_realtime_scope=True,
+        )
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH {scope_cte_sql}
+                SELECT {self._app_v1_signal_sse_select_list()}
+                FROM user_signal_projection p
+                JOIN user_projection_run r
+                  ON r.user_projection_run_id = p.user_projection_run_id
+                 AND r.status IN ('passed', 'ready')
+                LEFT JOIN user_signal_card c
+                  ON c.user_signal_projection_id = p.user_signal_projection_id
+                 AND c.user_projection_run_id = p.user_projection_run_id
+                 AND c.user_id = p.user_id
+                {self._app_v1_web_signal_scope_join()}
+                WHERE p.user_id = %(user_id)s
+                  AND p.user_signal_projection_id > %(after_id)s
+                  AND {where_sql}
+                ORDER BY p.user_signal_projection_id ASC
+                LIMIT %(limit)s
+                """,
+                params,
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -1762,6 +2243,32 @@ class PostgresN6UserRepository:
                     user_id = int(user_row["user_id"])
                     cur.execute(
                         """
+                        INSERT INTO n6_principal (
+                          principal_type,
+                          owner_user_id,
+                          principal_status,
+                          principal_label,
+                          principal_policy_json
+                        )
+                        VALUES (%s, %s, 'active', %s, %s)
+                        RETURNING principal_id
+                        """,
+                        (
+                            "admin" if role == "admin" else "human_user",
+                            user_id,
+                            display_name or login_name,
+                            Jsonb(
+                                {
+                                    "source": "n6_web_user_create",
+                                    "contract_version": "n6-web-user-principal-v1",
+                                    "created_by_user_id": created_by_user_id,
+                                }
+                            ),
+                        ),
+                    )
+                    principal_id = int(cur.fetchone()["principal_id"])
+                    cur.execute(
+                        """
                         INSERT INTO user_filter_profile (
                           user_id,
                           profile_name,
@@ -1800,11 +2307,31 @@ class PostgresN6UserRepository:
                             Jsonb({"shadow_only": True, "real_trade_submitted": False}),
                         ),
                     )
+                    provisioning_status = "not_applicable"
+                    if role == "user":
+                        try:
+                            cur.execute(
+                                "SELECT public.n6_provision_human_virtual_account(%s) AS result",
+                                (principal_id,),
+                            )
+                        except psycopg.Error as exc:
+                            raise UserManagementError("virtual_account_provisioning_failed") from exc
+                        provisioning_result = dict(cur.fetchone() or {}).get("result")
+                        if (
+                            not isinstance(provisioning_result, dict)
+                            or provisioning_result.get("ok") is not True
+                            or provisioning_result.get("status") != "created"
+                        ):
+                            raise UserManagementError("virtual_account_provisioning_failed")
+                        provisioning_status = "created"
         except psycopg.errors.UniqueViolation as exc:
             raise UserManagementError("login_name_exists") from exc
+        except UserManagementError:
+            raise
         user_row["filter_profile_count"] = 1
         user_row["sim_account_count"] = 1
         user_row["active_position_count"] = 0
+        user_row["virtual_account_provisioning_status"] = provisioning_status
         return user_row
 
     def delete_user(self, *, target_user_id: int, deleted_by_user_id: int) -> dict[str, Any]:
@@ -2572,187 +3099,6 @@ class PostgresN6UserRepository:
             },
             "items": items,
             "side_effects": n5_actions_read_only_side_effects(),
-        }
-
-    def _latest_b_track_buy_signal_action_run_id(self, cur: Any) -> str | None:
-        cur.execute(
-            """
-            SELECT r.run_id
-            FROM common_action_run r
-            WHERE r.status = 'passed'
-              AND EXISTS (
-                  SELECT 1
-                  FROM common_event_outbox e
-                  WHERE e.source_layer = 'N5_action'
-                    AND e.source_run_id = r.run_id
-                    AND e.event_type = 'ActionEligible'
-                    AND e.payload_json ->> 'provisional' = 'true'
-                    AND e.payload_json ->> 'action_confirmation_mode' = 'eligibility_only'
-              )
-            ORDER BY r.finished_at DESC NULLS LAST,
-                     r.updated_at DESC NULLS LAST,
-                     r.started_at DESC NULLS LAST,
-                     r.created_at DESC NULLS LAST,
-                     r.run_id DESC
-            LIMIT 1
-            """
-        )
-        row = cur.fetchone() or {}
-        return row.get("run_id")
-
-    def _b_track_buy_signal_where(
-        self,
-        *,
-        target_run_id: str,
-        filters: dict[str, Any],
-        include_action_type: bool,
-    ) -> tuple[list[str], list[Any]]:
-        where = [
-            "source_layer = 'N5_action'",
-            "event_type = 'ActionEligible'",
-            "source_run_id = %s",
-            "payload_json ->> 'provisional' = 'true'",
-            "payload_json ->> 'action_confirmation_mode' = 'eligibility_only'",
-        ]
-        params: list[Any] = [target_run_id]
-        action_type = normalize_b_track_buy_signal_action_type(filters.get("action_type"))
-        if include_action_type and action_type != "all":
-            where.append("payload_json ->> 'action_type' = %s")
-            params.append(action_type)
-        keyword = str(filters.get("q") or "").strip()
-        if keyword:
-            like = f"%{keyword}%"
-            where.append(
-                """
-                (
-                  identity_key ILIKE %s
-                  OR event_id ILIKE %s
-                  OR source_run_id ILIKE %s
-                  OR COALESCE(payload_json ->> 'projection_id', '') ILIKE %s
-                  OR COALESCE(payload_json ->> 'projection_run_id', '') ILIKE %s
-                  OR COALESCE(payload_json ->> 'source_trigger_event_id', '') ILIKE %s
-                  OR COALESCE(payload_json ->> 'condition_key', '') ILIKE %s
-                  OR COALESCE(payload_json ->> 'signal_type', '') ILIKE %s
-                )
-                """
-            )
-            params.extend([like, like, like, like, like, like, like, like])
-        return where, params
-
-    def fetch_b_track_buy_signals(
-        self,
-        *,
-        filters: dict[str, Any] | None = None,
-        limit: int,
-    ) -> dict[str, Any]:
-        effective_limit = max(1, min(int(limit or N5_MESSAGE_DEFAULT_LIMIT), 5000))
-        filters = filters or {}
-        filters = {
-            "action_run_id": filters.get("action_run_id"),
-            "action_type": normalize_b_track_buy_signal_action_type(filters.get("action_type")),
-            "q": filters.get("q"),
-        }
-        with self._readonly_connection() as conn, conn.cursor() as cur:
-            target_run_id = filters.get("action_run_id") or self._latest_b_track_buy_signal_action_run_id(cur)
-            if not target_run_id:
-                return b_track_buy_signal_empty_model(filters=filters, limit=effective_limit)
-            base_where, base_params = self._b_track_buy_signal_where(
-                target_run_id=target_run_id,
-                filters={**filters, "q": None},
-                include_action_type=False,
-            )
-            cur.execute(
-                f"""
-                SELECT count(*)::int AS count
-                FROM common_event_outbox
-                WHERE {" AND ".join(base_where)}
-                """,
-                tuple(base_params),
-            )
-            total_count = int((cur.fetchone() or {}).get("count") or 0)
-            where, params = self._b_track_buy_signal_where(
-                target_run_id=target_run_id,
-                filters=filters,
-                include_action_type=True,
-            )
-            where_sql = " AND ".join(where)
-            cur.execute(
-                f"""
-                SELECT count(*)::int AS total,
-                       count(*) FILTER (WHERE payload_json ->> 'action_type' = 'buy')::int AS buy,
-                       count(*) FILTER (WHERE payload_json ->> 'action_type' = 'sell')::int AS sell
-                FROM common_event_outbox
-                WHERE {where_sql}
-                """,
-                tuple(params),
-            )
-            summary_row = cur.fetchone() or {}
-            filtered_count = int(summary_row.get("total") or 0)
-            cur.execute(
-                f"""
-                SELECT outbox_id,
-                       event_id,
-                       event_type,
-                       event_schema_version,
-                       trade_date,
-                       asset_kind,
-                       identity_key,
-                       event_time,
-                       source_layer,
-                       source_run_id,
-                       dedup_key,
-                       partition_key,
-                       payload_json,
-                       status,
-                       attempt_count,
-                       created_at,
-                       updated_at
-                FROM common_event_outbox
-                WHERE {where_sql}
-                ORDER BY event_time DESC, created_at DESC, outbox_id DESC
-                LIMIT %s
-                """,
-                tuple(params + [effective_limit]),
-            )
-            rows = [dict(row) for row in cur.fetchall()]
-        items = [b_track_buy_signal_item(row) for row in rows]
-        effective_filters = {
-            key: value
-            for key, value in {
-                "action_run_id": target_run_id,
-                "action_type": filters.get("action_type") or "buy",
-                "q": filters.get("q"),
-            }.items()
-            if value
-        }
-        return {
-            "ok": True,
-            "component": "B Track Buy Signals",
-            "title": "B轨买入信号",
-            "source_layer": "N5_action",
-            "action_run_id": target_run_id,
-            "total_count": total_count,
-            "filtered_count": filtered_count,
-            "returned_count": len(items),
-            "default_limit": effective_limit,
-            "filters": effective_filters,
-            "filter_inputs": {
-                "action_run_id": str(filters.get("action_run_id") or ""),
-                "action_type": str(filters.get("action_type") or "buy"),
-                "q": str(filters.get("q") or ""),
-            },
-            "action_types": list(B_TRACK_BUY_SIGNAL_ACTION_TYPES),
-            "summary": {
-                "total": filtered_count,
-                "buy": int(summary_row.get("buy") or 0),
-                "sell": int(summary_row.get("sell") or 0),
-                "ActionEligible": filtered_count,
-                "ActionExecuted": 0,
-                "ActionBlocked": 0,
-                "ActionSkipped": 0,
-            },
-            "items": items,
-            "side_effects": b_track_buy_signal_read_only_side_effects(),
         }
 
     def fetch_ui_v1_input_messages(
@@ -4006,6 +4352,252 @@ class PostgresN6UserRepository:
             row = cur.fetchone()
         return dict(row) if row else None
 
+    def fetch_app_positions(self, principal_id: int, principal_type: str) -> list[dict[str, Any]]:
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH active_principal AS (
+                  SELECT p.principal_id,
+                         p.principal_type
+                  FROM n6_principal p
+                  WHERE p.principal_id = %s
+                    AND p.principal_type = %s
+                    AND p.principal_status = 'active'
+                ),
+                active_accounts AS (
+                  SELECT a.virtual_account_id,
+                         a.principal_id,
+                         a.principal_type
+                  FROM n6_virtual_account a
+                  JOIN active_principal p
+                    ON p.principal_id = a.principal_id
+                   AND p.principal_type = a.principal_type
+                  WHERE a.virtual_account_status = 'active'
+                ),
+                active_scope AS (
+                  SELECT min(virtual_account_id) AS virtual_account_id,
+                         min(principal_id) AS principal_id,
+                         min(principal_type) AS principal_type
+                  FROM active_accounts
+                  HAVING count(*) = 1
+                ),
+                current_trade_day AS (
+                  SELECT min(to_date(c.trade_date, 'YYYYMMDD')) AS trade_date
+                  FROM common_trade_calendar c
+                  WHERE c.trade_date = to_char(
+                          (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,
+                          'YYYYMMDD'
+                        )
+                    AND c.is_open IS TRUE
+                  HAVING count(*) = 1
+                ),
+                scoped_positions AS (
+                  SELECT p.virtual_position_id,
+                         p.virtual_account_id,
+                         p.principal_id,
+                         p.principal_type,
+                         p.asset_kind,
+                         p.identity_key,
+                         p.position_status,
+                         p.quantity,
+                         p.average_cost,
+                         p.holding_episode_no,
+                         p.first_open_trade_date,
+                         p.locked_target_price,
+                         p.target_price_status,
+                         p.stop_loss_price,
+                         p.stop_loss_status,
+                         p.stop_loss_effective_trade_date,
+                         p.stop_loss_source_quote_snapshot_id,
+                         p.stop_loss_frozen_at,
+                         p.stop_loss_policy_version,
+                         p.stop_loss_policy_hash,
+                         d.trade_date AS current_trade_date
+                  FROM active_scope s
+                  JOIN n6_virtual_position p
+                    ON p.virtual_account_id = s.virtual_account_id
+                   AND p.principal_id = s.principal_id
+                   AND p.principal_type = s.principal_type
+                  CROSS JOIN current_trade_day d
+                  WHERE p.asset_kind = 'stock'
+                    AND p.position_status = 'open_virtual'
+                    AND p.quantity > 0
+                ),
+                lot_rollup AS (
+                  SELECT p.virtual_position_id,
+                         coalesce(sum(l.remaining_quantity) FILTER (
+                           WHERE l.virtual_account_id = p.virtual_account_id
+                             AND l.principal_id = p.principal_id
+                             AND l.principal_type = p.principal_type
+                             AND l.identity_key = p.identity_key
+                             AND l.holding_episode_no = p.holding_episode_no
+                             AND l.remaining_quantity > 0
+                         ), 0) AS lot_quantity_total,
+                         coalesce(sum(l.remaining_quantity) FILTER (
+                           WHERE l.virtual_account_id = p.virtual_account_id
+                             AND l.principal_id = p.principal_id
+                             AND l.principal_type = p.principal_type
+                             AND l.identity_key = p.identity_key
+                             AND l.holding_episode_no = p.holding_episode_no
+                             AND l.remaining_quantity > 0
+                             AND l.available_trade_date <= p.current_trade_date
+                             AND l.lot_status IN ('locked_t1', 'available')
+                         ), 0) AS sellable_quantity,
+                         coalesce(sum(l.remaining_quantity) FILTER (
+                           WHERE l.virtual_account_id = p.virtual_account_id
+                             AND l.principal_id = p.principal_id
+                             AND l.principal_type = p.principal_type
+                             AND l.identity_key = p.identity_key
+                             AND l.holding_episode_no = p.holding_episode_no
+                             AND l.remaining_quantity > 0
+                             AND l.available_trade_date > p.current_trade_date
+                         ), 0) AS t1_locked_quantity,
+                         bool_or(
+                           l.remaining_quantity > 0
+                           AND (
+                             l.virtual_account_id <> p.virtual_account_id
+                             OR l.principal_id <> p.principal_id
+                             OR l.principal_type <> p.principal_type
+                             OR l.identity_key <> p.identity_key
+                             OR l.holding_episode_no <> p.holding_episode_no
+                           )
+                         ) AS lot_scope_mismatch,
+                         bool_or(
+                           l.remaining_quantity > 0
+                           AND l.lot_status NOT IN ('locked_t1', 'available')
+                         ) FILTER (
+                           WHERE l.virtual_account_id = p.virtual_account_id
+                             AND l.principal_id = p.principal_id
+                             AND l.principal_type = p.principal_type
+                             AND l.identity_key = p.identity_key
+                             AND l.holding_episode_no = p.holding_episode_no
+                         ) AS lot_status_mismatch
+                  FROM scoped_positions p
+                  JOIN n6_virtual_position_lot l
+                    ON l.virtual_position_id = p.virtual_position_id
+                  GROUP BY p.virtual_position_id
+                )
+                SELECT p.virtual_position_id,
+                       p.identity_key,
+                       split_part(p.identity_key, ':', 2) AS position_exchange,
+                       split_part(p.identity_key, ':', 3) AS stock_code,
+                       p.position_status,
+                       p.quantity,
+                       r.sellable_quantity,
+                       r.t1_locked_quantity,
+                       r.lot_quantity_total,
+                       p.average_cost,
+                       p.current_trade_date,
+                       p.holding_episode_no,
+                       p.first_open_trade_date,
+                       p.locked_target_price AS target_price,
+                       p.target_price_status,
+                       p.stop_loss_price,
+                       p.stop_loss_status,
+                       p.stop_loss_effective_trade_date,
+                       p.stop_loss_source_quote_snapshot_id,
+                       p.stop_loss_frozen_at,
+                       p.stop_loss_policy_version,
+                       p.stop_loss_policy_hash,
+                       q.exchange AS quote_exchange,
+                       q.current_price,
+                       q.quote_minute,
+                       q.fetched_at,
+                       q.quality_status,
+                       q.quality_reason
+                FROM scoped_positions p
+                JOIN lot_rollup r
+                  ON r.virtual_position_id = p.virtual_position_id
+                LEFT JOIN v_n6_virtual_quote_latest q
+                  ON q.identity_key = p.identity_key
+                WHERE r.lot_quantity_total = p.quantity
+                  AND coalesce(r.lot_scope_mismatch, false) IS FALSE
+                  AND coalesce(r.lot_status_mismatch, false) IS FALSE
+                ORDER BY p.identity_key
+                """,
+                (principal_id, principal_type),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def fetch_strategy_center_state(
+        self, session_token_hash: str
+    ) -> dict[str, Any] | None:
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.n6_btrack_strategy_center_state(%s) AS result",
+                (session_token_hash,),
+            )
+            row = cur.fetchone() or {}
+        result = row.get("result")
+        return dict(result) if isinstance(result, dict) else None
+
+    def fetch_strategy_center_changes(
+        self, session_token_hash: str, *, after_id: int, limit: int
+    ) -> dict[str, Any] | None:
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT public.n6_btrack_strategy_center_changes(
+                  %s, %s, %s
+                ) AS result
+                """,
+                (session_token_hash, after_id, limit),
+            )
+            row = cur.fetchone() or {}
+        result = row.get("result")
+        return dict(result) if isinstance(result, dict) else None
+
+    def put_strategy_center_selection(
+        self,
+        session_token_hash: str,
+        *,
+        selected_package_keys: list[str],
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            with psycopg.connect(
+                self.dsn,
+                connect_timeout=10,
+                row_factory=dict_row,
+                autocommit=False,
+            ) as conn:
+                with conn.transaction(), conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT public.n6_btrack_strategy_selection_put(
+                          %s, %s::text[], %s, %s
+                        ) AS result
+                        """,
+                        (
+                            session_token_hash,
+                            selected_package_keys,
+                            expected_revision,
+                            request_id,
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+        except psycopg.Error as exc:
+            message = str(exc)
+            for code in (
+                "strategy_selection_unauthorized",
+                "strategy_selection_request_id_invalid",
+                "strategy_selection_expected_revision_invalid",
+                "strategy_selection_package_keys_invalid",
+                "strategy_selection_package_keys_duplicate",
+                "strategy_selection_idempotency_conflict",
+                "strategy_selection_replay_pending",
+                "strategy_selection_active_revision_missing",
+                "strategy_selection_revision_conflict",
+                "strategy_selection_next_open_trade_date_missing",
+                "strategy_selection_catalog_authority_missing",
+            ):
+                if code in message:
+                    raise ValueError(code) from exc
+            raise
+        result = row.get("result")
+        return dict(result) if isinstance(result, dict) else None
+
     def fetch_app_signals(
         self,
         *,
@@ -4022,10 +4614,11 @@ class PostgresN6UserRepository:
             principal_type=principal_type,
             user_id=user_id,
             filters=filters,
+            include_monitor_scope=False,
         )
         params["limit"] = max(1, min(int(limit), 500))
         historical_projection_mode = bool(filters.get("historical_projection_mode"))
-        scope_cte_sql = self._app_v1_effective_monitor_scope_cte(
+        scope_cte_sql = self._app_v1_web_signal_scope_cte(
             include_expired=historical_projection_mode,
             include_realtime_scope=not historical_projection_mode,
         )
@@ -4042,7 +4635,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
-                {self._app_v1_signal_display_join()}
+                {self._app_v1_web_signal_scope_join()}
                 WHERE {where_sql}
                 ORDER BY p.created_at DESC, p.user_signal_projection_id DESC
                 LIMIT %(limit)s
@@ -4058,22 +4651,27 @@ class PostgresN6UserRepository:
         principal_type: str,
         user_id: int,
         user_signal_projection_id: int,
+        trade_date: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._app_v1_signal_scope_relations_ready():
+            return None
+        effective_trade_date = normalize_filter_value(trade_date) or self.fetch_app_current_signal_trade_date()
+        if not effective_trade_date:
             return None
         where_sql, params = self._app_v1_signal_where(
             principal_id=principal_id,
             principal_type=principal_type,
             user_id=user_id,
-            filters={},
+            filters={"trade_date": effective_trade_date},
+            include_monitor_scope=False,
         )
         params["user_signal_projection_id"] = int(user_signal_projection_id)
-        scope_cte_sql = self._app_v1_effective_monitor_scope_cte()
+        scope_cte_sql = self._app_v1_web_signal_scope_cte()
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 WITH {scope_cte_sql}
-                SELECT {self._app_v1_signal_select_list()}
+                SELECT {self._app_v1_signal_detail_select_list()}
                 FROM user_signal_projection p
                 JOIN user_projection_run r
                   ON r.user_projection_run_id = p.user_projection_run_id
@@ -4082,7 +4680,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
-                {self._app_v1_signal_display_join()}
+                {self._app_v1_web_signal_scope_join()}
                 WHERE {where_sql}
                   AND p.user_signal_projection_id = %(user_signal_projection_id)s
                 LIMIT 1
@@ -4092,16 +4690,24 @@ class PostgresN6UserRepository:
             row = cur.fetchone()
         return dict(row) if row else None
 
+    def fetch_app_current_signal_trade_date(self) -> str | None:
+        current_filter_batch = self._app_v2_current_filter_batches(["stock", "index", "board"])
+        return current_app_signal_trade_date({"current_filter_batch": current_filter_batch})
+
     def fetch_app_signal_scope_metadata(
         self,
         *,
         principal_id: int,
         principal_type: str,
         user_id: int,
+        trade_date: str | None = None,
     ) -> dict[str, Any]:
         metadata = {
             "scope_mode": "effective_monitor",
-            "current_filter_batch": self._app_v2_current_filter_batches(["stock", "index", "board"]),
+            "current_filter_batch": {
+                asset_kind: {"source_trade_date": "", "for_trade_date": "", "source_run_id": ""}
+                for asset_kind in APP_V2_MONITOR_TABLE_BY_ASSET
+            },
             "available_trade_dates": [],
             "effective_monitor_count": 0,
             "expired_monitor_count": 0,
@@ -4114,38 +4720,95 @@ class PostgresN6UserRepository:
         }
         if not self._app_v1_signal_scope_relations_ready():
             return metadata
+        current_filter_batch = self._app_v2_current_filter_batches(["stock", "index", "board"])
+        current_trade_date = current_app_signal_trade_date({"current_filter_batch": current_filter_batch})
+        requested_trade_date = normalize_filter_value(trade_date)
+        if requested_trade_date and requested_trade_date != current_trade_date:
+            current_trade_date = None
+        cache_key = (int(principal_id), str(principal_type), int(user_id), current_trade_date or "")
+        now_monotonic = time.monotonic()
+        with self._app_user_scope_cache_lock:
+            cached = self._app_user_scope_cache.get(cache_key)
+            if cached and now_monotonic - cached[0] <= 2.0:
+                return copy.deepcopy(cached[1])
+        metadata["current_filter_batch"] = current_filter_batch
+        if not current_trade_date:
+            return metadata
         where_sql, params = self._app_v1_signal_where(
             principal_id=principal_id,
             principal_type=principal_type,
             user_id=user_id,
-            filters={},
+            filters={"trade_date": current_trade_date},
             include_monitor_scope=False,
         )
         scope_cte_sql = self._app_v1_effective_monitor_scope_cte()
         all_monitor_cte_sql = self._app_v1_all_monitor_scope_cte()
-        trade_date_expr = self._app_v1_trade_date_expr()
         with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_catalog.to_char(p.for_trade_date, 'YYYYMMDD') AS trade_date
+                FROM user_signal_projection p
+                JOIN user_projection_run r
+                  ON r.user_projection_run_id = p.user_projection_run_id
+                 AND r.status IN ('passed', 'ready')
+                WHERE p.projection_status IN ('visible', 'blocked')
+                  AND p.for_trade_date IS NOT NULL
+                  AND (
+                    p.source_action_run_id IS NULL
+                    OR NOT (p.source_action_run_id = ANY(%(stale_source_action_run_ids)s))
+                  )
+                GROUP BY p.for_trade_date
+                ORDER BY p.for_trade_date DESC
+                """,
+                {"stale_source_action_run_ids": params["stale_source_action_run_ids"]},
+            )
+            metadata["available_trade_dates"] = [
+                str(item["trade_date"])
+                for item in cur.fetchall()
+                if item.get("trade_date")
+            ]
             cur.execute(
                 f"""
                 WITH {scope_cte_sql},
                 {all_monitor_cte_sql},
+                deduplicated_monitor_scope AS (
+                  SELECT DISTINCT principal_id,
+                                  principal_type,
+                                  asset_kind,
+                                  identity_key,
+                                  direction,
+                                  valid_for_trade_date
+                  FROM effective_monitor_scope
+                ),
                 candidate_messages AS (
-                  SELECT p.asset_kind,
+                  SELECT p.user_signal_projection_id,
+                         p.asset_kind,
                          p.identity_key,
                          p.direction,
-                         {trade_date_expr} AS message_trade_date
+                         pg_catalog.to_char(p.for_trade_date, 'YYYYMMDD') AS message_trade_date
                   FROM user_signal_projection p
                   JOIN user_projection_run r
                     ON r.user_projection_run_id = p.user_projection_run_id
                    AND r.status IN ('passed', 'ready')
-                  LEFT JOIN user_signal_card c
-                    ON c.user_signal_projection_id = p.user_signal_projection_id
-                   AND c.user_projection_run_id = p.user_projection_run_id
-                   AND c.user_id = p.user_id
                   WHERE {where_sql}
+                ),
+                scoped_candidate_messages AS (
+                  SELECT candidate_messages.user_signal_projection_id,
+                         candidate_messages.asset_kind,
+                         candidate_messages.identity_key,
+                         candidate_messages.direction,
+                         candidate_messages.message_trade_date
+                  FROM candidate_messages
+                  WHERE EXISTS (
+                    SELECT 1
+                    FROM deduplicated_monitor_scope
+                    WHERE deduplicated_monitor_scope.asset_kind = candidate_messages.asset_kind
+                      AND deduplicated_monitor_scope.identity_key = candidate_messages.identity_key
+                      AND deduplicated_monitor_scope.direction = candidate_messages.direction
+                  )
                 )
                 SELECT
-                  (SELECT COUNT(*) FROM effective_monitor_scope) AS effective_monitor_count,
+                  (SELECT COUNT(*) FROM deduplicated_monitor_scope) AS effective_monitor_count,
                   (
                     SELECT COUNT(*)
                     FROM all_monitor_scope expired_monitor_scope
@@ -4157,41 +4820,25 @@ class PostgresN6UserRepository:
                           AND effective_monitor_scope.monitor_id = expired_monitor_scope.monitor_id
                       )
                   ) AS expired_monitor_count,
-                  COUNT(*) FILTER (WHERE candidate_messages.message_trade_date IS NULL) AS message_trade_date_missing,
                   COUNT(*) FILTER (
-                    WHERE candidate_messages.message_trade_date IS NOT NULL
-                      AND candidate_messages.message_trade_date <> effective_monitor_scope.valid_for_trade_date
+                    WHERE scoped_candidate_messages.message_trade_date IS NULL
+                  ) AS message_trade_date_missing,
+                  COUNT(*) FILTER (
+                    WHERE scoped_candidate_messages.message_trade_date IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM deduplicated_monitor_scope
+                        WHERE deduplicated_monitor_scope.asset_kind = scoped_candidate_messages.asset_kind
+                          AND deduplicated_monitor_scope.identity_key = scoped_candidate_messages.identity_key
+                          AND deduplicated_monitor_scope.direction = scoped_candidate_messages.direction
+                          AND deduplicated_monitor_scope.valid_for_trade_date = scoped_candidate_messages.message_trade_date
+                      )
                   ) AS message_trade_date_mismatch
-                FROM candidate_messages
-                JOIN effective_monitor_scope
-                  ON effective_monitor_scope.asset_kind = candidate_messages.asset_kind
-                 AND effective_monitor_scope.identity_key = candidate_messages.identity_key
+                FROM scoped_candidate_messages
                 """,
                 params,
             )
             row = cur.fetchone()
-            cur.execute(
-                f"""
-                SELECT DISTINCT {trade_date_expr} AS trade_date
-                FROM user_signal_projection p
-                JOIN user_projection_run r
-                  ON r.user_projection_run_id = p.user_projection_run_id
-                 AND r.status IN ('passed', 'ready')
-                LEFT JOIN user_signal_card c
-                  ON c.user_signal_projection_id = p.user_signal_projection_id
-                 AND c.user_projection_run_id = p.user_projection_run_id
-                 AND c.user_id = p.user_id
-                WHERE (
-                    p.source_action_run_id IS NULL
-                    OR NOT (p.source_action_run_id = ANY(%(stale_source_action_run_ids)s))
-                  )
-                  AND p.projection_status IN ('visible', 'blocked')
-                  AND {trade_date_expr} IS NOT NULL
-                ORDER BY trade_date DESC
-                """,
-                {"stale_source_action_run_ids": list(stale_source_action_run_ids())},
-            )
-            metadata["available_trade_dates"] = [str(item["trade_date"]) for item in cur.fetchall() if item.get("trade_date")]
         if row:
             metadata["effective_monitor_count"] = int(row.get("effective_monitor_count") or 0)
             metadata["expired_monitor_count"] = int(row.get("expired_monitor_count") or 0)
@@ -4202,6 +4849,8 @@ class PostgresN6UserRepository:
             metadata["excluded_reason_counts"]["message_trade_date_mismatch"] = int(
                 row.get("message_trade_date_mismatch") or 0
             )
+        with self._app_user_scope_cache_lock:
+            self._app_user_scope_cache[cache_key] = (time.monotonic(), copy.deepcopy(metadata))
         return metadata
 
     def fetch_app_realtime_scope(
@@ -4263,100 +4912,8 @@ class PostgresN6UserRepository:
             ),
         }
 
-    def _app_v1_stock_signal_display_join(self) -> str:
-        return self._app_v1_signal_display_join()
-
-    def _app_v1_signal_display_join(self) -> str:
-        trade_date_expr = self._app_v1_trade_date_expr()
-        stock_basis_join = (
-            f"""
-                LEFT JOIN v_n6_stock_condition_display_basis s
-                  ON p.asset_kind = 'stock'
-                 AND s.identity_key = p.identity_key
-                 AND s.for_trade_date::text = ({trade_date_expr})::text
-                """
-            if self._app_v2_relation_exists("v_n6_stock_condition_display_basis")
-            else """
-                LEFT JOIN (
-                  SELECT NULL::text AS display_code,
-                         NULL::text AS display_name,
-                         NULL::text AS industry_code,
-                         NULL::text AS industry_name
-                ) s ON FALSE
-                """
-        )
-        membership_join = (
-            f"""
-                LEFT JOIN LATERAL (
-                  SELECT bm.stock_code,
-                         bm.stock_name,
-                         bm.parent_code,
-                         bm.parent_name
-                  FROM n6_board_membership_display_cache bm
-                  WHERE p.asset_kind = 'stock'
-                    AND bm.stock_identity_key = p.identity_key
-                    AND bm.board_type = 'tdx_industry'
-                    AND bm.quality_status = 'passed'
-                    AND bm.source_trade_date <= ({trade_date_expr})::text
-                  ORDER BY bm.source_trade_date DESC, bm.parent_code ASC
-                  LIMIT 1
-                ) bm ON TRUE
-                """
-            if self._app_v2_relation_exists("n6_board_membership_display_cache")
-            else """
-                LEFT JOIN (
-                  SELECT NULL::text AS stock_code,
-                         NULL::text AS stock_name,
-                         NULL::text AS parent_code,
-                         NULL::text AS parent_name
-                ) bm ON FALSE
-                """
-        )
-        index_basis_join = (
-            f"""
-                LEFT JOIN v_n6_index_condition_display_basis i
-                  ON p.asset_kind = 'index'
-                 AND i.identity_key = p.identity_key
-                 AND i.for_trade_date::text = ({trade_date_expr})::text
-                """
-            if self._app_v2_relation_exists("v_n6_index_condition_display_basis")
-            else """
-                LEFT JOIN (
-                  SELECT NULL::text AS display_code,
-                         NULL::text AS display_name
-                ) i ON FALSE
-                """
-        )
-        board_basis_join = (
-            f"""
-                LEFT JOIN v_n6_board_condition_display_basis b
-                  ON p.asset_kind = 'board'
-                 AND b.identity_key = p.identity_key
-                 AND b.for_trade_date::text = ({trade_date_expr})::text
-                """
-            if self._app_v2_relation_exists("v_n6_board_condition_display_basis")
-            else """
-                LEFT JOIN (
-                  SELECT NULL::text AS display_code,
-                         NULL::text AS display_name
-                ) b ON FALSE
-                """
-        )
-        return f"{stock_basis_join}\n{membership_join}\n{index_basis_join}\n{board_basis_join}"
-
     def _app_v1_signal_select_list(self) -> str:
         actual_trigger_period_expr = self._app_v1_actual_trigger_period_expr()
-        stock_filter_columns = (
-            self._app_v2_filter_columns("v_n6_stock_condition_display_basis")
-            if self._app_v2_relation_exists("v_n6_stock_condition_display_basis")
-            else set()
-        )
-        stock_basis_industry_code_expr = (
-            "NULLIF(s.industry_code::text, '')" if "industry_code" in stock_filter_columns else "NULL::text"
-        )
-        stock_basis_industry_name_expr = (
-            "NULLIF(s.industry_name::text, '')" if "industry_name" in stock_filter_columns else "NULL::text"
-        )
         return f"""
                p.user_signal_projection_id,
                c.user_signal_card_id,
@@ -4369,52 +4926,22 @@ class PostgresN6UserRepository:
                p.asset_kind,
                p.identity_key,
                p.code,
-               COALESCE(
-                 NULLIF(bm.stock_code::text, ''),
-                 CASE WHEN s.display_code::text LIKE 'stock:%%' THEN NULL ELSE NULLIF(s.display_code::text, '') END,
-                 NULLIF(i.display_code::text, ''),
-                 NULLIF(b.display_code::text, ''),
-                 CASE
-                   WHEN p.code::text LIKE 'stock:%%' OR p.code::text LIKE 'index:%%' OR p.code::text LIKE 'board:%%' THEN NULL
-                   ELSE NULLIF(p.code::text, '')
-                 END,
-                 p.code
-               ) AS display_code,
+               p.code AS display_code,
                p.name,
-               COALESCE(
-                 NULLIF(bm.stock_name::text, ''),
-                 CASE WHEN s.display_name::text LIKE 'stock:%%' THEN NULL ELSE NULLIF(s.display_name::text, '') END,
-                 NULLIF(i.display_name::text, ''),
-                 NULLIF(b.display_name::text, ''),
-                 CASE
-                   WHEN p.name::text LIKE 'stock:%%' OR p.name::text LIKE 'index:%%' OR p.name::text LIKE 'board:%%' THEN NULL
-                   ELSE NULLIF(p.name::text, '')
-                 END,
-                 p.name
-               ) AS display_name,
-               COALESCE(
-                 {stock_basis_industry_code_expr},
-                 NULLIF(bm.parent_code::text, ''),
-                 NULLIF(p.display_payload_json->>'industry_code', ''),
-                 NULLIF(p.trace_json->>'industry_code', '')
-               ) AS industry_code,
-               COALESCE(
-                 {stock_basis_industry_name_expr},
-                 NULLIF(bm.parent_name::text, ''),
-                 NULLIF(p.display_payload_json->>'industry_name', ''),
-                 NULLIF(p.trace_json->>'industry_name', '')
-               ) AS industry_name,
+               p.name AS display_name,
+               COALESCE(c.board_code, p.board_code) AS industry_code,
+               COALESCE(c.board_name, p.board_name) AS industry_name,
                p.direction,
                p.signal_type,
                {self._app_v1_action_state_expr()} AS action_state,
                COALESCE(NULLIF(p.action_mark, ''), NULLIF(c.action_mark, ''), '—') AS action_mark,
                c.card_status,
                {self._app_v1_blocked_reason_expr()} AS blocked_reason,
-               COALESCE(p.source_payload_json->'payload_json'->>'trigger_kind', c.card_payload_json->>'trigger_kind', p.display_payload_json->>'trigger_kind', p.trace_json->>'trigger_kind', p.source_payload_json->>'trigger_kind') AS trigger_kind,
-               COALESCE(NULLIF(p.condition_key, ''), NULLIF(c.condition_key, ''), p.display_payload_json->>'condition_key', p.trace_json->>'condition_key') AS condition_key,
-               COALESCE(NULLIF(p.original_condition_key, ''), NULLIF(c.original_condition_key, ''), p.display_payload_json->>'original_condition_key', p.trace_json->>'original_condition_key') AS original_condition_key,
+               p.list_payload_json->>'trigger_kind' AS trigger_kind,
+               COALESCE(NULLIF(p.condition_key, ''), NULLIF(c.condition_key, ''), p.list_payload_json->>'condition_key') AS condition_key,
+               COALESCE(NULLIF(p.original_condition_key, ''), NULLIF(c.original_condition_key, ''), p.list_payload_json->>'original_condition_key') AS original_condition_key,
                {actual_trigger_period_expr} AS primary_trigger_period,
-               COALESCE(p.trace_json->>'trigger_time', p.source_payload_json->>'event_time', p.created_at::text) AS trigger_time,
+               COALESCE(p.list_payload_json->>'trigger_time', p.created_at::text) AS trigger_time,
                'readonly'::text AS queue_status,
                'not_delivered'::text AS delivery_status,
                'b_track_reviewed_projection'::text AS notification_source,
@@ -4427,12 +4954,34 @@ class PostgresN6UserRepository:
                p.source_event_id,
                COALESCE(NULLIF(p.source_action_event_id, ''), NULLIF(c.source_action_event_id, ''), p.source_event_id) AS source_action_event_id,
                {self._app_v1_event_type_expr()} AS source_action_event_type,
-               COALESCE(c.card_payload_json->>'source_n4_run_id', p.trace_json->>'source_n4_run_id', p.source_payload_json->>'source_n4_run_id', p.trace_json->>'source_trigger_run_id') AS source_n4_run_id,
-               COALESCE(p.source_payload_json->'payload_json'->>'source_trigger_event_id', p.trace_json#>>'{{condition_provenance,source_trigger_event_ids,0}}') AS n4_trigger_event_id,
-               COALESCE(p.source_payload_json->'payload_json'->>'confirmation_status', p.trace_json->>'confirmation_status', p.action_state, c.action_state) AS source_action_status,
+               p.list_payload_json->>'source_n4_run_id' AS source_n4_run_id,
+               p.list_payload_json->>'n4_trigger_event_id' AS n4_trigger_event_id,
+               COALESCE(p.list_payload_json->>'source_action_status', p.action_state, c.action_state) AS source_action_status,
                {self._app_v1_trigger_price_expr()} AS trigger_price,
                {self._app_v1_triggered_periods_expr(actual_trigger_period_expr)} AS triggered_periods,
                {self._app_v1_baseline_source_expr(actual_trigger_period_expr)} AS baseline_source,
+               p.list_payload_json->'condition_projection_context' AS condition_projection_context,
+               p.list_payload_json->>'condition_projection_context_status' AS condition_projection_context_status,
+               p.list_payload_json->'condition_projection_context_trace' AS condition_projection_context_trace,
+               p.list_payload_json->>'projection_message_contract_version' AS projection_message_contract_version,
+               p.list_payload_json->>'projection_message_contract_hash' AS projection_message_contract_hash,
+               p.list_payload_json->>'projection_message_status' AS projection_message_status,
+               p.list_payload_json->'projection_message_not_ready_reasons' AS projection_message_not_ready_reasons,
+               p.list_payload_json->>'trigger_pct' AS trigger_pct,
+               p.list_payload_json->>'trigger_pct_status' AS trigger_pct_status,
+               p.list_payload_json->>'action_price' AS action_price,
+               p.list_payload_json->>'action_pct' AS action_pct,
+               p.list_payload_json->>'action_pct_status' AS action_pct_status,
+               p.list_payload_json->>'buy_expected_return_pct' AS buy_expected_return_pct,
+               p.list_payload_json->>'up_secondary_expected_return_pct' AS up_secondary_expected_return_pct,
+               p.list_payload_json->>'sell_expected_return_pct' AS sell_expected_return_pct,
+               p.list_payload_json->>'up_reference_period' AS up_reference_period,
+               p.list_payload_json->>'down_reference_period' AS down_reference_period,
+               p.list_payload_json->'all_trigger_periods' AS all_trigger_periods,
+               p.list_payload_json->>'score' AS score,
+               p.list_payload_json->>'pe_core' AS pe_core,
+               p.list_payload_json->>'industry_status' AS industry_status,
+               p.list_payload_json->'industry_provenance' AS industry_provenance,
                COALESCE(c.target_price, p.target_price) AS target_price,
                COALESCE(c.current_price, p.current_price) AS current_price,
                COALESCE(c.expected_return_pct, p.expected_return_pct) AS expected_return_pct,
@@ -4441,30 +4990,75 @@ class PostgresN6UserRepository:
                p.source_display_table,
                p.source_condition_display_basis_id,
                p.source_condition_display_run_id,
-               {self._app_v1_effective_monitor_scope_lookup("source_type_raw")} AS source_type_raw,
-               {self._app_v1_effective_monitor_scope_lookup("source_type")} AS source_type,
-               {self._app_v1_effective_monitor_scope_lookup("source_type_label")} AS source_type_label,
-               {self._app_v1_effective_monitor_scope_lookup("source_object_kind")} AS source_object_kind,
-               {self._app_v1_effective_monitor_scope_lookup("source_object_identity_key")} AS source_object_identity_key,
-               {self._app_v1_effective_monitor_scope_lookup("source_object_code")} AS source_object_code,
-               {self._app_v1_effective_monitor_scope_lookup("source_object_name")} AS source_object_name,
-               {self._app_v1_effective_monitor_scope_lookup("membership_relation_date")} AS membership_relation_date,
-               CASE p.source_display_table
-                 WHEN 'stock_condition_display_basis' THEN 'n6_display_stock_condition_cache'
-                 WHEN 'index_condition_display_basis' THEN 'n6_display_index_condition_cache'
-                 WHEN 'board_condition_display_basis' THEN 'n6_display_board_condition_cache'
-                 WHEN NULL THEN NULL
-                 ELSE NULL
-               END AS condition_display_cache_source,
-               CASE
-                 WHEN p.asset_kind = 'index' THEN 'n6_display_index_membership_cache'
-                 WHEN p.asset_kind IN ('stock', 'board') THEN 'n6_display_board_membership_cache'
-                 ELSE NULL
-               END AS membership_cache_source,
-               COALESCE(c.card_payload_json->>'quality_status', p.display_payload_json->>'quality_status', 'reviewed') AS quality_status,
-               c.card_payload_json,
-               p.display_payload_json,
+               monitor_scope.source_type_raw,
+               monitor_scope.source_type,
+               monitor_scope.source_type_label,
+               monitor_scope.source_object_kind,
+               monitor_scope.source_object_identity_key,
+               monitor_scope.source_object_code,
+               monitor_scope.source_object_name,
+               monitor_scope.membership_relation_date,
+               NULL::text AS condition_display_cache_source,
+               NULL::text AS membership_cache_source,
+               COALESCE(p.list_payload_json->>'quality_status', 'reviewed') AS quality_status,
                true AS rollback_safe,
+               p.created_at
+        """
+
+    def _app_v1_signal_detail_select_list(self) -> str:
+        return f"""
+               {self._app_v1_signal_select_list()},
+               p.source_payload_json,
+               p.display_payload_json,
+               p.trace_json,
+               c.card_payload_json
+        """
+
+    def _app_v1_signal_sse_select_list(self) -> str:
+        actual_trigger_period_expr = self._app_v1_actual_trigger_period_expr()
+        return f"""
+               p.user_signal_projection_id,
+               c.user_signal_card_id,
+               p.user_projection_run_id,
+               {self._app_v1_event_type_expr()} AS event_type,
+               {self._app_v1_trade_date_expr()} AS trade_date,
+               {self._app_v1_event_time_expr()} AS event_time,
+               p.asset_kind,
+               p.identity_key,
+               p.code,
+               p.code AS display_code,
+               p.name,
+               p.name AS display_name,
+               COALESCE(c.board_code, p.board_code) AS industry_code,
+               COALESCE(c.board_name, p.board_name) AS industry_name,
+               p.direction,
+               p.signal_type,
+               {self._app_v1_action_state_expr()} AS action_state,
+               COALESCE(NULLIF(p.action_mark, ''), NULLIF(c.action_mark, ''), '—') AS action_mark,
+               {self._app_v1_blocked_reason_expr()} AS blocked_reason,
+               COALESCE(NULLIF(p.condition_key, ''), NULLIF(c.condition_key, ''), p.list_payload_json->>'condition_key') AS condition_key,
+               {actual_trigger_period_expr} AS primary_trigger_period,
+               {self._app_v1_triggered_periods_expr(actual_trigger_period_expr)} AS triggered_periods,
+               COALESCE(c.target_price, p.target_price) AS target_price,
+               COALESCE(c.current_price, p.current_price) AS current_price,
+               COALESCE(c.expected_return_pct, p.expected_return_pct) AS expected_return_pct,
+               p.list_payload_json->>'buy_expected_return_pct' AS buy_expected_return_pct,
+               p.list_payload_json->>'up_secondary_expected_return_pct' AS up_secondary_expected_return_pct,
+               p.list_payload_json->>'sell_expected_return_pct' AS sell_expected_return_pct,
+               p.list_payload_json->>'up_reference_period' AS up_reference_period,
+               p.list_payload_json->>'down_reference_period' AS down_reference_period,
+               p.list_payload_json->>'score' AS score,
+               p.list_payload_json->>'pe_core' AS pe_core,
+               {self._app_v1_trigger_price_expr()} AS trigger_price,
+               p.list_payload_json->>'trigger_pct' AS trigger_pct,
+               p.list_payload_json->>'action_price' AS action_price,
+               p.list_payload_json->>'action_pct' AS action_pct,
+               COALESCE(p.list_payload_json->>'projection_message_status', 'not_ready') AS projection_message_status,
+               COALESCE(p.list_payload_json->>'quality_status', 'reviewed') AS quality_status,
+               p.source_action_run_id AS source_run_id,
+               p.user_projection_run_id AS projection_run_id,
+               c.title,
+               c.summary AS message,
                p.created_at
         """
 
@@ -4498,7 +5092,6 @@ class PostgresN6UserRepository:
         if include_monitor_scope:
             where_clauses.append(self._app_v1_effective_monitor_scope_clause())
         filter_specs = (
-            ("trade_date", self._app_v1_trade_date_expr()),
             ("event_type", self._app_v1_event_type_expr()),
             ("asset_kind", "p.asset_kind"),
             ("direction", "p.direction"),
@@ -4506,6 +5099,23 @@ class PostgresN6UserRepository:
             ("action_state", self._app_v1_action_state_expr()),
             ("blocked_reason", self._app_v1_blocked_reason_expr()),
         )
+        trade_date = normalize_filter_value(filters.get("trade_date"))
+        if trade_date:
+            params["trade_date"] = trade_date
+            where_clauses.append(
+                "p.for_trade_date = pg_catalog.to_date(pg_catalog.replace(%(trade_date)s, '-', ''), 'YYYYMMDD')"
+            )
+        before_created_at = filters.get("before_created_at")
+        before_id = filters.get("before_id")
+        if isinstance(before_created_at, datetime) and before_id is not None:
+            params["before_created_at"] = before_created_at
+            params["before_id"] = int(before_id)
+            where_clauses.append(
+                """
+                (p.created_at, p.user_signal_projection_id)
+                  < (%(before_created_at)s, %(before_id)s)
+                """
+            )
         for key, expression in filter_specs:
             value = normalize_filter_value(filters.get(key))
             if value:
@@ -4526,7 +5136,7 @@ class PostgresN6UserRepository:
         keyword = normalize_filter_value(filters.get("q"))
         if keyword:
             params["q_like"] = f"%{keyword}%"
-            condition_expr = "COALESCE(NULLIF(p.condition_key, ''), NULLIF(c.condition_key, ''), p.display_payload_json->>'condition_key', p.trace_json->>'condition_key')"
+            condition_expr = "COALESCE(NULLIF(p.condition_key, ''), NULLIF(c.condition_key, ''), p.list_payload_json->>'condition_key')"
             where_clauses.append(
                 f"""
                 (
@@ -4552,9 +5162,92 @@ class PostgresN6UserRepository:
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
         )
-        return all(self._app_v2_monitor_relation_exists(table_name) for table_name in required_monitor_tables) and all(
-            self._app_v2_relation_exists(view_name) for view_name in required_display_views
+        capabilities = self._app_v1_signal_schema_capabilities()
+        monitor_lineage_columns = {
+            "monitor_id",
+            "principal_id",
+            "principal_type",
+            "user_id",
+            "identity_key",
+            "direction",
+            "source_type",
+            "source_run_id",
+            "source_snapshot_json",
+            "valid_source_trade_date",
+            "valid_for_trade_date",
+            "valid_source_run_id",
+            "status",
+        }
+        approved_batch_columns = {"identity_key", "source_trade_date", "for_trade_date", "run_id"}
+        return all(
+            monitor_lineage_columns.issubset(capabilities.get(table_name, frozenset()))
+            for table_name in required_monitor_tables
+        ) and all(
+            approved_batch_columns.issubset(capabilities.get(view_name, frozenset()))
+            for view_name in required_display_views
         )
+
+    def _app_v1_signal_schema_capabilities(self) -> dict[str, frozenset[str]]:
+        cached = self._app_v1_signal_schema_capability_cache
+        if cached is not None:
+            return cached
+        monitor_tables = tuple(APP_V2_MONITOR_TABLE_BY_ASSET.values())
+        display_views = (
+            "v_n6_stock_condition_display_basis",
+            "v_n6_index_condition_display_basis",
+            "v_n6_board_condition_display_basis",
+        )
+        relation_names = (
+            *monitor_tables,
+            *display_views,
+            APP_REALTIME_SCOPE_TABLE,
+            "n6_virtual_account",
+            "n6_virtual_position",
+        )
+        with self._app_v1_signal_schema_capability_lock:
+            cached = self._app_v1_signal_schema_capability_cache
+            if cached is not None:
+                return cached
+            columns_by_relation: dict[str, set[str]] = {}
+            with self._readonly_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.relname AS relation_name,
+                           a.attname AS column_name
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n
+                      ON n.oid = c.relnamespace
+                    LEFT JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = c.oid
+                     AND a.attnum > 0
+                     AND NOT a.attisdropped
+                    WHERE n.nspname = current_schema()
+                      AND c.relname = ANY(%s)
+                      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                    ORDER BY c.relname, a.attnum
+                    """,
+                    (list(relation_names),),
+                )
+                for row in cur.fetchall():
+                    relation_name = str(row.get("relation_name") or "").strip()
+                    column_name = str(row.get("column_name") or "").strip()
+                    if not relation_name:
+                        continue
+                    columns_by_relation.setdefault(relation_name, set())
+                    if column_name:
+                        columns_by_relation[relation_name].add(column_name)
+            snapshot = {
+                relation_name: frozenset(columns)
+                for relation_name, columns in columns_by_relation.items()
+            }
+            for relation_name in relation_names:
+                self._app_v2_relation_existence_cache[relation_name] = relation_name in snapshot
+            for table_name in monitor_tables:
+                self._app_v2_monitor_column_cache[table_name] = set(snapshot.get(table_name, frozenset()))
+            for view_name in display_views:
+                self._app_v2_filter_column_cache[view_name] = set(snapshot.get(view_name, frozenset()))
+            self._app_v1_signal_schema_capability_cache = snapshot
+            return snapshot
 
     def _app_v1_effective_monitor_scope_clause(self) -> str:
         message_trade_date_expr = self._app_v1_trade_date_expr()
@@ -4564,6 +5257,7 @@ class PostgresN6UserRepository:
               FROM effective_monitor_scope
               WHERE effective_monitor_scope.asset_kind = p.asset_kind
                 AND effective_monitor_scope.identity_key = p.identity_key
+                AND effective_monitor_scope.direction = p.direction
                 AND effective_monitor_scope.valid_for_trade_date = ({message_trade_date_expr})
             )
         """
@@ -4576,10 +5270,88 @@ class PostgresN6UserRepository:
               FROM effective_monitor_scope
               WHERE effective_monitor_scope.asset_kind = p.asset_kind
                 AND effective_monitor_scope.identity_key = p.identity_key
+                AND effective_monitor_scope.direction = p.direction
                 AND effective_monitor_scope.valid_for_trade_date = ({message_trade_date_expr})
               ORDER BY effective_monitor_scope.monitor_id DESC
               LIMIT 1
             )
+        """
+
+    def _app_v1_effective_monitor_scope_join(self) -> str:
+        message_trade_date_expr = self._app_v1_trade_date_expr()
+        return f"""
+            JOIN LATERAL (
+              SELECT effective_monitor_scope.source_type_raw,
+                     effective_monitor_scope.source_type,
+                     effective_monitor_scope.source_type_label,
+                     effective_monitor_scope.source_object_kind,
+                     effective_monitor_scope.source_object_identity_key,
+                     effective_monitor_scope.source_object_code,
+                     effective_monitor_scope.source_object_name,
+                     effective_monitor_scope.membership_relation_date
+              FROM effective_monitor_scope
+              WHERE effective_monitor_scope.asset_kind = p.asset_kind
+                AND effective_monitor_scope.identity_key = p.identity_key
+                AND effective_monitor_scope.direction = p.direction
+                AND effective_monitor_scope.valid_for_trade_date = ({message_trade_date_expr})
+              ORDER BY effective_monitor_scope.monitor_id DESC
+              LIMIT 1
+            ) monitor_scope ON TRUE
+        """
+
+    def _app_v1_web_signal_scope_join(self) -> str:
+        message_trade_date_expr = self._app_v1_trade_date_expr()
+        return f"""
+            JOIN deduplicated_monitor_scope monitor_scope
+              ON monitor_scope.asset_kind = p.asset_kind
+             AND monitor_scope.identity_key = p.identity_key
+             AND monitor_scope.direction = p.direction
+             AND monitor_scope.valid_for_trade_date = ({message_trade_date_expr})
+        """
+
+    def _app_v1_web_signal_scope_cte(
+        self,
+        *,
+        include_expired: bool = False,
+        include_realtime_scope: bool = True,
+    ) -> str:
+        effective_scope_cte = self._app_v1_effective_monitor_scope_cte(
+            include_expired=include_expired,
+            include_realtime_scope=include_realtime_scope,
+        )
+        return f"""
+        {effective_scope_cte},
+        deduplicated_monitor_scope AS MATERIALIZED (
+          SELECT DISTINCT ON (
+                   asset_kind,
+                   identity_key,
+                   direction,
+                   valid_for_trade_date
+                 )
+                 monitor_id,
+                 principal_id,
+                 principal_type,
+                 asset_kind,
+                 identity_key,
+                 direction,
+                 valid_source_trade_date,
+                 valid_for_trade_date,
+                 valid_source_run_id,
+                 source_type_raw,
+                 source_type,
+                 source_type_label,
+                 source_object_kind,
+                 source_object_identity_key,
+                 source_object_code,
+                 source_object_name,
+                 membership_relation_date
+          FROM effective_monitor_scope
+          ORDER BY asset_kind,
+                   identity_key,
+                   direction,
+                   valid_for_trade_date,
+                   monitor_id DESC
+        )
         """
 
     def _app_v1_effective_monitor_scope_cte(
@@ -4594,29 +5366,109 @@ class PostgresN6UserRepository:
           UNION ALL
           {self._app_v1_realtime_scope_select()}
             """
+        holding_scope_union = ""
+        capabilities = self._app_v1_signal_schema_capabilities()
+        if not include_expired and {"n6_virtual_account", "n6_virtual_position"}.issubset(capabilities):
+            holding_scope_union = f"""
+          UNION ALL
+          {self._app_v1_holding_scope_select()}
+            """
         return f"""
+        {self._app_v1_current_approved_batch_cte(
+            asset_kind="stock",
+            view_name="v_n6_stock_condition_display_basis",
+        )},
+        {self._app_v1_current_approved_batch_cte(
+            asset_kind="index",
+            view_name="v_n6_index_condition_display_basis",
+        )},
+        {self._app_v1_current_approved_batch_cte(
+            asset_kind="board",
+            view_name="v_n6_board_condition_display_basis",
+        )},
+        {self._app_v1_principal_monitor_cte(
+            asset_kind="stock",
+            table_name="user_monitor_stock",
+            include_expired=include_expired,
+        )},
+        {self._app_v1_principal_monitor_cte(
+            asset_kind="index",
+            table_name="user_monitor_index",
+            include_expired=include_expired,
+        )},
+        {self._app_v1_principal_monitor_cte(
+            asset_kind="board",
+            table_name="user_monitor_board",
+            include_expired=include_expired,
+        )},
         effective_monitor_scope AS (
           {self._app_v1_effective_monitor_scope_select(
               asset_kind="stock",
               table_name="user_monitor_stock",
               view_name="v_n6_stock_condition_display_basis",
-              include_expired=include_expired,
           )}
           UNION ALL
           {self._app_v1_effective_monitor_scope_select(
               asset_kind="index",
               table_name="user_monitor_index",
               view_name="v_n6_index_condition_display_basis",
-              include_expired=include_expired,
           )}
           UNION ALL
           {self._app_v1_effective_monitor_scope_select(
               asset_kind="board",
               table_name="user_monitor_board",
               view_name="v_n6_board_condition_display_basis",
-              include_expired=include_expired,
           )}
           {realtime_scope_union}
+          {holding_scope_union}
+        )
+        """
+
+    def _app_v1_principal_monitor_cte(
+        self,
+        *,
+        asset_kind: str,
+        table_name: str,
+        include_expired: bool,
+    ) -> str:
+        status_clause = "status <> 'removed'" if include_expired else "status = 'active'"
+        return f"""
+        current_{asset_kind}_principal_monitors AS MATERIALIZED (
+          SELECT monitor_id,
+                 principal_id,
+                 principal_type,
+                 user_id,
+                 identity_key,
+                 direction,
+                 source_type,
+                 source_run_id,
+                 source_snapshot_json,
+                 valid_source_trade_date,
+                 valid_for_trade_date,
+                 valid_source_run_id,
+                 status
+          FROM {table_name}
+          WHERE principal_id = %(principal_id)s
+            AND principal_type = %(principal_type)s
+            AND user_id = %(user_id)s
+            AND {status_clause}
+            AND ('{asset_kind}' <> 'stock' OR direction = 'buy')
+        )
+        """
+
+    def _app_v1_current_approved_batch_cte(self, *, asset_kind: str, view_name: str) -> str:
+        return f"""
+        current_{asset_kind}_approved_batch AS MATERIALIZED (
+          SELECT min(source_trade_date::text) AS source_trade_date,
+                 min(for_trade_date::text) AS for_trade_date,
+                 min(run_id::text) AS source_run_id
+          FROM {view_name}
+          WHERE for_trade_date = (SELECT max(for_trade_date) FROM {view_name})
+          HAVING count(*) > 0
+             AND count(source_trade_date) = count(*)
+             AND count(for_trade_date) = count(*)
+             AND count(run_id) = count(*)
+             AND count(DISTINCT (source_trade_date::text, for_trade_date::text, run_id::text)) = 1
         )
         """
 
@@ -4640,26 +5492,22 @@ class PostgresN6UserRepository:
         )
         """
 
-    def _app_v1_monitor_validity_sql_exprs(self, table_name: str, alias: str = "m") -> tuple[str, str, str]:
+    def _app_v1_monitor_validity_sql_exprs(
+        self,
+        table_name: str,
+        alias: str = "m",
+    ) -> tuple[str, str, str, str]:
         columns = self._app_v2_monitor_columns(table_name)
-        snapshot_expr = f"{alias}.source_snapshot_json"
-        source_run_expr = f"{alias}.source_run_id"
-        valid_source_trade_expr = (
-            f"COALESCE({alias}.valid_source_trade_date, {snapshot_expr}->>'source_trade_date')"
-            if "valid_source_trade_date" in columns
-            else f"{snapshot_expr}->>'source_trade_date'"
+        expressions = tuple(
+            f"{alias}.{column_name}::text" if column_name in columns else "NULL::text"
+            for column_name in (
+                "source_run_id",
+                "valid_source_trade_date",
+                "valid_for_trade_date",
+                "valid_source_run_id",
+            )
         )
-        valid_for_trade_expr = (
-            f"COALESCE({alias}.valid_for_trade_date, {snapshot_expr}->>'for_trade_date')"
-            if "valid_for_trade_date" in columns
-            else f"{snapshot_expr}->>'for_trade_date'"
-        )
-        valid_run_expr = (
-            f"COALESCE({alias}.valid_source_run_id, {snapshot_expr}->>'source_run_id', {source_run_expr})"
-            if "valid_source_run_id" in columns
-            else f"COALESCE({snapshot_expr}->>'source_run_id', {source_run_expr})"
-        )
-        return valid_source_trade_expr, valid_for_trade_expr, valid_run_expr
+        return expressions  # type: ignore[return-value]
 
     def _app_v1_effective_monitor_scope_select(
         self,
@@ -4667,11 +5515,10 @@ class PostgresN6UserRepository:
         asset_kind: str,
         table_name: str,
         view_name: str,
-        include_expired: bool = False,
     ) -> str:
-        valid_source_trade_expr, valid_for_trade_expr, valid_run_expr = self._app_v1_monitor_validity_sql_exprs(table_name)
-        user_id_clause = "AND m.user_id = %(user_id)s" if "user_id" in self._app_v2_monitor_columns(table_name) else ""
-        status_clause = "m.status <> 'removed'" if include_expired else "m.status = 'active'"
+        source_run_expr, valid_source_trade_expr, valid_for_trade_expr, valid_run_expr = (
+            self._app_v1_monitor_validity_sql_exprs(table_name)
+        )
         source_type_raw_expr = "COALESCE(NULLIF(m.source_type, ''), 'single_row')"
         source_type_expr = f"""
             CASE {source_type_raw_expr}
@@ -4715,12 +5562,20 @@ class PostgresN6UserRepository:
                  CASE WHEN {source_type_expr} = 'direct' THEN NULL ELSE NULLIF(m.source_snapshot_json->>'parent_code', '') END AS source_object_code,
                  CASE WHEN {source_type_expr} = 'direct' THEN NULL ELSE NULLIF(m.source_snapshot_json->>'parent_name', '') END AS source_object_name,
                  CASE WHEN {source_type_expr} = 'direct' THEN NULL ELSE NULLIF(m.source_snapshot_json->>'membership_trade_date', '') END AS membership_relation_date
-          FROM {table_name} m
-          WHERE m.principal_id = %(principal_id)s
-            AND m.principal_type = %(principal_type)s
-            {user_id_clause}
-            AND {status_clause}
-            AND NULLIF({valid_for_trade_expr}, '') IS NOT NULL
+          FROM current_{asset_kind}_principal_monitors m
+          JOIN current_{asset_kind}_approved_batch current_batch
+            ON NULLIF({source_run_expr}, '') = current_batch.source_run_id
+           AND NULLIF({valid_source_trade_expr}, '') = current_batch.source_trade_date
+           AND NULLIF({valid_for_trade_expr}, '') = current_batch.for_trade_date
+           AND NULLIF({valid_run_expr}, '') = current_batch.source_run_id
+          WHERE EXISTS (
+            SELECT 1
+            FROM {view_name} approved
+            WHERE approved.identity_key = m.identity_key
+              AND approved.source_trade_date::text = current_batch.source_trade_date
+              AND approved.for_trade_date::text = current_batch.for_trade_date
+              AND approved.run_id::text = current_batch.source_run_id
+          )
         """
 
     def _app_v1_realtime_scope_select(self) -> str:
@@ -4730,6 +5585,40 @@ class PostgresN6UserRepository:
           {self._app_v1_default_realtime_scope_seed_select()}
         """
 
+    def _app_v1_holding_scope_select(self) -> str:
+        return """
+          SELECT NULL::bigint AS monitor_id,
+                 a.principal_id,
+                 a.principal_type,
+                 'stock'::text AS asset_kind,
+                 p.identity_key,
+                 holding_direction.direction,
+                 NULL::text AS valid_source_trade_date,
+                 %(trade_date)s::text AS valid_for_trade_date,
+                 NULL::text AS valid_source_run_id,
+                 'virtual_position'::text AS source_type_raw,
+                 'virtual_position'::text AS source_type,
+                 '虚拟持仓'::text AS source_type_label,
+                 'none'::text AS source_object_kind,
+                 NULL::text AS source_object_identity_key,
+                 NULL::text AS source_object_code,
+                 NULL::text AS source_object_name,
+                 NULL::text AS membership_relation_date
+          FROM n6_virtual_account a
+          JOIN n6_virtual_position p
+            ON p.virtual_account_id = a.virtual_account_id
+           AND p.principal_id = a.principal_id
+           AND p.principal_type = a.principal_type
+          CROSS JOIN (VALUES ('buy'::text), ('sell'::text)) AS holding_direction(direction)
+          WHERE a.principal_id = %(principal_id)s
+            AND a.principal_type = %(principal_type)s
+            AND a.virtual_account_status = 'active'
+            AND p.asset_kind = 'stock'
+            AND p.position_status = 'open_virtual'
+            AND p.quantity > 0
+            AND NULLIF(%(trade_date)s, '') IS NOT NULL
+        """
+
     def _app_v1_explicit_realtime_scope_select(self) -> str:
         return f"""
           SELECT s.realtime_scope_id AS monitor_id,
@@ -4737,7 +5626,7 @@ class PostgresN6UserRepository:
                  s.principal_type,
                  s.asset_kind,
                  s.identity_key,
-                 NULL::text AS direction,
+                 scope_direction.direction,
                  NULL::text AS valid_source_trade_date,
                  %(trade_date)s::text AS valid_for_trade_date,
                  NULL::text AS valid_source_run_id,
@@ -4750,6 +5639,12 @@ class PostgresN6UserRepository:
                  NULL::text AS source_object_name,
                  NULL::text AS membership_relation_date
           FROM {APP_REALTIME_SCOPE_TABLE} s
+          CROSS JOIN LATERAL unnest(
+            CASE
+              WHEN s.asset_kind = 'stock' THEN ARRAY['buy'::text]
+              ELSE ARRAY['buy'::text, 'sell'::text]
+            END
+          ) AS scope_direction(direction)
           WHERE s.principal_id = %(principal_id)s
             AND s.principal_type = %(principal_type)s
             AND s.user_id = %(user_id)s
@@ -4768,7 +5663,7 @@ class PostgresN6UserRepository:
                  %(principal_type)s::text AS principal_type,
                  d.asset_kind,
                  d.identity_key,
-                 NULL::text AS direction,
+                 scope_direction.direction,
                  NULL::text AS valid_source_trade_date,
                  %(trade_date)s::text AS valid_for_trade_date,
                  NULL::text AS valid_source_run_id,
@@ -4784,6 +5679,12 @@ class PostgresN6UserRepository:
                  VALUES
                  {values_sql}
           ) AS d(asset_kind, identity_key, display_name)
+          CROSS JOIN LATERAL unnest(
+            CASE
+              WHEN d.asset_kind = 'stock' THEN ARRAY['buy'::text]
+              ELSE ARRAY['buy'::text, 'sell'::text]
+            END
+          ) AS scope_direction(direction)
           WHERE NULLIF(%(trade_date)s, '') IS NOT NULL
             AND NOT EXISTS (
               SELECT 1
@@ -4809,7 +5710,9 @@ class PostgresN6UserRepository:
         """
 
     def _app_v1_all_monitor_scope_select(self, *, asset_kind: str, table_name: str) -> str:
-        valid_source_trade_expr, valid_for_trade_expr, valid_run_expr = self._app_v1_monitor_validity_sql_exprs(table_name)
+        _, valid_source_trade_expr, valid_for_trade_expr, valid_run_expr = self._app_v1_monitor_validity_sql_exprs(
+            table_name
+        )
         user_id_clause = "AND m.user_id = %(user_id)s" if "user_id" in self._app_v2_monitor_columns(table_name) else ""
         return f"""
           SELECT m.monitor_id,
@@ -4830,13 +5733,13 @@ class PostgresN6UserRepository:
         """
 
     def _app_v1_trade_date_expr(self) -> str:
-        return "COALESCE(p.display_payload_json->>'trade_date', p.source_payload_json->>'trade_date', c.card_payload_json->>'trade_date', p.trace_json->>'trade_date')"
+        return "pg_catalog.to_char(p.for_trade_date, 'YYYYMMDD')"
 
     def _app_v1_event_type_expr(self) -> str:
         return "COALESCE(NULLIF(p.source_action_event_type, ''), NULLIF(c.source_action_event_type, ''), p.source_event_type)"
 
     def _app_v1_event_time_expr(self) -> str:
-        return "COALESCE(p.source_payload_json->>'event_time', p.source_payload_json->'payload_json'->>'event_time', p.trace_json->>'event_time', p.display_payload_json->>'event_time', c.card_payload_json->>'event_time', p.created_at::text)"
+        return "COALESCE(p.list_payload_json->>'event_time', p.created_at::text)"
 
     def _app_v1_action_state_expr(self) -> str:
         return """
@@ -4856,146 +5759,29 @@ class PostgresN6UserRepository:
         """
 
     def _app_v1_blocked_reason_expr(self) -> str:
-        return "COALESCE(c.card_payload_json->>'blocked_reason', p.display_payload_json->>'blocked_reason', p.source_payload_json->'payload_json'->>'blocked_reason', p.trace_json->>'blocked_reason', p.source_payload_json->>'blocked_reason')"
+        return "p.list_payload_json->>'blocked_reason'"
 
     def _app_v1_actual_trigger_period_expr(self) -> str:
-        return """
-            COALESCE(
-              p.source_payload_json->'payload_json'->>'primary_trigger_period',
-              p.source_payload_json->'payload_json'->>'trigger_period',
-              c.card_payload_json->>'primary_trigger_period',
-              c.card_payload_json->>'trigger_period',
-              p.display_payload_json->>'primary_trigger_period'
-            )
-        """
+        return "NULLIF(p.list_payload_json->>'primary_trigger_period', '')"
 
     def _app_v1_trigger_price_expr(self) -> str:
-        return """
-            COALESCE(
-              p.source_payload_json->'payload_json'->>'trigger_price',
-              p.source_payload_json->'payload_json'->'trace_json'->>'trigger_price',
-              p.trace_json->>'trigger_price',
-              c.card_payload_json->>'trigger_price'
-            )
-        """
+        return "p.list_payload_json->>'trigger_price'"
 
     def _app_v1_triggered_periods_expr(self, actual_trigger_period_expr: str) -> str:
         return f"""
             COALESCE(
-              p.source_payload_json->'payload_json'->>'all_trigger_periods',
-              p.source_payload_json->'payload_json'->'trace_json'->>'all_trigger_periods',
-              p.trace_json->>'all_trigger_periods',
-              c.card_payload_json->>'all_trigger_periods',
-              p.source_payload_json->'payload_json'->>'triggered_periods',
-              p.source_payload_json->'payload_json'->'trace_json'->>'triggered_periods',
-              p.trace_json->>'triggered_periods',
-              c.card_payload_json->>'triggered_periods',
+              NULLIF(NULLIF(p.list_payload_json->>'triggered_periods', ''), '[]'),
               CASE
                 WHEN {actual_trigger_period_expr} IS NOT NULL
-                THEN jsonb_build_array({actual_trigger_period_expr})::text
+                THEN pg_catalog.jsonb_build_array({actual_trigger_period_expr})::text
                 ELSE NULL
               END
             )
         """
 
     def _app_v1_baseline_source_expr(self, actual_trigger_period_expr: str) -> str:
-        period_baseline_cases = "\n".join(
-            f"""
-              WHEN '{period}' THEN COALESCE(
-                p.source_payload_json#>>'{{payload_json,period_trigger_baseline_trace,traced_periods,{period},baseline_source}}',
-                p.source_payload_json#>>'{{payload_json,trace_json,period_trigger_baseline_trace,traced_periods,{period},baseline_source}}',
-                p.source_payload_json#>>'{{payload_json,source_market_trace,period_trigger_baseline_trace,traced_periods,{period},baseline_source}}',
-                p.trace_json#>>'{{period_trigger_baseline_trace,traced_periods,{period},baseline_source}}',
-                c.card_payload_json#>>'{{period_trigger_baseline_trace,traced_periods,{period},baseline_source}}'
-              )
-            """
-            for period in ("Y", "Q", "M", "W", "D", "30m", "120m", "5m", "1m")
-        )
-        return f"""
-            COALESCE(
-              p.source_payload_json->'payload_json'->>'baseline_source',
-              p.source_payload_json->'payload_json'->'trace_json'->>'baseline_source',
-              p.trace_json->>'baseline_source',
-              c.card_payload_json->>'baseline_source',
-              CASE {actual_trigger_period_expr}
-                {period_baseline_cases}
-                ELSE NULL
-              END
-            )
-        """
-
-    def fetch_app_positions(self, principal_id: int, principal_type: str) -> list[dict[str, Any]]:
-        with self._readonly_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT virtual_position_id,
-                       virtual_account_id,
-                       principal_id,
-                       principal_type,
-                       asset_kind,
-                       identity_key,
-                       position_status,
-                       quantity,
-                       available_quantity,
-                       locked_quantity,
-                       average_cost,
-                       market_value,
-                       unrealized_pnl,
-                       last_virtual_trade_id,
-                       source_position_event_id,
-                       run_id,
-                       policy_version,
-                       policy_hash,
-                       rollback_scope,
-                       quality_status,
-                       created_at,
-                       updated_at
-                FROM n6_virtual_position
-                WHERE principal_id = %s
-                  AND principal_type = %s
-                ORDER BY updated_at DESC, virtual_position_id DESC
-                LIMIT 200
-                """,
-                (principal_id, principal_type),
-            )
-            return [dict(row) for row in cur.fetchall()]
-
-    def fetch_app_pnl_snapshots(self, principal_id: int, principal_type: str, limit: int) -> list[dict[str, Any]]:
-        with self._readonly_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT pnl_snapshot_id,
-                       virtual_account_id,
-                       principal_id,
-                       principal_type,
-                       snapshot_time,
-                       trade_date,
-                       gross_pnl,
-                       realized_pnl,
-                       unrealized_pnl,
-                       total_fee,
-                       total_tax,
-                       net_pnl,
-                       total_asset_value,
-                       cash_value,
-                       position_market_value,
-                       source_price_policy,
-                       pnl_status,
-                       run_id,
-                       policy_version,
-                       policy_hash,
-                       rollback_scope,
-                       quality_status,
-                       created_at
-                FROM n6_virtual_pnl_snapshot
-                WHERE principal_id = %s
-                  AND principal_type = %s
-                ORDER BY snapshot_time DESC, pnl_snapshot_id DESC
-                LIMIT %s
-                """,
-                (principal_id, principal_type, max(1, min(int(limit), 100))),
-            )
-            return [dict(row) for row in cur.fetchall()]
+        _ = actual_trigger_period_expr
+        return "p.list_payload_json->>'baseline_source'"
 
     def _app_v2_filter_source_identity_keys(self, filters: dict[str, Any]) -> list[str]:
         return normalize_filter_identity_values(
@@ -5206,7 +5992,6 @@ class PostgresN6UserRepository:
         asset_kind: str,
         filters: dict[str, Any],
         limit: int,
-        include_all_fields: bool = False,
     ) -> dict[str, Any]:
         table_by_asset = {
             "stock": "v_n6_stock_condition_display_basis",
@@ -5222,16 +6007,19 @@ class PostgresN6UserRepository:
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT DISTINCT for_trade_date::text AS for_trade_date
+                SELECT for_trade_date::text AS for_trade_date,
+                       max(run_id::text) AS source_run_id
                 FROM {table_name}
                 WHERE for_trade_date IS NOT NULL
+                GROUP BY for_trade_date
                 ORDER BY for_trade_date DESC
                 LIMIT 120
                 """
             )
+            batch_rows = [dict(row) for row in cur.fetchall()]
             available_for_trade_dates = [
                 str(row.get("for_trade_date") or "").strip()
-                for row in cur.fetchall()
+                for row in batch_rows
                 if str(row.get("for_trade_date") or "").strip()
             ]
             selected_for_trade_date = normalize_filter_value(filters.get("for_trade_date"))
@@ -5247,6 +6035,24 @@ class PostgresN6UserRepository:
                     "available_for_trade_dates": available_for_trade_dates,
                     "selected_for_trade_date": "",
                 }
+            source_run_id = next(
+                (
+                    str(row.get("source_run_id") or "").strip()
+                    for row in batch_rows
+                    if str(row.get("for_trade_date") or "").strip() == selected_for_trade_date
+                ),
+                "",
+            )
+            cache_key = (
+                asset_kind,
+                selected_for_trade_date,
+                source_run_id,
+                json.dumps(filters, ensure_ascii=False, sort_keys=True, default=str),
+                int(params["limit"]),
+            )
+            cached_result = self._app_shared_cache_get(self._app_filter_result_cache, cache_key)
+            if cached_result is not None:
+                return cached_result
             params["selected_for_trade_date"] = selected_for_trade_date
             source_context = (
                 self._app_v2_stock_source_context(
@@ -5287,9 +6093,10 @@ class PostgresN6UserRepository:
             total_count = int(count_row.get("total_count") or 0)
             filtered_count = int(count_row.get("filtered_count") or 0)
             order_sql = self._app_v2_filter_order_sql(table_name, filters)
+            select_sql = self._app_v2_filter_select_sql(table_name, asset_kind)
             cur.execute(
                 f"""
-                SELECT t.*
+                SELECT {select_sql}
                 FROM {table_name} t
                 WHERE {where_sql}
                   AND {source_where_sql}
@@ -5322,11 +6129,6 @@ class PostgresN6UserRepository:
                         if str(row.get("identity_key") or "").strip()
                     )
                 )
-            if asset_kind == "stock":
-                self._app_v2_enrich_stock_membership_display_cache(cur, rows)
-            if include_all_fields:
-                for row in rows:
-                    row["_include_all_fields"] = True
             if source_context is not None:
                 source_context["matched_stock_count"] = filtered_count
                 if (
@@ -5337,7 +6139,7 @@ class PostgresN6UserRepository:
                 ):
                     source_context["empty_state"] = "成分股中无符合当前筛选条件的个股"
                 source_context.pop("_stock_identity_keys", None)
-        return {
+        result = {
             "cache_ready": True,
             "items": rows,
             "total_count": total_count,
@@ -5345,9 +6147,54 @@ class PostgresN6UserRepository:
             "returned_count": len(rows),
             "available_for_trade_dates": available_for_trade_dates,
             "selected_for_trade_date": selected_for_trade_date,
+            "source_run_id": source_run_id,
             "source_context": source_context,
             "level_up_recommendation": level_up_recommendation,
             "linked_stock_filter_source_identity_keys": linked_stock_filter_source_identity_keys,
+        }
+        self._app_shared_cache_set(self._app_filter_result_cache, cache_key, result)
+        return result
+
+    def fetch_app_current_filter_identity(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+    ) -> dict[str, Any]:
+        del principal_id, principal_type, user_id
+        table_by_asset = {
+            "stock": "v_n6_stock_condition_display_basis",
+            "index": "v_n6_index_condition_display_basis",
+            "board": "v_n6_board_condition_display_basis",
+        }
+        table_name = table_by_asset.get(asset_kind)
+        if table_name is None or not self._app_v2_relation_exists(table_name):
+            return {"approved": False, "for_trade_date": ""}
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH current_batch AS (
+                  SELECT max(for_trade_date) AS for_trade_date
+                  FROM {table_name}
+                )
+                SELECT current_batch.for_trade_date::text AS for_trade_date,
+                       EXISTS (
+                         SELECT 1
+                         FROM {table_name} approved
+                         WHERE approved.identity_key = %(identity_key)s
+                           AND approved.for_trade_date = current_batch.for_trade_date
+                       ) AS approved
+                FROM current_batch
+                """,
+                {"identity_key": identity_key},
+            )
+            row = cur.fetchone() or {}
+        return {
+            "approved": bool(row.get("approved")),
+            "for_trade_date": str(row.get("for_trade_date") or "").strip(),
         }
 
     def _app_v2_filter_level_up_recommendation_context(
@@ -5399,105 +6246,6 @@ class PostgresN6UserRepository:
             }
         )
         return context
-
-    def _app_v2_enrich_stock_membership_display_cache(self, cur: Any, rows: list[dict[str, Any]]) -> None:
-        stock_identity_keys = sorted(
-            {
-                str(row.get("identity_key") or row.get("stock_identity_key") or "").strip()
-                for row in rows
-                if str(row.get("identity_key") or row.get("stock_identity_key") or "").strip()
-            }
-        )
-        source_trade_dates = sorted(
-            {
-                str(row.get("source_trade_date") or "").strip()
-                for row in rows
-                if str(row.get("source_trade_date") or "").strip()
-            }
-        )
-        if not stock_identity_keys or not source_trade_dates:
-            return
-        params = {
-            "membership_source_trade_date": source_trade_dates[-1],
-            "membership_stock_identity_keys": stock_identity_keys,
-        }
-        if self._app_v2_relation_exists("n6_index_membership_display_cache"):
-            cur.execute(
-                """
-                SELECT stock_identity_key, parent_code, parent_name
-                FROM n6_index_membership_display_cache
-                WHERE source_trade_date = COALESCE(
-                    (
-                        SELECT max(source_trade_date)
-                        FROM n6_index_membership_display_cache
-                        WHERE source_trade_date <= %(membership_source_trade_date)s
-                    ),
-                    (
-                        SELECT max(source_trade_date)
-                        FROM n6_index_membership_display_cache
-                    )
-                  )
-                  AND stock_identity_key = ANY(%(membership_stock_identity_keys)s)
-                  AND quality_status = 'passed'
-                ORDER BY stock_identity_key ASC, parent_code ASC
-                """,
-                params,
-            )
-            index_memberships_by_stock: dict[str, list[dict[str, Any]]] = {}
-            for row in cur.fetchall():
-                stock_key = str(row.get("stock_identity_key") or "").strip()
-                if stock_key:
-                    index_memberships_by_stock.setdefault(stock_key, []).append(dict(row))
-        else:
-            index_memberships_by_stock = {}
-        if self._app_v2_relation_exists("n6_board_membership_display_cache"):
-            cur.execute(
-                """
-                SELECT stock_identity_key, parent_identity_key, parent_code, parent_name
-                FROM n6_board_membership_display_cache
-                WHERE source_trade_date = COALESCE(
-                    (
-                        SELECT max(source_trade_date)
-                        FROM n6_board_membership_display_cache
-                        WHERE source_trade_date <= %(membership_source_trade_date)s
-                    ),
-                    (
-                        SELECT max(source_trade_date)
-                        FROM n6_board_membership_display_cache
-                    )
-                  )
-                  AND stock_identity_key = ANY(%(membership_stock_identity_keys)s)
-                  AND board_type = 'tdx_industry'
-                  AND quality_status = 'passed'
-                ORDER BY stock_identity_key ASC, parent_code ASC
-                """,
-                params,
-            )
-            industry_membership_by_stock: dict[str, dict[str, Any]] = {}
-            for row in cur.fetchall():
-                stock_key = str(row.get("stock_identity_key") or "").strip()
-                if stock_key and stock_key not in industry_membership_by_stock:
-                    industry_membership_by_stock[stock_key] = dict(row)
-        else:
-            industry_membership_by_stock = {}
-        for row in rows:
-            stock_key = str(row.get("identity_key") or row.get("stock_identity_key") or "").strip()
-            industry = industry_membership_by_stock.get(stock_key)
-            if industry:
-                row["industry_code"] = industry.get("parent_code")
-                row["industry_name"] = industry.get("parent_name")
-            index_memberships = index_memberships_by_stock.get(stock_key) or []
-            if index_memberships:
-                row["index_codes"] = ",".join(
-                    str(item.get("parent_code") or "").strip()
-                    for item in index_memberships
-                    if str(item.get("parent_code") or "").strip()
-                )
-                row["index_names"] = ",".join(
-                    str(item.get("parent_name") or "").strip()
-                    for item in index_memberships
-                    if str(item.get("parent_name") or "").strip()
-                )
 
     def fetch_app_filter_members(
         self,
@@ -5555,6 +6303,24 @@ class PostgresN6UserRepository:
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
+                SELECT max(trade_date)::text AS trade_date,
+                       max(source_batch_id::text) AS source_batch_id
+                FROM {table_name}
+                """
+            )
+            batch_row = dict(cur.fetchone() or {})
+            cache_key = (
+                membership_kind,
+                parent_identity_key,
+                str(batch_row.get("trade_date") or ""),
+                str(batch_row.get("source_batch_id") or ""),
+                max(1, min(int(limit), 500)),
+            )
+            cached_result = self._app_shared_cache_get(self._app_membership_result_cache, cache_key)
+            if cached_result is not None:
+                return cached_result
+            cur.execute(
+                f"""
                 SELECT {membership_select}
                 FROM {table_name}
                 WHERE {parent_column} = %(parent_identity_key)s
@@ -5568,7 +6334,9 @@ class PostgresN6UserRepository:
                 },
             )
             rows = [dict(row) for row in cur.fetchall()]
-        return {"cache_ready": True, "items": rows}
+        result = {"cache_ready": True, "items": rows}
+        self._app_shared_cache_set(self._app_membership_result_cache, cache_key, result)
+        return result
 
     def fetch_app_filter_linked_stocks(
         self,
@@ -5900,27 +6668,68 @@ class PostgresN6UserRepository:
                 and display_table
                 and self._app_v2_relation_exists(display_table)
             ):
+                approved_display_json_expr = self._app_v2_monitor_display_json_expr(
+                    kind,
+                    display_table,
+                    row_alias="approved_display",
+                )
                 display_join = f"""
-                LEFT JOIN {display_table} display_row
-                  ON display_row.identity_key = monitor_base.identity_key
-                 AND display_row.for_trade_date::text = %(selected_for_trade_date)s
+                LEFT JOIN LATERAL (
+                  SELECT {approved_display_json_expr} AS current_display_row_json
+                  FROM {display_table} approved_display
+                  WHERE %(current_{kind}_source_trade_date)s <> ''
+                    AND %(current_{kind}_for_trade_date)s <> ''
+                    AND %(current_{kind}_source_run_id)s <> ''
+                    AND approved_display.identity_key = monitor_base.identity_key
+                    AND approved_display.source_trade_date::text = %(current_{kind}_source_trade_date)s
+                    AND approved_display.for_trade_date::text = %(current_{kind}_for_trade_date)s
+                    AND approved_display.run_id::text = %(current_{kind}_source_run_id)s
+                  LIMIT 1
+                ) display_row ON true
                 """
-                display_json_expr = self._app_v2_monitor_display_json_expr(kind, display_table)
+                display_json_expr = (
+                    "COALESCE(display_row.current_display_row_json, '{}'::jsonb)"
+                )
+            source_run_expr = (
+                "monitor_base.source_run_id::text" if "source_run_id" in columns else "NULL::text"
+            )
             valid_source_trade_expr = (
-                "COALESCE(monitor_base.valid_source_trade_date, monitor_base.source_snapshot_json->>'source_trade_date')"
+                "monitor_base.valid_source_trade_date::text"
                 if "valid_source_trade_date" in columns
-                else "monitor_base.source_snapshot_json->>'source_trade_date'"
+                else "NULL::text"
             )
             valid_for_trade_expr = (
-                "COALESCE(monitor_base.valid_for_trade_date, monitor_base.source_snapshot_json->>'for_trade_date')"
+                "monitor_base.valid_for_trade_date::text"
                 if "valid_for_trade_date" in columns
-                else "monitor_base.source_snapshot_json->>'for_trade_date'"
+                else "NULL::text"
             )
             valid_run_expr = (
-                "COALESCE(monitor_base.valid_source_run_id, monitor_base.source_snapshot_json->>'source_run_id')"
+                "monitor_base.valid_source_run_id::text"
                 if "valid_source_run_id" in columns
-                else "monitor_base.source_snapshot_json->>'source_run_id'"
+                else "NULL::text"
             )
+            current_batch = current_filter_batch.get(kind) or {}
+            params[f"current_{kind}_source_trade_date"] = self._batch_text(
+                current_batch.get("source_trade_date")
+            )
+            params[f"current_{kind}_for_trade_date"] = self._batch_text(
+                current_batch.get("for_trade_date")
+            )
+            params[f"current_{kind}_source_run_id"] = self._batch_text(
+                current_batch.get("source_run_id")
+            )
+            identity_approved_expr = "false"
+            if display_table and self._app_v2_relation_exists(display_table):
+                identity_approved_expr = f"""
+                EXISTS (
+                  SELECT 1
+                  FROM {display_table} approved_identity
+                  WHERE approved_identity.identity_key = monitor_base.identity_key
+                    AND approved_identity.source_trade_date::text = %(current_{kind}_source_trade_date)s
+                    AND approved_identity.for_trade_date::text = %(current_{kind}_for_trade_date)s
+                    AND approved_identity.run_id::text = %(current_{kind}_source_run_id)s
+                )
+                """
             expired_at_expr = "monitor_base.expired_at" if "expired_at" in columns else "NULL::timestamptz"
             expired_reason_expr = "monitor_base.expired_reason" if "expired_reason" in columns else "NULL::text"
             user_id_expr = "monitor_base.user_id" if "user_id" in columns else "NULL::text"
@@ -5937,7 +6746,7 @@ class PostgresN6UserRepository:
                        monitor_base.direction,
                        monitor_base.source_type AS source,
                        monitor_base.condition_key,
-                       monitor_base.source_run_id,
+                       {source_run_expr} AS source_run_id,
                        monitor_base.projection_run_id,
                        monitor_base.status,
                        monitor_base.quality_status,
@@ -5945,6 +6754,7 @@ class PostgresN6UserRepository:
                        {valid_source_trade_expr} AS valid_source_trade_date,
                        {valid_for_trade_expr} AS valid_for_trade_date,
                        {valid_run_expr} AS valid_source_run_id,
+                       {identity_approved_expr} AS identity_in_current_batch,
                        {expired_at_expr} AS expired_at,
                        {expired_reason_expr} AS expired_reason,
                        monitor_base.source_snapshot_json,
@@ -5974,7 +6784,41 @@ class PostgresN6UserRepository:
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT *
+                SELECT monitor_rows.monitor_id,
+                       monitor_rows.principal_id,
+                       monitor_rows.principal_type,
+                       monitor_rows.user_id,
+                       monitor_rows.asset_kind,
+                       monitor_rows.identity_key,
+                       monitor_rows.direction,
+                       monitor_rows.source,
+                       monitor_rows.condition_key,
+                       monitor_rows.source_run_id,
+                       monitor_rows.projection_run_id,
+                       monitor_rows.status,
+                       monitor_rows.quality_status,
+                       monitor_rows.last_signal_state,
+                       monitor_rows.valid_source_trade_date,
+                       monitor_rows.valid_for_trade_date,
+                       monitor_rows.valid_source_run_id,
+                       monitor_rows.identity_in_current_batch,
+                       monitor_rows.expired_at,
+                       monitor_rows.expired_reason,
+                       monitor_rows.source_snapshot_json,
+                       monitor_rows.display_name,
+                       monitor_rows.display_code,
+                       monitor_rows.source_parent_asset_kind,
+                       monitor_rows.source_parent_identity_key,
+                       monitor_rows.source_parent_code,
+                       monitor_rows.source_parent_name,
+                       monitor_rows.source_parent_trade_date,
+                       monitor_rows.source_parent_source_version,
+                       monitor_rows.source_parent_source_batch_id,
+                       monitor_rows.source_linked_mode,
+                       monitor_rows.current_display_row_json,
+                       monitor_rows.created_at,
+                       monitor_rows.updated_at,
+                       monitor_rows.removed_at
                 FROM (
                   {union_sql}
                 ) monitor_rows
@@ -6006,7 +6850,13 @@ class PostgresN6UserRepository:
             "status_counts": status_counts,
         }
 
-    def _app_v2_monitor_display_json_expr(self, asset_kind: str, display_table: str) -> str:
+    def _app_v2_monitor_display_json_expr(
+        self,
+        asset_kind: str,
+        display_table: str,
+        *,
+        row_alias: str = "display_row",
+    ) -> str:
         columns = self._app_v2_filter_columns(display_table)
         fields: list[str] = []
         for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ()):
@@ -6028,7 +6878,7 @@ class PostgresN6UserRepository:
                 fields.append(field)
         if not fields:
             return "'{}'::jsonb"
-        pairs = ", ".join(f"'{field}', display_row.\"{field}\"" for field in fields)
+        pairs = ", ".join(f"'{field}', {row_alias}.\"{field}\"" for field in fields)
         return f"COALESCE(jsonb_strip_nulls(jsonb_build_object({pairs})), '{{}}'::jsonb)"
 
     def _app_v2_monitor_columns(self, table_name: str) -> set[str]:
@@ -6093,22 +6943,22 @@ class PostgresN6UserRepository:
                 if table_name is None or not self._app_v2_relation_exists(table_name):
                     continue
                 params: dict[str, Any] = {}
-                where_clause = "source_trade_date = (SELECT max(source_trade_date) FROM {table_name})"
+                where_clause = "for_trade_date = (SELECT max(for_trade_date) FROM {table_name})"
                 if for_trade_date:
                     where_clause = "for_trade_date::text = %(for_trade_date)s"
                     params["for_trade_date"] = for_trade_date
                 cur.execute(
                     f"""
-                    SELECT source_trade_date::text AS source_trade_date,
-                           for_trade_date::text AS for_trade_date,
-                           run_id::text AS source_run_id
+                    SELECT min(source_trade_date::text) AS source_trade_date,
+                           min(for_trade_date::text) AS for_trade_date,
+                           min(run_id::text) AS source_run_id
                     FROM {table_name}
                     WHERE {where_clause.format(table_name=table_name)}
-                    ORDER BY updated_at DESC NULLS LAST,
-                             source_trade_date DESC NULLS LAST,
-                             for_trade_date DESC NULLS LAST,
-                             identity_key ASC
-                    LIMIT 1
+                    HAVING count(*) > 0
+                       AND count(source_trade_date) = count(*)
+                       AND count(for_trade_date) = count(*)
+                       AND count(run_id) = count(*)
+                       AND count(DISTINCT (source_trade_date::text, for_trade_date::text, run_id::text)) = 1
                     """,
                     params,
                 )
@@ -6132,22 +6982,11 @@ class PostgresN6UserRepository:
             self._app_v2_apply_monitor_validity_to_row(row, current_batch)
 
     def _app_v2_apply_monitor_validity_to_row(self, row: dict[str, Any], current_batch: dict[str, Any]) -> None:
-        snapshot = row.get("source_snapshot_json")
-        if isinstance(snapshot, str):
-            try:
-                snapshot = json.loads(snapshot)
-            except json.JSONDecodeError:
-                snapshot = {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
-
         original_batch = {
-            "source_trade_date": self._batch_text(row.get("valid_source_trade_date") or snapshot.get("source_trade_date")),
-            "for_trade_date": self._batch_text(row.get("valid_for_trade_date") or snapshot.get("for_trade_date")),
-            "source_run_id": self._batch_text(
-                row.get("valid_source_run_id")
-                or snapshot.get("source_run_id")
-                or row.get("source_run_id")
-            ),
+            "source_trade_date": self._batch_text(row.get("valid_source_trade_date")),
+            "for_trade_date": self._batch_text(row.get("valid_for_trade_date")),
+            "source_run_id": self._batch_text(row.get("source_run_id")),
+            "valid_source_run_id": self._batch_text(row.get("valid_source_run_id")),
         }
         normalized_current = {
             "source_trade_date": self._batch_text(current_batch.get("source_trade_date")),
@@ -6156,7 +6995,7 @@ class PostgresN6UserRepository:
         }
         row["valid_source_trade_date"] = original_batch["source_trade_date"]
         row["valid_for_trade_date"] = original_batch["for_trade_date"]
-        row["valid_source_run_id"] = original_batch["source_run_id"]
+        row["valid_source_run_id"] = original_batch["valid_source_run_id"]
 
         status = str(row.get("status") or "active").strip().lower()
         effective_status = status
@@ -6178,8 +7017,13 @@ class PostgresN6UserRepository:
             run_matches = (
                 original_batch["source_run_id"]
                 and original_batch["source_run_id"] == normalized_current["source_run_id"]
+                and original_batch["valid_source_run_id"]
+                and original_batch["valid_source_run_id"] == normalized_current["source_run_id"]
             )
-            effective_active = bool(source_trade_matches and for_trade_matches and run_matches)
+            identity_matches = row.get("identity_in_current_batch") is True
+            effective_active = bool(
+                source_trade_matches and for_trade_matches and run_matches and identity_matches
+            )
             if not effective_active:
                 effective_status = "expired"
                 expired_reason = expired_reason or "filter_batch_changed"
@@ -6200,6 +7044,7 @@ class PostgresN6UserRepository:
         row["validity"] = {
             "original_batch": original_batch,
             "current_batch": normalized_current,
+            "identity_in_current_batch": row.get("identity_in_current_batch") is True,
         }
 
     def _app_v2_monitor_status_counts(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -6467,6 +7312,126 @@ class PostgresN6UserRepository:
                 )
                 item = dict(cur.fetchone())
         return {"ok": True, "status": "added", "added_count": 1, "skipped_count": 0, "item": item}
+
+    def add_app_monitor_directions(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        asset_kind: str,
+        identity_key: str,
+        directions: tuple[str, ...],
+        source: str = "single_row",
+        for_trade_date: str = "",
+    ) -> dict[str, Any]:
+        table_name = APP_V2_MONITOR_TABLE_BY_ASSET.get(asset_kind)
+        normalized_directions = tuple(dict.fromkeys(str(item).strip() for item in directions))
+        if (
+            table_name is None
+            or not normalized_directions
+            or any(direction not in APP_V2_VALID_DIRECTIONS for direction in normalized_directions)
+        ):
+            return {"ok": False, "status": "invalid_request", "error": "invalid_monitor_request"}
+        if not self._app_v2_monitor_relation_exists(table_name):
+            return {"ok": False, "status": "data_not_ready", "error": "monitor_table_not_ready"}
+        source_row = self._app_v2_fetch_filter_source_row(
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+            for_trade_date=for_trade_date,
+        )
+        if source_row is None:
+            return {"ok": False, "status": "not_found", "error": "source_not_found"}
+        snapshot = self._app_v2_monitor_snapshot(source_row, asset_kind=asset_kind)
+        condition_key = self._app_v2_monitor_condition_key(source_row)
+        results: list[dict[str, Any]] = []
+        with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                for direction in normalized_directions:
+                    existing = self._app_v2_fetch_existing_monitor(
+                        cur,
+                        table_name=table_name,
+                        principal_id=principal_id,
+                        principal_type=principal_type,
+                        user_id=user_id,
+                        identity_key=identity_key,
+                        direction=direction,
+                        valid_source_trade_date=snapshot.get("source_trade_date"),
+                        valid_for_trade_date=snapshot.get("for_trade_date"),
+                        valid_source_run_id=snapshot.get("source_run_id"),
+                        require_matching_batch=self._app_v2_monitor_batch_identity_enabled(table_name),
+                    )
+                    if existing:
+                        results.append(
+                            {
+                                "ok": True,
+                                "status": "already_exists",
+                                "added_count": 0,
+                                "skipped_count": 1,
+                                "item": dict(existing),
+                            }
+                        )
+                        continue
+                    lifecycle_columns, lifecycle_values, lifecycle_params = (
+                        self._app_v2_monitor_lifecycle_insert_parts(table_name, snapshot)
+                    )
+                    user_id_columns, user_id_values, user_id_params = self._app_v2_monitor_user_insert_parts(
+                        table_name,
+                        user_id,
+                    )
+                    insert_params = {
+                        "principal_id": principal_id,
+                        "principal_type": principal_type,
+                        "asset_kind": asset_kind,
+                        "identity_key": identity_key,
+                        "direction": direction,
+                        "source_type": source,
+                        "source_run_id": snapshot.get("source_run_id"),
+                        "projection_run_id": snapshot.get("projection_run_id"),
+                        "condition_key": condition_key,
+                        "quality_status": snapshot.get("quality_status") or "reviewed",
+                        "last_signal_state": snapshot.get("last_signal_state"),
+                        "source_snapshot_json": Jsonb(snapshot),
+                    }
+                    insert_params.update(lifecycle_params)
+                    insert_params.update(user_id_params)
+                    cur.execute(
+                        f"""
+                        INSERT INTO {table_name} (
+                          principal_id, principal_type, asset_kind {user_id_columns},
+                          identity_key, direction, source_type, source_run_id,
+                          projection_run_id, condition_key, status, quality_status,
+                          last_signal_state, source_snapshot_json {lifecycle_columns}
+                        )
+                        VALUES (
+                          %(principal_id)s, %(principal_type)s, %(asset_kind)s {user_id_values},
+                          %(identity_key)s, %(direction)s, %(source_type)s, %(source_run_id)s,
+                          %(projection_run_id)s, %(condition_key)s, 'active', %(quality_status)s,
+                          %(last_signal_state)s, %(source_snapshot_json)s {lifecycle_values}
+                        )
+                        RETURNING monitor_id, principal_id, principal_type, asset_kind,
+                                  identity_key, direction, source_type AS source, condition_key,
+                                  source_run_id, projection_run_id, status, quality_status,
+                                  last_signal_state, created_at, updated_at
+                        """,
+                        insert_params,
+                    )
+                    results.append(
+                        {
+                            "ok": True,
+                            "status": "added",
+                            "added_count": 1,
+                            "skipped_count": 0,
+                            "item": dict(cur.fetchone()),
+                        }
+                    )
+        return {
+            "ok": True,
+            "status": "added" if any(item["added_count"] for item in results) else "already_exists",
+            "added_count": sum(int(item["added_count"]) for item in results),
+            "skipped_count": sum(int(item["skipped_count"]) for item in results),
+            "results": results,
+        }
 
     def bulk_add_app_monitor_items(
         self,
@@ -6879,16 +7844,9 @@ class PostgresN6UserRepository:
             identity_key=identity_key,
             for_trade_date=for_trade_date,
         )
-        snapshot = (
-            self._app_v2_monitor_snapshot(source_row, asset_kind=asset_kind)
-            if source_row is not None
-            else {
-                "asset_kind": asset_kind,
-                "identity_key": identity_key,
-                "display_name": identity_key,
-                "for_trade_date": self._batch_text(for_trade_date),
-            }
-        )
+        if source_row is None:
+            return {"ok": False, "status": "not_found", "error": "source_not_found"}
+        snapshot = self._app_v2_monitor_snapshot(source_row, asset_kind=asset_kind)
         with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 item = self._app_v2_upsert_realtime_scope_item(
@@ -7055,6 +8013,342 @@ class PostgresN6UserRepository:
             return {"ok": False, "status": "not_found", "error": "realtime_scope_not_found"}
         return {"ok": True, "status": "deleted", "realtime_scope_id": int(row["realtime_scope_id"])}
 
+    def fetch_app_trade_proposals(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        if not self._app_v2_relation_exists("n6_virtual_trade_proposal"):
+            return {"tables_ready": False, "items": []}
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT proposal_id,
+                       source_type,
+                       source_id,
+                       source_signal_projection_id,
+                       source_virtual_position_id,
+                       holding_episode_no,
+                       asset_kind,
+                       identity_key,
+                       proposal_side,
+                       signal_reference_kind,
+                       signal_reference_price,
+                       proposal_status,
+                       expires_at,
+                       confirmed_at,
+                       executed_virtual_order_id,
+                       executed_virtual_trade_id,
+                       failure_reason,
+                       created_at,
+                       updated_at
+                FROM n6_virtual_trade_proposal
+                WHERE principal_id = %(principal_id)s
+                  AND principal_type = %(principal_type)s
+                  AND user_id = %(user_id)s
+                ORDER BY created_at DESC, proposal_id DESC
+                LIMIT %(limit)s
+                """,
+                {
+                    "principal_id": principal_id,
+                    "principal_type": principal_type,
+                    "user_id": user_id,
+                    "limit": max(1, min(int(limit), 500)),
+                },
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        return {"tables_ready": True, "items": rows}
+
+    def create_app_trade_proposal(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        source_type: str,
+        source_id: str,
+    ) -> dict[str, Any]:
+        if principal_type not in {"admin", "human_user"}:
+            return {"ok": False, "status": "forbidden", "error": "principal_type_not_supported"}
+        if not self._app_v2_relation_exists("n6_virtual_trade_proposal"):
+            return {"ok": False, "status": "data_not_ready", "error": "proposal_table_not_ready"}
+        source_id = str(source_id or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]*", source_id):
+            return {"ok": False, "status": "invalid_request", "error": "invalid_source_id"}
+        source_signal_projection_id: int | None = None
+        source_virtual_position_id: int | None = None
+        holding_episode_no: int | None = None
+        signal_reference_kind = "manual"
+        signal_reference_price: Decimal | None = None
+        locked_target_price: Decimal | None = None
+        if source_type == "signal":
+            source_signal_projection_id = int(source_id)
+            signal_row = self.fetch_app_signal_detail(
+                principal_id=principal_id,
+                principal_type=principal_type,
+                user_id=user_id,
+                user_signal_projection_id=source_signal_projection_id,
+            )
+            if not signal_row:
+                return {"ok": False, "status": "not_found", "error": "signal_not_in_effective_scope"}
+            signal = app_signal_item(signal_row)
+            asset_kind = str(signal.get("asset_kind") or "")
+            identity_key = str(signal.get("identity_key") or "")
+            proposal_side = str(signal.get("direction") or "")
+            action_state = str(signal.get("action_state") or "")
+            signal_trade_date = normalize_filter_value(signal.get("trade_date"))
+            current_stock_batch = self._app_v2_current_filter_batches(["stock"]).get("stock") or {}
+            current_trade_date = normalize_filter_value(current_stock_batch.get("for_trade_date"))
+            if not current_trade_date or signal_trade_date != current_trade_date:
+                return {
+                    "ok": False,
+                    "status": "conflict",
+                    "error": "current_for_trade_date_signal_required",
+                }
+            if asset_kind != "stock" or proposal_side not in {"buy", "sell"}:
+                return {"ok": False, "status": "invalid_request", "error": "stock_signal_required"}
+            if action_state == "executed":
+                signal_reference_kind = "action_price"
+                signal_reference_price = _decimal_or_none(signal.get("action_price"))
+            elif action_state == "eligible":
+                signal_reference_kind = "trigger_price"
+                signal_reference_price = _decimal_or_none(signal.get("trigger_price"))
+            else:
+                return {"ok": False, "status": "invalid_request", "error": "signal_action_state_not_actionable"}
+            if signal_reference_price is None or not signal_reference_price.is_finite() or signal_reference_price <= 0:
+                return {"ok": False, "status": "not_ready", "error": "signal_reference_price_not_ready"}
+            locked_target_price = _decimal_or_none(signal.get("target_price"))
+            if locked_target_price is not None and (
+                not locked_target_price.is_finite() or locked_target_price <= 0
+            ):
+                locked_target_price = None
+        elif source_type == "manual_position":
+            source_virtual_position_id = int(source_id)
+            with self._readonly_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.virtual_position_id,
+                           p.asset_kind,
+                           p.identity_key,
+                           p.available_quantity,
+                           p.holding_episode_no
+                    FROM n6_virtual_position p
+                    JOIN n6_virtual_account a
+                      ON a.virtual_account_id = p.virtual_account_id
+                     AND a.principal_id = p.principal_id
+                     AND a.principal_type = p.principal_type
+                    WHERE p.virtual_position_id = %(source_id)s
+                      AND p.principal_id = %(principal_id)s
+                      AND p.principal_type = %(principal_type)s
+                      AND a.virtual_account_status = 'active'
+                      AND p.position_status = 'open_virtual'
+                      AND p.asset_kind = 'stock'
+                      AND p.available_quantity > 0
+                    """,
+                    {
+                        "source_id": source_virtual_position_id,
+                        "principal_id": principal_id,
+                        "principal_type": principal_type,
+                    },
+                )
+                position = cur.fetchone()
+            if not position:
+                return {"ok": False, "status": "not_found", "error": "sellable_position_not_found"}
+            asset_kind = "stock"
+            identity_key = str(position["identity_key"])
+            proposal_side = "sell"
+            holding_episode_no = int(position.get("holding_episode_no") or 1)
+        else:
+            return {"ok": False, "status": "invalid_request", "error": "invalid_proposal_source_type"}
+        policy_version = "n6_virtual_trade_proposal_v1"
+        policy_hash = hashlib.sha256(
+            b"source-only-request|server-derived-side|60s-expiry|fresh-n6-quote-at-execution"
+        ).hexdigest()
+        with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT virtual_account_id
+                    FROM n6_virtual_account
+                    WHERE principal_id = %(principal_id)s
+                      AND principal_type = %(principal_type)s
+                      AND virtual_account_status = 'active'
+                    FOR SHARE
+                    """,
+                    {"principal_id": principal_id, "principal_type": principal_type},
+                )
+                accounts = cur.fetchall()
+                if len(accounts) != 1:
+                    return {"ok": False, "status": "not_ready", "error": "exactly_one_active_virtual_account_required"}
+                cur.execute(
+                    """
+                    INSERT INTO n6_virtual_trade_proposal (
+                      principal_id, principal_type, user_id, virtual_account_id,
+                      source_type, source_id, source_signal_projection_id,
+                      source_virtual_position_id, holding_episode_no,
+                      asset_kind, identity_key, proposal_side,
+                      signal_reference_kind, signal_reference_price,
+                      locked_target_price,
+                      proposal_status, expires_at, policy_version, policy_hash,
+                      source_lineage_json
+                    ) VALUES (
+                      %(principal_id)s, %(principal_type)s, %(user_id)s, %(virtual_account_id)s,
+                      %(source_type)s, %(source_id)s, %(source_signal_projection_id)s,
+                      %(source_virtual_position_id)s, %(holding_episode_no)s,
+                      %(asset_kind)s, %(identity_key)s, %(proposal_side)s,
+                      %(signal_reference_kind)s, %(signal_reference_price)s,
+                      %(locked_target_price)s,
+                      'pending', now() + interval '60 seconds', %(policy_version)s, %(policy_hash)s,
+                      %(source_lineage_json)s
+                    )
+                    ON CONFLICT DO NOTHING
+                    RETURNING proposal_id, proposal_status, expires_at, proposal_side,
+                              identity_key, signal_reference_kind, signal_reference_price
+                    """,
+                    {
+                        "principal_id": principal_id,
+                        "principal_type": principal_type,
+                        "user_id": user_id,
+                        "virtual_account_id": int(accounts[0]["virtual_account_id"]),
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "source_signal_projection_id": source_signal_projection_id,
+                        "source_virtual_position_id": source_virtual_position_id,
+                        "holding_episode_no": holding_episode_no,
+                        "asset_kind": asset_kind,
+                        "identity_key": identity_key,
+                        "proposal_side": proposal_side,
+                        "signal_reference_kind": signal_reference_kind,
+                        "signal_reference_price": signal_reference_price,
+                        "locked_target_price": locked_target_price,
+                        "policy_version": policy_version,
+                        "policy_hash": policy_hash,
+                        "source_lineage_json": Jsonb({"source_type": source_type, "source_id": source_id}),
+                    },
+                )
+                inserted = cur.fetchone()
+                if not inserted:
+                    return {"ok": False, "status": "conflict", "error": "proposal_already_exists"}
+                row = dict(inserted)
+        return {"ok": True, "status": "created", "item": row}
+
+    def confirm_app_trade_proposal(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        proposal_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        idempotency_key = str(idempotency_key or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
+            return {"ok": False, "status": "invalid_request", "error": "invalid_idempotency_key"}
+        if not self._app_v2_relation_exists("n6_virtual_trade_proposal"):
+            return {"ok": False, "status": "data_not_ready", "error": "proposal_table_not_ready"}
+        with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT proposal_id, proposal_status, expires_at, confirm_idempotency_key
+                    FROM n6_virtual_trade_proposal
+                    WHERE proposal_id = %(proposal_id)s
+                      AND principal_id = %(principal_id)s
+                      AND principal_type = %(principal_type)s
+                      AND user_id = %(user_id)s
+                    FOR UPDATE
+                    """,
+                    {
+                        "proposal_id": proposal_id,
+                        "principal_id": principal_id,
+                        "principal_type": principal_type,
+                        "user_id": user_id,
+                    },
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"ok": False, "status": "not_found", "error": "proposal_not_found"}
+                if row["proposal_status"] == "confirmed" and row.get("confirm_idempotency_key") == idempotency_key:
+                    return {"ok": True, "status": "confirmed", "proposal_id": proposal_id, "idempotent": True}
+                if row["proposal_status"] != "pending":
+                    return {"ok": False, "status": "conflict", "error": "proposal_not_pending"}
+                if ensure_aware(row["expires_at"]) <= utc_now():
+                    cur.execute(
+                        "UPDATE n6_virtual_trade_proposal SET proposal_status = 'expired', updated_at = now() WHERE proposal_id = %s",
+                        (proposal_id,),
+                    )
+                    return {"ok": False, "status": "expired", "error": "proposal_expired"}
+                cur.execute(
+                    """
+                    UPDATE n6_virtual_trade_proposal
+                    SET proposal_status = 'confirmed',
+                        confirmed_at = now(),
+                        confirm_idempotency_key = %(idempotency_key)s,
+                        updated_at = now()
+                    WHERE proposal_id = %(proposal_id)s
+                    RETURNING proposal_id, proposal_status, confirmed_at, expires_at
+                    """,
+                    {"proposal_id": proposal_id, "idempotency_key": idempotency_key},
+                )
+                confirmed = dict(cur.fetchone())
+        return {"ok": True, "status": "confirmed", "item": confirmed, "idempotent": False}
+
+    def fetch_app_virtual_trades(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if not self._app_v2_relation_exists("n6_virtual_trade"):
+            return {"tables_ready": False, "items": []}
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT virtual_trade_id,
+                       virtual_order_id,
+                       virtual_account_id,
+                       identity_key,
+                       trade_side,
+                       filled_quantity,
+                       filled_price,
+                       gross_amount,
+                       total_fee_amount,
+                       net_amount,
+                       trade_status,
+                       trade_time,
+                       source_proposal_id,
+                       signal_reference_kind,
+                       signal_reference_price,
+                       fill_quote_snapshot_id
+                FROM n6_virtual_trade
+                WHERE principal_id = %(principal_id)s
+                  AND principal_type = %(principal_type)s
+                  AND EXISTS (
+                    SELECT 1
+                    FROM n6_principal p
+                    WHERE p.principal_id = %(principal_id)s
+                      AND p.principal_type = %(principal_type)s
+                      AND p.owner_user_id = %(user_id)s
+                      AND p.principal_status = 'active'
+                  )
+                ORDER BY trade_time DESC, virtual_trade_id DESC
+                LIMIT %(limit)s
+                """,
+                {
+                    "principal_id": principal_id,
+                    "principal_type": principal_type,
+                    "user_id": user_id,
+                    "limit": max(1, min(int(limit), 500)),
+                },
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        return {"tables_ready": True, "items": rows}
+
     def _app_v2_upsert_realtime_scope_item(
         self,
         cur: Any,
@@ -7145,9 +8439,14 @@ class PostgresN6UserRepository:
             "v_n6_index_membership_fact",
             "v_n6_board_membership_fact",
             APP_REALTIME_SCOPE_TABLE,
+            "n6_virtual_trade_proposal",
+            "n6_virtual_trade",
         }
         if relation_name not in allowed_relations:
             return False
+        cached = self._app_v2_relation_existence_cache.get(relation_name)
+        if cached is not None:
+            return cached
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT to_regclass(%s) AS relation_name", (relation_name,))
             row = cur.fetchone()
@@ -7249,6 +8548,20 @@ class PostgresN6UserRepository:
         self._app_v2_filter_column_cache[table_name] = set(columns)
         return columns
 
+    def _app_v2_filter_select_sql(self, table_name: str, asset_kind: str, *, alias: str = "t") -> str:
+        available_columns = self._app_v2_filter_columns(table_name)
+        selected_columns = [
+            field
+            for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ())
+            if field in available_columns and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field)
+        ]
+        if not selected_columns:
+            raise RuntimeError("approved N6 filter view exposes no approved visible columns")
+        return ",\n                       ".join(
+            f'{alias}."{field}" AS "{field}"'
+            for field in selected_columns
+        )
+
     def _app_v2_filter_order_sql(self, table_name: str, filters: dict[str, Any]) -> str:
         default_order = "t.updated_at DESC NULLS LAST, t.identity_key ASC"
         sort_key = normalize_filter_value(filters.get("sort"))
@@ -7263,6 +8576,9 @@ class PostgresN6UserRepository:
     def _app_v2_monitor_relation_exists(self, relation_name: str) -> bool:
         if relation_name not in set(APP_V2_MONITOR_TABLE_BY_ASSET.values()):
             return False
+        cached = self._app_v2_relation_existence_cache.get(relation_name)
+        if cached is not None:
+            return cached
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT to_regclass(%s) AS relation_name", (relation_name,))
             row = cur.fetchone()
@@ -7324,10 +8640,11 @@ class PostgresN6UserRepository:
         if selected_for_trade_date:
             date_filter_sql = "AND t.for_trade_date::text = %(for_trade_date)s"
             params["for_trade_date"] = selected_for_trade_date
+        select_sql = self._app_v2_filter_select_sql(table_name, asset_kind)
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT t.*
+                SELECT {select_sql}
                 FROM {table_name} t
                 WHERE t.identity_key = %(identity_key)s
                   {date_filter_sql}
@@ -7845,632 +9162,12 @@ class PostgresN6UserRepository:
         )
 
 
-class SignalBoundVirtualBuyExecutionRepository:
-    def __init__(self, delegate: Any, signal: dict[str, Any]) -> None:
-        self.delegate = delegate
-        self.signal = signal
-
-    def fetch_signal_for_buy(
-        self,
-        user_signal_projection_id: int,
-        principal_id: int,
-        principal_type: str,
-    ) -> dict[str, Any] | None:
-        if int(self.signal.get("user_signal_projection_id") or 0) != int(user_signal_projection_id):
-            return None
-        scoped_signal = dict(self.signal)
-        scoped_signal["principal_id"] = int(principal_id)
-        scoped_signal["principal_type"] = str(principal_type)
-        return scoped_signal
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.delegate, name)
-
-
-class PostgresVirtualBuyExecutionRepository:
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-
-    @contextmanager
-    def transaction(self) -> Any:
-        with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
-            with conn.transaction(), conn.cursor() as cur:
-                yield _PostgresVirtualBuyExecutionCursorRepository(cur)
-
-
-class _PostgresVirtualBuyExecutionCursorRepository:
-    def __init__(self, cur: Any) -> None:
-        self.cur = cur
-        self._active_account_scope_by_id: dict[int, tuple[int, str]] = {}
-
-    def fetch_signal_for_buy(
-        self,
-        user_signal_projection_id: int,
-        principal_id: int,
-        principal_type: str,
-    ) -> dict[str, Any] | None:
-        return None
-
-    def fetch_active_virtual_account(self, principal_id: int, principal_type: str) -> dict[str, Any] | None:
-        self.cur.execute(
-            """
-            SELECT virtual_account_id, principal_id, principal_type, virtual_account_status
-            FROM n6_virtual_account
-            WHERE principal_id = %s
-              AND principal_type = %s
-              AND virtual_account_status = 'active'
-            ORDER BY virtual_account_id DESC
-            LIMIT 1
-            """,
-            (principal_id, principal_type),
-        )
-        row = self.cur.fetchone()
-        if not row:
-            return None
-        result = dict(row)
-        self._active_account_scope_by_id[int(result["virtual_account_id"])] = (
-            int(result["principal_id"]),
-            str(result["principal_type"]),
-        )
-        return result
-
-    def fetch_current_cash_snapshot(self, virtual_account_id: int) -> dict[str, Any] | None:
-        self.cur.execute(
-            "SELECT pg_advisory_xact_lock(%s::bigint)",
-            (int(virtual_account_id),),
-        )
-        self.cur.execute(
-            """
-            SELECT cash_snapshot_id,
-                   virtual_account_id,
-                   available_cash,
-                   frozen_cash,
-                   total_cash,
-                   source_ledger_max_id
-            FROM n6_virtual_cash_snapshot
-            WHERE virtual_account_id = %s
-              AND snapshot_status = 'active'
-            ORDER BY snapshot_time DESC, cash_snapshot_id DESC
-            LIMIT 1
-            """,
-            (virtual_account_id,),
-        )
-        row = self.cur.fetchone()
-        return dict(row) if row else None
-
-    def fetch_position_for_update(
-        self,
-        virtual_account_id: int,
-        asset_kind: str,
-        identity_key: str,
-    ) -> dict[str, Any] | None:
-        self.cur.execute(
-            """
-            SELECT virtual_position_id,
-                   virtual_account_id,
-                   principal_id,
-                   principal_type,
-                   asset_kind,
-                   identity_key,
-                   position_status,
-                   quantity,
-                   available_quantity,
-                   locked_quantity,
-                   average_cost,
-                   market_value,
-                   unrealized_pnl,
-                   last_virtual_trade_id
-            FROM n6_virtual_position
-            WHERE virtual_account_id = %s
-              AND asset_kind = %s
-              AND identity_key = %s
-              AND position_status = 'open_virtual'
-            FOR UPDATE
-            """,
-            (virtual_account_id, asset_kind, identity_key),
-        )
-        row = self.cur.fetchone()
-        return dict(row) if row else None
-
-    def insert_virtual_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        existing = self._fetch_order_by_idempotency(payload)
-        if existing:
-            return {"duplicate": True, "existing": existing}
-        params = dict(payload)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        params["source_json"] = Jsonb(payload.get("source_json") or {})
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_order (
-              virtual_account_id,
-              principal_id,
-              principal_type,
-              asset_kind,
-              identity_key,
-              signal_type,
-              order_side,
-              order_type,
-              order_status,
-              requested_quantity,
-              requested_price,
-              estimated_fee_amount,
-              estimated_tax_amount,
-              fee_policy_version,
-              tax_policy_version,
-              execution_policy_version,
-              execution_policy_hash,
-              market_rule_set,
-              source_action_event_id,
-              source_signal_projection_id,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              source_lineage_json,
-              quality_status,
-              idempotency_key,
-              source_message_key,
-              source_signal_identity_key,
-              source_condition_key,
-              source_event_time,
-              source_for_trade_date,
-              source_trade_date,
-              source_monitor_id,
-              source_strategy_id,
-              source_action_state,
-              source_blocked_reason,
-              source_json
-            )
-            VALUES (
-              %(virtual_account_id)s,
-              %(principal_id)s,
-              %(principal_type)s,
-              %(asset_kind)s,
-              %(identity_key)s,
-              %(signal_type)s,
-              %(order_side)s,
-              %(order_type)s,
-              %(order_status)s,
-              %(requested_quantity)s,
-              %(requested_price)s,
-              %(estimated_fee_amount)s,
-              %(estimated_tax_amount)s,
-              %(fee_policy_version)s,
-              %(tax_policy_version)s,
-              %(execution_policy_version)s,
-              %(execution_policy_hash)s,
-              %(market_rule_set)s,
-              %(source_action_event_id)s,
-              %(source_signal_projection_id)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(source_lineage_json)s,
-              %(quality_status)s,
-              %(idempotency_key)s,
-              %(source_message_key)s,
-              %(source_signal_identity_key)s,
-              %(source_condition_key)s,
-              %(source_event_time)s,
-              %(source_for_trade_date)s,
-              %(source_trade_date)s,
-              %(source_monitor_id)s,
-              %(source_strategy_id)s,
-              %(source_action_state)s,
-              %(source_blocked_reason)s,
-              %(source_json)s
-            )
-            ON CONFLICT DO NOTHING
-            RETURNING virtual_order_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        if row:
-            return {"virtual_order_id": int(row["virtual_order_id"])}
-        existing = self._fetch_order_by_idempotency(payload)
-        if existing:
-            return {"duplicate": True, "existing": existing}
-        raise RuntimeError("virtual_order_insert_failed")
-
-    def insert_virtual_trade(self, payload: dict[str, Any]) -> dict[str, Any]:
-        params = dict(payload)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_trade (
-              virtual_order_id,
-              virtual_account_id,
-              principal_id,
-              principal_type,
-              asset_kind,
-              identity_key,
-              trade_side,
-              filled_quantity,
-              filled_price,
-              gross_amount,
-              commission_amount,
-              stamp_tax_amount,
-              transfer_fee_amount,
-              total_fee_amount,
-              net_amount,
-              fill_policy_version,
-              fill_policy_hash,
-              replay_deterministic_seed,
-              trade_status,
-              trade_time,
-              source_lineage_json,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              quality_status
-            )
-            VALUES (
-              %(virtual_order_id)s,
-              %(virtual_account_id)s,
-              %(principal_id)s,
-              %(principal_type)s,
-              %(asset_kind)s,
-              %(identity_key)s,
-              %(trade_side)s,
-              %(filled_quantity)s,
-              %(filled_price)s,
-              %(gross_amount)s,
-              %(commission_amount)s,
-              %(stamp_tax_amount)s,
-              %(transfer_fee_amount)s,
-              %(total_fee_amount)s,
-              %(net_amount)s,
-              %(fill_policy_version)s,
-              %(fill_policy_hash)s,
-              %(replay_deterministic_seed)s,
-              %(trade_status)s,
-              %(trade_time)s,
-              %(source_lineage_json)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(quality_status)s
-            )
-            RETURNING virtual_trade_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        return {"virtual_trade_id": int(row["virtual_trade_id"])}
-
-    def insert_cash_ledger(self, payload: dict[str, Any]) -> dict[str, Any]:
-        params = dict(payload)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_cash_ledger (
-              virtual_account_id,
-              ledger_type,
-              amount,
-              currency,
-              trade_date,
-              event_time,
-              source_event_type,
-              source_event_id,
-              source_virtual_order_id,
-              source_virtual_trade_id,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              source_lineage_json,
-              quality_status
-            )
-            VALUES (
-              %(virtual_account_id)s,
-              %(ledger_type)s,
-              %(amount)s,
-              %(currency)s,
-              %(trade_date)s,
-              %(event_time)s,
-              %(source_event_type)s,
-              %(source_event_id)s,
-              %(source_virtual_order_id)s,
-              %(source_virtual_trade_id)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(source_lineage_json)s,
-              %(quality_status)s
-            )
-            RETURNING cash_ledger_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        return {"cash_ledger_id": int(row["cash_ledger_id"])}
-
-    def insert_cash_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
-        params = dict(payload)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        self.cur.execute(
-            """
-            UPDATE n6_virtual_cash_snapshot
-            SET snapshot_status = 'superseded'
-            WHERE virtual_account_id = %(virtual_account_id)s
-              AND trade_date = %(trade_date)s
-              AND snapshot_status = 'active'
-            """,
-            params,
-        )
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_cash_snapshot (
-              virtual_account_id,
-              trade_date,
-              available_cash,
-              frozen_cash,
-              total_cash,
-              currency,
-              source_ledger_max_id,
-              snapshot_status,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              source_lineage_json,
-              quality_status
-            )
-            VALUES (
-              %(virtual_account_id)s,
-              %(trade_date)s,
-              %(available_cash)s,
-              %(frozen_cash)s,
-              %(total_cash)s,
-              %(currency)s,
-              %(source_ledger_max_id)s,
-              %(snapshot_status)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(source_lineage_json)s,
-              %(quality_status)s
-            )
-            RETURNING cash_snapshot_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        cash_snapshot_id = int(row["cash_snapshot_id"])
-        params["cash_snapshot_id"] = cash_snapshot_id
-        account_scope = self._active_account_scope_by_id.get(int(params["virtual_account_id"]))
-        if account_scope is not None:
-            params["principal_id"], params["principal_type"] = account_scope
-        if params.get("principal_id") is None or params.get("principal_type") is None:
-            raise RuntimeError("virtual_account_scope_missing")
-        self.cur.execute(
-            """
-            UPDATE n6_virtual_account
-            SET current_cash_snapshot_id = %(cash_snapshot_id)s,
-                updated_at = now()
-            WHERE virtual_account_id = %(virtual_account_id)s
-              AND principal_id = %(principal_id)s
-              AND principal_type = %(principal_type)s
-              AND virtual_account_status = 'active'
-            """,
-            params,
-        )
-        if getattr(self.cur, "rowcount", 1) != 1:
-            raise RuntimeError("virtual_account_cash_pointer_update_failed")
-        return {"cash_snapshot_id": cash_snapshot_id}
-
-    def upsert_virtual_position(self, payload: dict[str, Any]) -> dict[str, Any]:
-        params = dict(payload)
-        params.setdefault("market_value", None)
-        params.setdefault("unrealized_pnl", None)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        if params.get("virtual_position_id"):
-            self.cur.execute(
-                """
-                UPDATE n6_virtual_position
-                SET position_status = %(position_status)s,
-                    quantity = %(quantity)s,
-                    available_quantity = %(available_quantity)s,
-                    locked_quantity = %(locked_quantity)s,
-                    average_cost = %(average_cost)s,
-                    market_value = COALESCE(%(market_value)s, market_value),
-                    unrealized_pnl = COALESCE(%(unrealized_pnl)s, unrealized_pnl),
-                    last_virtual_trade_id = %(last_virtual_trade_id)s,
-                    run_id = %(run_id)s,
-                    policy_version = %(policy_version)s,
-                    policy_hash = %(policy_hash)s,
-                    rollback_scope = %(rollback_scope)s,
-                    source_lineage_json = %(source_lineage_json)s,
-                    quality_status = %(quality_status)s,
-                    updated_at = now()
-                WHERE virtual_position_id = %(virtual_position_id)s
-                  AND virtual_account_id = %(virtual_account_id)s
-                RETURNING virtual_position_id
-                """,
-                params,
-            )
-            row = self.cur.fetchone()
-            if row:
-                return {"virtual_position_id": int(row["virtual_position_id"])}
-            raise RuntimeError("virtual_position_update_failed")
-
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_position (
-              virtual_account_id,
-              principal_id,
-              principal_type,
-              asset_kind,
-              identity_key,
-              position_status,
-              quantity,
-              available_quantity,
-              locked_quantity,
-              average_cost,
-              market_value,
-              unrealized_pnl,
-              last_virtual_trade_id,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              source_lineage_json,
-              quality_status
-            )
-            VALUES (
-              %(virtual_account_id)s,
-              %(principal_id)s,
-              %(principal_type)s,
-              %(asset_kind)s,
-              %(identity_key)s,
-              %(position_status)s,
-              %(quantity)s,
-              %(available_quantity)s,
-              %(locked_quantity)s,
-              %(average_cost)s,
-              %(market_value)s,
-              %(unrealized_pnl)s,
-              %(last_virtual_trade_id)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(source_lineage_json)s,
-              %(quality_status)s
-            )
-            ON CONFLICT (virtual_account_id, asset_kind, identity_key)
-            DO UPDATE SET
-              position_status = EXCLUDED.position_status,
-              quantity = n6_virtual_position.quantity + EXCLUDED.quantity,
-              available_quantity = n6_virtual_position.available_quantity,
-              locked_quantity = n6_virtual_position.locked_quantity + EXCLUDED.locked_quantity,
-              average_cost = CASE
-                WHEN (n6_virtual_position.quantity + EXCLUDED.quantity) > 0 THEN
-                  (
-                    (n6_virtual_position.quantity * n6_virtual_position.average_cost)
-                    + (EXCLUDED.quantity * EXCLUDED.average_cost)
-                  ) / (n6_virtual_position.quantity + EXCLUDED.quantity)
-                ELSE EXCLUDED.average_cost
-              END,
-              market_value = n6_virtual_position.market_value,
-              unrealized_pnl = n6_virtual_position.unrealized_pnl,
-              last_virtual_trade_id = EXCLUDED.last_virtual_trade_id,
-              run_id = EXCLUDED.run_id,
-              policy_version = EXCLUDED.policy_version,
-              policy_hash = EXCLUDED.policy_hash,
-              rollback_scope = EXCLUDED.rollback_scope,
-              source_lineage_json = EXCLUDED.source_lineage_json,
-              quality_status = EXCLUDED.quality_status,
-              updated_at = now()
-            RETURNING virtual_position_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        return {"virtual_position_id": int(row["virtual_position_id"])}
-
-    def insert_position_event(self, payload: dict[str, Any]) -> dict[str, Any]:
-        params = dict(payload)
-        params["source_lineage_json"] = Jsonb(payload.get("source_lineage_json") or {})
-        params["source_json"] = Jsonb(payload.get("source_json") or {})
-        self.cur.execute(
-            """
-            INSERT INTO n6_virtual_position_event (
-              virtual_position_id,
-              virtual_account_id,
-              principal_id,
-              principal_type,
-              asset_kind,
-              identity_key,
-              event_type,
-              quantity_delta,
-              available_quantity_delta,
-              locked_quantity_delta,
-              cost_delta,
-              price,
-              source_virtual_order_id,
-              source_virtual_trade_id,
-              event_time,
-              trade_date,
-              available_date,
-              source_order_side,
-              source_for_trade_date,
-              source_trade_date,
-              source_json,
-              run_id,
-              policy_version,
-              policy_hash,
-              rollback_scope,
-              source_lineage_json,
-              quality_status
-            )
-            VALUES (
-              %(virtual_position_id)s,
-              %(virtual_account_id)s,
-              %(principal_id)s,
-              %(principal_type)s,
-              %(asset_kind)s,
-              %(identity_key)s,
-              %(event_type)s,
-              %(quantity_delta)s,
-              %(available_quantity_delta)s,
-              %(locked_quantity_delta)s,
-              %(cost_delta)s,
-              %(price)s,
-              %(source_virtual_order_id)s,
-              %(source_virtual_trade_id)s,
-              %(event_time)s,
-              %(trade_date)s,
-              %(available_date)s,
-              %(source_order_side)s,
-              %(source_for_trade_date)s,
-              %(source_trade_date)s,
-              %(source_json)s,
-              %(run_id)s,
-              %(policy_version)s,
-              %(policy_hash)s,
-              %(rollback_scope)s,
-              %(source_lineage_json)s,
-              %(quality_status)s
-            )
-            RETURNING position_event_id
-            """,
-            params,
-        )
-        row = self.cur.fetchone()
-        return {"position_event_id": int(row["position_event_id"])}
-
-    def _fetch_order_by_idempotency(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        idempotency_key = payload.get("idempotency_key")
-        if not idempotency_key:
-            return None
-        self.cur.execute(
-            """
-            SELECT o.virtual_order_id,
-                   t.virtual_trade_id,
-                   o.idempotency_key
-            FROM n6_virtual_order o
-            LEFT JOIN n6_virtual_trade t
-              ON t.virtual_order_id = o.virtual_order_id
-            WHERE o.principal_id = %s
-              AND o.virtual_account_id = %s
-              AND o.idempotency_key = %s
-            ORDER BY t.virtual_trade_id DESC NULLS LAST
-            LIMIT 1
-            """,
-            (payload.get("principal_id"), payload.get("virtual_account_id"), idempotency_key),
-        )
-        row = self.cur.fetchone()
-        return dict(row) if row else None
-
-
 def config_from_env() -> N6UserWebConfig:
+    csrf_secret_file = (
+        ""
+        if "ASHARE_V3_N6_CSRF_SECRET" in os.environ
+        else os.environ.get("ASHARE_V3_N6_CSRF_SECRET_FILE", "")
+    )
     return N6UserWebConfig(
         dsn=os.environ.get("ASHARE_V3_POSTGRES_DSN", DEFAULT_DSN),
         cookie_secure=os.environ.get("ASHARE_V3_N6_COOKIE_SECURE", "0") == "1",
@@ -8491,26 +9188,147 @@ def config_from_env() -> N6UserWebConfig:
         runtime_archive_root=os.environ.get("ASHARE_V3_RUNTIME_ARCHIVE_ROOT", DEFAULT_RUNTIME_ARCHIVE_ROOT),
         rag_docs_root=os.environ.get("ASHARE_V3_RAG_DOCS_ROOT", DEFAULT_RAG_DOCS_ROOT),
         rag_sql_root=os.environ.get("ASHARE_V3_RAG_SQL_ROOT", DEFAULT_RAG_SQL_ROOT),
+        scope_write_enabled=os.environ.get("ASHARE_V3_N6_SCOPE_WRITE_ENABLED", "0") == "1",
+        scope_bulk_write_enabled=os.environ.get(
+            "ASHARE_V3_N6_SCOPE_BULK_WRITE_ENABLED",
+            "0",
+        )
+        == "1",
+        proposal_write_enabled=os.environ.get("ASHARE_V3_N6_PROPOSAL_WRITE_ENABLED", "0") == "1",
+        strategy_center_write_enabled=os.environ.get(
+            "ASHARE_V3_N6_STRATEGY_CENTER_WRITE_ENABLED", "0"
+        )
+        == "1",
+        csrf_secret_file=csrf_secret_file,
     )
+
+
+def load_n6_csrf_secret_file(path: str) -> str:
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return ""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(normalized_path, flags)
+    except (OSError, ValueError):
+        return ""
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            return ""
+        if file_stat.st_uid != os.geteuid():
+            return ""
+        if stat.S_IMODE(file_stat.st_mode) != 0o600:
+            return ""
+        if file_stat.st_size <= 0 or file_stat.st_size > N6_CSRF_SECRET_MAX_BYTES:
+            return ""
+        raw_secret = os.read(descriptor, N6_CSRF_SECRET_MAX_BYTES + 1)
+        if len(raw_secret) > N6_CSRF_SECRET_MAX_BYTES or b"\x00" in raw_secret:
+            return ""
+        try:
+            secret = raw_secret.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return ""
+        if not secret or "\n" in secret or "\r" in secret:
+            return ""
+        return secret
+    except OSError:
+        return ""
+    finally:
+        os.close(descriptor)
+
+
+def build_runtime_btrack_authority_repository(
+    environ: Mapping[str, str] | None = None,
+) -> N6BTrackAuthorityRepository | None:
+    source = os.environ if environ is None else environ
+    if source.get("PGSERVICE") != N6_BTRACK_WEB_DB_SERVICE:
+        return None
+    if "PGPASSWORD" in source:
+        return None
+    if any(
+        key in source
+        for key in (
+            "ASHARE_V3_N6_BTRACK_DSN",
+            "ASHARE_V3_N6_BTRACK_PASSWORD",
+        )
+    ):
+        return None
+    try:
+        return PostgresN6BTrackAuthorityRepository(
+            f"service={N6_BTRACK_WEB_DB_SERVICE}"
+        )
+    except Exception:
+        return None
+
+
+def build_runtime_strategy_center_repository(
+    environ: Mapping[str, str] | None = None,
+) -> N6UserRepository | None:
+    source = os.environ if environ is None else environ
+    if source.get("PGSERVICE") != N6_BTRACK_WEB_DB_SERVICE:
+        return None
+    if "PGPASSWORD" in source or "ASHARE_V3_POSTGRES_DSN" in source:
+        return None
+    for key in ("PGSERVICEFILE", "PGPASSFILE"):
+        path = str(source.get(key) or "")
+        if not path or not os.path.isabs(path) or any(char in path for char in "\x00\r\n"):
+            return None
+    return PostgresN6UserRepository(f"service={N6_BTRACK_WEB_DB_SERVICE}")
 
 
 def create_app(
     *,
     repository: N6UserRepository | None = None,
-    buy_execution_repository: Any | None = None,
+    btrack_authority_repository: N6BTrackAuthorityRepository | None = None,
+    btrack_authority_required: bool = False,
+    strategy_center_repository: N6UserRepository | None = None,
+    strategy_center_repository_required: bool = False,
     config: N6UserWebConfig | None = None,
     password_verifier: PasswordVerifier | None = None,
     password_hasher: PasswordHasher | None = None,
 ) -> FastAPI:
     web_config = config or config_from_env()
+    csrf_secret = (
+        load_n6_csrf_secret_file(web_config.csrf_secret_file)
+        if (
+            web_config.scope_write_enabled
+            or web_config.scope_bulk_write_enabled
+            or web_config.proposal_write_enabled
+            or web_config.strategy_center_write_enabled
+        )
+        else ""
+    )
     repo = repository or PostgresN6UserRepository(web_config.dsn)
-    buy_repo = buy_execution_repository or PostgresVirtualBuyExecutionRepository(web_config.dsn)
+    strategy_repo = (
+        strategy_center_repository
+        if strategy_center_repository is not None
+        else None
+        if strategy_center_repository_required
+        else repo
+    )
     verifier = password_verifier or verify_password
     hasher = password_hasher or hash_password
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app = FastAPI(
         title="Ashare v3 N6 User MVP",
         description="N6 login and read-only user projection pages.",
+    )
+    scope_write_active = bool(
+        web_config.scope_write_enabled
+        and csrf_secret
+        and btrack_authority_repository is not None
+    )
+    scope_bulk_write_active = bool(
+        scope_write_active and web_config.scope_bulk_write_enabled
+    )
+    proposal_write_active = bool(
+        web_config.proposal_write_enabled
+        and csrf_secret
+        and btrack_authority_repository is not None
+    )
+    strategy_center_write_active = bool(
+        web_config.strategy_center_write_enabled and csrf_secret
     )
 
     @app.get("/n6/login", response_class=HTMLResponse)
@@ -8524,19 +9342,33 @@ def create_app(
         login_name = str(payload.get("login_name") or "").strip()
         password = str(payload.get("password") or "")
         requested_next = payload.get("next") or request.query_params.get("next")
-        user = repo.fetch_user_for_login(login_name) if login_name else None
+        try:
+            user = repo.fetch_user_for_login(login_name) if login_name else None
+        except psycopg.OperationalError:
+            return JSONResponse(
+                {"ok": False, "error": "authentication_service_unavailable"},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
         if user is None or user.status != "active" or not verifier(password, user.password_hash, user.password_hash_algo):
             return JSONResponse({"ok": False, "error": "invalid_login"}, status_code=401)
 
         raw_token = generate_session_token()
         expires_at = utc_now() + timedelta(seconds=web_config.session_ttl_seconds)
-        session = repo.create_session(
-            user_id=user.user_id,
-            session_token_hash=hash_session_token(raw_token),
-            session_token_hash_algo=SESSION_HASH_ALGO,
-            expires_at=expires_at,
-            client_info=client_info_from_request(request),
-        )
+        try:
+            session = repo.create_session(
+                user_id=user.user_id,
+                session_token_hash=hash_session_token(raw_token),
+                session_token_hash_algo=SESSION_HASH_ALGO,
+                expires_at=expires_at,
+                client_info=client_info_from_request(request),
+            )
+        except psycopg.OperationalError:
+            return JSONResponse(
+                {"ok": False, "error": "authentication_service_unavailable"},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
         next_target = login_success_location(user, requested_next)
         response = RedirectResponse(next_target, status_code=302)
         response.set_cookie(
@@ -8575,9 +9407,22 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        account, snapshot = app_account_sources(repo, principal)
+        account = repo.fetch_app_virtual_account(
+            int(principal["principal_id"]),
+            str(principal["principal_type"]),
+        )
+        cash_snapshot = (
+            repo.fetch_app_cash_snapshot(int(account["virtual_account_id"]))
+            if account and account.get("virtual_account_id")
+            else None
+        )
         return JSONResponse(
-            app_account_model(principal, user=session_user_payload(session), account=account, cash_snapshot=snapshot)
+            app_account_model(
+                principal,
+                user=session_user_payload(session),
+                account=account,
+                cash_snapshot=cash_snapshot,
+            )
         )
 
     @app.get("/api/n6/app/v1/dashboard")
@@ -8598,68 +9443,175 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
         rows = repo.fetch_app_signals(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
-            filters={},
+            filters={"trade_date": current_trade_date},
             limit=web_config.ui_signal_limit,
-        )
+        ) if current_trade_date else []
         return JSONResponse(app_watchlist_model(principal, user=session_user_payload(session), rows=rows))
 
     @app.get("/api/n6/app/v1/signals")
-    async def app_v1_signals(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
+    async def app_v1_signals(request: Request) -> Response:
+        raw_session_token = request.cookies.get(COOKIE_NAME)
+        filters = ui_v1_filters_from_request(request)
+        page_limit = ui_v1_limit_from_request(
+            request,
+            N6_SIGNAL_PAGE_DEFAULT_LIMIT,
+            max_limit=N6_SIGNAL_PAGE_MAX_LIMIT,
+        )
+        try:
+            n6_signal_filters_with_cursor(filters)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_signal_page_cursor"}, status_code=400)
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
         if session is None:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
+        principal = await asyncio.to_thread(resolve_app_principal, session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        filters = ui_v1_filters_from_request(request)
-        limit = ui_v1_limit_from_request(request, web_config.ui_signal_limit)
-        scope_metadata = repo.fetch_app_signal_scope_metadata(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-        )
+        current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+        if not current_trade_date:
+            return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
         date_policy = n6_trade_date_access_policy(
-            current_trade_date=current_app_signal_trade_date(scope_metadata),
+            current_trade_date=current_trade_date,
             requested_trade_date=filters.get("trade_date"),
+            live_only=True,
         )
         if date_policy["blocked"]:
             return n6_trading_session_blocker_response(date_policy)
-        filters = app_signal_filters_with_trade_date_defaults(filters, scope_metadata)
-        scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
-        rows = repo.fetch_app_signals(
+        scope_metadata = await asyncio.to_thread(
+            repo.fetch_app_signal_scope_metadata,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
-            filters=filters,
-            limit=limit,
+            trade_date=current_trade_date,
         )
-        return JSONResponse(
-            app_signals_model(
-                principal,
-                user=session_user_payload(session),
-                rows=rows,
-                filters=filters,
-                scope_metadata=scope_metadata,
+        filters = app_signal_filters_with_trade_date_defaults(filters, scope_metadata)
+        scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
+        query_filters = n6_signal_filters_with_cursor(filters)
+        rows = await asyncio.to_thread(
+            repo.fetch_app_signals,
+            principal_id=int(principal["principal_id"]),
+            principal_type=str(principal["principal_type"]),
+            user_id=session.user_id,
+            filters=query_filters,
+            limit=page_limit + 1,
+        )
+        page_rows, pagination = n6_signal_keyset_page(rows, limit=page_limit)
+        payload = app_signals_model(
+            principal,
+            user=session_user_payload(session),
+            rows=page_rows,
+            filters=filters,
+            scope_metadata=scope_metadata,
+        )
+        payload = n6_compact_signal_payload(payload)
+        payload["pagination"] = pagination
+        etag = n6_signal_response_etag(
+            principal_id=int(principal["principal_id"]),
+            filters=filters,
+            pagination=pagination,
+        )
+        return n6_signal_json_response(
+            request,
+            payload,
+            etag=etag,
+            watermark=str(pagination["watermark"]),
+        )
+
+    @app.get("/api/n6/app/v1/signals/stream")
+    async def app_v1_signal_stream(request: Request) -> Response:
+        forbidden_scope_params = {"principal_id", "principal_type", "user_id"}
+        query_param_names = frozenset(request.query_params.keys())
+        raw_session_token = request.cookies.get(COOKIE_NAME)
+        last_event_id = request.headers.get("last-event-id")
+        requested_after_id = request.query_params.get("after_id")
+        filters = ui_v1_filters_from_request(request)
+        if forbidden_scope_params.intersection(query_param_names):
+            return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
+        if session is None:
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+        principal = await asyncio.to_thread(resolve_app_principal, session, repo)
+        if principal is None or principal.get("principal_source") == "session_scope":
+            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        try:
+            after_id = parse_n6_signal_sse_cursor(
+                last_event_id=last_event_id,
+                after_id=requested_after_id,
             )
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_signal_sse_cursor"}, status_code=400)
+        current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+        requested_trade_date = normalize_filter_value(filters.get("trade_date"))
+        if not current_trade_date or (requested_trade_date and requested_trade_date != current_trade_date):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "signal_sse_current_trade_date_required",
+                    "current_trade_date": current_trade_date or "",
+                },
+                status_code=409,
+            )
+        scope_metadata = await asyncio.to_thread(
+            repo.fetch_app_signal_scope_metadata,
+            principal_id=int(principal["principal_id"]),
+            principal_type=str(principal["principal_type"]),
+            user_id=session.user_id,
+            trade_date=current_trade_date,
+        )
+        filters = app_signal_filters_with_trade_date_defaults(filters, scope_metadata)
+        principal_id = int(principal["principal_id"])
+        principal_type = str(principal["principal_type"])
+        user_id = int(session.user_id)
+
+        async def read_batch(cursor: int, limit: int) -> list[dict[str, Any]]:
+            return await asyncio.to_thread(
+                repo.fetch_app_signal_events,
+                principal_id=principal_id,
+                principal_type=principal_type,
+                user_id=user_id,
+                filters=filters,
+                after_id=cursor,
+                limit=limit,
+            )
+
+        stream = iter_n6_signal_sse(
+            after_id=after_id,
+            read_batch=read_batch,
+            is_disconnected=request.is_disconnected,
+        )
+        return StreamingResponse(
+            stream,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get("/api/n6/app/v1/signals/{user_signal_projection_id}")
     async def app_v1_signal_detail(request: Request, user_signal_projection_id: int) -> JSONResponse:
-        session = current_session(request, repo)
+        raw_session_token = request.cookies.get(COOKIE_NAME)
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
         if session is None:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
+        principal = await asyncio.to_thread(resolve_app_principal, session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        row = repo.fetch_app_signal_detail(
+        current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+        if not current_trade_date:
+            return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
+        row = await asyncio.to_thread(
+            repo.fetch_app_signal_detail,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
             user_signal_projection_id=user_signal_projection_id,
+            trade_date=current_trade_date,
         )
         if row is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
@@ -8674,13 +9626,24 @@ def create_app(
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
         filters = ui_v1_filters_from_request(request)
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
+        if not current_trade_date:
+            return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
+        date_policy = n6_trade_date_access_policy(
+            current_trade_date=current_trade_date,
+            requested_trade_date=filters.get("trade_date"),
+            live_only=True,
+        )
+        if date_policy["blocked"]:
+            return n6_trading_session_blocker_response(date_policy)
+        filters["trade_date"] = current_trade_date
         rows = repo.fetch_app_signals(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
             filters=filters,
             limit=web_config.ui_signal_limit,
-        )
+        ) if current_trade_date else []
         return JSONResponse(
             app_status_monitor_model(principal, user=session_user_payload(session), rows=rows, filters=filters)
         )
@@ -8707,9 +9670,17 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        positions = repo.fetch_app_positions(
+            int(principal["principal_id"]),
+            str(principal["principal_type"]),
+        )
         return JSONResponse(
-            app_locked_future_module_model(
-                principal, user=session_user_payload(session), module_key="portfolio", component="B Track Portfolio"
+            app_portfolio_model(
+                principal,
+                user=session_user_payload(session),
+                positions=positions,
+                now=n6_trading_session_now(),
+                proposal_write_enabled=proposal_write_active,
             )
         )
 
@@ -8747,37 +9718,66 @@ def create_app(
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
         return JSONResponse(app_leaderboard_model(principal, user=session_user_payload(session)))
 
-    def app_v2_message_context(
+    async def app_v2_message_context(
         request: Request,
-    ) -> tuple[AuthSession, dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]] | JSONResponse:
-        session = current_session(request, repo)
+    ) -> (
+        tuple[
+            AuthSession,
+            dict[str, Any],
+            list[dict[str, Any]],
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+        ]
+        | JSONResponse
+    ):
+        raw_session_token = request.cookies.get(COOKIE_NAME)
+        filters = ui_v1_filters_from_request(request)
+        page_limit = ui_v1_limit_from_request(
+            request,
+            N6_SIGNAL_PAGE_DEFAULT_LIMIT,
+            max_limit=N6_SIGNAL_PAGE_MAX_LIMIT,
+        )
+        try:
+            n6_signal_filters_with_cursor(filters)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_signal_page_cursor"}, status_code=400)
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
         if session is None:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
+        principal = await asyncio.to_thread(resolve_app_principal, session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        filters = ui_v1_filters_from_request(request)
-        scope_metadata = repo.fetch_app_signal_scope_metadata(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-        )
+        current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+        if not current_trade_date:
+            return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
         date_policy = n6_trade_date_access_policy(
-            current_trade_date=current_app_signal_trade_date(scope_metadata),
+            current_trade_date=current_trade_date,
             requested_trade_date=filters.get("trade_date"),
+            live_only=True,
         )
         if date_policy["blocked"]:
             return n6_trading_session_blocker_response(date_policy)
-        filters = app_signal_filters_with_trade_date_defaults(filters, scope_metadata)
-        scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
-        rows = repo.fetch_app_signals(
+        scope_metadata = await asyncio.to_thread(
+            repo.fetch_app_signal_scope_metadata,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
-            filters=filters,
-            limit=web_config.ui_signal_limit,
+            trade_date=current_trade_date,
         )
-        return session, principal, rows, scope_metadata, filters
+        filters = app_signal_filters_with_trade_date_defaults(filters, scope_metadata)
+        scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
+        query_filters = n6_signal_filters_with_cursor(filters)
+        rows = await asyncio.to_thread(
+            repo.fetch_app_signals,
+            principal_id=int(principal["principal_id"]),
+            principal_type=str(principal["principal_type"]),
+            user_id=session.user_id,
+            filters=query_filters,
+            limit=page_limit + 1,
+        )
+        page_rows, pagination = n6_signal_keyset_page(rows, limit=page_limit)
+        return session, principal, page_rows, scope_metadata, filters, pagination
 
     def build_app_v2_buy_messages_data(
         session: AuthSession,
@@ -8785,18 +9785,20 @@ def create_app(
         *,
         selected_asset_kind: str | None = None,
     ) -> dict[str, Any]:
-        rows = repo.fetch_app_signals(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-            filters={},
-            limit=web_config.ui_signal_limit,
-        )
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
         scope_metadata = repo.fetch_app_signal_scope_metadata(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
+            trade_date=current_trade_date,
         )
+        rows = repo.fetch_app_signals(
+            principal_id=int(principal["principal_id"]),
+            principal_type=str(principal["principal_type"]),
+            user_id=session.user_id,
+            filters={"trade_date": current_trade_date},
+            limit=web_config.ui_signal_limit,
+        ) if current_trade_date else []
         return app_v2_buy_messages_model(
             principal,
             user=session_user_payload(session),
@@ -8806,43 +9808,56 @@ def create_app(
         )
 
     @app.get("/api/n6/app/v2/message-dashboard")
-    async def app_v2_message_dashboard(request: Request) -> JSONResponse:
-        context = app_v2_message_context(request)
+    async def app_v2_message_dashboard(request: Request) -> Response:
+        context = await app_v2_message_context(request)
         if isinstance(context, JSONResponse):
             return context
-        session, principal, rows, scope_metadata, filters = context
-        return JSONResponse(
-            build_app_v2_message_dashboard(
-                principal,
-                user=session_user_payload(session),
-                rows=rows,
-                filters=filters,
-                scope_metadata=scope_metadata,
-                limit=web_config.ui_signal_limit,
-            )
+        session, principal, rows, scope_metadata, filters, pagination = context
+        payload = build_app_v2_message_dashboard(
+            principal,
+            user=session_user_payload(session),
+            rows=rows,
+            filters=filters,
+            scope_metadata=scope_metadata,
+            limit=int(pagination["limit"]),
+        )
+        payload = n6_compact_message_dashboard_payload(payload)
+        payload["pagination"] = pagination
+        etag = n6_signal_response_etag(
+            principal_id=int(principal["principal_id"]),
+            filters=filters,
+            pagination=pagination,
+        )
+        return n6_signal_json_response(
+            request,
+            payload,
+            etag=etag,
+            watermark=str(pagination["watermark"]),
         )
 
     @app.get("/api/n6/app/v2/message-dashboard/groups")
     async def app_v2_message_dashboard_groups(request: Request) -> JSONResponse:
-        context = app_v2_message_context(request)
+        context = await app_v2_message_context(request)
         if isinstance(context, JSONResponse):
             return context
-        session, principal, rows, scope_metadata, _filters = context
+        session, principal, rows, scope_metadata, _filters, _pagination = context
         return JSONResponse(
-            build_app_v2_message_groups(
-                principal,
-                user=session_user_payload(session),
-                rows=rows,
-                scope_metadata=scope_metadata,
+            n6_compact_message_dashboard_payload(
+                build_app_v2_message_groups(
+                    principal,
+                    user=session_user_payload(session),
+                    rows=rows,
+                    scope_metadata=scope_metadata,
+                )
             )
         )
 
     @app.get("/api/n6/app/v2/message-dashboard/projection-status")
     async def app_v2_message_dashboard_projection_status(request: Request) -> JSONResponse:
-        context = app_v2_message_context(request)
+        context = await app_v2_message_context(request)
         if isinstance(context, JSONResponse):
             return context
-        session, principal, rows, scope_metadata, _filters = context
+        session, principal, rows, scope_metadata, _filters, _pagination = context
         return JSONResponse(
             build_app_v2_projection_status(
                 principal,
@@ -8870,62 +9885,6 @@ def create_app(
                 selected_asset_kind=asset_kind or None,
             )
         )
-
-    @app.post("/api/n6/app/v2/buy-messages/{user_signal_projection_id}/execute")
-    async def app_v2_buy_message_execute(request: Request, user_signal_projection_id: int) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        signal = repo.fetch_app_signal_detail(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-            user_signal_projection_id=user_signal_projection_id,
-        )
-        if signal is None:
-            return JSONResponse(virtual_buy_rejected_response("signal_not_found"), status_code=404)
-        price = first_virtual_buy_value(body, "price") or first_virtual_buy_value(signal, "trigger_price", "current_price")
-        if price is None:
-            return JSONResponse(virtual_buy_rejected_response("price_missing"), status_code=400)
-        trade_date = normalize_virtual_buy_date(
-            first_virtual_buy_value(body, "trade_date") or first_virtual_buy_value(signal, "trade_date")
-        )
-        if trade_date is None:
-            return JSONResponse(virtual_buy_rejected_response("trade_date_missing"), status_code=400)
-        available_date = normalize_virtual_buy_date(
-            first_virtual_buy_value(body, "available_date") or first_virtual_buy_value(signal, "available_date")
-        )
-        if available_date is None:
-            return JSONResponse(virtual_buy_rejected_response("available_date_missing"), status_code=400)
-        buy_request = VirtualBuyRequest(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_signal_projection_id=int(user_signal_projection_id),
-            quantity=body.get("quantity", 300),
-            price=price,
-            trade_date=trade_date,
-            available_date=available_date,
-        )
-        try:
-            transaction_factory = getattr(buy_repo, "transaction", None)
-            scope = transaction_factory() if callable(transaction_factory) else nullcontext(buy_repo)
-            with scope as scoped_buy_repo:
-                result = execute_virtual_buy(
-                    SignalBoundVirtualBuyExecutionRepository(scoped_buy_repo, signal),
-                    buy_request,
-                )
-        except VirtualBuyRejected as exc:
-            return JSONResponse(virtual_buy_rejected_response(exc.code), status_code=400)
-        return JSONResponse(virtual_buy_result_response(result))
 
     @app.get("/api/n6/app/v2/filter/stocks")
     async def app_v2_filter_stocks(request: Request) -> JSONResponse:
@@ -8979,308 +9938,964 @@ def create_app(
     async def app_v2_monitor_indexes(request: Request) -> JSONResponse:
         return app_v2_monitor_response(request, "index")
 
-    @app.post("/api/n6/app/v2/monitor/items")
-    async def app_v2_monitor_add_item(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
+    async def app_v3_authority_context(
+        request: Request,
+    ) -> tuple[AuthSession, dict[str, Any], str] | JSONResponse:
+        raw_session_token = request.cookies.get(COOKIE_NAME)
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
         if session is None:
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
+        session_token_hash = hash_session_token(raw_session_token or "")
+        if btrack_authority_required and btrack_authority_repository is None:
+            return JSONResponse(
+                {"ok": False, "error": "btrack_db_authority_unavailable"},
+                status_code=503,
+            )
+        if btrack_authority_repository is not None:
+            try:
+                authority = await asyncio.to_thread(
+                    btrack_authority_repository.resolve_authority,
+                    session_token_hash,
+                )
+            except (AttributeError, TypeError, ValueError, psycopg.Error):
+                return JSONResponse(
+                    {"ok": False, "error": "btrack_db_authority_unavailable"},
+                    status_code=503,
+                )
+            if authority is None or authority.user_id != session.user_id:
+                return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+            principal = authority.principal_payload()
+        else:
+            principal = await asyncio.to_thread(resolve_app_principal, session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        return session, principal, session_token_hash
+
+    @app.get("/api/n6/app/v3/strategy-center")
+    async def app_v3_strategy_center(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        reader = getattr(strategy_repo, "fetch_strategy_center_state", None)
+        if not callable(reader):
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_service_unavailable"},
+                status_code=503,
+            )
         try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        identity_key = normalize_filter_value(body.get("identity_key"))
-        direction = normalize_filter_value(body.get("direction")) or "buy"
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
-        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET or not identity_key or direction not in APP_V2_VALID_DIRECTIONS:
-            return JSONResponse({"ok": False, "error": "invalid_monitor_request"}, status_code=400)
-        result = repo.add_app_monitor_item(
+            state = await asyncio.to_thread(reader, session_token_hash)
+            if not isinstance(state, dict):
+                return JSONResponse(
+                    {"ok": False, "error": "principal_scope_unavailable"},
+                    status_code=403,
+                )
+            payload = app_strategy_center_model(
+                principal,
+                user=session_user_payload(session),
+                state=state,
+                write_enabled=strategy_center_write_active,
+            )
+        except (AttributeError, TypeError, ValueError, psycopg.Error):
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_service_unavailable"},
+                status_code=503,
+            )
+        response = n6_json_response(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.put("/api/n6/app/v3/strategy-center/selection")
+    async def app_v3_strategy_center_selection(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, _principal, session_token_hash = context
+        if not web_config.strategy_center_write_enabled:
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_write_disabled"},
+                status_code=403,
+            )
+        if not csrf_secret:
+            return JSONResponse(
+                {"ok": False, "error": "csrf_not_configured"},
+                status_code=503,
+            )
+        if not n6_csrf_valid(request, session, csrf_secret):
+            return JSONResponse(
+                {"ok": False, "error": "csrf_rejected"},
+                status_code=403,
+            )
+        payload = await read_json_object(request)
+        if set(payload) != {
+            "selected_package_keys",
+            "expected_revision",
+            "request_id",
+        }:
+            return JSONResponse(
+                {"ok": False, "error": "client_scope_not_allowed"},
+                status_code=400,
+            )
+        selected = payload.get("selected_package_keys")
+        expected_revision = payload.get("expected_revision")
+        request_id = str(payload.get("request_id") or "").strip()
+        if (
+            not isinstance(selected, list)
+            or not 1 <= len(selected) <= 2
+            or len(set(selected)) != len(selected)
+            or any(item not in {"package_1", "package_2"} for item in selected)
+            or isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+            or not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", request_id)
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "invalid_strategy_selection_request"},
+                status_code=400,
+            )
+        writer = getattr(strategy_repo, "put_strategy_center_selection", None)
+        if not callable(writer):
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_service_unavailable"},
+                status_code=503,
+            )
+        try:
+            result = await asyncio.to_thread(
+                writer,
+                session_token_hash,
+                selected_package_keys=selected,
+                expected_revision=expected_revision,
+                request_id=request_id,
+            )
+            if not isinstance(result, dict):
+                return JSONResponse(
+                    {"ok": False, "error": "principal_scope_unavailable"},
+                    status_code=403,
+                )
+            response_payload = app_strategy_center_selection_result_model(result)
+        except ValueError as exc:
+            code = str(exc)
+            status_code = (
+                409
+                if code in {
+                    "strategy_selection_idempotency_conflict",
+                    "strategy_selection_replay_pending",
+                    "strategy_selection_active_revision_missing",
+                    "strategy_selection_revision_conflict",
+                }
+                else 403
+                if code == "strategy_selection_unauthorized"
+                else 400
+                if code.endswith("_invalid") or code.endswith("_duplicate")
+                else 503
+            )
+            return JSONResponse({"ok": False, "error": code}, status_code=status_code)
+        except (AttributeError, TypeError, psycopg.Error):
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_service_unavailable"},
+                status_code=503,
+            )
+        response = n6_json_response(response_payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/n6/app/v3/strategy-center/stream")
+    async def app_v3_strategy_center_stream(request: Request) -> Response:
+        if {"principal_id", "principal_type", "user_id"}.intersection(
+            request.query_params.keys()
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "client_scope_not_allowed"},
+                status_code=400,
+            )
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, session_token_hash = context
+        try:
+            after_id = parse_n6_signal_sse_cursor(
+                last_event_id=request.headers.get("last-event-id"),
+                after_id=request.query_params.get("after_id"),
+            )
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "invalid_strategy_center_sse_cursor"},
+                status_code=400,
+            )
+        reader = getattr(strategy_repo, "fetch_strategy_center_changes", None)
+        if not callable(reader):
+            return JSONResponse(
+                {"ok": False, "error": "strategy_center_service_unavailable"},
+                status_code=503,
+            )
+
+        async def read_batch(cursor: int, limit: int) -> dict[str, Any]:
+            result = await asyncio.to_thread(
+                reader,
+                session_token_hash,
+                after_id=cursor,
+                limit=limit,
+            )
+            if not isinstance(result, dict):
+                raise ValueError("strategy_center_authority_missing")
+            return app_strategy_center_change_batch_model(result)
+
+        return StreamingResponse(
+            iter_n6_strategy_center_sse(
+                after_id=after_id,
+                read_batch=read_batch,
+                is_disconnected=request.is_disconnected,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    async def app_v3_ai_agent_public_snapshot(
+        request: Request,
+    ) -> tuple[AuthSession, dict[str, Any], dict[str, Any]] | JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if btrack_authority_repository is None:
+            return JSONResponse(
+                {"ok": False, "error": "ai_agent_public_service_unavailable"},
+                status_code=503,
+            )
+        session, principal, session_token_hash = context
+        try:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.fetch_public_ai_agent_dashboard,
+                session_token_hash,
+                decision_limit=50,
+                trade_limit=50,
+                summary_limit=30,
+            )
+        except (AttributeError, TypeError, ValueError, psycopg.Error):
+            return JSONResponse(
+                {"ok": False, "error": "ai_agent_public_service_unavailable"},
+                status_code=503,
+            )
+        if not isinstance(result, dict):
+            return JSONResponse(
+                {"ok": False, "error": "principal_scope_unavailable"},
+                status_code=403,
+            )
+        return session, principal, app_ai_agent_public_model(result)
+
+    @app.get("/api/n6/app/v3/ai-agent")
+    async def app_v3_ai_agent(request: Request) -> JSONResponse:
+        context = await app_v3_ai_agent_public_snapshot(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, payload = context
+        response = n6_json_response(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/n6/app/v3/ai-agent/decisions/{decision_id}")
+    async def app_v3_ai_agent_decision_detail(
+        request: Request,
+        decision_id: int,
+    ) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if btrack_authority_repository is None:
+            return JSONResponse(
+                {"ok": False, "error": "ai_agent_public_service_unavailable"},
+                status_code=503,
+            )
+        _session, _principal, session_token_hash = context
+        try:
+            decision_id_text = canonical_bigint_id(
+                decision_id,
+                field_name="ai_decision_id",
+                required=True,
+            )
+            result = await asyncio.to_thread(
+                btrack_authority_repository.fetch_public_ai_decision_detail,
+                session_token_hash,
+                decision_id=int(decision_id_text),
+            )
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "invalid_ai_decision_id"},
+                status_code=400,
+            )
+        except (AttributeError, TypeError, psycopg.Error):
+            return JSONResponse(
+                {"ok": False, "error": "ai_agent_public_service_unavailable"},
+                status_code=503,
+            )
+        payload = app_ai_agent_public_decision_detail_model(result)
+        response = n6_json_response(
+            payload,
+            status_code=200 if payload["ok"] else 404,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/n6/app/v3/ai-agent/{section}")
+    async def app_v3_ai_agent_section(
+        request: Request,
+        section: str,
+    ) -> JSONResponse:
+        if section not in {
+            "overview",
+            "positions",
+            "trades",
+            "decisions",
+            "daily-summaries",
+            "performance",
+        }:
+            return JSONResponse(
+                {"ok": False, "error": "not_found"},
+                status_code=404,
+            )
+        context = await app_v3_ai_agent_public_snapshot(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, payload = context
+        response = n6_json_response(
+            app_ai_agent_public_section_model(payload, section)
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def app_v3_scope_write_context(
+        request: Request,
+    ) -> tuple[AuthSession, dict[str, Any], str] | JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not web_config.scope_write_enabled:
+            return JSONResponse({"ok": False, "error": "scope_write_disabled"}, status_code=403)
+        if not csrf_secret:
+            return JSONResponse({"ok": False, "error": "csrf_not_configured"}, status_code=503)
+        if btrack_authority_repository is None:
+            return JSONResponse({"ok": False, "error": "btrack_db_authority_unavailable"}, status_code=503)
+        session, principal, session_token_hash = context
+        if not n6_csrf_valid(request, session, csrf_secret):
+            return JSONResponse({"ok": False, "error": "csrf_rejected"}, status_code=403)
+        return session, principal, session_token_hash
+
+    async def app_v3_current_filter_identity(
+        *,
+        session: AuthSession,
+        principal: dict[str, Any],
+        asset_kind: str,
+        identity_key: str,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            repo.fetch_app_current_filter_identity,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
             asset_kind=asset_kind,
             identity_key=identity_key,
-            direction=direction,
-            source="single_row",
-            for_trade_date=for_trade_date,
         )
-        if result.get("status") == "not_found":
-            return n6_json_response(result, status_code=404)
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
 
-    @app.post("/api/n6/app/v2/monitor/bulk-add")
-    async def app_v2_monitor_bulk_add(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        direction = normalize_filter_value(body.get("direction")) or "buy"
-        filters = body.get("filters") if isinstance(body.get("filters"), dict) else {}
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
-        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET or direction not in APP_V2_VALID_DIRECTIONS:
-            return JSONResponse({"ok": False, "error": "invalid_monitor_request"}, status_code=400)
-        clean_filters = {key: value for key, value in filters.items() if value}
-        if for_trade_date:
-            clean_filters["for_trade_date"] = for_trade_date
-        result = repo.bulk_add_app_monitor_items(
+    def invalidate_app_user_scope(session: AuthSession, principal: dict[str, Any]) -> None:
+        invalidator = getattr(repo, "invalidate_app_user_scope_cache", None)
+        if callable(invalidator):
+            invalidator(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+            )
+
+    async def app_v3_bulk_filter_selection(
+        *,
+        session: AuthSession,
+        principal: dict[str, Any],
+        asset_kind: str,
+        filters: Mapping[str, Any],
+    ) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET:
+            return None, JSONResponse({"ok": False, "error": "invalid_asset_kind"}, status_code=400)
+        canonical_filters = n6_scope_bulk_canonical_filters(filters)
+        current_filters = {
+            key: value
+            for key, value in canonical_filters.items()
+            if key != "for_trade_date"
+        }
+        current_result = await asyncio.to_thread(
+            repo.fetch_app_filter_items,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
             asset_kind=asset_kind,
-            direction=direction,
-            filters=clean_filters,
+            filters=current_filters,
+            limit=1,
         )
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
-
-    @app.post("/api/n6/app/v2/monitor/selected-add")
-    async def app_v2_monitor_selected_add(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        direction = normalize_filter_value(body.get("direction")) or "buy"
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
-        raw_identity_keys = body.get("identity_keys")
-        identity_keys = (
-            [str(item).strip() for item in raw_identity_keys if str(item or "").strip()]
-            if isinstance(raw_identity_keys, list)
-            else []
+        current_trade_date = next(
+            (
+                str(value).strip()
+                for value in current_result.get("available_for_trade_dates") or []
+                if str(value).strip()
+            ),
+            str(current_result.get("selected_for_trade_date") or "").strip(),
         )
-        if (
-            asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET
-            or direction not in APP_V2_VALID_DIRECTIONS
-            or not identity_keys
+        requested_trade_date = str(canonical_filters.get("for_trade_date") or "").strip()
+        if not current_trade_date or (
+            requested_trade_date and requested_trade_date != current_trade_date
         ):
-            return JSONResponse({"ok": False, "error": "invalid_monitor_request"}, status_code=400)
-        result = repo.selected_add_app_monitor_items(
+            return None, JSONResponse(
+                {
+                    "ok": False,
+                    "error": "current_for_trade_date_required",
+                    "current_trade_date": current_trade_date,
+                },
+                status_code=409,
+            )
+        canonical_filters["for_trade_date"] = current_trade_date
+        result = await asyncio.to_thread(
+            repo.fetch_app_filter_items,
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
             asset_kind=asset_kind,
-            direction=direction,
-            identity_keys=identity_keys,
-            for_trade_date=for_trade_date,
+            filters=canonical_filters,
+            limit=N6_SCOPE_BULK_MAX_IDENTITIES,
         )
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
-
-    @app.post("/api/n6/app/v2/monitor/linked-stocks")
-    async def app_v2_monitor_add_linked_stocks(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        parent_asset_kind = normalize_filter_value(body.get("parent_asset_kind"))
-        parent_identity_key = normalize_filter_value(body.get("parent_identity_key"))
-        mode = normalize_filter_value(body.get("mode")) or "selected"
-        direction = normalize_filter_value(body.get("direction")) or "buy"
-        raw_stock_keys = body.get("stock_identity_keys")
-        stock_identity_keys = (
-            [str(item).strip() for item in raw_stock_keys if str(item or "").strip()]
-            if isinstance(raw_stock_keys, list)
-            else []
+        filtered_count = int(result.get("filtered_count") or 0)
+        rows = list(result.get("items") or [])
+        identity_keys = sorted(
+            {
+                str(row.get("identity_key") or "").strip()
+                for row in rows
+                if str(row.get("identity_key") or "").strip()
+            }
         )
+        if filtered_count > N6_SCOPE_BULK_MAX_IDENTITIES:
+            return None, JSONResponse(
+                {
+                    "ok": False,
+                    "error": "bulk_scope_too_large",
+                    "matched_count": filtered_count,
+                    "max_count": N6_SCOPE_BULK_MAX_IDENTITIES,
+                },
+                status_code=409,
+            )
         if (
-            parent_asset_kind not in {"index", "board"}
-            or not parent_identity_key
-            or mode not in {"selected", "matched_stock_filter"}
-            or direction not in APP_V2_VALID_DIRECTIONS
-            or (mode == "selected" and not stock_identity_keys)
+            filtered_count < 1
+            or len(rows) != filtered_count
+            or len(identity_keys) != filtered_count
+            or any(not value.startswith(f"{asset_kind}:") for value in identity_keys)
         ):
-            return JSONResponse({"ok": False, "error": "invalid_monitor_request"}, status_code=400)
-        result = repo.add_app_linked_stock_monitor_items(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-            parent_asset_kind=parent_asset_kind,
-            parent_identity_key=parent_identity_key,
-            mode=mode,
-            stock_identity_keys=stock_identity_keys,
-            direction=direction,
-        )
-        if result.get("status") == "invalid_request":
-            return n6_json_response(result, status_code=400)
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        if result.get("status") == "not_found":
-            return n6_json_response(result, status_code=404)
-        return n6_json_response(result)
+            return None, JSONResponse(
+                {"ok": False, "error": "filter_snapshot_stale"},
+                status_code=409,
+            )
+        source_run_id = str(result.get("source_run_id") or "").strip()
+        selected_trade_date = str(result.get("selected_for_trade_date") or "").strip()
+        if not source_run_id or selected_trade_date != current_trade_date:
+            return None, JSONResponse(
+                {"ok": False, "error": "filter_snapshot_stale"},
+                status_code=409,
+            )
+        return {
+            "asset_kind": asset_kind,
+            "filters": canonical_filters,
+            "for_trade_date": current_trade_date,
+            "source_run_id": source_run_id,
+            "identity_keys": identity_keys,
+            "identity_count": len(identity_keys),
+            "selection_sha256": n6_scope_bulk_selection_sha256(identity_keys),
+        }, None
 
-    @app.delete("/api/n6/app/v2/monitor/items/{monitor_id}")
-    async def app_v2_monitor_delete_item(request: Request, monitor_id: int) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        result = repo.remove_app_monitor_item(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
+    @app.get("/api/n6/app/v3/filter-scope-bulk-preview")
+    async def app_v3_filter_scope_bulk_preview(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not scope_bulk_write_active:
+            return JSONResponse({"ok": False, "error": "scope_bulk_write_disabled"}, status_code=403)
+        session, principal, session_token_hash = context
+        target_scope = str(request.query_params.get("target") or "").strip()
+        asset_kind = str(request.query_params.get("asset_kind") or "").strip()
+        if target_scope not in {"monitor", "realtime"}:
+            return JSONResponse({"ok": False, "error": "invalid_target_scope"}, status_code=400)
+        filters = app_v2_filter_filters_from_request(request)
+        selection, blocker = await app_v3_bulk_filter_selection(
+            session=session,
+            principal=principal,
+            asset_kind=asset_kind,
+            filters=filters,
+        )
+        if blocker is not None:
+            return blocker
+        assert selection is not None
+        preview = await asyncio.to_thread(
+            btrack_authority_repository.preview_bulk_scope,
+            session_token_hash,
+            target_scope=target_scope,
+            asset_kind=asset_kind,
+            identity_keys=selection["identity_keys"],
+            for_trade_date=selection["for_trade_date"],
+            source_run_id=selection["source_run_id"],
+            selection_sha256=selection["selection_sha256"],
+        )
+        if not preview.get("ok"):
+            return n6_json_response(app_v3_public_payload(preview), status_code=409)
+        selection_token = n6_scope_bulk_selection_token(
+            session=session,
+            principal=principal,
+            secret=csrf_secret,
+            target_scope=target_scope,
+            asset_kind=asset_kind,
+            filters=selection["filters"],
+            for_trade_date=selection["for_trade_date"],
+            source_run_id=selection["source_run_id"],
+            identity_count=selection["identity_count"],
+            selection_sha256=selection["selection_sha256"],
+        )
+        response = n6_json_response(
+            app_v3_public_payload(
+                {
+                    **preview,
+                    "selection_token": selection_token,
+                    "selection_expires_in_seconds": N6_SCOPE_BULK_SELECTION_TTL_SECONDS,
+                }
+            )
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def app_v3_execute_scope_bulk(
+        request: Request,
+        *,
+        target_scope: str,
+    ) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not scope_bulk_write_active:
+            return JSONResponse({"ok": False, "error": "scope_bulk_write_disabled"}, status_code=403)
+        session, principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) != {"selection_token"}:
+            return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
+        token_payload, token_error = n6_scope_bulk_selection_payload(
+            str(payload.get("selection_token") or ""),
+            session=session,
+            principal=principal,
+            secret=csrf_secret,
+            expected_target_scope=target_scope,
+        )
+        if token_payload is None:
+            return JSONResponse({"ok": False, "error": token_error}, status_code=409)
+        selection, blocker = await app_v3_bulk_filter_selection(
+            session=session,
+            principal=principal,
+            asset_kind=str(token_payload["asset_kind"]),
+            filters=dict(token_payload["filters"]),
+        )
+        if blocker is not None:
+            return blocker
+        assert selection is not None
+        if any(
+            (
+                selection["for_trade_date"] != str(token_payload["for_trade_date"]),
+                selection["source_run_id"] != str(token_payload["source_run_id"]),
+                selection["identity_count"] != int(token_payload["identity_count"]),
+                selection["selection_sha256"] != str(token_payload["selection_sha256"]),
+            )
+        ):
+            return JSONResponse({"ok": False, "error": "filter_snapshot_stale"}, status_code=409)
+        writer = (
+            btrack_authority_repository.bulk_upsert_monitor_items
+            if target_scope == "monitor"
+            else btrack_authority_repository.bulk_upsert_realtime_scope_items
+        )
+        result = await asyncio.to_thread(
+            writer,
+            session_token_hash,
+            asset_kind=selection["asset_kind"],
+            identity_keys=selection["identity_keys"],
+            for_trade_date=selection["for_trade_date"],
+            source_run_id=selection["source_run_id"],
+            selection_sha256=selection["selection_sha256"],
+        )
+        if not result.get("ok"):
+            return n6_json_response(app_v3_public_payload(result), status_code=409)
+        invalidate_app_user_scope(session, principal)
+        return n6_json_response(app_v3_public_payload(result))
+
+    @app.post("/api/n6/app/v3/monitor-items/bulk")
+    async def app_v3_add_monitor_items_bulk(request: Request) -> JSONResponse:
+        return await app_v3_execute_scope_bulk(request, target_scope="monitor")
+
+    @app.post("/api/n6/app/v3/realtime-scope-items/bulk")
+    async def app_v3_add_realtime_scope_items_bulk(request: Request) -> JSONResponse:
+        return await app_v3_execute_scope_bulk(request, target_scope="realtime")
+
+    @app.get("/api/n6/app/v3/realtime-scope-items")
+    async def app_v3_realtime_scope_items(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        if btrack_authority_repository is not None:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.list_realtime_scope_items,
+                session_token_hash,
+                limit=500,
+            )
+        else:
+            result = await asyncio.to_thread(
+                repo.fetch_app_realtime_scope,
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+            )
+        return n6_json_response(
+            app_realtime_scope_model(
+                principal,
+                user=session_user_payload(session),
+                result=result,
+                write_enabled=scope_write_active,
+            )
+        )
+
+    @app.post("/api/n6/app/v3/monitor-items")
+    async def app_v3_add_monitor_item(request: Request) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) - {"asset_kind", "identity_key", "for_trade_date"}:
+            return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
+        asset_kind = str(payload.get("asset_kind") or "").strip()
+        identity_key = str(payload.get("identity_key") or "").strip()
+        requested_trade_date = str(payload.get("for_trade_date") or "").strip()
+        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET or not identity_key:
+            return JSONResponse({"ok": False, "error": "invalid_monitor_request"}, status_code=400)
+        current_filter_identity = await app_v3_current_filter_identity(
+            session=session,
+            principal=principal,
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+        )
+        current_trade_date = str(current_filter_identity.get("for_trade_date") or "").strip()
+        if not current_trade_date or (requested_trade_date and requested_trade_date != current_trade_date):
+            return JSONResponse(
+                {"ok": False, "error": "current_for_trade_date_required", "current_trade_date": current_trade_date},
+                status_code=409,
+            )
+        if not current_filter_identity.get("approved"):
+            return JSONResponse({"ok": False, "error": "source_not_found"}, status_code=409)
+        directions = ("buy",) if asset_kind == "stock" else ("buy", "sell")
+        results = [
+            await asyncio.to_thread(
+                btrack_authority_repository.upsert_monitor_item,
+                session_token_hash,
+                asset_kind=asset_kind,
+                identity_key=identity_key,
+                direction=direction,
+                for_trade_date=current_trade_date,
+            )
+            for direction in directions
+        ]
+        result = next((item for item in results if not item.get("ok")), None) or {
+            "ok": True,
+            "status": "active",
+            "added_count": len(results),
+            "results": results,
+        }
+        if not result.get("ok"):
+            return n6_json_response(app_v3_public_payload(result), status_code=409)
+        invalidate_app_user_scope(session, principal)
+        return n6_json_response(
+            app_v3_public_payload(
+                {"ok": True, "asset_kind": asset_kind, "identity_key": identity_key, **result}
+            )
+        )
+
+    @app.delete("/api/n6/app/v3/monitor-items/{monitor_id}")
+    async def app_v3_remove_monitor_item(request: Request, monitor_id: int) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        try:
+            monitor_id = int(canonical_bigint_id(monitor_id, field_name="monitor_id", required=True))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_monitor_id"}, status_code=400)
+        result = await asyncio.to_thread(
+            btrack_authority_repository.remove_monitor_item,
+            session_token_hash,
             monitor_id=monitor_id,
         )
-        if result.get("status") == "not_found":
-            return n6_json_response(result, status_code=404)
-        return n6_json_response(result)
-
-    @app.get("/api/n6/app/v2/realtime-scope")
-    async def app_v2_realtime_scope(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        result = repo.fetch_app_realtime_scope(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
+        if result.get("ok"):
+            invalidate_app_user_scope(session, principal)
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=200 if result.get("ok") else 404,
         )
-        return n6_json_response({"ok": True, **result})
 
-    @app.post("/api/n6/app/v2/realtime-scope/items")
-    async def app_v2_realtime_scope_add_item(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        identity_key = normalize_filter_value(body.get("identity_key"))
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
+    @app.post("/api/n6/app/v3/realtime-scope-items")
+    async def app_v3_add_realtime_scope_item(request: Request) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) - {"asset_kind", "identity_key"}:
+            return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
+        asset_kind = str(payload.get("asset_kind") or "").strip()
+        identity_key = str(payload.get("identity_key") or "").strip()
         if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET or not identity_key:
             return JSONResponse({"ok": False, "error": "invalid_realtime_scope_request"}, status_code=400)
-        result = repo.add_app_realtime_scope_item(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
+        current_filter_identity = await app_v3_current_filter_identity(
+            session=session,
+            principal=principal,
             asset_kind=asset_kind,
             identity_key=identity_key,
-            for_trade_date=for_trade_date,
-            source="single_row",
         )
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
-
-    @app.post("/api/n6/app/v2/realtime-scope/selected-add")
-    async def app_v2_realtime_scope_selected_add(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
-        raw_identity_keys = body.get("identity_keys")
-        identity_keys = (
-            [str(item).strip() for item in raw_identity_keys if str(item or "").strip()]
-            if isinstance(raw_identity_keys, list)
-            else []
-        )
-        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET or not identity_keys:
-            return JSONResponse({"ok": False, "error": "invalid_realtime_scope_request"}, status_code=400)
-        result = repo.selected_add_app_realtime_scope_items(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
+        current_trade_date = str(current_filter_identity.get("for_trade_date") or "").strip()
+        if not current_trade_date:
+            return JSONResponse(
+                {"ok": False, "error": "current_for_trade_date_required"},
+                status_code=409,
+            )
+        if not current_filter_identity.get("approved"):
+            return JSONResponse({"ok": False, "error": "source_not_found"}, status_code=409)
+        result = await asyncio.to_thread(
+            btrack_authority_repository.upsert_realtime_scope_item,
+            session_token_hash,
             asset_kind=asset_kind,
-            identity_keys=identity_keys,
-            for_trade_date=for_trade_date,
+            identity_key=identity_key,
+            for_trade_date=current_trade_date,
         )
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
+        if result.get("ok"):
+            invalidate_app_user_scope(session, principal)
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=200 if result.get("ok") else 409,
+        )
 
-    @app.post("/api/n6/app/v2/realtime-scope/bulk-add")
-    async def app_v2_realtime_scope_bulk_add(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+    @app.delete("/api/n6/app/v3/realtime-scope-items/{scope_id}")
+    async def app_v3_remove_realtime_scope_item(request: Request, scope_id: int) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
         try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        asset_kind = normalize_filter_value(body.get("asset_kind"))
-        filters = body.get("filters") if isinstance(body.get("filters"), dict) else {}
-        for_trade_date = normalize_filter_value(body.get("for_trade_date"))
-        if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET:
-            return JSONResponse({"ok": False, "error": "invalid_realtime_scope_request"}, status_code=400)
-        clean_filters = {key: value for key, value in filters.items() if value}
-        if for_trade_date:
-            clean_filters["for_trade_date"] = for_trade_date
-        result = repo.bulk_add_app_realtime_scope_items(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-            asset_kind=asset_kind,
-            filters=clean_filters,
+            scope_id = int(canonical_bigint_id(scope_id, field_name="realtime_scope_id", required=True))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_realtime_scope_id"}, status_code=400)
+        result = await asyncio.to_thread(
+            btrack_authority_repository.remove_realtime_scope_item,
+            session_token_hash,
+            realtime_scope_id=scope_id,
         )
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
+        if result.get("ok"):
+            invalidate_app_user_scope(session, principal)
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=200 if result.get("ok") else 404,
+        )
 
-    @app.delete("/api/n6/app/v2/realtime-scope/items/{realtime_scope_id}")
-    async def app_v2_realtime_scope_delete_item(request: Request, realtime_scope_id: int) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        result = repo.remove_app_realtime_scope_item(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
-            user_id=session.user_id,
-            realtime_scope_id=realtime_scope_id,
+    async def app_v3_proposal_write_context(
+        request: Request,
+    ) -> tuple[AuthSession, dict[str, Any], str] | JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not web_config.proposal_write_enabled:
+            return JSONResponse({"ok": False, "error": "proposal_write_disabled"}, status_code=403)
+        if not csrf_secret:
+            return JSONResponse({"ok": False, "error": "csrf_not_configured"}, status_code=503)
+        if btrack_authority_repository is None:
+            return JSONResponse({"ok": False, "error": "btrack_db_authority_unavailable"}, status_code=503)
+        session, principal, session_token_hash = context
+        if not n6_csrf_valid(request, session, csrf_secret):
+            return JSONResponse({"ok": False, "error": "csrf_rejected"}, status_code=403)
+        return session, principal, session_token_hash
+
+    @app.get("/api/n6/app/v3/virtual-account/proposals")
+    async def app_v3_virtual_account_proposals(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        if btrack_authority_repository is not None:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.list_trade_proposals,
+                session_token_hash,
+                limit=100,
+            )
+        else:
+            result = await asyncio.to_thread(
+                repo.fetch_app_trade_proposals,
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                limit=100,
+            )
+        return n6_json_response(
+            app_trade_proposals_model(
+                principal,
+                user=session_user_payload(session),
+                result=result,
+                write_enabled=proposal_write_active,
+            )
         )
-        if result.get("status") == "not_found":
-            return n6_json_response(result, status_code=404)
-        if result.get("status") == "data_not_ready":
-            return n6_json_response(result, status_code=409)
-        return n6_json_response(result)
+
+    @app.post("/api/n6/app/v3/virtual-account/proposals")
+    async def app_v3_create_virtual_account_proposal(request: Request) -> JSONResponse:
+        context = await app_v3_proposal_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) != {"source_type", "source_id"}:
+            return JSONResponse({"ok": False, "error": "source_only_request_required"}, status_code=400)
+        source_type = str(payload.get("source_type") or "")
+        source_id_field = {
+            "signal": "user_signal_projection_id",
+            "manual_position": "virtual_position_id",
+        }.get(source_type)
+        if source_id_field is None or not isinstance(payload.get("source_id"), str):
+            return JSONResponse({"ok": False, "error": "canonical_source_id_required"}, status_code=400)
+        try:
+            source_id = canonical_bigint_id(
+                payload.get("source_id"),
+                field_name=source_id_field,
+                required=True,
+            )
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "canonical_source_id_required"}, status_code=400)
+        try:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.create_trade_proposal,
+                session_token_hash,
+                source_type=source_type,
+                source_id=int(source_id),
+            )
+        except psycopg.Error:
+            return JSONResponse(
+                {"ok": False, "error": "proposal_service_unavailable"},
+                status_code=503,
+            )
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=201 if result.get("ok") else 409,
+        )
+
+    @app.post("/api/n6/app/v3/virtual-account/proposals/{proposal_id}/confirm")
+    async def app_v3_confirm_virtual_account_proposal(request: Request, proposal_id: int) -> JSONResponse:
+        context = await app_v3_proposal_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, session_token_hash = context
+        try:
+            proposal_id = int(canonical_bigint_id(proposal_id, field_name="proposal_id", required=True))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_proposal_id"}, status_code=400)
+        payload = await read_json_object(request)
+        if payload:
+            return JSONResponse({"ok": False, "error": "empty_confirm_body_required"}, status_code=400)
+        try:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.confirm_trade_proposal,
+                session_token_hash,
+                proposal_id=proposal_id,
+                idempotency_key=str(request.headers.get("idempotency-key") or ""),
+            )
+        except psycopg.Error:
+            return JSONResponse(
+                {"ok": False, "error": "proposal_service_unavailable"},
+                status_code=503,
+            )
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=200 if result.get("ok") else 409,
+        )
+
+    @app.post("/api/n6/app/v3/virtual-account/proposals/cancel")
+    async def app_v3_cancel_virtual_account_proposals(request: Request) -> JSONResponse:
+        context = await app_v3_proposal_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        _session, _principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) != {"proposal_ids"}:
+            return JSONResponse(
+                {"ok": False, "error": "proposal_ids_only_request_required"},
+                status_code=400,
+            )
+        raw_ids = payload.get("proposal_ids")
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+            return JSONResponse(
+                {"ok": False, "error": "invalid_proposal_ids"},
+                status_code=400,
+            )
+        try:
+            proposal_ids = [
+                int(
+                    canonical_bigint_id(
+                        value,
+                        field_name="proposal_id",
+                        required=True,
+                    )
+                )
+                for value in raw_ids
+            ]
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"ok": False, "error": "invalid_proposal_ids"},
+                status_code=400,
+            )
+        if len(set(proposal_ids)) != len(proposal_ids):
+            return JSONResponse(
+                {"ok": False, "error": "duplicate_proposal_ids"},
+                status_code=400,
+            )
+        try:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.cancel_trade_proposals,
+                session_token_hash,
+                proposal_ids=proposal_ids,
+            )
+        except psycopg.Error:
+            return JSONResponse(
+                {"ok": False, "error": "proposal_service_unavailable"},
+                status_code=503,
+            )
+        return n6_json_response(
+            app_v3_public_payload(result),
+            status_code=200 if result.get("ok") else 409,
+        )
+
+    @app.get("/api/n6/app/v3/virtual-account/trades")
+    async def app_v3_virtual_account_trades(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        session, principal, session_token_hash = context
+        if btrack_authority_repository is not None:
+            result = await asyncio.to_thread(
+                btrack_authority_repository.list_virtual_trades,
+                session_token_hash,
+                limit=200,
+            )
+        else:
+            result = await asyncio.to_thread(
+                repo.fetch_app_virtual_trades,
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                limit=200,
+            )
+        return n6_json_response(
+            app_virtual_trades_model(principal, user=session_user_payload(session), result=result)
+        )
 
     @app.get("/api/n6/ui/v1/signals")
     async def ui_v1_signals(request: Request) -> JSONResponse:
@@ -9421,20 +11036,6 @@ def create_app(
         limit = ui_v1_limit_from_request(request, N5_MESSAGE_DEFAULT_LIMIT, max_limit=5000)
         data = repo.fetch_ui_v1_n5_actions(
             filters=n5_action_filters_from_request(request),
-            limit=limit,
-        )
-        return JSONResponse(data)
-
-    @app.get("/api/n6/b-track/v1/buy-signals")
-    async def b_track_v1_buy_signals(request: Request) -> JSONResponse:
-        session = current_session(request, repo)
-        if session is None:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        if session.role != "admin":
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-        limit = ui_v1_limit_from_request(request, N5_MESSAGE_DEFAULT_LIMIT, max_limit=5000)
-        data = repo.fetch_b_track_buy_signals(
-            filters=b_track_buy_signal_filters_from_request(request),
             limit=limit,
         )
         return JSONResponse(data)
@@ -9601,7 +11202,24 @@ def create_app(
             {
                 "ok": True,
                 "user": user_view(user_row),
-                "created": {"user_account": 1, "user_filter_profile": 1, "user_sim_account": 1},
+                "created": {
+                    "user_account": 1,
+                    "user_filter_profile": 1,
+                    "user_sim_account": 1,
+                    "n6_principal": 1,
+                    "n6_virtual_account": 1
+                    if user_row.get("virtual_account_provisioning_status") == "created"
+                    else 0,
+                    "n6_principal_account": 1
+                    if user_row.get("virtual_account_provisioning_status") == "created"
+                    else 0,
+                    "n6_virtual_cash_ledger": 1
+                    if user_row.get("virtual_account_provisioning_status") == "created"
+                    else 0,
+                    "n6_virtual_cash_snapshot": 1
+                    if user_row.get("virtual_account_provisioning_status") == "created"
+                    else 0,
+                },
                 "password_value_logged": False,
                 "password_hash_logged": False,
             }
@@ -9627,19 +11245,19 @@ def create_app(
 
     def build_app_dashboard_data(session: AuthSession, principal: dict[str, Any]) -> dict[str, Any]:
         user = session_user_payload(session)
-        account, snapshot = app_account_sources(repo, principal)
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
         signals = repo.fetch_app_signals(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
-            filters={},
+            filters={"trade_date": current_trade_date},
             limit=web_config.ui_signal_limit,
-        )
+        ) if current_trade_date else []
         return app_dashboard_model(
             principal,
             user=user,
-            account=account,
-            cash_snapshot=snapshot,
+            account=None,
+            cash_snapshot=None,
             signal_rows=signals,
         )
 
@@ -9661,16 +11279,19 @@ def create_app(
             asset_kind=asset_kind,
             filters=filters,
             limit=ui_v1_limit_from_request(request, 100, max_limit=200),
-            include_all_fields=True,
         )
         return JSONResponse(
-            app_v2_filter_model(
-                principal,
-                user=session_user_payload(session),
+            app_v2_filter_api_model(
+                app_v2_filter_model(
+                    principal,
+                    user=session_user_payload(session),
+                    asset_kind=asset_kind,
+                    result=result,
+                    filters=filters,
+                    base_href=f"/n6/app/filter-center/{APP_FILTER_CENTER_PAGE_BY_ASSET[asset_kind]}",
+                    write_enabled=scope_write_active,
+                ),
                 asset_kind=asset_kind,
-                result=result,
-                filters=filters,
-                base_href=f"/n6/app/filter-center/{APP_FILTER_CENTER_PAGE_BY_ASSET[asset_kind]}",
             )
         )
 
@@ -9691,7 +11312,6 @@ def create_app(
             asset_kind=asset_kind,
             filters=current_filters,
             limit=1,
-            include_all_fields=False,
         )
         current_trade_date = ""
         for value in current_result.get("available_for_trade_dates") or []:
@@ -9814,6 +11434,7 @@ def create_app(
                 user=session_user_payload(session),
                 result=result,
                 selected_asset_kind=asset_kind,
+                write_enabled=scope_write_active,
             )
         )
 
@@ -9829,60 +11450,127 @@ def create_app(
         if page_key in {"home", "dashboard"}:
             return build_app_dashboard_data(session, principal)
         if page_key == "account":
-            account, snapshot = app_account_sources(repo, principal)
-            return app_account_model(principal, user=user, account=account, cash_snapshot=snapshot)
-        if page_key == "signals":
-            filters = app_signal_filters_with_trade_date_defaults(dict(app_filters or {}), repo.fetch_app_signal_scope_metadata(
-                principal_id=int(principal["principal_id"]),
-                principal_type=str(principal["principal_type"]),
-                user_id=session.user_id,
-            ), enforce_trading_session=True)
-            scope_metadata = repo.fetch_app_signal_scope_metadata(
-                principal_id=int(principal["principal_id"]),
-                principal_type=str(principal["principal_type"]),
-                user_id=session.user_id,
+            account = repo.fetch_app_virtual_account(
+                int(principal["principal_id"]),
+                str(principal["principal_type"]),
             )
-            scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
-            rows = repo.fetch_app_signals(
-                principal_id=int(principal["principal_id"]),
-                principal_type=str(principal["principal_type"]),
-                user_id=session.user_id,
-                filters=filters,
-                limit=web_config.ui_signal_limit,
+            cash_snapshot = (
+                repo.fetch_app_cash_snapshot(int(account["virtual_account_id"]))
+                if account and account.get("virtual_account_id")
+                else None
             )
-            return app_signals_model(principal, user=user, rows=rows, filters=filters, scope_metadata=scope_metadata)
-        if page_key == "messages":
-            scope_metadata = repo.fetch_app_signal_scope_metadata(
-                principal_id=int(principal["principal_id"]),
-                principal_type=str(principal["principal_type"]),
-                user_id=session.user_id,
-            )
-            filters = app_signal_filters_with_trade_date_defaults(dict(app_filters or {}), scope_metadata, enforce_trading_session=True)
-            scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
-            rows = repo.fetch_app_signals(
-                principal_id=int(principal["principal_id"]),
-                principal_type=str(principal["principal_type"]),
-                user_id=session.user_id,
-                filters=filters,
-                limit=web_config.ui_signal_limit,
-            )
-            return build_app_v2_message_dashboard(
-                principal,
-                user=user,
-                rows=rows,
-                filters=filters,
-                scope_metadata=scope_metadata,
-                limit=web_config.ui_signal_limit,
-            )
-        if page_key == "buy-messages":
-            return build_app_v2_buy_messages_data(session, principal)
+            return app_account_model(principal, user=user, account=account, cash_snapshot=cash_snapshot)
         if page_key == "realtime-scope":
             result = repo.fetch_app_realtime_scope(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
                 user_id=session.user_id,
             )
-            return app_realtime_scope_model(principal, user=user, result=result)
+            return app_realtime_scope_model(
+                principal,
+                user=user,
+                result=result,
+                write_enabled=scope_write_active,
+            )
+        if page_key == "trade-log":
+            result = repo.fetch_app_virtual_trades(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                limit=200,
+            )
+            return app_virtual_trades_model(principal, user=user, result=result)
+        if page_key == "signals":
+            page_limit = max(
+                1,
+                min(
+                    int((app_filters or {}).get("page_limit") or N6_SIGNAL_PAGE_DEFAULT_LIMIT),
+                    N6_SIGNAL_PAGE_MAX_LIMIT,
+                ),
+            )
+            current_trade_date = normalize_filter_value((app_filters or {}).get("trade_date"))
+            scope_metadata = repo.fetch_app_signal_scope_metadata(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                trade_date=current_trade_date,
+            )
+            filters = app_signal_filters_with_trade_date_defaults(
+                {
+                    key: value
+                    for key, value in dict(app_filters or {}).items()
+                    if key != "page_limit"
+                },
+                scope_metadata,
+                enforce_trading_session=True,
+            )
+            scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
+            query_filters = n6_signal_filters_with_cursor(filters)
+            rows = repo.fetch_app_signals(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                filters=query_filters,
+                limit=page_limit + 1,
+            )
+            page_rows, pagination = n6_signal_keyset_page(rows, limit=page_limit)
+            payload = app_signals_model(
+                principal,
+                user=user,
+                rows=page_rows,
+                filters=filters,
+                scope_metadata=scope_metadata,
+            )
+            payload = n6_compact_signal_payload(payload)
+            payload["pagination"] = pagination
+            return payload
+        if page_key == "messages":
+            page_limit = max(
+                1,
+                min(
+                    int((app_filters or {}).get("page_limit") or N6_SIGNAL_PAGE_DEFAULT_LIMIT),
+                    N6_SIGNAL_PAGE_MAX_LIMIT,
+                ),
+            )
+            current_trade_date = normalize_filter_value((app_filters or {}).get("trade_date"))
+            scope_metadata = repo.fetch_app_signal_scope_metadata(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                trade_date=current_trade_date,
+            )
+            filters = app_signal_filters_with_trade_date_defaults(
+                {
+                    key: value
+                    for key, value in dict(app_filters or {}).items()
+                    if key != "page_limit"
+                },
+                scope_metadata,
+                enforce_trading_session=True,
+            )
+            scope_metadata = app_signal_scope_metadata_for_filters(scope_metadata, filters)
+            query_filters = n6_signal_filters_with_cursor(filters)
+            rows = repo.fetch_app_signals(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                filters=query_filters,
+                limit=page_limit + 1,
+            )
+            page_rows, pagination = n6_signal_keyset_page(rows, limit=page_limit)
+            payload = build_app_v2_message_dashboard(
+                principal,
+                user=user,
+                rows=page_rows,
+                filters=filters,
+                scope_metadata=scope_metadata,
+                limit=page_limit,
+            )
+            payload = n6_compact_message_dashboard_payload(payload)
+            payload["pagination"] = pagination
+            return payload
+        if page_key == "buy-messages":
+            return build_app_v2_buy_messages_data(session, principal)
         if page_key in APP_FILTER_CENTER_ASSET_BY_PAGE_KEY:
             asset_kind = APP_FILTER_CENTER_ASSET_BY_PAGE_KEY[page_key]
             filters = {key: value for key, value in (app_filters or {}).items() if value}
@@ -9900,7 +11588,6 @@ def create_app(
                     if app_show_all
                     else app_v2_filter_default_limit(asset_kind)
                 ),
-                include_all_fields=True,
             )
             if date_policy["blocked"]:
                 selected_result["date_policy_blocker"] = date_policy["blocker"]
@@ -9921,6 +11608,8 @@ def create_app(
                 selected_asset_kind=asset_kind,
                 filters=filters,
                 show_all=app_show_all,
+                write_enabled=scope_write_active,
+                bulk_write_enabled=scope_bulk_write_active,
             )
         if page_key in APP_MONITOR_ASSET_BY_PAGE_KEY:
             asset_kind = APP_MONITOR_ASSET_BY_PAGE_KEY[page_key]
@@ -9934,32 +11623,57 @@ def create_app(
                 monitor_status=monitor_status,
                 for_trade_date=str((app_filters or {}).get("for_trade_date") or "").strip(),
             )
-            return app_v2_monitor_model(principal, user=user, result=result, selected_asset_kind=asset_kind)
+            return app_v2_monitor_model(
+                principal,
+                user=user,
+                result=result,
+                selected_asset_kind=asset_kind,
+                write_enabled=scope_write_active,
+            )
         if page_key == "status-monitor":
+            current_trade_date = repo.fetch_app_current_signal_trade_date()
             rows = repo.fetch_app_signals(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
                 user_id=session.user_id,
-                filters={},
+                filters={"trade_date": current_trade_date},
                 limit=web_config.ui_signal_limit,
-            )
+            ) if current_trade_date else []
             return app_status_monitor_model(principal, user=user, rows=rows, filters={})
         if page_key == "watchlist":
+            current_trade_date = repo.fetch_app_current_signal_trade_date()
             rows = repo.fetch_app_signals(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
                 user_id=session.user_id,
-                filters={},
+                filters={"trade_date": current_trade_date},
                 limit=web_config.ui_signal_limit,
-            )
+            ) if current_trade_date else []
             return app_watchlist_model(principal, user=user, rows=rows)
         if page_key == "proposals":
-            return app_locked_future_module_model(
-                principal, user=user, module_key="proposals", component="B Track Proposals"
+            result = repo.fetch_app_trade_proposals(
+                principal_id=int(principal["principal_id"]),
+                principal_type=str(principal["principal_type"]),
+                user_id=session.user_id,
+                limit=100,
+            )
+            return app_trade_proposals_model(
+                principal,
+                user=user,
+                result=result,
+                write_enabled=proposal_write_active,
             )
         if page_key == "portfolio":
-            return app_locked_future_module_model(
-                principal, user=user, module_key="portfolio", component="B Track Portfolio"
+            positions = repo.fetch_app_positions(
+                int(principal["principal_id"]),
+                str(principal["principal_type"]),
+            )
+            return app_portfolio_model(
+                principal,
+                user=user,
+                positions=positions,
+                now=n6_trading_session_now(),
+                proposal_write_enabled=proposal_write_active,
             )
         if page_key == "pnl":
             return app_locked_future_module_model(principal, user=user, module_key="pnl", component="B Track PnL")
@@ -9970,6 +11684,7 @@ def create_app(
         component = {
             "watchlist": "B Track Watchlist",
             "proposals": "B Track Proposals",
+            "strategy-center": "B Track Strategy Center",
         }.get(page_key, "B Track Dashboard")
         return app_empty_planned_model(principal, user=user, component=component)
 
@@ -9993,14 +11708,18 @@ def create_app(
 
     @app.get("/n6/app/{page_key}", response_class=HTMLResponse)
     async def app_shell_page(request: Request, page_key: str) -> Response:
+        if page_key == "watchlist":
+            return RedirectResponse("/n6/app/my-monitor", status_code=307)
+        if page_key == "buy-messages":
+            return RedirectResponse("/n6/app/signals", status_code=307)
         if page_key not in {
             "dashboard",
             "account",
-            "watchlist",
             "signals",
             "messages",
-            "buy-messages",
             "realtime-scope",
+            "strategy-center",
+            "trade-log",
             "filter-center",
             "filter-center:indexes",
             "filter-center:boards",
@@ -10013,32 +11732,91 @@ def create_app(
             "proposals",
             "portfolio",
             "pnl",
+            "ai-agent",
             "ai-users",
             "leaderboard",
             "home",
         }:
             return HTMLResponse("not found", status_code=404)
-        session = current_session(request, repo)
-        if session is None:
-            return RedirectResponse(b_track_login_location(request), status_code=302)
-        principal = resolve_app_principal(session, repo)
-        if principal is None:
-            return HTMLResponse("principal_scope_unavailable", status_code=403)
+        raw_session_token = request.cookies.get(COOKIE_NAME)
         is_filter_center_page = page_key in APP_FILTER_CENTER_ASSET_BY_PAGE_KEY
         is_monitor_page = page_key in APP_MONITOR_ASSET_BY_PAGE_KEY
-        data = build_app_page_data(
-            page_key,
-            session,
-            principal,
-            app_filters=app_v2_filter_filters_from_request(request)
+        app_filters = (
+            app_v2_filter_filters_from_request(request)
             if is_filter_center_page
             else app_v2_monitor_filters_from_request(request)
             if is_monitor_page
             else ui_v1_filters_from_request(request)
             if page_key in {"signals", "messages"}
-            else None,
-            app_show_all=query_param_enabled(request, "show_all") if is_filter_center_page else False,
+            else None
         )
+        if page_key in {"signals", "messages"}:
+            try:
+                n6_signal_filters_with_cursor(app_filters or {})
+            except ValueError:
+                return HTMLResponse("invalid_signal_page_cursor", status_code=400)
+            app_filters = dict(app_filters or {})
+            app_filters["page_limit"] = ui_v1_limit_from_request(
+                request,
+                N6_SIGNAL_PAGE_DEFAULT_LIMIT,
+                max_limit=N6_SIGNAL_PAGE_MAX_LIMIT,
+            )
+        app_show_all = query_param_enabled(request, "show_all") if is_filter_center_page else False
+        session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
+        if session is None:
+            return RedirectResponse(b_track_login_location(request), status_code=302)
+        if page_key == "ai-agent":
+            if btrack_authority_repository is None:
+                return HTMLResponse("AI模拟投资员服务暂不可用", status_code=503)
+            session_token_hash = hash_session_token(raw_session_token or "")
+            try:
+                authority = await asyncio.to_thread(
+                    btrack_authority_repository.resolve_authority,
+                    session_token_hash,
+                )
+                result = await asyncio.to_thread(
+                    btrack_authority_repository.fetch_public_ai_agent_dashboard,
+                    session_token_hash,
+                    decision_limit=50,
+                    trade_limit=50,
+                    summary_limit=30,
+                )
+            except (AttributeError, TypeError, ValueError, psycopg.Error):
+                return HTMLResponse("AI模拟投资员服务暂不可用", status_code=503)
+            if (
+                authority is None
+                or authority.user_id != session.user_id
+                or not isinstance(result, dict)
+            ):
+                return HTMLResponse("principal_scope_unavailable", status_code=403)
+            principal = authority.principal_payload()
+            data = app_ai_agent_public_model(result)
+        else:
+            principal = await asyncio.to_thread(resolve_app_principal, session, repo)
+            if principal is None:
+                return HTMLResponse("principal_scope_unavailable", status_code=403)
+            if page_key in {"signals", "messages"}:
+                current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+                if not current_trade_date:
+                    return HTMLResponse("signal_current_trade_date_unavailable", status_code=409)
+                date_policy = n6_trade_date_access_policy(
+                    current_trade_date=current_trade_date,
+                    requested_trade_date=(app_filters or {}).get("trade_date"),
+                    live_only=True,
+                )
+                if date_policy["blocked"]:
+                    return HTMLResponse(N6_TRADING_SESSION_HISTORY_MESSAGE, status_code=409)
+                app_filters = dict(app_filters or {})
+                if current_trade_date:
+                    app_filters["trade_date"] = current_trade_date
+            data = await asyncio.to_thread(
+                build_app_page_data,
+                page_key,
+                session,
+                principal,
+                app_filters=app_filters,
+                app_show_all=app_show_all,
+            )
         display_page_key = (
             "filter-center"
             if page_key.startswith("filter-center:")
@@ -10046,13 +11824,38 @@ def create_app(
             if is_monitor_page
             else page_key
         )
+        page_model = app_page_model(
+            display_page_key,
+            principal,
+            user=session_user_payload(session),
+            data=data,
+        )
+        page_model["csrf_token"] = (
+            n6_csrf_token(session, csrf_secret)
+            if scope_write_active or proposal_write_active or strategy_center_write_active
+            else ""
+        )
+        page_model["scope_write_enabled"] = scope_write_active
+        page_model["scope_bulk_write_enabled"] = scope_bulk_write_active
+        page_model["proposal_write_enabled"] = proposal_write_active
+        page_model["strategy_center_write_enabled"] = strategy_center_write_active
+        page_model["ux_safety_status"] = (
+            "投影只读模式；"
+            f"本人监控范围{'可管理' if scope_write_active else '管理未启用'}；"
+            + (
+                "交易申请可用；申请由受限 Web 创建，成交由独立 N6 executor 处理（不代表 executor 正在运行）"
+                if proposal_write_active
+                else "交易申请未启用"
+            )
+            + "；不连接真实券商；不执行真实下单"
+        )
         return templates.TemplateResponse(
             request,
             "n6_app_shell.html",
             {
                 "request": request,
                 "user": session_user_payload(session),
-                "page": app_page_model(display_page_key, principal, user=session_user_payload(session), data=data),
+                "page": page_model,
             },
         )
 
@@ -10250,29 +12053,6 @@ def create_app(
                 "user": session_user_payload(session),
                 "nav": nav_context(session, "n5_actions"),
                 "n5_actions_page": n5_actions_page,
-            },
-        )
-
-    @app.get("/n6/b-track/buy-signals", response_class=HTMLResponse)
-    async def b_track_buy_signals_page(request: Request) -> Response:
-        session = current_session(request, repo)
-        if session is None:
-            return RedirectResponse("/n6/login", status_code=303)
-        if session.role != "admin":
-            return HTMLResponse("forbidden", status_code=403)
-        limit = ui_v1_limit_from_request(request, N5_MESSAGE_DEFAULT_LIMIT, max_limit=5000)
-        buy_signals_page = repo.fetch_b_track_buy_signals(
-            filters=b_track_buy_signal_filters_from_request(request),
-            limit=limit,
-        )
-        return templates.TemplateResponse(
-            request,
-            "n6_b_track_buy_signals.html",
-            {
-                "request": request,
-                "user": session_user_payload(session),
-                "nav": nav_context(session, "b_track_buy_signals"),
-                "buy_signals_page": buy_signals_page,
             },
         )
 
@@ -10497,6 +12277,34 @@ def create_app(
             },
         )
 
+    allowed_b_track_write_routes = {
+        ("/api/n6/app/v3/monitor-items", frozenset({"POST"})),
+        ("/api/n6/app/v3/monitor-items/bulk", frozenset({"POST"})),
+        ("/api/n6/app/v3/monitor-items/{monitor_id}", frozenset({"DELETE"})),
+        ("/api/n6/app/v3/realtime-scope-items", frozenset({"POST"})),
+        ("/api/n6/app/v3/realtime-scope-items/bulk", frozenset({"POST"})),
+        ("/api/n6/app/v3/realtime-scope-items/{scope_id}", frozenset({"DELETE"})),
+        ("/api/n6/app/v3/virtual-account/proposals", frozenset({"POST"})),
+        ("/api/n6/app/v3/virtual-account/proposals/cancel", frozenset({"POST"})),
+        ("/api/n6/app/v3/virtual-account/proposals/{proposal_id}/confirm", frozenset({"POST"})),
+        ("/api/n6/app/v3/strategy-center/selection", frozenset({"PUT"})),
+    }
+    # Keep A-track/admin routes intact and fail closed if a B-track mutation
+    # outside the explicitly frozen v3 command surface is ever registered.
+    app.router.routes[:] = [
+        route
+        for route in app.router.routes
+        if not (
+            getattr(route, "path", "").startswith("/api/n6/app/")
+            and set(getattr(route, "methods", set()) or set()) != {"GET"}
+            and (
+                str(getattr(route, "path", "")),
+                frozenset(getattr(route, "methods", set()) or set()),
+            )
+            not in allowed_b_track_write_routes
+        )
+    ]
+
     return app
 
 
@@ -10544,6 +12352,164 @@ def b_track_login_location(request: Request) -> str:
     return f"/n6/login?next={quote(safe_next, safe='/')}"
 
 
+def n6_csrf_token(session: AuthSession, secret: str) -> str:
+    if not secret:
+        return ""
+    return hmac.new(
+        secret.encode("utf-8"),
+        session.session_token_hash.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def n6_csrf_valid(request: Request, session: AuthSession, secret: str) -> bool:
+    expected = n6_csrf_token(session, secret)
+    supplied = str(request.headers.get("x-csrf-token") or "").strip()
+    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+
+def n6_scope_bulk_canonical_filters(filters: Mapping[str, Any]) -> dict[str, Any]:
+    excluded = {"asset_kind", "sort", "sort_dir", "date_policy_blocker", "date_policy_message"}
+    output: dict[str, Any] = {}
+    for key in sorted(filters):
+        if key in excluded:
+            continue
+        value = filters.get(key)
+        if isinstance(value, (list, tuple, set)):
+            normalized = sorted(
+                {
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                }
+            )
+            if normalized:
+                output[key] = normalized
+            continue
+        normalized = str(value or "").strip()
+        if normalized:
+            output[key] = normalized
+    return output
+
+
+def n6_scope_bulk_selection_sha256(identity_keys: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(identity_keys)).encode("utf-8")).hexdigest()
+
+
+def _n6_scope_bulk_b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _n6_scope_bulk_b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
+def n6_scope_bulk_selection_token(
+    *,
+    session: AuthSession,
+    principal: Mapping[str, Any],
+    secret: str,
+    target_scope: str,
+    asset_kind: str,
+    filters: Mapping[str, Any],
+    for_trade_date: str,
+    source_run_id: str,
+    identity_count: int,
+    selection_sha256: str,
+    issued_at: int | None = None,
+) -> str:
+    issued = int(time.time()) if issued_at is None else int(issued_at)
+    payload = {
+        "v": 1,
+        "iat": issued,
+        "exp": issued + N6_SCOPE_BULK_SELECTION_TTL_SECONDS,
+        "target_scope": target_scope,
+        "asset_kind": asset_kind,
+        "filters": n6_scope_bulk_canonical_filters(filters),
+        "for_trade_date": for_trade_date,
+        "source_run_id": source_run_id,
+        "identity_count": int(identity_count),
+        "selection_sha256": selection_sha256,
+        "principal_id": str(principal.get("principal_id") or ""),
+        "principal_type": str(principal.get("principal_type") or ""),
+        "user_id": str(session.user_id),
+    }
+    encoded = _n6_scope_bulk_b64encode(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{encoded}.{session.session_token_hash}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def n6_scope_bulk_selection_payload(
+    token: str,
+    *,
+    session: AuthSession,
+    principal: Mapping[str, Any],
+    secret: str,
+    expected_target_scope: str,
+    now: int | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        encoded, signature = str(token or "").split(".", 1)
+        expected_signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{encoded}.{session.session_token_hash}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not secrets.compare_digest(expected_signature, signature):
+            return None, "selection_token_invalid"
+        payload = json.loads(_n6_scope_bulk_b64decode(encoded))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return None, "selection_token_invalid"
+    current_time = int(time.time()) if now is None else int(now)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("v") != 1
+        or payload.get("target_scope") != expected_target_scope
+        or payload.get("asset_kind") not in {"stock", "index", "board"}
+        or str(payload.get("principal_id") or "") != str(principal.get("principal_id") or "")
+        or str(payload.get("principal_type") or "") != str(principal.get("principal_type") or "")
+        or str(payload.get("user_id") or "") != str(session.user_id)
+    ):
+        return None, "selection_token_invalid"
+    try:
+        expires_at = int(payload.get("exp"))
+        issued_at = int(payload.get("iat"))
+        identity_count = int(payload.get("identity_count"))
+    except (TypeError, ValueError):
+        return None, "selection_token_invalid"
+    if issued_at > current_time + 30 or expires_at < current_time:
+        return None, "selection_token_expired"
+    if (
+        identity_count < 1
+        or identity_count > N6_SCOPE_BULK_MAX_IDENTITIES
+        or not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("selection_sha256") or ""))
+        or not re.fullmatch(r"[0-9]{8}", str(payload.get("for_trade_date") or ""))
+        or not str(payload.get("source_run_id") or "").strip()
+        or not isinstance(payload.get("filters"), dict)
+    ):
+        return None, "selection_token_invalid"
+    return payload, ""
+
+
+async def read_json_object(request: Request) -> dict[str, Any]:
+    if "application/json" not in request.headers.get("content-type", ""):
+        raise HTTPException(status_code=415, detail="application_json_required")
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="json_object_required")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="json_object_required")
+    return payload
+
+
 async def read_login_payload(request: Request) -> dict[str, str]:
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -10584,7 +12550,10 @@ def verify_password(password: str, password_hash: str, password_hash_algo: str) 
 
 
 def current_session(request: Request, repository: N6UserRepository) -> AuthSession | None:
-    raw_token = request.cookies.get(COOKIE_NAME)
+    return current_session_from_token(request.cookies.get(COOKIE_NAME), repository)
+
+
+def current_session_from_token(raw_token: str | None, repository: N6UserRepository) -> AuthSession | None:
     if not raw_token:
         return None
     session = repository.fetch_session(hash_session_token(raw_token))
@@ -10609,8 +12578,6 @@ def session_user_payload(session: AuthSession) -> dict[str, Any]:
 
 def resolve_app_principal(session: AuthSession, repository: N6UserRepository) -> dict[str, Any] | None:
     principals = repository.fetch_app_principals(session.user_id)
-    if not principals and session.role == "user":
-        return session_scoped_human_principal(session)
     if len(principals) != 1:
         return None
     principal = principals[0]
@@ -10619,31 +12586,6 @@ def resolve_app_principal(session: AuthSession, repository: N6UserRepository) ->
     if str(principal.get("principal_type") or "") not in {"admin", "human_user", "ai_user"}:
         return None
     return principal
-
-
-def session_scoped_human_principal(session: AuthSession) -> dict[str, Any]:
-    return {
-        "principal_id": session.user_id,
-        "principal_type": "human_user",
-        "owner_user_id": session.user_id,
-        "principal_status": "active",
-        "display_name": session.display_name or session.login_name,
-        "principal_source": "session_scope",
-    }
-
-
-def app_account_sources(
-    repository: N6UserRepository,
-    principal: dict[str, Any],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    account = repository.fetch_app_virtual_account(
-        int(principal["principal_id"]),
-        str(principal["principal_type"]),
-    )
-    if not account:
-        return None, None
-    snapshot = repository.fetch_app_cash_snapshot(int(account["virtual_account_id"]))
-    return account, snapshot
 
 
 def normalize_login_name(value: Any) -> str:
@@ -10765,7 +12707,16 @@ def ui_v1_filters_from_request(request: Request) -> dict[str, str | None]:
         "action_state": normalize_filter_value(request.query_params.get("action_state")),
         "blocked_reason": normalize_filter_value(request.query_params.get("blocked_reason")),
         "q": normalize_filter_value(request.query_params.get("q")),
+        "cursor": normalize_filter_value(request.query_params.get("cursor")),
     }
+
+
+def n6_signal_filters_with_cursor(filters: Mapping[str, Any]) -> dict[str, Any]:
+    output = dict(filters)
+    parsed_cursor = parse_n6_signal_page_cursor(output.pop("cursor", None))
+    if parsed_cursor is not None:
+        output["before_created_at"], output["before_id"] = parsed_cursor
+    return output
 
 
 def app_signal_filters_with_trade_date_defaults(
@@ -10783,6 +12734,7 @@ def app_signal_filters_with_trade_date_defaults(
             policy = n6_trade_date_access_policy(
                 current_trade_date=current_trade_date,
                 requested_trade_date=explicit_trade_date,
+                live_only=True,
             )
             if policy["blocked"]:
                 output["trade_date"] = policy["effective_trade_date"]
@@ -10875,19 +12827,6 @@ def n5_action_filters_from_request(request: Request) -> dict[str, str | None]:
         "status": normalize_filter_value(request.query_params.get("status")),
         "asset_kind": normalize_filter_value(request.query_params.get("asset_kind")),
         "action_state": normalize_filter_value(request.query_params.get("action_state")),
-        "q": normalize_filter_value(request.query_params.get("q")),
-    }
-
-
-def normalize_b_track_buy_signal_action_type(value: Any) -> str:
-    action_type = str(value or "buy").strip().lower()
-    return action_type if action_type in B_TRACK_BUY_SIGNAL_ACTION_TYPES else "buy"
-
-
-def b_track_buy_signal_filters_from_request(request: Request) -> dict[str, str | None]:
-    return {
-        "action_run_id": normalize_filter_value(request.query_params.get("action_run_id")),
-        "action_type": normalize_b_track_buy_signal_action_type(request.query_params.get("action_type")),
         "q": normalize_filter_value(request.query_params.get("q")),
     }
 
@@ -11062,7 +13001,6 @@ def nav_context(session: AuthSession, active: str) -> dict[str, Any]:
             {"key": "input_messages", "label": "N6输入消息", "href": "/n6/input-messages"},
             {"key": "n5_messages", "label": "N5消息", "href": "/n6/n5-messages"},
             {"key": "n5_actions", "label": "N5动作", "href": "/n6/n5-actions"},
-            {"key": "b_track_buy_signals", "label": "B轨买入信号", "href": "/n6/b-track/buy-signals"},
             {"key": "rag", "label": "RAG问答", "href": "/n6/rag"},
         ],
     }
@@ -11644,7 +13582,16 @@ def transition_summary(row: dict[str, Any]) -> str:
     return " / ".join(f"{name}:{labels.get(value, value or '—')}" for name, value in values)
 
 
-app = create_app()
+def create_runtime_app() -> FastAPI:
+    return create_app(
+        btrack_authority_repository=build_runtime_btrack_authority_repository(),
+        btrack_authority_required=True,
+        strategy_center_repository=build_runtime_strategy_center_repository(),
+        strategy_center_repository_required=True,
+    )
+
+
+app = create_runtime_app()
 
 
 def main() -> None:

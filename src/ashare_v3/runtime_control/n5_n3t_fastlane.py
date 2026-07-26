@@ -22,6 +22,34 @@ DEFAULT_PYTHON_EXECUTABLE = "/Library/Frameworks/Python.framework/Versions/3.11/
 FASTLANE_ACTIVATION_POLICY = "load_safe_activation_guard_v1"
 FASTLANE_ACTIVE_PLAN_POLICY = "active_launchd_schedule_v1"
 FASTLANE_ACTIVATION_CONFIG_ARTIFACT_TYPE = "n5_n3t_fastlane_activation_config_v1"
+FASTLANE_ACTIVATION_CONFIG_ARTIFACT_VERSION = 1
+N5_ACTION_INTAKE_CONTRACT_VERSION = "n5-action-intake-tsc-refresh-v1"
+N5_ACTION_INTAKE_ALLOWED_INPUT = {
+    "trigger_matched": True,
+    "trigger_state_changed_true_matched": True,
+    "trigger_state_changed_false": True,
+    "n4_outbox_read_only": True,
+}
+N5_ACTION_INTAKE_FORBIDDEN = {
+    "market_pull": True,
+    "n3_direct_call": True,
+    "n4_outbox_status_update": True,
+    "n6_touch": True,
+    "trigger_state_changed_action_eligible_entry": True,
+    "trigger_state_changed_action_executed_entry": True,
+}
+N5_ACTION_INTAKE_CONTRACT_HASH = hashlib.sha256(
+    json.dumps(
+        {
+            "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+            "allowed_input": N5_ACTION_INTAKE_ALLOWED_INPUT,
+            "forbidden": N5_ACTION_INTAKE_FORBIDDEN,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
 FASTLANE_WRITE_ENABLED_EXECUTE_POLICY_TYPE = "n5_n3t_fastlane_write_enabled_execute_policy_v1"
 FASTLANE_SESSION_PHASE_POLICY_TYPE = "fastlane_session_phase_policy_v1"
 FASTLANE_ACTIVE_WORKER_POLICY_TYPE = "fastlane_active_worker_policy_v1"
@@ -44,6 +72,11 @@ FASTLANE_LABELS = {
     "n3_c1_n3t": "com.ashare-v3.n3.c1-n3t-action-confirmation-poller",
     "n5_executed": "com.ashare-v3.n5.action-executed-poller",
 }
+FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL = "com.ashare-v3.n5-n3t.policy-review-refresh"
+FASTLANE_POLICY_REVIEW_AUTO_REFRESH_INTERVAL_SECONDS = 15
+FASTLANE_POLICY_REVIEW_AUTO_REFRESH_RUNNER = (
+    "scripts/run_n5_n3t_policy_review_auto_refresh_once.py"
+)
 
 PROTECTED_EXISTING_LABELS = (
     "com.ashare-v3.n3.intraday-proof-poller",
@@ -98,6 +131,161 @@ def default_fastlane_stable_activation_config_path() -> str:
 def default_fastlane_active_worker_policy_review_path(*, for_trade_date: str) -> str:
     safe_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit()) or "unknown_trade_date"
     return str(FASTLANE_POLICY_REVIEW_DIR / safe_trade_date / "active_worker_policy_review_current_latest.json")
+
+
+def classify_fastlane_policy_review_auto_refresh(
+    *,
+    for_trade_date: str,
+    current_exchange_time: str,
+    existing_review: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Decide whether the control-plane review should be regenerated now."""
+
+    target_trade_date = "".join(ch for ch in str(for_trade_date or "") if ch.isdigit())
+    current_trade_date = _yyyymmdd(current_exchange_time)
+    if len(target_trade_date) != 8:
+        raise ValueError("policy review auto refresh for_trade_date mismatch")
+    if len(current_trade_date) != 8:
+        raise ValueError("policy review auto refresh current_exchange_time mismatch")
+
+    if current_trade_date < target_trade_date:
+        action = "NOOP_WAITING_FOR_TRADE_DATE"
+    elif current_trade_date > target_trade_date:
+        action = "BLOCKED_STALE_ACTIVATION_CONFIG"
+    else:
+        hhmm = _hhmm_int(current_exchange_time)
+        if hhmm < 925:
+            action = "NOOP_BEFORE_0925"
+        elif hhmm >= 1500:
+            action = "NOOP_AFTER_SESSION"
+        elif (
+            isinstance(existing_review, Mapping)
+            and str(existing_review.get("for_trade_date") or "") == target_trade_date
+            and existing_review.get("result") == "PASS"
+            and existing_review.get("active_worker_write_enabled_ready") is True
+        ):
+            action = "NOOP_ALREADY_PASS"
+        else:
+            action = "REFRESH_REQUIRED"
+
+    return {
+        "policy_type": "n5_n3t_policy_review_auto_refresh_decision_v1",
+        "action": action,
+        "for_trade_date": target_trade_date,
+        "current_exchange_time": str(current_exchange_time),
+        "review_write_allowed": action == "REFRESH_REQUIRED",
+        "business_runtime_execution_allowed": False,
+    }
+
+
+def write_fastlane_active_worker_policy_review_atomic(
+    *,
+    policy_review_path: Path,
+    review: Mapping[str, Any],
+    expected_for_trade_date: str,
+) -> dict[str, Any]:
+    """Validate and atomically replace the runtime-deferred policy review."""
+
+    expected_trade_date = "".join(ch for ch in str(expected_for_trade_date or "") if ch.isdigit())
+    if len(expected_trade_date) != 8:
+        raise ValueError("policy review expected_for_trade_date mismatch")
+    payload_text = json.dumps(dict(review), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    _assert_no_unresolved_placeholder_or_secret(payload_text)
+    payload = json.loads(payload_text)
+    _validate_fastlane_active_worker_policy_review_candidate(
+        payload,
+        expected_for_trade_date=expected_trade_date,
+    )
+
+    policy_review_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = policy_review_path.with_name(policy_review_path.name + ".tmp")
+    tmp_path.write_text(payload_text, encoding="utf-8")
+    try:
+        loaded = json.loads(tmp_path.read_text(encoding="utf-8"))
+        _validate_fastlane_active_worker_policy_review_candidate(
+            loaded,
+            expected_for_trade_date=expected_trade_date,
+        )
+        os.replace(tmp_path, policy_review_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return {
+        "policy_review_path": str(policy_review_path),
+        "tmp_path": str(tmp_path),
+        "os_replace_used": True,
+        "sha256": _sha256_file(policy_review_path),
+    }
+
+
+def _validate_fastlane_active_worker_policy_review_candidate(
+    review: Mapping[str, Any],
+    *,
+    expected_for_trade_date: str,
+) -> None:
+    if not isinstance(review, Mapping):
+        raise ValueError("active worker policy review must be a JSON object")
+    if review.get("policy_type") != FASTLANE_ACTIVE_WORKER_POLICY_TYPE:
+        raise ValueError("active worker policy review policy_type mismatch")
+    if str(review.get("for_trade_date") or "") != expected_for_trade_date:
+        raise ValueError("active worker policy review for_trade_date mismatch")
+    if _yyyymmdd(str(review.get("current_exchange_time") or "")) != expected_for_trade_date:
+        raise ValueError("active worker policy review current_exchange_time mismatch")
+    result = str(review.get("result") or "")
+    if result not in {"PASS", "WAITING", "BLOCKED"}:
+        raise ValueError("active worker policy review result mismatch")
+    ready = review.get("active_worker_write_enabled_ready") is True
+    if ready != (result == "PASS"):
+        raise ValueError("active worker policy review readiness mismatch")
+    if not str(review.get("session_phase") or ""):
+        raise ValueError("active worker policy review session_phase missing")
+    if not isinstance(review.get("blockers") or [], list):
+        raise ValueError("active worker policy review blockers mismatch")
+    if not isinstance(review.get("waiting_reasons") or [], list):
+        raise ValueError("active worker policy review waiting_reasons mismatch")
+
+
+def _normalize_n5_action_intake_contract(config: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade copied activation config semantics without changing historical files."""
+    lanes = config.get("lanes")
+    normalized_lanes = dict(lanes) if isinstance(lanes, Mapping) else {}
+    n5_action_intake = normalized_lanes.get("n5_action_intake")
+    normalized_intake = dict(n5_action_intake) if isinstance(n5_action_intake, Mapping) else {}
+    normalized_intake.update(
+        {
+            "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+            "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+            "allowed_input": dict(N5_ACTION_INTAKE_ALLOWED_INPUT),
+            "forbidden": dict(N5_ACTION_INTAKE_FORBIDDEN),
+        }
+    )
+    normalized_lanes["n5_action_intake"] = normalized_intake
+    config["artifact_version"] = FASTLANE_ACTIVATION_CONFIG_ARTIFACT_VERSION
+    config["lanes"] = normalized_lanes
+    config.pop("activation_config_path", None)
+    return config
+
+
+def _assert_n5_action_intake_contract_aligned(config: Mapping[str, Any]) -> dict[str, str]:
+    lanes = config.get("lanes")
+    intake = lanes.get("n5_action_intake") if isinstance(lanes, Mapping) else None
+    if not isinstance(intake, Mapping):
+        raise ValueError("n5_intake_contract_missing")
+    if intake.get("contract_version") != N5_ACTION_INTAKE_CONTRACT_VERSION:
+        raise ValueError("n5_intake_contract_version_mismatch")
+    if intake.get("allowed_input") != N5_ACTION_INTAKE_ALLOWED_INPUT:
+        raise ValueError("n5_intake_allowed_input_mismatch")
+    if intake.get("forbidden") != N5_ACTION_INTAKE_FORBIDDEN:
+        raise ValueError("n5_intake_forbidden_policy_mismatch")
+    if intake.get("contract_hash") != N5_ACTION_INTAKE_CONTRACT_HASH:
+        raise ValueError("n5_intake_contract_hash_mismatch")
+    return {
+        "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+        "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+    }
 
 
 def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
@@ -668,7 +856,7 @@ def build_fastlane_active_worker_policy() -> dict[str, Any]:
         "write_authorization": {
             "requires_explicit_execute_gate": True,
             "requires_user_confirmed": True,
-            "n5_action_intake": "formal_TriggerMatched_or_inactive_TriggerStateChanged_false_cleanup",
+            "n5_action_intake": "TriggerMatched_entry_or_TriggerStateChanged_attention_live_refresh_or_inactive_cleanup",
             "n5_actioneligible_entry": "formal_TriggerMatched_only",
             "n3_c1_n3t_action_confirmation": "explicit_n5_active_scope_artifact_and_closed_minute",
             "n5_action_executed": "matching_N3T_C1_CLOSED_metric",
@@ -680,17 +868,17 @@ def build_fastlane_active_worker_policy() -> dict[str, Any]:
                 "n5_action_executed": "disabled",
             },
             "pre_open_call_auction_after_0925": {
-                "n5_action_intake": "write_enabled_bounded_if_formal_TriggerMatched_or_inactive_cleanup",
+                "n5_action_intake": "write_enabled_bounded_for_entry_attention_refresh_or_inactive_cleanup",
                 "n3_c1_n3t_action_confirmation": "wait_first_closed_minute",
                 "n5_action_executed": "wait_matching_n3t_metric",
             },
             "trading": {
-                "n5_action_intake": "write_enabled_bounded_for_TriggerMatched_or_inactive_cleanup",
+                "n5_action_intake": "write_enabled_bounded_for_entry_attention_refresh_or_inactive_cleanup",
                 "n3_c1_n3t_action_confirmation": "write_enabled_bounded_after_closed_minute",
                 "n5_action_executed": "write_enabled_bounded_if_matching_n3t_metric",
             },
             "lunch_break": {
-                "n5_action_intake": "write_enabled_bounded_for_TriggerMatched_or_inactive_cleanup",
+                "n5_action_intake": "write_enabled_bounded_for_entry_attention_refresh_or_inactive_cleanup",
                 "n3_c1_n3t_action_confirmation": "write_enabled_bounded_with_session_gap_policy",
                 "n5_action_executed": "write_enabled_bounded_if_matching_n3t_metric",
             },
@@ -1083,6 +1271,12 @@ def build_fastlane_contract() -> dict[str, Any]:
         "pipeline_order": list(FASTLANE_PIPELINE_ORDER),
         "n5_market_context_permission": list(N5_MARKET_CONTEXT_PERMISSION),
         "n5_output_event_types": list(N5_OUTPUT_EVENT_TYPES),
+        "n5_action_intake_contract": {
+            "contract_version": N5_ACTION_INTAKE_CONTRACT_VERSION,
+            "contract_hash": N5_ACTION_INTAKE_CONTRACT_HASH,
+            "allowed_input": dict(N5_ACTION_INTAKE_ALLOWED_INPUT),
+            "forbidden": dict(N5_ACTION_INTAKE_FORBIDDEN),
+        },
         "n3t_metric_lineage": dict(N3T_METRIC_LINEAGE),
         "session_phase_policy": build_fastlane_session_phase_policy(),
         "active_worker_policy": build_fastlane_active_worker_policy(),
@@ -1247,6 +1441,7 @@ def build_fastlane_trading_day_monitor_review(
     waiting_reasons: list[str] = []
     stderr_error_observed = False
     stderr_snapshots = stderr_snapshots or {}
+    ignored_stale_log_manifest_counts = {label: 0 for label in expected_intervals}
 
     for label, expected_interval in expected_intervals.items():
         state = launchd_states.get(label)
@@ -1286,6 +1481,9 @@ def build_fastlane_trading_day_monitor_review(
     session_phase = str(chain_evidence.get("session_phase") or "")
     for label in expected_intervals:
         for manifest in _as_mapping_list(recent_log_manifests.get(label)):
+            if _is_manifest_from_other_trade_date(manifest, for_trade_date=for_trade_date):
+                ignored_stale_log_manifest_counts[label] += 1
+                continue
             if bool(manifest.get("legacy_metric_used")):
                 blockers.append("legacy_metric_used")
             if bool(manifest.get("old_runner_ref")):
@@ -1360,6 +1558,8 @@ def build_fastlane_trading_day_monitor_review(
     closed_minute_available = bool(chain_evidence.get("closed_minute_available"))
     n5_intake_remaining = max(n4_triggermatched - n5_actioneligible, 0)
     n3t_metric_remaining = max(n5_actioneligible - n3t_rows, 0)
+    exact_cover_waiting = n5_intake_remaining > 0 or n3t_metric_remaining > 0
+    n3t_lineage_ok = bool(chain_evidence.get("n3t_lineage_ok"))
 
     if n4_triggermatched <= 0:
         waiting_reasons.append("waiting_for_n4_triggermatched")
@@ -1377,14 +1577,26 @@ def build_fastlane_trading_day_monitor_review(
         else:
             if n5_active_scope_artifacts > 0 and n3_scoped_c1_artifacts <= 0:
                 blockers.append("n3_scoped_c1_not_advancing_after_closed_minute")
-            if not bool(chain_evidence.get("n3t_lineage_ok")):
+            if not n3t_lineage_ok:
                 blockers.append("n3t_lineage_mismatch")
             if n3t_rows <= 0:
                 blockers.append("n3t_c1_closed_metric_missing_after_closed_minute")
             if n3t_metric_remaining > 0:
                 waiting_reasons.append("waiting_for_n3t_metric_exact_cover")
             if n5_actionexecuted <= 0:
-                blockers.append("n5_actionexecuted_not_advancing")
+                n5_actionexecuted_bootstrap_ready = (
+                    exact_cover_waiting
+                    and n5_actioneligible > 0
+                    and n5_active_tracking > 0
+                    and n5_active_scope_artifacts > 0
+                    and n3_scoped_c1_artifacts > 0
+                    and n3t_rows > 0
+                    and n3t_lineage_ok
+                )
+                if n5_actionexecuted_bootstrap_ready:
+                    waiting_reasons.append("waiting_for_n5_actionexecuted_exact_cover")
+                else:
+                    blockers.append("n5_actionexecuted_not_advancing")
 
     unique_blockers = sorted(set(blockers))
     unique_waiting_reasons = sorted(set(waiting_reasons))
@@ -1408,7 +1620,6 @@ def build_fastlane_trading_day_monitor_review(
     else:
         result = "WAITING"
 
-    exact_cover_waiting = n5_intake_remaining > 0 or n3t_metric_remaining > 0
     final_verdict = {
         "PASS": "FASTLANE_TRADING_DAY_MONITOR_PASS_AUTOMATIC_CHAIN_VERIFIED",
         "WAITING": "FASTLANE_TRADING_DAY_MONITOR_WAITING_FOR_EXACT_COVER"
@@ -1426,6 +1637,7 @@ def build_fastlane_trading_day_monitor_review(
         "automatic_chain_verified": automatic_chain_verified,
         "manual_gate_required": "manual_gate_required" in unique_blockers,
         "stderr_error_observed": stderr_error_observed,
+        "ignored_stale_log_manifest_counts": ignored_stale_log_manifest_counts,
         "chain_counts": {
             "n4_triggermatched": n4_triggermatched,
             "n5_actioneligible": n5_actioneligible,
@@ -1555,6 +1767,7 @@ def build_fastlane_active_worker_policy_review(
         "final_verdict": final_verdict,
         "policy_type": FASTLANE_ACTIVE_WORKER_POLICY_TYPE,
         "for_trade_date": str(for_trade_date),
+        "current_exchange_time": str(monitor_review.get("current_exchange_time") or ""),
         "session_phase": session_phase,
         "session_phase_policy": build_fastlane_session_phase_policy(),
         "active_worker_policy": build_fastlane_active_worker_policy(),
@@ -1640,6 +1853,23 @@ def _is_stale_scheduler_noop_manifest(manifest: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_manifest_from_other_trade_date(
+    manifest: Mapping[str, Any],
+    *,
+    for_trade_date: str,
+) -> bool:
+    fastlane = manifest.get("fastlane") if isinstance(manifest.get("fastlane"), Mapping) else {}
+    manifest_trade_date = str(
+        manifest.get("for_trade_date") or fastlane.get("for_trade_date") or ""
+    )
+    # A manifest without an exact trade date cannot prove the current session.
+    # Treat it like stale history so old compact logs cannot block today.
+    return not (
+        re.fullmatch(r"\d{8}", manifest_trade_date)
+        and manifest_trade_date == str(for_trade_date)
+    )
+
+
 def build_fastlane_launchd_plan(
     *,
     working_directory: str,
@@ -1712,13 +1942,75 @@ def build_fastlane_launchd_plan(
     return report
 
 
+def build_fastlane_policy_review_auto_refresh_launchd_plan(
+    *,
+    working_directory: str,
+    activation_config_path: str,
+    python_executable: str = DEFAULT_PYTHON_EXECUTABLE,
+    start_interval_seconds: int = FASTLANE_POLICY_REVIEW_AUTO_REFRESH_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    config_path = Path(activation_config_path)
+    if config_path.name != Path(default_fastlane_stable_activation_config_path()).name:
+        raise ValueError("policy review auto refresh requires stable activation config path")
+    config = load_fastlane_activation_config(config_path)
+    for_trade_date = str(config.get("for_trade_date") or "")
+    review_path = str(config.get("active_worker_policy_review_path") or "")
+    path_policy = config.get("active_worker_policy_review_path_policy") or {}
+    if not re.fullmatch(r"\d{8}", for_trade_date):
+        raise ValueError("policy review auto refresh activation config for_trade_date mismatch")
+    if not review_path:
+        raise ValueError("policy review auto refresh policy review path missing")
+    if not isinstance(path_policy, Mapping) or (
+        path_policy.get("policy_type") != FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_PATH_POLICY_TYPE
+        or path_policy.get("authorization_timing")
+        != FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_DEFERRED_AUTHORIZATION_TIMING
+    ):
+        raise ValueError("policy review auto refresh path policy mismatch")
+    if int(start_interval_seconds) <= 0:
+        raise ValueError("policy review auto refresh interval must be positive")
+
+    plist = _build_plist(
+        label=FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL,
+        working_directory=working_directory,
+        program_arguments=[
+            python_executable,
+            FASTLANE_POLICY_REVIEW_AUTO_REFRESH_RUNNER,
+            "--activation-config",
+            activation_config_path,
+            "--scheduler-quiet",
+        ],
+        start_interval=int(start_interval_seconds),
+    )
+    _assert_fastlane_policy_review_auto_refresh_plist_safe(plist)
+    return {
+        "gate": "RUNTIME_CONTROL_N5_N3T_0925_POLICY_REVIEW_AUTO_REFRESH_LAUNCHD_PLAN_GATE",
+        "result": "PLAN_ONLY_PASS",
+        "label": FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL,
+        "for_trade_date": for_trade_date,
+        "activation_config_path": activation_config_path,
+        "active_worker_policy_review_path": review_path,
+        "start_interval_seconds": int(start_interval_seconds),
+        "plist": plist,
+        "boundary": {
+            "db_written": False,
+            "business_runtime_executed": False,
+            "outbox_updated": False,
+            "inbox_checkpoint_written": False,
+            "launchd_installed_or_reloaded": False,
+            "stable_config_modified": False,
+            "n6_touched": False,
+        },
+    }
+
+
 def build_fastlane_active_launchd_plan(
     *,
     working_directory: str,
     activation_config_path: str,
     python_executable: str = DEFAULT_PYTHON_EXECUTABLE,
 ) -> dict[str, Any]:
-    config = load_fastlane_activation_config(activation_config_path)
+    config_path = Path(activation_config_path)
+    config = load_fastlane_activation_config(config_path)
     write_policy = _normalize_write_enabled_execute_policy(config.get("execute_policy"))
     intervals = {
         "n5_intake": int(config.get("n5_intake_interval_seconds") or 3),
@@ -1730,6 +2022,7 @@ def build_fastlane_active_launchd_plan(
         "result": "ACTIVE_PLAN_ONLY_PASS",
         "activation_policy": FASTLANE_ACTIVE_PLAN_POLICY,
         "activation_config_path": activation_config_path,
+        "activation_config_sha256": _sha256_file(config_path),
         "activation_config_artifact_type": config.get("artifact_type"),
         "session_phase_policy": build_fastlane_session_phase_policy(),
         "active_worker_policy": build_fastlane_active_worker_policy(),
@@ -1749,6 +2042,15 @@ def build_fastlane_active_launchd_plan(
             == FASTLANE_ACTIVE_WORKER_POLICY_REVIEW_DEFERRED_BOOTSTRAP_MODE
         )
         report["write_enabled_execute_policy"] = write_policy
+        intake_lanes = config.get("lanes") or {}
+        intake_config = intake_lanes.get("n5_action_intake") if isinstance(intake_lanes, Mapping) else {}
+        if isinstance(intake_config, Mapping) and (
+            intake_config.get("contract_version") or intake_config.get("contract_hash")
+        ):
+            report["n5_action_intake_contract"] = {
+                "contract_version": str(intake_config.get("contract_version") or ""),
+                "contract_hash": str(intake_config.get("contract_hash") or ""),
+            }
         report["active_worker_policy_review_ref"] = active_worker_policy_review_ref
         report["write_enabled_lane_readiness"] = lane_readiness
         report["automatic_worker_activation_ready"] = all(lane_readiness.values())
@@ -1864,7 +2166,9 @@ def build_fastlane_write_enabled_activation_config(
     if active_worker_policy_review is None and not defer_active_worker_policy_review_to_runtime:
         raise ValueError("active_worker_policy_review is required for write-enabled activation config")
 
-    config = json.loads(json.dumps(dict(base_config), ensure_ascii=False))
+    config = _normalize_n5_action_intake_contract(
+        json.loads(json.dumps(dict(base_config), ensure_ascii=False))
+    )
     config.pop("session_context", None)
     config["session_context_policy"] = {
         "policy_type": FASTLANE_RUNTIME_SESSION_CONTEXT_POLICY_TYPE,
@@ -1932,6 +2236,7 @@ def build_fastlane_write_enabled_activation_config(
         "old_n3_n4_labels_unchanged": True,
     }
     config["forbidden_operation_proof"] = _forbidden_operation_proof()
+    _assert_n5_action_intake_contract_aligned(config)
     _assert_no_unresolved_placeholder_or_secret(json.dumps(config, ensure_ascii=False, sort_keys=True))
     return config
 
@@ -2074,7 +2379,9 @@ def retarget_fastlane_activation_config_for_trade_date(
             return {str(key): retarget(item) for key, item in value.items()}
         return value
 
-    config = retarget(json.loads(json.dumps(dict(base_config), ensure_ascii=False)))
+    config = _normalize_n5_action_intake_contract(
+        retarget(json.loads(json.dumps(dict(base_config), ensure_ascii=False)))
+    )
     config["for_trade_date"] = new_trade_date
     config["post_close_final_a_pass_done_marker_path"] = default_post_close_final_a_pass_done_marker_path(
         for_trade_date=new_trade_date
@@ -2100,6 +2407,7 @@ def write_fastlane_stable_activation_config_atomic(
         raise ValueError("stable activation config artifact_type mismatch")
     if str(payload.get("for_trade_date") or "") != expected_trade_date:
         raise ValueError("stable activation config for_trade_date mismatch")
+    _assert_n5_action_intake_contract_aligned(payload)
 
     stable_activation_config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = stable_activation_config_path.with_name(stable_activation_config_path.name + ".tmp")
@@ -2141,6 +2449,7 @@ def write_fastlane_post_close_readiness_config_rollover(
         raise ValueError("next_trade_date_required")
 
     base_config = load_fastlane_activation_config(base_activation_config_path)
+    base_activation_config_sha256 = _sha256_file(base_activation_config_path)
     target_base_config = retarget_fastlane_activation_config_for_trade_date(
         base_config,
         for_trade_date=target_trade_date,
@@ -2190,6 +2499,10 @@ def write_fastlane_post_close_readiness_config_rollover(
         config=config,
         expected_for_trade_date=target_trade_date,
     )
+    dated_activation_config_sha256 = _sha256_file(dated_path)
+    if dated_activation_config_sha256 != stable_write["sha256"]:
+        raise ValueError("stable_dated_activation_config_sha256_mismatch")
+    n5_action_intake_contract = _assert_n5_action_intake_contract_aligned(config)
 
     report = {
         "artifact_type": FASTLANE_POST_CLOSE_READINESS_CONFIG_ROLLOVER_ARTIFACT_TYPE,
@@ -2198,10 +2511,13 @@ def write_fastlane_post_close_readiness_config_rollover(
         "for_trade_date": source_trade_date,
         "next_trade_date": target_trade_date,
         "base_activation_config_path": str(base_activation_config_path),
+        "base_activation_config_sha256": base_activation_config_sha256,
         "dated_activation_config_path": str(dated_path),
-        "dated_activation_config_sha256": _sha256_file(dated_path),
+        "dated_activation_config_sha256": dated_activation_config_sha256,
         "stable_activation_config_path": str(stable_path),
         "stable_activation_config_sha256": stable_write["sha256"],
+        "stable_dated_content_equal": True,
+        "n5_action_intake_contract": n5_action_intake_contract,
         "stable_atomic_write": stable_write,
         "active_worker_policy_review_path": str(review_path),
         "active_worker_policy_review": {
@@ -2240,11 +2556,13 @@ def build_fastlane_write_enabled_activation_config_full_chain_preflight(
         "n5_action_executed": False,
     }
     active_worker_policy_review_ref: Mapping[str, Any] = {}
+    n5_action_intake_contract: dict[str, str] = {}
 
     try:
         config = load_fastlane_activation_config(config_path)
         _assert_write_enabled_plan_has_session_context_policy(config)
         active_worker_policy_review_ref = _resolve_active_worker_policy_review_ref(config)
+        n5_action_intake_contract = _assert_n5_action_intake_contract_aligned(config)
         write_policy = _normalize_write_enabled_execute_policy(config.get("execute_policy"))
         if not write_policy:
             blockers.append("execute_policy_missing")
@@ -2297,6 +2615,7 @@ def build_fastlane_write_enabled_activation_config_full_chain_preflight(
         "automatic_worker_activation_ready": automatic_worker_activation_ready,
         "activation_scope": activation_scope,
         "active_worker_policy_review_ref": dict(active_worker_policy_review_ref),
+        "n5_action_intake_contract": n5_action_intake_contract,
         "blockers": blockers,
         "forbidden_operation_proof": _forbidden_operation_proof(),
         "next_safe_order": (
@@ -2368,6 +2687,7 @@ def validate_fastlane_write_enabled_activation_authorization(config: Mapping[str
         active_worker_policy_review_ref,
         for_trade_date=str(config.get("for_trade_date") or ""),
     )
+    _assert_n5_action_intake_contract_aligned(config)
     if (write_policy.get("n3_c1_n3t_action_confirmation") or {}).get("execute"):
         _assert_n3_c1_n3t_write_enabled_config_ready(config)
     return write_policy
@@ -2465,6 +2785,7 @@ def _is_fastlane_exact_cover_waiting_reason(reason: str) -> bool:
     return reason in {
         "waiting_for_n5_intake_exact_cover",
         "waiting_for_n3t_metric_exact_cover",
+        "waiting_for_n5_actionexecuted_exact_cover",
     }
 
 
@@ -2656,6 +2977,34 @@ def write_fastlane_active_launchd_plan(
     return report
 
 
+def write_fastlane_policy_review_auto_refresh_launchd_plan(
+    *,
+    output_dir: Path,
+    working_directory: str,
+    activation_config_path: str,
+    python_executable: str = DEFAULT_PYTHON_EXECUTABLE,
+    start_interval_seconds: int = FASTLANE_POLICY_REVIEW_AUTO_REFRESH_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    report = build_fastlane_policy_review_auto_refresh_launchd_plan(
+        working_directory=working_directory,
+        activation_config_path=activation_config_path,
+        python_executable=python_executable,
+        start_interval_seconds=start_interval_seconds,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = output_dir / f"{report['label']}.plist"
+    with plist_path.open("wb") as fh:
+        plistlib.dump(report["plist"], fh, sort_keys=True)
+    report["plist_path"] = str(plist_path)
+    report_path = output_dir / "N5_N3T_policy_review_auto_refresh_launchd_plan.json"
+    report["report_path"] = str(report_path)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return report
+
+
 def write_fastlane_launchd_plan(
     *,
     output_dir: Path,
@@ -2774,6 +3123,36 @@ def _assert_fastlane_active_plist_safe(plist: dict[str, Any]) -> None:
     ):
         if forbidden in joined:
             raise ValueError(f"forbidden fastlane active ProgramArguments token: {forbidden}")
+
+
+def _assert_fastlane_policy_review_auto_refresh_plist_safe(plist: dict[str, Any]) -> None:
+    if plist.get("Label") != FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL:
+        raise ValueError("policy review auto refresh label mismatch")
+    if plist.get("RunAtLoad") is not False or plist.get("KeepAlive") is not False:
+        raise ValueError("policy review auto refresh must be bounded and interval-only")
+    if int(plist.get("StartInterval") or 0) <= 0:
+        raise ValueError("policy review auto refresh requires positive StartInterval")
+    joined = " ".join(str(value) for value in plist.get("ProgramArguments", []))
+    if FASTLANE_POLICY_REVIEW_AUTO_REFRESH_RUNNER not in joined:
+        raise ValueError("policy review auto refresh runner mismatch")
+    if "--activation-config" not in joined or "--scheduler-quiet" not in joined:
+        raise ValueError("policy review auto refresh arguments incomplete")
+    _assert_no_unresolved_placeholder_or_secret(json.dumps(plist, ensure_ascii=False, sort_keys=True))
+    for forbidden in (
+        "--current-exchange-time",
+        "--dsn",
+        "--execute",
+        "--user-confirmed",
+        "launchctl",
+        "run_n5_live_tracking_poller_once.py",
+        "run_n3_c1_n3t_action_confirmation_fastlane_once.py",
+        "run_n6",
+        "rollback",
+        "schema",
+        "migration",
+    ):
+        if forbidden in joined:
+            raise ValueError(f"forbidden policy review auto refresh ProgramArguments token: {forbidden}")
 
 
 def load_fastlane_activation_config(path: str | Path) -> dict[str, Any]:

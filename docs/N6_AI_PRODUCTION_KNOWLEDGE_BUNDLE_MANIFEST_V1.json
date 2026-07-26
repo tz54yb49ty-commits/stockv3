@@ -1,0 +1,92 @@
+{
+  "bundle_version": "N6_AI_PRODUCTION_KNOWLEDGE_BUNDLE_V1",
+  "authority_source_commit": "8fef361aa053eb93bb6b00bf43df6b73c32debbe",
+  "authority_source_tree": "4f78768e27cf733e99d35065293b4efe1bff2057",
+  "highest_schema_migration": "058",
+  "planned_schema_migrations": [],
+  "status": "shadow_runtime_approved_after_catalog_activation",
+  "production_agent_usable": true,
+  "autonomous_trading_usable": false,
+  "production_field_count": 194,
+  "unresolved_production_field_count": 0,
+  "production_field_allowlist_sha256": "eadbf1742cfc804776998bf8cc236df469b3f61153410ef906c2f20b0c76ad7e",
+  "production_field_allowlist_payload_sha256": "1464542e613504ff4bb78b29c8465ff8bb85aaeb1ac37b63aa883ef6d957bd36",
+  "research_bundle_superseded_sha256": "69db95dd106bc5ffbee501ebe3144a3005bb8b55012377a29779816169e7b0fc",
+  "allowed_sources_sha256": "98b3e2b0a03ce632d82c3eda9a10b4115a58c910b84639b9d4f605e0a9b601bc",
+  "forbidden_sources_sha256": "f52b4300858110df0632a437942119f560107b44bbcba2577ec58b1e3f507e06",
+  "documents": [
+    {
+      "path": "docs/N6_AI_AGENT_V1_CONTRACT.json",
+      "sha256": "038099b3695b1f7e6a17ac016dd44fc9bf4e7d5f30d6edd1ed54184db17de452"
+    },
+    {
+      "path": "docs/N6_AI_AGENT_V1_SYSTEM_GUIDE.md",
+      "sha256": "8f6ac5741a343a9ee72e9f755bf724f963d01e94e95030c3b6d30d0af1e65ffb"
+    },
+    {
+      "path": "docs/N6_PROJECTION_CONTRACT.md",
+      "sha256": "3b97a2b5f2544810803a45b29059855a7912855a3cf0fbdd9b60099eea36bd5a"
+    },
+    {
+      "path": "docs/N3N6Q_FOR_N6_VIRTUAL_ACCOUNT_QUOTE_CONTRACT.md",
+      "sha256": "0904ff58fd304274212837e152a9f506dc3437565c3a4f76cbd2dc876289f6b7"
+    },
+    {
+      "path": "docs/N6_MULTI_USER_AND_AI_ARCHITECTURE_v1.md",
+      "sha256": "2f4b7d58ec5afe1a1815df4217429a2ab0954956b478685181bc6e53586d8e91"
+    },
+    {
+      "path": "docs/V3_TRIGGER_ACTION_RUNTIME_SPEC.md",
+      "sha256": "8210da0e06e4b316488f209135643c7e5fb03893c03c5931b410373f4b8ec499"
+    },
+    {
+      "path": "docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md",
+      "sha256": "6a22383b16e26d84863a1762c0831619eb6e3fbb021e2e6c61e49b3d82632635"
+    },
+    {
+      "path": "docs/N5_CANONICAL_ACTION_FLOW_v0.1.md",
+      "sha256": "c4e3912290e77dafc0d564dc27da57b5a78988e841257db5c9e6c7b6ec2a4de5"
+    }
+  ],
+  "runtime_boundaries": {
+    "shadow_only": true,
+    "autonomous_feature_must_remain_disabled": true,
+    "zero_human_private_data": true,
+    "zero_n1_n5_bare_table_access": true,
+    "zero_repository_or_obsidian_runtime_access": true,
+    "model_cannot_submit_price_quantity_account_or_date": true,
+    "fresh_n3n6q_quote_owned_by_executor": true
+  },
+  "bundle_sha256": "1a873d69ef8f14e329b744460d549bcb3c35d99bb6af5fd10c16fc1a9dda15bc",
+  "activation_contract": {
+    "migration": "058",
+    "migration_file_sha256": "e9be877e437d471b63181f0bf1e1d14c10373f184a0ba2cf104bd1e9ef80d4e0",
+    "migration_chain": [
+      {
+        "migration": "055",
+        "path": "sql/055_n6_ai_agent_v1_schema.sql",
+        "sha256": "ad13f8d0a1db3a91b01dd154e69f74abf1cee5458572f2210343f5d3c07d34a8"
+      },
+      {
+        "migration": "056",
+        "path": "sql/056_n6_ai_agent_v1_identity_account_seed.sql",
+        "sha256": "5cb4cc1fb2997bdf817043e36fff83adfe6e6d01fc3c61a4cacc79db03150cef"
+      },
+      {
+        "migration": "057",
+        "path": "sql/057_n6_ai_agent_execution_compat.sql",
+        "sha256": "4088461ce77de9cd1d6cfd084c51d34b0ff9ccf79fb6310e657345ef5f8b7da8"
+      },
+      {
+        "migration": "058",
+        "path": "sql/058_n6_ai_context_memory_hash_contract.sql",
+        "sha256": "e9be877e437d471b63181f0bf1e1d14c10373f184a0ba2cf104bd1e9ef80d4e0"
+      }
+    ],
+    "required_db_role": "n6_ai_agent",
+    "required_function": "public.n6_ai_agent_context_load_v2(text,date,integer,text)",
+    "required_external_manifest_file_sha256": true,
+    "required_scram_service": "n6_ai_agent",
+    "ai_identity_seed_required": true
+  }
+}

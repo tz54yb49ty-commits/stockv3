@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from ashare_v3.condition.basis import (
+    CONDITION_PROJECTION_CONTEXT_VERSION,
     DateContext,
     DEFAULT_INDEX_POOL_IDENTITIES,
     PERIOD_ESCALATION_CONTEXT_GENERATION_MODE,
@@ -12,10 +13,12 @@ from ashare_v3.condition.basis import (
     active_versions_from_ready_check,
     attach_period_escalation_contexts,
     attach_period_escalation_context_to_row,
+    build_condition_projection_context,
     build_period_escalation_context,
     build_quality_items,
     canonical_target_fields_for_direction,
     computed_condition_fields,
+    condition_projection_context_hash_valid,
     count_quality_severities,
     empty_necessary_condition_fields,
     empty_static_structure_fields,
@@ -47,6 +50,40 @@ class RecordingCursor:
 
     def fetchall(self) -> list[dict[str, object]]:
         return list(self.rows)
+
+
+def condition_projection_basis_row(asset_kind: str) -> dict[str, object]:
+    identity_fields = {
+        "stock": {"stock_identity_key": "stock:SH:600000", "name": "浦发银行"},
+        "index": {"index_identity_key": "index:SH:000001", "name": "上证指数"},
+        "board": {"board_identity_key": "board:TDX:881155", "board_name": "银行"},
+    }
+    return {
+        "asset_kind": asset_kind,
+        **identity_fields[asset_kind],
+        "source_trade_date": "20260710",
+        "for_trade_date": "20260713",
+        "source_version": f"{asset_kind}_daily_20260710_v1",
+        "raw_json": {"close": "10.5000"},
+        "period_trigger_baseline_json": {
+            "periods": {
+                period: {"current_close_seed": "10.5" if period == "D" else None}
+                for period in PERIODS
+            }
+        },
+        "up_reference_period": "W",
+        "buy_target_price": "12.3400",
+        "buy_expected_return_pct": "17.523800",
+        "down_reference_period": "M",
+        "sell_target_price": "9.1000",
+        "sell_expected_return_pct": "13.333300",
+        "up_sell_reference_period": "W",
+        "clear_sell_ref_period": "W",
+        "up_secondary_target_price": "13.2500",
+        "up_secondary_expected_return_pct": "26.190500",
+        "score": "80.5000",
+        "pe_core": "12.3000",
+    }
 
 
 class ConditionBasisTest(unittest.TestCase):
@@ -1000,6 +1037,181 @@ class ConditionBasisTest(unittest.TestCase):
         self.assertEqual(weekly["expected_source_trade_date_count"], 0)
         self.assertEqual(weekly["status"], "not_seen")
         self.assertFalse(weekly["seen"])
+
+    def test_condition_projection_context_stock_is_ready_and_hash_stable(self) -> None:
+        dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+        row = condition_projection_basis_row("stock")
+        expected_common_fields = (
+            "name", "close", "up_reference_period", "buy_target_price",
+            "buy_expected_return_pct", "down_reference_period", "sell_target_price",
+            "sell_expected_return_pct", "clear_sell_ref_period",
+            "up_secondary_target_price", "up_secondary_expected_return_pct",
+        )
+
+        first = build_condition_projection_context(dates=dates, current_row=row)
+        second = build_condition_projection_context(dates=dates, current_row=row)
+
+        self.assertEqual(first["contract_version"], CONDITION_PROJECTION_CONTEXT_VERSION)
+        self.assertEqual(first["status"], "ready")
+        self.assertEqual(first["not_ready_reasons"], [])
+        self.assertEqual(first["fields"]["name"], "浦发银行")
+        self.assertEqual(first["fields"]["close"], "10.5")
+        self.assertEqual(first["fields"]["buy_target_price"], "12.34")
+        self.assertEqual(first["fields"]["score"], "80.5")
+        self.assertEqual(first["fields"]["pe_core"], "12.3")
+        self.assertEqual(tuple(first["fields"]), expected_common_fields + ("score", "pe_core"))
+        self.assertEqual(first["context_hash"], second["context_hash"])
+        self.assertTrue(condition_projection_context_hash_valid(first))
+        changed = condition_projection_basis_row("stock")
+        changed["buy_target_price"] = "12.35"
+        self.assertNotEqual(
+            first["context_hash"],
+            build_condition_projection_context(dates=dates, current_row=changed)["context_hash"],
+        )
+        tampered = {**first, "fields": {**first["fields"], "close": "10.6"}}
+        self.assertFalse(condition_projection_context_hash_valid(tampered))
+
+    def test_condition_projection_context_index_and_board_use_exact_shapes(self) -> None:
+        dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+        expected_common_fields = (
+            "name", "close", "up_reference_period", "buy_target_price",
+            "buy_expected_return_pct", "down_reference_period", "sell_target_price",
+            "sell_expected_return_pct", "clear_sell_ref_period",
+            "up_secondary_target_price", "up_secondary_expected_return_pct",
+        )
+
+        index_context = build_condition_projection_context(
+            dates=dates,
+            current_row=condition_projection_basis_row("index"),
+        )
+        board_context = build_condition_projection_context(
+            dates=dates,
+            current_row=condition_projection_basis_row("board"),
+        )
+
+        self.assertEqual(index_context["status"], "ready")
+        self.assertEqual(index_context["fields"]["name"], "上证指数")
+        self.assertEqual(tuple(index_context["fields"]), expected_common_fields)
+        self.assertEqual(tuple(board_context["fields"]), expected_common_fields)
+        self.assertNotIn("score", index_context["fields"])
+        self.assertNotIn("pe_core", index_context["fields"])
+        self.assertEqual(board_context["status"], "ready")
+        self.assertEqual(board_context["fields"]["name"], "银行")
+
+    def test_condition_projection_context_index_and_board_validate_nullable_not_ready_and_hash(self) -> None:
+        dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+        optional_fields = (
+            "up_reference_period", "buy_target_price", "buy_expected_return_pct",
+            "down_reference_period", "sell_target_price", "sell_expected_return_pct",
+            "clear_sell_ref_period", "up_secondary_target_price",
+            "up_secondary_expected_return_pct",
+        )
+
+        for asset_kind, name_field in (("index", "name"), ("board", "board_name")):
+            with self.subTest(asset_kind=asset_kind, case="nullable"):
+                row = condition_projection_basis_row(asset_kind)
+                for field in optional_fields:
+                    row[field] = None
+                row["up_sell_reference_period"] = None
+                context = build_condition_projection_context(dates=dates, current_row=row)
+                self.assertEqual(context["status"], "ready")
+                self.assertEqual(context["nullable_fields"], list(optional_fields))
+                self.assertTrue(condition_projection_context_hash_valid(context))
+                tampered = {**context, "fields": {**context["fields"], "close": "10.6"}}
+                self.assertFalse(condition_projection_context_hash_valid(tampered))
+
+            with self.subTest(asset_kind=asset_kind, case="not_ready"):
+                row = condition_projection_basis_row(asset_kind)
+                row[name_field] = None
+                context = build_condition_projection_context(dates=dates, current_row=row)
+                self.assertEqual(context["status"], "not_ready")
+                self.assertIn("name_missing", context["not_ready_reasons"])
+                self.assertTrue(condition_projection_context_hash_valid(context))
+
+    def test_condition_projection_context_optional_nulls_do_not_block_ready(self) -> None:
+        dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+        row = condition_projection_basis_row("stock")
+        for field in (
+            "up_reference_period", "buy_target_price", "buy_expected_return_pct",
+            "down_reference_period", "sell_target_price", "sell_expected_return_pct",
+            "clear_sell_ref_period", "up_secondary_target_price",
+            "up_secondary_expected_return_pct", "score", "pe_core",
+        ):
+            row[field] = None
+        row["up_sell_reference_period"] = None
+
+        context = build_condition_projection_context(dates=dates, current_row=row)
+
+        self.assertEqual(context["status"], "ready")
+        self.assertEqual(context["not_ready_reasons"], [])
+        self.assertEqual(
+            context["nullable_fields"],
+            [field for field in context["fields"] if field not in {"name", "close"}],
+        )
+
+    def test_condition_projection_context_fails_closed_for_core_contract_errors(self) -> None:
+        good_dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+        cases = []
+        for mutation, reason in (
+            (("name", None), "name_missing"),
+            (("raw_json", {"close": "0"}), "raw_close_missing_or_non_positive"),
+            (("raw_json", {}), "raw_close_missing_or_non_positive"),
+            (("raw_json", {"close": "not-a-number"}), "raw_close_missing_or_non_positive"),
+            (("stock_identity_key", "index:SH:600000"), "invalid_identity_key"),
+            (("source_trade_date", "20260709"), "source_trade_date_mismatch"),
+            (("for_trade_date", "20260714"), "for_trade_date_mismatch"),
+            (("clear_sell_ref_period", "Q"), "clear_sell_ref_period_alias_mismatch"),
+            (("clear_sell_ref_period", None), "clear_sell_ref_period_alias_mismatch"),
+            (("up_sell_reference_period", None), "clear_sell_ref_period_alias_mismatch"),
+        ):
+            row = condition_projection_basis_row("stock")
+            row[mutation[0]] = mutation[1]
+            cases.append((good_dates, row, reason))
+        missing_d_seed = condition_projection_basis_row("stock")
+        missing_d_seed["period_trigger_baseline_json"]["periods"]["D"]["current_close_seed"] = None
+        cases.append((good_dates, missing_d_seed, "d_current_close_seed_missing_or_non_positive"))
+        mismatch = condition_projection_basis_row("stock")
+        mismatch["raw_json"] = {"close": "10.6"}
+        cases.append((good_dates, mismatch, "close_source_mismatch"))
+        cases.append((
+            DateContext("20260713", "20260710", "20260710", "20260713", True),
+            condition_projection_basis_row("stock"),
+            "trade_date_order_invalid",
+        ))
+        cases.append((
+            DateContext("2026-07-10", "20260709", "20260713", "20260710", True),
+            condition_projection_basis_row("stock"),
+            "invalid_source_trade_date",
+        ))
+
+        for dates, row, reason in cases:
+            with self.subTest(reason=reason):
+                context = build_condition_projection_context(dates=dates, current_row=row)
+                self.assertEqual(context["status"], "not_ready")
+                self.assertIn(reason, context["not_ready_reasons"])
+                self.assertTrue(condition_projection_context_hash_valid(context))
+
+    def test_condition_projection_context_is_attached_after_incremental_context(self) -> None:
+        dates = DateContext("20260710", "20260709", "20260713", "20260710", True)
+
+        enriched = attach_period_escalation_context_to_row(
+            condition_projection_basis_row("stock"),
+            dates=dates,
+            previous_context_by_identity={},
+            open_source_dates=["20260706", "20260707", "20260708", "20260709", "20260710"],
+        )
+        baseline = enriched["period_trigger_baseline_json"]
+
+        self.assertEqual(
+            baseline["condition_projection_context"]["contract_version"],
+            CONDITION_PROJECTION_CONTEXT_VERSION,
+        )
+        self.assertTrue(condition_projection_context_hash_valid(baseline["condition_projection_context"]))
+        self.assertEqual(
+            baseline["period_escalation_context"]["generation_mode"],
+            PERIOD_ESCALATION_CONTEXT_GENERATION_MODE,
+        )
+        self.assertTrue(enriched["context_enrichment_hash"])
 
     def test_period_escalation_context_is_reenriched_and_materialized_without_new_columns(self) -> None:
         dates = DateContext(

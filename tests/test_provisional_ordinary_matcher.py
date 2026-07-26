@@ -12,6 +12,7 @@ from ashare_v3.trigger.provisional_ordinary_matcher import (
     build_provisional_ordinary_matcher_plans,
     summarize_provisional_ordinary_matcher_plans,
 )
+from ashare_v3.trigger.provisional_trigger_lifecycle import build_lifecycle_output_plans
 from ashare_v3.trigger.rule_v4_matcher import (
     LEGACY_PERIOD_ESCALATION_REPLAY_CONTEXT_RUN_IDS,
     ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
@@ -20,7 +21,12 @@ from ashare_v3.trigger.rule_v4_matcher import (
     PERIOD_ESCALATION_DIRECTION_TRANSITIONS,
     PERIOD_ESCALATION_REQUIREMENTS,
 )
-from tests.test_trigger_projection_matcher import CONTEXT_RUN_ID, context_row, stable_int
+from tests.test_trigger_projection_matcher import (
+    CONTEXT_RUN_ID,
+    context_row,
+    context_row_with_condition_projection,
+    stable_int,
+)
 
 
 N3P_RUN_ID = (
@@ -569,6 +575,66 @@ def production_20260714_1322_stock_300308_non_same_day_not_seen(
 
 
 class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
+    def test_condition_projection_context_is_trace_only_for_ordinary_and_full(self) -> None:
+        cases = (
+            ("stock", "stock:SH:600000", "buy", "BUY:D", ["BUY"]),
+            ("stock", "stock:SH:600001", "sell", "SELL:D", ["SELL"]),
+            ("stock", "stock:SH:600002", "buy", "BUY:FULL", ["BUY:FULL"]),
+            ("stock", "stock:SH:600003", "sell", "SELL:FULL", ["SELL:FULL"]),
+            ("index", "index:SH:000001", "buy", "BUY:D", ["BUY"]),
+            ("index", "index:SH:000905", "buy", "BUY:FULL", ["BUY:FULL"]),
+            ("board", "board:TDX:BK001", "sell", "SELL:D", ["SELL"]),
+            ("board", "board:TDX:BK002", "sell", "SELL:FULL", ["SELL:FULL"]),
+        )
+        for asset_kind, identity_key, direction, condition_key, signal_types in cases:
+            with self.subTest(asset_kind=asset_kind, condition_key=condition_key):
+                valid_context = context_row_with_condition_projection(
+                    identity_key,
+                    direction,
+                    condition_key,
+                    signal_types,
+                    asset_kind=asset_kind,
+                )
+                invalid_context = copy.deepcopy(valid_context)
+                invalid_context["period_trigger_baseline_json"]["condition_projection_context"]["fields"][
+                    "close"
+                ] = "10.6"
+                metric = n3p_metric_row(asset_kind, identity_key, direction=direction)
+
+                valid_plan = build_provisional_ordinary_matcher_plans(
+                    trigger_context_run_id=CONTEXT_RUN_ID,
+                    source_metric_run_id=N3P_RUN_ID,
+                    context_rows=[valid_context],
+                    metric_rows=[metric],
+                )[0]
+                invalid_plan = build_provisional_ordinary_matcher_plans(
+                    trigger_context_run_id=CONTEXT_RUN_ID,
+                    source_metric_run_id=N3P_RUN_ID,
+                    context_rows=[invalid_context],
+                    metric_rows=[metric],
+                )[0]
+
+                self.assertEqual(valid_plan["condition_projection_context_status"], "ready")
+                self.assertEqual(invalid_plan["condition_projection_context_status"], "not_ready")
+                self.assertIn(
+                    "condition_projection_context_hash_mismatch",
+                    invalid_plan["condition_projection_context_trace"]["validation_reasons"],
+                )
+                self.assertEqual(
+                    valid_plan["condition_projection_context"],
+                    valid_context["period_trigger_baseline_json"]["condition_projection_context"],
+                )
+                for field in (
+                    "plan_status",
+                    "output_event_type",
+                    "trigger_type",
+                    "trigger_period",
+                    "triggered_periods",
+                    "signal_type",
+                    "candidate_trigger_identity_key",
+                ):
+                    self.assertEqual(valid_plan.get(field), invalid_plan.get(field), field)
+
     def test_production_20260714_1322_stock_300308_non_same_day_not_seen(self) -> None:
         context, metric = production_20260714_1322_stock_300308_non_same_day_not_seen()
 
@@ -620,6 +686,111 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
         traces = plan["period_escalation_trace"]["periods"]
         self.assertEqual(traces["Y"]["gate_status"], "not_ready")
         self.assertEqual(traces["Q"]["evidence_source"], "current_same_day_formal_pass")
+
+    def test_lifecycle_output_event_authority_is_stage_specific_and_fail_closed(self) -> None:
+        context, metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SH:600048",
+            direction="buy",
+            condition_key="BUY:Y,Q,M,W,D",
+            formal_periods=("W", "D"),
+            negative_statuses={"Y": "not_ready", "Q": "not_seen", "M": "not_seen"},
+        )
+        raw_plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+        previous = {
+            "asset_kind": raw_plan["asset_kind"],
+            "identity_key": raw_plan["identity_key"],
+            "direction": raw_plan["direction"],
+            "signal_type": raw_plan["signal_type"],
+            "condition_key": raw_plan["condition_key"],
+            "trigger_period": raw_plan["trigger_period"],
+            "current_status": "matched",
+            "raw_json": {
+                "trigger_type": raw_plan["trigger_type"],
+                "trigger_mark_candidate": "legacy_mark",
+                "primary_trigger_period": raw_plan["primary_trigger_period"],
+                "triggered_periods": raw_plan["triggered_periods"],
+                "all_trigger_periods": raw_plan["all_trigger_periods"],
+            },
+        }
+
+        initial_match = build_lifecycle_output_plans([raw_plan], previous_states=[])[0]
+        matched_changed = build_lifecycle_output_plans([raw_plan], previous_states=[previous])[0]
+        raw_inactive = copy.deepcopy(raw_plan)
+        raw_inactive.update(
+            {
+                "plan_status": "no_op",
+                "output_event_type": None,
+                "current_status": "no_op",
+                "trigger_live": False,
+                "metric_ready": True,
+                "projection_status": "ready",
+                "projection_quality_status": "passed",
+                "trace_status": "passed",
+            }
+        )
+        raw_inactive["rule_eval_result"].update(
+            {
+                "outcome_classification": "no_op",
+                "output_event_type": None,
+                "trigger_live": False,
+                "pending_reasons": [],
+                "quality_reasons": [],
+                "blocked_reason": None,
+            }
+        )
+        matched_to_inactive = build_lifecycle_output_plans(
+            [raw_inactive], previous_states=[previous]
+        )[0]
+
+        for valid in (initial_match, matched_changed, matched_to_inactive):
+            assert_same_day_period_escalation_output_contract(valid)
+        self.assertEqual(initial_match["output_event_type"], "TriggerMatched")
+        self.assertEqual(initial_match["lifecycle_output_reason"], "inactive_to_matched")
+        self.assertEqual(matched_changed["output_event_type"], "TriggerStateChanged")
+        self.assertEqual(matched_changed["rule_eval_result"]["output_event_type"], "TriggerMatched")
+        self.assertEqual(matched_changed["lifecycle_output_reason"], "matched_changed")
+        self.assertEqual(matched_to_inactive["output_event_type"], "TriggerStateChanged")
+        self.assertIsNone(matched_to_inactive["rule_eval_result"]["output_event_type"])
+        self.assertEqual(matched_to_inactive["lifecycle_output_reason"], "matched_to_inactive")
+
+        invalid_plans = []
+        for field, value in (
+            ("output_event_type", "TriggerMatched"),
+            ("current_status", "inactive"),
+            ("lifecycle_output_reason", "inactive_to_matched"),
+            ("state_change_reason", "tampered"),
+            ("previous_status", "inactive"),
+            ("writes_trigger_match", True),
+        ):
+            invalid = copy.deepcopy(matched_changed)
+            invalid[field] = value
+            invalid_plans.append(invalid)
+        previous_alias_tamper = copy.deepcopy(matched_changed)
+        previous_alias_tamper["previous_current_status"] = "inactive"
+        invalid_plans.append(previous_alias_tamper)
+        raw_event_tamper = copy.deepcopy(matched_changed)
+        raw_event_tamper["rule_eval_result"]["output_event_type"] = None
+        invalid_plans.append(raw_event_tamper)
+        raw_outcome_tamper = copy.deepcopy(matched_changed)
+        raw_outcome_tamper["rule_eval_result"]["outcome_classification"] = "no_op"
+        invalid_plans.append(raw_outcome_tamper)
+        forged_rule_proof = copy.deepcopy(matched_changed)
+        forged_rule_proof["rule_proof"]["output_event_type"] = "TriggerStateChanged"
+        invalid_plans.append(forged_rule_proof)
+        shared_field_tamper = copy.deepcopy(matched_changed)
+        shared_field_tamper["rule_eval_result"]["all_trigger_periods"] = ["M", "W", "D"]
+        invalid_plans.append(shared_field_tamper)
+
+        for invalid in invalid_plans:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    assert_same_day_period_escalation_output_contract(invalid)
 
     def test_20260715_1017_mixed_same_day_and_n2_context_keeps_terminal_contract(self) -> None:
         cases = (
@@ -965,7 +1136,7 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
                             run_id=SAME_DAY_CONTEXT_RUN_ID,
                         )
                         amount_value = 150000.0 if asset_kind == "stock" and direction == "buy" else (
-                            50.0 if asset_kind == "stock" else (150.0 if direction == "buy" else 50.0)
+                            50000.0 if asset_kind == "stock" else (150.0 if direction == "buy" else 50.0)
                         )
                         metric = n3p_metric_row(
                             asset_kind,
@@ -1413,16 +1584,194 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
         self.assertFalse(report["side_effect_guard"]["n6_written"])
         self.assertFalse(report["side_effect_guard"]["sim_trade_virtual_written"])
 
+    def test_stock_buy_full_converts_missing_n2_unit_and_rejects_300759_false_match(self) -> None:
+        context = context_row("stock:SZ:300759", "buy", "BUY:FULL", ["BUY:FULL"])
+        baseline = context["period_trigger_baseline_json"]["periods"]["D"]
+        baseline.update(
+            {
+                "previous_transition": "flat",
+                "trigger_previous_entity_high": "33.90",
+                "trigger_previous_entity_low": "32.00",
+                "previous_avg_amount": "3394611.01782",
+            }
+        )
+        metric = n3p_metric_row(
+            "stock",
+            "stock:SZ:300759",
+            direction="buy",
+            price="34.05",
+            amount="2752606058.850448",
+            formal_period_amount_proof=formal_period_amount_proof_factory(
+                periods=("D",),
+                amount_unit="yuan",
+                source_kind="N3_standard_period_metric",
+                amount_pass=True,
+                amount_value=2752606058.850448,
+            ),
+        )
 
+        plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
 
+        detail = plan["rule_proof"]["period_evaluation_details"][0]
+        trace = detail["amount_unit_status"]["amount_normalization_trace"]
+        self.assertIsNone(plan["output_event_type"])
+        self.assertEqual(detail["current_transition"], "low_volume_up")
+        self.assertFalse(detail["transition_amount_pass"])
+        self.assertAlmostEqual(detail["previous_amount_baseline"], 3394611017.82)
+        self.assertEqual(trace["source_unit"], "thousand_yuan")
+        self.assertEqual(trace["n2_baseline_unit_conversion_factor"], 1000)
+        self.assertEqual(trace["canonical_unit"], "yuan")
 
+    def test_stock_missing_units_convert_for_all_ordinary_periods(self) -> None:
+        context = context_row("stock:SZ:300001", "buy", "BUY:Y,Q,M,W,D", ["BUY"])
+        for baseline in context["period_trigger_baseline_json"]["periods"].values():
+            baseline["previous_avg_amount"] = "100"
+        metric = n3p_metric_row(
+            "stock",
+            "stock:SZ:300001",
+            direction="buy",
+            price="11",
+            amount="150000",
+            formal_period_amount_proof=formal_period_amount_proof_factory(
+                periods=("Y", "Q", "M", "W", "D"),
+                amount_unit="yuan",
+                source_kind="N3_standard_period_metric",
+                amount_pass=True,
+                amount_value=150000.0,
+            ),
+        )
 
+        plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+
+        self.assertEqual(plan["output_event_type"], "TriggerMatched")
+        self.assertEqual(plan["triggered_periods"], ["Y", "Q", "M", "W", "D"])
+        for detail in plan["rule_proof"]["period_evaluation_details"]:
+            trace = detail["amount_unit_status"]["amount_normalization_trace"]
+            self.assertEqual(detail["previous_amount_baseline"], 100000.0)
+            self.assertEqual(trace["source_unit"], "thousand_yuan")
+            self.assertEqual(trace["n2_baseline_unit_conversion_factor"], 1000)
+
+    def test_stock_sell_and_sell_full_use_converted_baseline(self) -> None:
+        contexts = [
+            context_row("stock:SZ:300002", "sell", "SELL:Y,Q,M,W,D", ["SELL"]),
+            context_row("stock:SZ:300003", "sell", "SELL:FULL", ["SELL:FULL"]),
+        ]
+        for context in contexts:
+            for baseline in context["period_trigger_baseline_json"]["periods"].values():
+                baseline["previous_avg_amount"] = "100"
+        metrics = [
+            n3p_metric_row(
+                "stock",
+                "stock:SZ:300002",
+                direction="sell",
+                amount="50000",
+                formal_period_amount_proof=formal_period_amount_proof_factory(
+                    periods=("Y", "Q", "M", "W", "D"),
+                    amount_unit="yuan",
+                    source_kind="N3_standard_period_metric",
+                    amount_pass=True,
+                    amount_value=50000.0,
+                ),
+            ),
+            n3p_metric_row("stock", "stock:SZ:300003", direction="sell", amount="50000"),
+        ]
+
+        plans = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=contexts,
+            metric_rows=metrics,
+        )
+
+        self.assertEqual({plan["output_event_type"] for plan in plans}, {"TriggerMatched"})
+        self.assertEqual({plan["trigger_type"] for plan in plans}, {"SELL", "SELL:FULL"})
+        self.assertEqual(plans[0]["triggered_periods"], ["Y", "Q", "M", "W", "D"])
+        self.assertEqual(plans[1]["triggered_periods"], ["D"])
+        self.assertTrue(
+            all(
+                plan["rule_proof"]["period_evaluation_details"][0]["current_transition"]
+                == "low_volume_down"
+                for plan in plans
+            )
+        )
+
+    def test_explicit_yuan_and_index_board_missing_units_do_not_double_convert(self) -> None:
+        contexts = [
+            context_row("stock:SZ:300004", "buy", "BUY:D", ["BUY"]),
+            context_row("index:SH:000016", "buy", "BUY:D", ["BUY"], asset_kind="index"),
+            context_row("board:TDX:BK001", "buy", "BUY:D", ["BUY"], asset_kind="board"),
+        ]
+        stock_baseline = contexts[0]["period_trigger_baseline_json"]["periods"]["D"]
+        stock_baseline["previous_avg_amount"] = "100"
+        stock_baseline["previous_avg_amount_unit"] = "yuan"
+        metrics = [
+            n3p_metric_row(str(context["asset_kind"]), str(context["identity_key"]), direction="buy", amount="150")
+            for context in contexts
+        ]
+
+        plans = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=contexts,
+            metric_rows=metrics,
+        )
+
+        self.assertEqual({plan["output_event_type"] for plan in plans}, {"TriggerMatched"})
+        for plan in plans:
+            detail = plan["rule_proof"]["period_evaluation_details"][0]
+            trace = detail["amount_unit_status"]["amount_normalization_trace"]
+            self.assertEqual(detail["previous_amount_baseline"], 100.0)
+            self.assertEqual(trace["n2_baseline_unit_conversion_factor"], 1)
+            self.assertEqual(trace["canonical_unit"], "yuan")
+
+    def test_unsupported_n2_amount_unit_fails_closed(self) -> None:
+        context = context_row("stock:SZ:300005", "buy", "BUY:D", ["BUY"])
+        baseline = context["period_trigger_baseline_json"]["periods"]["D"]
+        baseline["previous_avg_amount"] = "100"
+        baseline["previous_avg_amount_unit"] = "wan_yuan"
+
+        plan = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            source_metric_run_id=N3P_RUN_ID,
+            context_rows=[context],
+            metric_rows=[n3p_metric_row("stock", "stock:SZ:300005", direction="buy", amount="150")],
+        )[0]
+
+        detail = plan["rule_proof"]["period_evaluation_details"][0]
+        trace = detail["amount_unit_status"]["amount_normalization_trace"]
+        self.assertIsNone(plan["output_event_type"])
+        self.assertEqual(detail["classification"], "pending")
+        self.assertEqual(detail["amount_unit_status"]["status"], "mismatch")
+        self.assertEqual(trace["unit_conversion_policy"], "unsupported_n2_period_trigger_baseline_amount_unit")
 
     def test_rule_reuse_and_b2_hint_module_isolation_static_guard(self) -> None:
+        from ashare_v3.trigger import projection_matcher
+        from ashare_v3.trigger import provisional_ordinary_execute
         import ashare_v3.trigger.provisional_ordinary_matcher as ordinary_matcher
+        from ashare_v3.trigger import provisional_projection_execute
 
         module_source = inspect.getsource(ordinary_matcher)
         b2_module_source = inspect.getsource(provisional_projection_matcher)
+        passthrough_source = "\n".join(
+            inspect.getsource(module)
+            for module in (
+                projection_matcher,
+                ordinary_matcher,
+                provisional_ordinary_execute,
+                provisional_projection_matcher,
+                provisional_projection_execute,
+            )
+        )
 
         self.assertIn("evaluate_v4_plan", module_source)
         self.assertNotIn("stock_realtime_projection_metric", module_source)
@@ -1431,16 +1780,15 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
         self.assertNotIn("common_event_outbox", module_source)
         self.assertNotIn("common_event_inbox", module_source)
         self.assertIn("build_provisional_projection_matcher_plans", b2_module_source)
-
-    def test_period_escalation_policy_is_versioned_v2(self) -> None:
-        self.assertEqual(
-            ORDINARY_PERIOD_ESCALATION_POLICY_VERSION,
-            "N4-ordinary-period-escalation-v2",
-        )
-        self.assertEqual(
-            ORDINARY_PERIOD_ESCALATION_POLICY_HASH,
-            "3a0aa136ff3393c7",
-        )
+        for forbidden in (
+            "stock_condition_basis",
+            "index_condition_basis",
+            "board_condition_basis",
+            "stock_daily_bar_fact",
+            "index_daily_bar_fact",
+            "board_daily_bar_fact",
+        ):
+            self.assertNotIn(forbidden, passthrough_source)
 
 
 def n3p_metric_row(
@@ -1459,7 +1807,10 @@ def n3p_metric_row(
 ) -> dict[str, object]:
     price = price if price is not None else ("10.50" if direction == "buy" else "9.50")
     if amount is None:
-        amount = "150" if direction == "buy" else "50"
+        if asset_kind == "stock":
+            amount = "150000" if direction == "buy" else "50000"
+        else:
+            amount = "150" if direction == "buy" else "50"
     if trigger_amount_chain_pass is None and formal_period_amount_proof is None:
         trigger_amount_chain_pass = {"D": True}
         formal_period_amount_proof = formal_period_amount_proof_factory(

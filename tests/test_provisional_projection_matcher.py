@@ -1,3 +1,4 @@
+from copy import deepcopy
 import inspect
 import unittest
 
@@ -9,6 +10,7 @@ from tests.test_trigger_projection_matcher import (
     CONTEXT_RUN_ID,
     PROJECTION_RUN_ID,
     context_row,
+    context_row_with_condition_projection,
     direct_30m_projection_row,
     hint_1m_projection_row,
     projection_row,
@@ -16,6 +18,84 @@ from tests.test_trigger_projection_matcher import (
 
 
 class ProvisionalProjectionMatcherTest(unittest.TestCase):
+    def test_condition_projection_context_is_trace_only_for_index_board_hint(self) -> None:
+        cases = (
+            ("index", "index:SH:000016", "buy", "BUY_HINT", "up_volume_expanding"),
+            ("board", "board:TDX:BK001", "sell", "SELL_HINT", "down_volume_shrinking"),
+        )
+        for asset_kind, identity_key, direction, condition_key, signal in cases:
+            with self.subTest(condition_key=condition_key):
+                valid_context = context_row_with_condition_projection(
+                    identity_key,
+                    direction,
+                    condition_key,
+                    [condition_key],
+                    asset_kind=asset_kind,
+                )
+                invalid_context = deepcopy(valid_context)
+                invalid_context["period_trigger_baseline_json"]["condition_projection_context"]["fields"][
+                    "close"
+                ] = "10.6"
+                projection = projection_row(asset_kind, identity_key, "ready", signal)
+
+                valid_plan = build_provisional_projection_matcher_plans(
+                    trigger_context_run_id=CONTEXT_RUN_ID,
+                    projection_run_id=PROJECTION_RUN_ID,
+                    context_rows=[valid_context],
+                    projection_rows=[projection],
+                )[0]
+                invalid_plan = build_provisional_projection_matcher_plans(
+                    trigger_context_run_id=CONTEXT_RUN_ID,
+                    projection_run_id=PROJECTION_RUN_ID,
+                    context_rows=[invalid_context],
+                    projection_rows=[projection],
+                )[0]
+
+                self.assertEqual(valid_plan["condition_projection_context_status"], "ready")
+                self.assertEqual(invalid_plan["condition_projection_context_status"], "not_ready")
+                self.assertIn(
+                    "condition_projection_context_hash_mismatch",
+                    invalid_plan["condition_projection_context_trace"]["validation_reasons"],
+                )
+                self.assertEqual(
+                    valid_plan["condition_projection_context"],
+                    valid_context["period_trigger_baseline_json"]["condition_projection_context"],
+                )
+                for field in (
+                    "plan_status",
+                    "output_event_type",
+                    "trigger_live",
+                    "current_status",
+                    "signal_type",
+                    "trigger_mark_candidate",
+                    "projection_30m_type",
+                    "plan_id",
+                ):
+                    self.assertEqual(valid_plan.get(field), invalid_plan.get(field), field)
+
+    def test_stock_hint_not_applicable_preserves_ready_condition_projection_context(self) -> None:
+        context = context_row_with_condition_projection(
+            "stock:SH:600000",
+            "buy",
+            "BUY_HINT",
+            ["BUY_HINT"],
+            asset_kind="stock",
+        )
+        plan = build_provisional_projection_matcher_plans(
+            trigger_context_run_id=CONTEXT_RUN_ID,
+            projection_run_id=PROJECTION_RUN_ID,
+            context_rows=[context],
+            projection_rows=[projection_row("stock", "stock:SH:600000", "ready", "up_volume_expanding")],
+        )[0]
+
+        self.assertEqual(plan["plan_status"], "no_op")
+        self.assertIsNone(plan["output_event_type"])
+        self.assertEqual(plan["condition_projection_context_status"], "ready")
+        self.assertEqual(
+            plan["condition_projection_context"],
+            context["period_trigger_baseline_json"]["condition_projection_context"],
+        )
+
     def test_ready_buy_and_sell_hint_projection_rows_match(self) -> None:
         plans = build_provisional_projection_matcher_plans(
             trigger_context_run_id=CONTEXT_RUN_ID,
@@ -107,14 +187,19 @@ class ProvisionalProjectionMatcherTest(unittest.TestCase):
             self.assertTrue(plan["not_n5_final_proof"])
 
     def test_index_board_hint_1m_projection_v2_matches_and_stock_is_not_applicable(self) -> None:
+        contexts = [
+            context_row("index:SH:000016", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="index"),
+            context_row("board:TDX:BK001", "sell", "SELL_HINT", ["SELL_HINT"], asset_kind="board"),
+            context_row("stock:SH:600000", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="stock"),
+        ]
+        for context in contexts:
+            for baseline in context["period_trigger_baseline_json"]["periods"].values():
+                baseline["previous_avg_amount_unit"] = "unsupported_test_unit"
+
         plans = build_provisional_projection_matcher_plans(
             trigger_context_run_id=CONTEXT_RUN_ID,
             projection_run_id=PROJECTION_RUN_ID,
-            context_rows=[
-                context_row("index:SH:000016", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="index"),
-                context_row("board:TDX:BK001", "sell", "SELL_HINT", ["SELL_HINT"], asset_kind="board"),
-                context_row("stock:SH:600000", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="stock"),
-            ],
+            context_rows=contexts,
             projection_rows=[
                 hint_1m_projection_row("index", "index:SH:000016", "volume_up"),
                 hint_1m_projection_row("board", "board:TDX:BK001", "shrink_down"),

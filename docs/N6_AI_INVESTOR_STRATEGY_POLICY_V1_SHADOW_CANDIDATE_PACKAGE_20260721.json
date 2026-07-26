@@ -1,0 +1,112 @@
+{
+  "package_id": "N6_AI_INVESTOR_STRATEGY_POLICY_V1_SHADOW_CANDIDATE_20260721",
+  "package_version": "2",
+  "strategy_version": "n6_ai_investor_strategy_policy_v1_shadow_20260721",
+  "layer_role": "N6_user",
+  "candidate_status": "approved_for_shadow_only",
+  "approval_scope": "N6_AI_STRATEGY_SHADOW_FAST_LANE_SINGLE_APPROVAL",
+  "approval_received": true,
+  "semantic_source": {
+    "path": "docs/N6_AI_INVESTOR_STRATEGY_POLICY_V1_DRAFT.md",
+    "sha256": "56082554c4f1099c9fa265d80f0233fde7459d2748be4c85f69fc198bddfc9e7",
+    "document_status_at_freeze": "DRAFT",
+    "unresolved_semantic_count": 0
+  },
+  "runtime_semantic_source_bundle": {
+    "bundle_version": "N6_AI_KNOWLEDGE_BUNDLE_V3",
+    "bundle_sha256": "95098b11e8cc9296d243c54a8a7954aaf42f7fa4771f251b537522e1ff94332b",
+    "manifest_path": "docs/N6_AI_KNOWLEDGE_BUNDLE_MANIFEST.json",
+    "manifest_sha256_at_promotion_input": "e1d600246004547b081fbf92bdc2280a1180eed6158831ba698bd7474a443541"
+  },
+  "research_promotion_bundle": {
+    "bundle_version": "N6_AI_KNOWLEDGE_BUNDLE_V5",
+    "supersedes_bundle_sha256": "2b4d82a8f82c0930c22872c1e097910857378ab10bbf62840f838016bf89bfd9",
+    "manifest_path": "docs/N6_AI_KNOWLEDGE_BUNDLE_MANIFEST.json",
+    "identity_rule": "the downstream V5 manifest hashes this immutable candidate package and the canonical wrapper; its own exact hashes must be recorded in activation closeout evidence, not embedded here"
+  },
+  "implementation_authority": {
+    "policy_module": "src/ashare_v3/user/ai_investor_strategy_policy_v1.py",
+    "policy_module_sha256": "9034f865c91af7e94869089818e45cf7b2cdbb1de9a1f1287e760a4503348107",
+    "shadow_schedule_commit": "dedba8621009cbdab21398c263cacb85b028938d",
+    "shadow_schedule_contract_sha256": "aa10f84db4af2d3024656b60f085adec7140e45f5392c5441ff92c999b5bd5dd",
+    "research_compatibility_commit": "098048af4a73feff94fbc0fcfc46ac08a5388774"
+  },
+  "rule_differences": [
+    {
+      "field": "governance_status",
+      "before": "documented_not_active",
+      "after": "approved_for_shadow_only",
+      "semantic_change": false
+    },
+    {
+      "field": "runtime_schedule",
+      "before": "legacy_300_second_shadow_launchagent",
+      "after": "open_trade_date_four_slots_with_five_minute_recovery_windows",
+      "semantic_change": false
+    }
+  ],
+  "risk_boundaries": {
+    "shadow_only": true,
+    "autonomous_trading_authorized": false,
+    "real_trading_authorized": false,
+    "proposal_authorized": false,
+    "order_authorized": false,
+    "trade_authorized": false,
+    "n1_n5_modification_authorized": false,
+    "open_trade_date_gate_required": true,
+    "slot_gate_required": true,
+    "deepseek_identity_probe_required": true,
+    "concurrent_manual_invocation_authorized": false
+  },
+  "activation_policy": {
+    "slots": [
+      "10:25",
+      "11:25",
+      "13:55",
+      "14:55"
+    ],
+    "window_minutes": 5,
+    "maximum_identity_probes_per_open_trade_date": 4,
+    "maximum_decision_calls_per_open_trade_date": 4,
+    "maximum_requests_per_ready_slot": 2,
+    "outside_slot_requests": 0,
+    "closed_trade_date_requests": 0
+  },
+  "evidence": {
+    "research_bridge_tests": "53/53 OK on compatibility worktree",
+    "schedule_targeted_tests": "10/10 pg_proc source compatibility tests and 132/132 original 067 matrix OK on 067 worktree",
+    "full_n6_tests_at_freeze": "1078 OK skipped=8 on pre-compatibility integration commit; must be rerun on final integration commit",
+    "git_diff_check": "PASS",
+    "database_062_and_067_objects_at_freeze": "MISSING",
+    "runtime_at_freeze": "legacy plist restored after fail-closed attempt; shadow labels not loaded"
+  },
+  "prior_fast_lane_attempt": {
+    "status": "failed_closed_before_activation",
+    "reason": "067_requires_058_and_062",
+    "database_write_committed": false,
+    "deepseek_request_count": 0,
+    "external_state_restored": true,
+    "evidence_path": "/Users/chuanfuchen/.local/state/ashare-v3/n6-ai-agent/20260721_022309_shadow_fast_lane/attempt-1-fail-closed.json",
+    "evidence_sha256": "6f24e9339624357ccc7b0ace0e31c871f4bc2006c0e4447622471657aedda0b4"
+  },
+  "rollback_conditions": [
+    "input_sha_or_manifest_identity_mismatch",
+    "integration_or_test_failure",
+    "obsidian_sync_or_check_failure",
+    "release_manifest_mismatch",
+    "database_067_contract_mismatch",
+    "launchagent_schedule_mismatch",
+    "deepseek_identity_probe_failure",
+    "duplicate_or_ambiguous_slot_activity",
+    "proposal_order_trade_count_nonzero",
+    "autonomous_or_real_trading_boundary_violation"
+  ],
+  "rollback_order": [
+    "stop_new_shadow_schedule",
+    "restore_previous_launchagent_plist_and_release",
+    "rollback_only_the_067_preflight_function_when_safe",
+    "remove_failed_release_staging",
+    "restore_obsidian_managed_snapshot",
+    "retain_failed_audit_evidence"
+  ]
+}

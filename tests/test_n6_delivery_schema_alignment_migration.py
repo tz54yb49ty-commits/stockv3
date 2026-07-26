@@ -1,4 +1,3 @@
-import json
 import re
 import unittest
 from pathlib import Path
@@ -6,21 +5,19 @@ from pathlib import Path
 
 MIGRATION = Path("sql/035_n6_delivery_notification_queue_schema_alignment.sql")
 ROLLBACK = Path("sql/035_n6_delivery_notification_queue_schema_alignment_rollback.sql")
-DOC_JSON = Path("docs/N6_delivery_schema_alignment_migration_draft.json")
 DOC_MD = Path("docs/N6_DELIVERY_SCHEMA_ALIGNMENT_MIGRATION_DRAFT.md")
 
 
 class N6DeliverySchemaAlignmentMigrationTest(unittest.TestCase):
-    def test_required_artifacts_exist_and_json_parses(self) -> None:
+    def test_required_tracked_artifacts_document_draft_boundary(self) -> None:
         self.assertTrue(MIGRATION.exists())
         self.assertTrue(ROLLBACK.exists())
-        self.assertTrue(DOC_JSON.exists())
         self.assertTrue(DOC_MD.exists())
 
-        payload = json.loads(DOC_JSON.read_text(encoding="utf-8"))
-        self.assertEqual(payload["status"], "DRAFT_PASS")
-        self.assertFalse(payload["execute"])
-        self.assertFalse(payload["database_write"])
+        document = DOC_MD.read_text(encoding="utf-8")
+        self.assertIn("Status: DRAFT_PASS", document)
+        self.assertIn("execute=false", document)
+        self.assertIn("database_write=false", document)
 
     def test_migration_only_touches_user_notification_queue_constraints(self) -> None:
         sql = MIGRATION.read_text(encoding="utf-8")

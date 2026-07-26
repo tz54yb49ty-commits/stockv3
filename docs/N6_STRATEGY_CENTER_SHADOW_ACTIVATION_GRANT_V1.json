@@ -1,0 +1,366 @@
+{
+  "document_schema_version": 1,
+  "schema": {
+    "$id": "ashare-v3://runtime-control/n6-strategy-center-shadow-activation-grant-v1",
+    "type": "object",
+    "required": [
+      "document_schema_version",
+      "schema",
+      "policy",
+      "parent_manifest",
+      "parent_manifest_sha256",
+      "child_request_template"
+    ],
+    "properties": {
+      "document_schema_version": {
+        "const": 1
+      },
+      "schema": {
+        "type": "object"
+      },
+      "policy": {
+        "type": "object"
+      },
+      "parent_manifest": {
+        "type": "object"
+      },
+      "parent_manifest_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "child_request_template": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  },
+  "policy": {
+    "policy_id": "n6_strategy_center_shadow_activation_grant_v1",
+    "layer_role": "runtime_control",
+    "mode": "FULL_MODE",
+    "risk_level": "high",
+    "default_decision": "REJECT",
+    "parent_approval_is_immutable": true,
+    "approval_survives_lease_expiry": true,
+    "lease_renewal_expands_authority": false,
+    "approval_termination_conditions": [
+      "successful_closeout",
+      "explicit_user_revocation",
+      "input_lineage_or_rule_drift"
+    ],
+    "checkpoint_storage": "append_only_hash_chained_jsonl",
+    "checkpoint_statuses": [
+      "planned",
+      "running",
+      "passed",
+      "failed",
+      "rolled_back"
+    ],
+    "completed_stage_behavior": "idempotent_skip_on_exact_evidence",
+    "failed_stage_behavior": "resume_from_last_successful_checkpoint",
+    "empty_state_recovery": "forbidden",
+    "runtime_execution_authorized_by_this_document_creation": false
+  },
+  "parent_manifest": {
+    "approval_id": "N6_AI_SIMULATED_INVESTOR_RESUMABLE_ACTIVATION",
+    "approval_status": "ONE_TIME_APPROVAL_ALREADY_ACCEPTED",
+    "scope": "N6_only",
+    "purpose": "Resumable display-only N6 strategy-center shadow activation",
+    "lineage": {
+      "policy_source": {
+        "commit": "5885f9c5297b5af1bf8a7bcbc5b95d5834fd1015",
+        "tree": "576574d2e0488c9dd028c2f090718ecd4c356df2",
+        "meaning": "pre-governance source used to freeze policy bytes"
+      },
+      "governance_binding": {
+        "storage": "external_post_commit_attestation",
+        "commit_field": "governance_commit",
+        "tree_field": "governance_tree",
+        "manifest_sha_field": "parent_manifest_sha256",
+        "must_differ_from_policy_source": true,
+        "policy_file_must_not_predict_final_governance_commit": true
+      },
+      "candidate": {
+        "integration_commit": "d85df6328bde223e912dabc3bd65e16df984aa45",
+        "integration_tree": "d6d5ae1d68a1255ea9f05d8e7ce40a837a572ea1",
+        "path": "docs/N6_SC_TEMPORAL_CONFLUENCE_V2_CANDIDATE_20260723.json",
+        "sha256": "94f5a6d88717688bfe079930edb956c20acd6c0c66aef870b332d5c2b221e489"
+      },
+      "bundle": {
+        "integration_commit": "d85df6328bde223e912dabc3bd65e16df984aa45",
+        "path": "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
+        "file_sha256": "31ded67fb24558a2c635b50f5fa13fb63918056e57d6bb68defa393bb4f83de0",
+        "declared_bundle_sha256": "d451beaba47908842d59a2a7cbdd9dc45267807e44ec52d768a3b4a1c80e434d"
+      },
+      "implementation": {
+        "commit": "999d38f5692a8718e8aa846f9999f2b42f3122c2",
+        "tree": "33fe31e1e2bad639332fc29e923039a906f6b734",
+        "policy_sha256": "7c392e68418786d51952ed9728376d9e5adf17620b6793e14385135ecf935f75",
+        "worker_sha256_at_integration": "5ed821a636373743d869dba209c801201afae3dcf646650f257dba59de723793",
+        "auto_runner_sha256_at_integration": "f3d93405423f7f5dc6168fd0fb360b37ebdb085e8c9b30158e46e801c763ed2d"
+      }
+    },
+    "current_runtime_anchors": {
+      "web": {
+        "label": "com.ashare-v3.n6.user-web",
+        "plist_path": "/Users/chuanfuchen/Library/LaunchAgents/com.ashare-v3.n6.user-web.plist",
+        "plist_sha256": "4367d80cca8e0981a296f91f067bbb1fd5ecba132a1c2c00f1169c11c08129b8",
+        "release_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/20260724_042200__a1dc7350",
+        "release_commit": "a1dc73503a07055f7bdb9cd29b378d1272642473",
+        "release_tree": "7cd12228d5f126d0972098e46dc96de6a9a245f1",
+        "runner_path": "scripts/run_n6_user_app.py",
+        "runner_sha256": "d267af9aec27076f5fdc47fb70756927bef8da80a55a12ff7bd0e8b1304ca884",
+        "strategy_center_write_enabled": "1"
+      },
+      "evaluator": {
+        "label": "com.ashare-v3.n6.strategy-center-evaluator-v1",
+        "plist_path": "/Users/chuanfuchen/Library/LaunchAgents/com.ashare-v3.n6.strategy-center-evaluator-v1.plist",
+        "plist_sha256": "60e9446a89b5f84ff5dee874eab6d05974c4e2dd6fb63a30c2d77074bb0c501a",
+        "release_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/20260722_234251__658ebb3995a7c539ac211258c378af6499635df4",
+        "release_commit": "658ebb3995a7c539ac211258c378af6499635df4",
+        "release_tree": "016f154e6716ce0c4f2c7dcee74808e9f95c6dc9",
+        "runner_path": "scripts/run_n6_strategy_center_auto_once.py",
+        "runner_sha256": "0be8ca4cf235971b1e801faf66238d445790edf7f2a36dc1e5bfba8f4c7328f4",
+        "start_interval_seconds": 5,
+        "max_runtime_seconds": 12
+      },
+      "virtual_executor_frozen_not_operable": {
+        "label": "com.ashare-v3.n6.virtual-executor-v1",
+        "plist_path": "/Users/chuanfuchen/Library/LaunchAgents/com.ashare-v3.n6.virtual-executor-v1.plist",
+        "plist_sha256": "bae58f9d30938f13a6d9d1d4d92daa2c6be3d7b244fa819b0d6ea6b2b9c7b469",
+        "operation_allowed": false
+      }
+    },
+    "existing_migrations": [
+      {
+        "migration": "081",
+        "rerun_allowed": false
+      },
+      {
+        "migration": "082",
+        "rerun_allowed": false
+      },
+      {
+        "migration": "083",
+        "rerun_allowed": false
+      }
+    ],
+    "stage_dag": [
+      {
+        "order": 1,
+        "stage": "GOVERNANCE",
+        "layer_role": "runtime_control",
+        "depends_on": []
+      },
+      {
+        "order": 2,
+        "stage": "EVALUATOR_RESUME_FIX",
+        "layer_role": "N6_user",
+        "depends_on": [
+          "GOVERNANCE"
+        ]
+      },
+      {
+        "order": 3,
+        "stage": "BOUNDED_REBIND",
+        "layer_role": "runtime_control",
+        "depends_on": [
+          "EVALUATOR_RESUME_FIX"
+        ]
+      },
+      {
+        "order": 4,
+        "stage": "NATURAL_ACCEPTANCE",
+        "layer_role": "N6_user",
+        "depends_on": [
+          "BOUNDED_REBIND"
+        ]
+      }
+    ],
+    "forbidden_boundaries": [
+      "N1-N5 modification",
+      "DeepSeek invocation",
+      "Virtual Executor operation",
+      "proposal mutation",
+      "order mutation",
+      "trade mutation",
+      "position mutation",
+      "lot mutation",
+      "cash mutation",
+      "autonomous trading",
+      "real trading"
+    ],
+    "child_requests": [
+      {
+        "stage": "GOVERNANCE",
+        "layer_role": "runtime_control",
+        "frozen_inputs": {
+          "policy_id": "n6_strategy_center_shadow_activation_grant_v1",
+          "approval_id": "N6_AI_SIMULATED_INVESTOR_RESUMABLE_ACTIVATION",
+          "source_lineage_key": "parent_manifest.lineage.policy_source"
+        },
+        "permissions": [
+          "modify runtime_control control-plane contract, validator, CLI, documentation and tests",
+          "create one independent governance commit",
+          "create external post-commit attestation"
+        ],
+        "allowed_side_effects": [
+          "repository runtime_control files",
+          "git branch and independent governance commit",
+          "external governance attestation"
+        ],
+        "stop_conditions": [
+          "manifest hash drift",
+          "runtime anchor drift",
+          "cross-layer file required"
+        ],
+        "rollback_conditions": [
+          "targeted tests fail",
+          "forbidden boundary test fails"
+        ],
+        "required_outputs": [
+          "governance commit and tree",
+          "parent manifest SHA",
+          "machine-readable policy and schema",
+          "child request template",
+          "clean worktree"
+        ]
+      },
+      {
+        "stage": "EVALUATOR_RESUME_FIX",
+        "layer_role": "N6_user",
+        "frozen_inputs": {
+          "candidate_lineage_key": "parent_manifest.lineage.candidate",
+          "bundle_lineage_key": "parent_manifest.lineage.bundle",
+          "implementation_lineage_key": "parent_manifest.lineage.implementation",
+          "evaluator_anchor_key": "parent_manifest.current_runtime_anchors.evaluator"
+        },
+        "permissions": [
+          "modify only N6 evaluator resume implementation and its tests",
+          "create one independent N6 commit"
+        ],
+        "allowed_side_effects": [
+          "N6 evaluator resume source files",
+          "N6 evaluator resume tests",
+          "independent N6 implementation commit"
+        ],
+        "stop_conditions": [
+          "N1-N5 change required",
+          "runtime execution required",
+          "candidate, bundle, implementation or evaluator anchor drift",
+          "DeepSeek or Virtual Executor required"
+        ],
+        "rollback_conditions": [
+          "resume loses last successful checkpoint",
+          "evaluator can create proposal, order or trade side effects"
+        ],
+        "required_outputs": [
+          "implementation commit and tree",
+          "targeted tests",
+          "bounded rebind child evidence inputs"
+        ]
+      },
+      {
+        "stage": "BOUNDED_REBIND",
+        "layer_role": "runtime_control",
+        "frozen_inputs": {
+          "web_anchor_key": "parent_manifest.current_runtime_anchors.web",
+          "evaluator_anchor_key": "parent_manifest.current_runtime_anchors.evaluator",
+          "virtual_executor_anchor_key": "parent_manifest.current_runtime_anchors.virtual_executor_frozen_not_operable",
+          "prior_stage": "EVALUATOR_RESUME_FIX"
+        },
+        "permissions": [
+          "build and validate one immutable N6 target release",
+          "rebind only exact Web and Evaluator plist and launchd labels",
+          "automatically restore exact frozen Web and Evaluator anchors on failed health gate"
+        ],
+        "allowed_side_effects": [
+          "one immutable N6 target release",
+          "exact Web plist and launchd label",
+          "exact Evaluator plist and launchd label",
+          "automatic rollback to exact frozen Web and Evaluator anchors"
+        ],
+        "stop_conditions": [
+          "lease expired",
+          "checkpoint or manifest drift",
+          "plist or source release drift",
+          "Virtual Executor operation requested",
+          "health or stability gate failed after rollback"
+        ],
+        "rollback_conditions": [
+          "old process or job does not quiesce",
+          "target readiness or stability fails",
+          "target lineage is not exact"
+        ],
+        "required_outputs": [
+          "target release attestation",
+          "before and after plist hashes",
+          "bounded rebind evidence",
+          "rollback evidence when applicable"
+        ]
+      },
+      {
+        "stage": "NATURAL_ACCEPTANCE",
+        "layer_role": "N6_user",
+        "frozen_inputs": {
+          "candidate_lineage_key": "parent_manifest.lineage.candidate",
+          "bundle_lineage_key": "parent_manifest.lineage.bundle",
+          "prior_stage": "BOUNDED_REBIND"
+        },
+        "permissions": [
+          "run bounded N6 display-only evaluator acceptance",
+          "write only N6 strategy selection revision, match projection, match change and observation projection facts",
+          "collect natural-event acceptance evidence"
+        ],
+        "allowed_side_effects": [
+          "bounded N6 evaluator run",
+          "N6 display-only strategy selection and observation facts",
+          "N6 acceptance evidence artifacts"
+        ],
+        "stop_conditions": [
+          "lease expired",
+          "checkpoint, manifest, bundle or runtime lineage drift",
+          "no natural event group",
+          "DeepSeek or Virtual Executor requested",
+          "proposal, order, trade, position, lot or cash mutation requested"
+        ],
+        "rollback_conditions": [
+          "N6 display-only write set exceeded",
+          "idempotency or deterministic replay failed",
+          "any forbidden mutation observed"
+        ],
+        "required_outputs": [
+          "natural acceptance report",
+          "row-level N6-only mutation proof",
+          "forbidden-side-effect zero proof",
+          "successful closeout evidence"
+        ]
+      }
+    ]
+  },
+  "parent_manifest_sha256": "507eea13e9d6e5bb7088c83632107c68e444453fa1badd3869bfda89678be625",
+  "child_request_template": {
+    "template_version": 1,
+    "derived_from": "parent_manifest.child_requests[stage]",
+    "immutable_fields": [
+      "policy_id",
+      "approval_id",
+      "parent_manifest_sha256",
+      "checkpoint_sha256",
+      "stage",
+      "layer_role",
+      "frozen_inputs",
+      "permissions",
+      "allowed_side_effects",
+      "stop_conditions",
+      "rollback_conditions",
+      "required_outputs"
+    ],
+    "approval_reconfirmation_required": false,
+    "lease_required_for_actual_action": true,
+    "lease_renewal_rule": "same manifest SHA, same checkpoint SHA, same stage, same permissions; no authority expansion",
+    "on_expired_lease": "pause action and internally renew; parent approval remains active",
+    "on_failed_stage": "append failed checkpoint and resume same stage from last successful checkpoint",
+    "on_passed_stage": "idempotently skip only when exact evidence SHA matches"
+  }
+}

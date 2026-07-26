@@ -1,0 +1,57 @@
+{
+  "contract_id": "N6_B_TRACK_PRODUCT_V3_PROPOSAL_TIMESTAMP_SYNTAX_AND_UI_ERROR_FIX_053",
+  "status": "implementation_draft_exact_diff_review",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "base_commit": "958b2d5f492778fe0b2f6c30ce656d161cf079a7",
+  "branch": "codex/n6-proposal-create-fix-v1",
+  "database_fix": {
+    "function": "public.n6_btrack_proposal_create(text,text,bigint)",
+    "definition_base": "052_published_proposal_create",
+    "invalid_expression": "pg_catalog.current_timestamp AT TIME ZONE 'Asia/Shanghai'",
+    "replacement_expression": "pg_catalog.now() AT TIME ZONE 'Asia/Shanghai'",
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "owner_preserved_by_create_or_replace": true,
+    "public_execute": false,
+    "allowed_role": "n6_btrack_web",
+    "business_logic_changed": false,
+    "historical_migrations_modified": false
+  },
+  "api_failure_contract": {
+    "routes": [
+      "POST /api/n6/app/v3/virtual-account/proposals",
+      "POST /api/n6/app/v3/virtual-account/proposals/{proposal_id}/confirm"
+    ],
+    "database_error_status": 503,
+    "database_error_code": "proposal_service_unavailable",
+    "database_detail_exposed": false
+  },
+  "browser": {
+    "confirmation_label_source": "frozen_initial_action_label",
+    "confirmation_example": "买入准备：仅创建待确认申请，不会成交；是否继续？",
+    "failure_uses_aria_live_status": true,
+    "failure_overwrites_action_label": false,
+    "non_json_or_http_5xx_error": "proposal_service_unavailable",
+    "user_message": "交易申请服务暂不可用，请稍后重试"
+  },
+  "boundaries": {
+    "trading_session_guard_preserved": true,
+    "for_trade_date_guard_preserved": true,
+    "proposal_create_only": true,
+    "real_trade": false,
+    "n1_n5_writeback": false,
+    "quote_executor_stop_scheduler_modified": false
+  },
+  "rollback": {
+    "restore_exact_052_proposal_create_definition": true,
+    "preserve_proposals_and_history": true,
+    "drop_or_truncate": false
+  },
+  "runtime": {
+    "database_connected_in_gate": false,
+    "migration_executed_in_gate": false,
+    "post_or_delete_sent_in_gate": false,
+    "runtime_or_plist_modified_in_gate": false
+  }
+}

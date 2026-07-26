@@ -1,0 +1,122 @@
+{
+  "contract_id": "N6_B_TRACK_PRODUCT_V3_VIRTUAL_EXECUTOR_046",
+  "status": "implementation_draft",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "function": {
+    "name": "public.n6_executor_apply_claimed_proposal",
+    "arguments": ["proposal_id", "executor_run_id"],
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "transaction": "single_statement",
+    "allowed_role": "n6_virtual_executor",
+    "public_execute": false,
+    "web_execute": false,
+    "executor_direct_table_privileges": [],
+    "executor_direct_sequence_privileges": []
+  },
+  "inputs_rejected": [
+    "client_price",
+    "client_quantity",
+    "client_account",
+    "client_position",
+    "client_principal",
+    "client_trade_date"
+  ],
+  "policy": {
+    "asset_kind": "stock",
+    "exchanges": ["SH", "SZ"],
+    "forbidden_exchanges": ["BJ"],
+    "forbidden_sources": ["stop_loss"],
+    "quote_source": "latest_fresh_passed_n6_virtual_quote_snapshot",
+    "quote_freshness_seconds": 120,
+    "quote_trade_date": "current_asia_shanghai_open_trade_date",
+    "quote_sessions": ["09:30-11:30", "13:00-15:00"],
+    "buy_budget_cny": 300000,
+    "buy_round_lot": 100,
+    "buy_quantity_formula": "floor(min(300000,available_cash)/fresh_quote/100)*100",
+    "cash_below_budget_behavior": "scale_down_to_round_lot",
+    "cash_below_one_lot_behavior": "fail_closed",
+    "target_freeze": "first_or_reopened_signal_buy_from_proposal",
+    "same_episode_add_target": "preserve_existing",
+    "new_episode_stop_loss": "provisional_first_day_clear_old_freeze",
+    "same_episode_add_stop_loss": "preserve_existing",
+    "sell_quantity": "all_t1_sellable_lots",
+    "sell_holding_episode": "required_exact_current_position_episode",
+    "sell_lot_order": "fifo",
+    "fees": "zero_v1",
+    "sell_position_event_cost_delta": "negative_removed_average_cost_basis"
+  },
+  "atomic_writes": [
+    "n6_virtual_order",
+    "n6_virtual_trade",
+    "n6_virtual_cash_ledger",
+    "n6_virtual_cash_snapshot",
+    "n6_virtual_position_lot",
+    "n6_virtual_position",
+    "n6_virtual_position_event",
+    "n6_virtual_trade_proposal"
+  ],
+  "idempotency": {
+    "key": "source_proposal_id",
+    "proposal_lock": true,
+    "sequential_replay": true,
+    "concurrent_replay": true
+  },
+  "position_event_pointer": {
+    "field": "n6_virtual_position.source_position_event_id",
+    "value": "new_position_event_id",
+    "required_update_count": 1,
+    "mismatch_behavior": "raise_and_rollback_full_transaction"
+  },
+  "order_projection_lineage": {
+    "field": "n6_virtual_order.source_signal_projection_id",
+    "source": "proposal.source_signal_projection_id",
+    "signal_behavior": "canonical_foreign_key",
+    "manual_position_behavior": "null"
+  },
+  "forbidden_dml": [
+    "broker",
+    "real_trade",
+    "outbox",
+    "N1-N5",
+    "projection",
+    "monitor",
+    "realtime"
+  ],
+  "runner": {
+    "one_shot": true,
+    "keep_alive": false,
+    "default": "read_only_preflight_plan",
+    "default_calls_claim": false,
+    "no_execute_zero_dml": true,
+    "execute_outer_transaction": [
+      "042_claim",
+      "046_apply_and_processing_to_executed",
+      "commit"
+    ],
+    "apply_rejection_rolls_back_claim": true,
+    "not_claimed_returns_without_apply": true,
+    "exception_or_process_failure_before_commit_rolls_back_claim": true,
+    "processing_residue_from_current_invocation": false
+  },
+  "runtime_credentials": {
+    "required_pgservice": "n6_virtual_executor",
+    "connection_string": "service=n6_virtual_executor",
+    "dsn_argument_allowed": false,
+    "argv_secret_allowed": false,
+    "pgpassword_allowed": false,
+    "custom_dsn_or_password_env_allowed": false,
+    "other_pg_overrides_allowed": false,
+    "pgservicefile_required": true,
+    "pgpassfile_required": true,
+    "credential_file_contents_read_by_runner": false,
+    "libpq_resolves_service_and_passfile": true,
+    "autocommit": false
+  },
+  "rollback": {
+    "drops_only_046_function_and_grant": true,
+    "preserves_business_history": true,
+    "preserves_041_045": true
+  }
+}

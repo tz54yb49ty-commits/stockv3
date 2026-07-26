@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from ashare_v3.user.owner_principal_initialization import (
     AdminUserSummary,
@@ -33,6 +36,29 @@ class FakeRepository:
 
 
 class N6OwnerPrincipalInitializationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.contract_path = str(Path(self._temporary_directory.name) / "contract.json")
+        Path(self.contract_path).write_text(
+            json.dumps(
+                {
+                    "result": "CONTRACT_PASS",
+                    "seed_run_id": "n6_phase2_owner_principal_initialization_20260605_v1",
+                    "planned_rows": {
+                        "n6_principal": 2,
+                        "n6_ai_user": 0,
+                        "n6_principal_account": 0,
+                        "n6_watchlist_ownership": 0,
+                        "n6_strategy": 0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
     def test_parser_requires_execute_and_user_confirmed_flags(self) -> None:
         parser = build_parser()
         option_strings = {option for action in parser._actions for option in action.option_strings}
@@ -50,7 +76,7 @@ class N6OwnerPrincipalInitializationTest(unittest.TestCase):
             seed_run_id="n6_phase2_owner_principal_initialization_20260605_v1",
             execute=False,
             user_confirmed=True,
-            contract_path="docs/N6_PHASE2_OWNER_PRINCIPAL_INITIALIZATION_execute_contract.json",
+            contract_path=self.contract_path,
         )
 
         self.assertEqual(report["result"], "BLOCKED")
@@ -65,7 +91,7 @@ class N6OwnerPrincipalInitializationTest(unittest.TestCase):
             seed_run_id="n6_phase2_owner_principal_initialization_20260605_v1",
             execute=True,
             user_confirmed=False,
-            contract_path="docs/N6_PHASE2_OWNER_PRINCIPAL_INITIALIZATION_execute_contract.json",
+            contract_path=self.contract_path,
         )
 
         self.assertEqual(report["result"], "BLOCKED")
@@ -82,7 +108,7 @@ class N6OwnerPrincipalInitializationTest(unittest.TestCase):
             seed_run_id="n6_phase2_owner_principal_initialization_20260605_v1",
             execute=True,
             user_confirmed=True,
-            contract_path="docs/N6_PHASE2_OWNER_PRINCIPAL_INITIALIZATION_execute_contract.json",
+            contract_path=self.contract_path,
         )
 
         self.assertEqual(report["result"], "BLOCKED")
@@ -97,7 +123,7 @@ class N6OwnerPrincipalInitializationTest(unittest.TestCase):
             seed_run_id="n6_phase2_owner_principal_initialization_20260605_v1",
             execute=True,
             user_confirmed=True,
-            contract_path="docs/N6_PHASE2_OWNER_PRINCIPAL_INITIALIZATION_execute_contract.json",
+            contract_path=self.contract_path,
         )
 
         self.assertEqual(report["result"], "EXECUTED")
@@ -121,7 +147,7 @@ class N6OwnerPrincipalInitializationTest(unittest.TestCase):
             seed_run_id="n6_phase2_owner_principal_initialization_20260605_v1",
             execute=True,
             user_confirmed=True,
-            contract_path="docs/N6_PHASE2_OWNER_PRINCIPAL_INITIALIZATION_execute_contract.json",
+            contract_path=self.contract_path,
         )
 
         self.assertEqual(report["result"], "BLOCKED")

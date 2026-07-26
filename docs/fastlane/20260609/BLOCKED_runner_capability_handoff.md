@@ -2,8 +2,8 @@
 
 Result: **BLOCKED**
 
-blocked_by_layer: `runtime_control`
-for_trade_date: `20260609`
+blocked_by_layer: `runtime_control`  
+for_trade_date: `20260609`  
 source_trade_date: `20260608`
 
 ## What Is Cleared

@@ -1,0 +1,105 @@
+{
+  "contract_id": "N6_B_TRACK_PRODUCT_V3_FIRST_BUY_QUOTE_SCOPE_AND_QUOTE_WRITER_051",
+  "status": "implementation_draft_exact_diff_review",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "base_commit": "f39c7b4d13a8dbfec65b15493d6dc29dfa5209ee",
+  "branch": "codex/n6-b-track-product-v3-quote-scope-051-v1",
+  "scope": {
+    "principal_types": [
+      "admin",
+      "human_user"
+    ],
+    "principal_status": "active",
+    "virtual_account_status": "active",
+    "identity_sources": [
+      "open_positive_stock_position",
+      "unexpired_pending_or_confirmed_stock_buy_proposal"
+    ],
+    "proposal_identity_authority": "exact_principal_account_owner_and_source_signal_projection_join",
+    "proposal_source_readiness_authority": "proposal_create_048_freezes effective run/card/scope validation before proposal insertion; 051 revalidates immutable principal/account/user/asset/identity/direction/source projection linkage and does not repeat enrichment readiness",
+    "global_identity_deduplication": true,
+    "provider_batch_partition": "exact_principal_membership_set_then_batch_at_most_80",
+    "provider_calls_per_identity_per_minute_max": 1,
+    "batch_size_max": 80
+  },
+  "provider": {
+    "authority": "frozen_N3N6Q",
+    "modified": false,
+    "fallbacks": [],
+    "fail_closed": [
+      "BJ_unsupported",
+      "identity_mismatch",
+      "empty_response",
+      "nonfinite_or_nonpositive_price",
+      "stale_or_invalid_source_time",
+      "provider_error"
+    ],
+    "client_price_or_quantity_input": false
+  },
+  "scheduler": {
+    "cadence_seconds": 5,
+    "minute_idempotency": true,
+    "process_lock": true,
+    "all_execute_paths_share_session_open_date_and_process_lock_guard": true,
+    "global_multi_user_only": true,
+    "fixed_principal_argument": false,
+    "start_interval_60_only_is_forbidden": true
+  },
+  "race_contract": {
+    "proposal_expiry_seconds": 60,
+    "normal_path_closed": true,
+    "provider_failure_ttl_guarantee": false,
+    "worst_case_scheduler_wait_seconds_exclusive": 5,
+    "minimum_follow_up_ticks_before_expiry": 11,
+    "same_minute_late_scope_supported": "only_when_identity_has_not_already_been_sampled",
+    "same_minute_not_ready_retry": "forbidden",
+    "not_ready_reuse_as_success": false,
+    "not_ready_behavior": "fail_closed_until_next_minute",
+    "provider_failure_ui": "show_quote_not_ready_and_require_user_retry",
+    "template_create_confirm_split_required": false,
+    "remaining_blocker": "A not_ready snapshot consumes the one provider attempt and UNIQUE identity-minute slot. A 60-second proposal can expire before the next successful minute.",
+    "minimum_follow_up_gate_options": [
+      "UX-only explicit retry after quote-not-ready",
+      "separately authorized append-only attempt ledger plus bounded not-ready retry exception",
+      "separately authorized TTL or two-step proposal interaction change"
+    ]
+  },
+  "persistence": {
+    "owned_tables": [
+      "n6_virtual_quote_run",
+      "n6_virtual_quote_snapshot",
+      "n6_virtual_quote_run_identity"
+    ],
+    "late_scope_run_identity_evidence": "same_tick_or_unquoted_late_scope_only",
+    "evidence_schema_reapply": "allowed_only_after_exact_catalog_owner_column_constraint_and_index_match",
+    "projection_monitor_proposal_state_dml": false,
+    "order_trade_position_cash_dml": false,
+    "rollback_preserves_quote_history": true
+  },
+  "database_role": {
+    "service": "n6_quote_writer",
+    "pgservice_exact": true,
+    "pgpassword_rejected": true,
+    "pgservicefile_required_absolute_owned_0600": true,
+    "pgpassfile_required_absolute_owned_0600": true,
+    "direct_connection_overrides_rejected": true,
+    "direct_relation_privileges": [],
+    "direct_sequence_privileges": [],
+    "function_only": true,
+    "security_definer_time_guard": "exact current Asia/Shanghai minute on current open trade date, trading-session minute, start before second 60, bounded 75-second completion window",
+    "zero_payload_save": "rejected",
+    "provisioning_role_attributes": "LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS",
+    "role_provisioning_in_migration": false,
+    "password_in_migration": false
+  },
+  "runtime": {
+    "database_connected_in_gate": false,
+    "migration_executed_in_gate": false,
+    "provider_called_in_gate": false,
+    "scheduler_started_in_gate": false,
+    "executor_started_in_gate": false,
+    "stop_evaluator_started_in_gate": false,
+    "import_time_database_connections": 0
+  }
+}

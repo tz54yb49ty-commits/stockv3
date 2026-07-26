@@ -2013,11 +2013,7 @@ class N4TriggerRuleV4MatcherTest(unittest.TestCase):
         )
         live = build_lifecycle_output_plans([ready_plan], previous_states=[])
 
-        outputs = build_lifecycle_output_plans([not_ready_plan], previous_states=live)
-        self.assertEqual(len(outputs), 1)
-        self.assertEqual(outputs[0]["output_event_type"], "TriggerStateChanged")
-        self.assertEqual(outputs[0]["current_status"], "inactive")
-        self.assertFalse(outputs[0]["writes_trigger_match"])
+        self.assertEqual(build_lifecycle_output_plans([not_ready_plan], previous_states=live), [])
 
     def test_report_proves_n5_entry_guard(self):
         plans = [

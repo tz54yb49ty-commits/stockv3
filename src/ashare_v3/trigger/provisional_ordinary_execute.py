@@ -867,6 +867,15 @@ def build_ordinary_trigger_matched_envelope(
             "identity_key": plan.get("identity_key"),
             "asset_kind": plan.get("asset_kind"),
             "display_name": plan.get("display_name"),
+            "condition_projection_context": to_jsonable(
+                plan.get("condition_projection_context")
+                if plan.get("condition_projection_context") is not None
+                else {}
+            ),
+            "condition_projection_context_status": plan.get("condition_projection_context_status") or "not_ready",
+            "condition_projection_context_trace": to_jsonable(
+                plan.get("condition_projection_context_trace") or {}
+            ),
             "direction": plan.get("direction"),
             "condition_key": plan.get("condition_key"),
             "original_condition_key": original_condition_key,
@@ -973,6 +982,15 @@ def build_ordinary_raw_json(plan: Mapping[str, Any]) -> dict[str, Any]:
             "provisional": True,
             "asset_kind": plan.get("asset_kind"),
             "identity_key": plan.get("identity_key"),
+            "condition_projection_context": to_jsonable(
+                plan.get("condition_projection_context")
+                if plan.get("condition_projection_context") is not None
+                else {}
+            ),
+            "condition_projection_context_status": plan.get("condition_projection_context_status") or "not_ready",
+            "condition_projection_context_trace": to_jsonable(
+                plan.get("condition_projection_context_trace") or {}
+            ),
             "source_metric_kind": SOURCE_METRIC_KIND,
             "source_metric_event_type": plan.get("source_metric_event_type"),
             "source_metric_run_id": plan.get("source_metric_run_id"),

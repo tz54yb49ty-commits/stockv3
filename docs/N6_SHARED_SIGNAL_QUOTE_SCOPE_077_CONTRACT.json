@@ -1,0 +1,73 @@
+{
+  "contract_version": "N6_SHARED_SIGNAL_QUOTE_SCOPE_077_V1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "kernel_check": "ACCEPT",
+  "baseline": {
+    "commit": "a7fafa27cd15308465d2a56146b97267c3cbf42a",
+    "tree": "1e3382ed6b6d47d984958b57586ebf7b516a6596",
+    "highest_migration": "076",
+    "scope_source_sha256": "856bfc57439d85e9f1cab84a93f25dfcf4e4a50274e30c60cfac0e7110b527b1",
+    "pending_scope_source_sha256": "f7d29a064b4dc149dd6a34a7ace9c5f1583679784ecbfc6675f41304060de14e",
+    "helper_source_sha256": "fa772cb72c1751060032552865350dc6f8dedcdc413bcab5a4e5e789600bcd3a"
+  },
+  "migration": {
+    "number": "077",
+    "forward_file": "sql/077_n6_shared_signal_quote_scope.sql",
+    "rollback_file": "sql/077_n6_shared_signal_quote_scope_rollback.sql",
+    "new_scope_source_sha256": "c7e88b727f49a54aeedcba5bd32bd1e63d9838c916dd221a0b299c03f410de76",
+    "pending_scope_source_sha256_unchanged": "f7d29a064b4dc149dd6a34a7ace9c5f1583679784ecbfc6675f41304060de14e",
+    "helper_source_sha256_unchanged": "fa772cb72c1751060032552865350dc6f8dedcdc413bcab5a4e5e789600bcd3a",
+    "business_row_dml": false,
+    "table_or_schema_change": false,
+    "runtime_code_change": false,
+    "deployment_authorized_by_this_contract": false
+  },
+  "function_identity": {
+    "owner": "ashare_v3_user",
+    "security_definer": true,
+    "volatility": "VOLATILE",
+    "parallel": "UNSAFE",
+    "search_path": "pg_catalog",
+    "scope_execute_acl": ["owner", "n6_quote_writer"],
+    "pending_scope_execute_acl": ["owner", "n6_quote_writer"],
+    "helper_execute_acl": ["owner"]
+  },
+  "scope_compatibility": {
+    "human_admin_source_owner_binding_removed": true,
+    "shared_source_relation": "public.n6_ai_shared_signal_projection",
+    "shared_status": "active",
+    "buyer_scope_helper": "public.n6_btrack_manual_signal_buy_current_scope(bigint,text,bigint,bigint,bigint,text,text,numeric,text)",
+    "proposal_buyer_remains_quote_consumer": true,
+    "proposal_payload_cannot_replace_source_owner": true,
+    "pending_scope_delegates_to_scope": true,
+    "pending_scope_function_body_changes": false,
+    "ai_shared_projection_branch_changes": false
+  },
+  "preserved_guards": {
+    "proposal_status_pending_or_confirmed": true,
+    "manual_signal_buy_only": true,
+    "current_open_trade_date": true,
+    "regular_trade_session": true,
+    "active_principal_and_account": true,
+    "buyer_position_monitor_or_realtime_scope": true,
+    "shared_lineage_date_identity_state_price_exact": true,
+    "quote_quality_and_two_minute_freshness_unchanged": true,
+    "executor_apply_gate_unchanged": true
+  },
+  "side_effect_boundary": {
+    "creates_or_confirms_proposal": false,
+    "claims_or_executes_proposal": false,
+    "runs_quote_writer_or_executor": false,
+    "touches_launch_agent": false,
+    "connects_real_broker": false,
+    "handles_proposal_37": false
+  },
+  "rollback": {
+    "restores_scope_source_sha256": "856bfc57439d85e9f1cab84a93f25dfcf4e4a50274e30c60cfac0e7110b527b1",
+    "preserves_pending_scope_and_helper": true,
+    "restores_owner_acl_security_and_search_path": true,
+    "deletes_history": false
+  }
+}

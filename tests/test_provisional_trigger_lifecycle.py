@@ -189,10 +189,35 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         self.assertEqual(outputs[0]["current_status"], "inactive")
         self.assertFalse(outputs[0]["trigger_live"])
         self.assertFalse(outputs[0]["writes_trigger_match"])
-        self.assertEqual(outputs[0]["state_change_reason"], "matched_to_inactive")
+        self.assertEqual(outputs[0]["state_change_reason"], "deactivated")
         self.assertEqual(outputs[0]["lifecycle_output_reason"], "matched_to_inactive")
 
+    def test_matched_to_inactive_revalidates_buy_signal_type_alias(self) -> None:
+        current = plan(condition_key="BUY:FULL", signal_type="BUY", trigger_type="BUY:FULL", status="no_op")
+        prior = previous_state(plan(condition_key="BUY:FULL", signal_type="B_BUY", trigger_type="BUY:FULL"))
 
+        outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0]["output_event_type"], TRIGGER_STATE_CHANGED_EVENT_TYPE)
+        self.assertEqual(outputs[0]["state_change_reason"], "deactivated")
+        self.assertEqual(outputs[0]["lifecycle_output_reason"], "matched_to_inactive")
+        self.assertEqual(outputs[0]["current_status"], "inactive")
+        self.assertFalse(outputs[0]["trigger_live"])
+        self.assertFalse(outputs[0]["writes_trigger_match"])
+        self.assertFalse(outputs[0]["n5_entry_allowed"])
+
+    def test_missing_or_unready_current_evidence_does_not_clear_live_state(self) -> None:
+        current = plan(status="no_op")
+        current["projection_status"] = "pending"
+        current["projection_quality_status"] = "pending"
+        current["trace_status"] = "pending"
+        current["rule_proof"] = {"selected_metric": {"metric_ready": False}}
+        prior = previous_state(plan())
+
+        outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+        self.assertEqual(outputs, [])
 
     def test_inactive_to_inactive_drops_plan(self) -> None:
         outputs = build_lifecycle_output_plans([plan(status="no_op")], previous_states=[])

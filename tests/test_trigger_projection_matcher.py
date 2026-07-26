@@ -1,13 +1,19 @@
+from copy import deepcopy
 import inspect
 import json
 import unittest
 
 import ashare_v3.trigger.projection_matcher as projection_matcher
+from ashare_v3.condition.basis import stable_json_hash
 from ashare_v3.trigger.projection_matcher import (
+    CONDITION_PROJECTION_CONTEXT_VERSION,
+    CONDITION_PROJECTION_PASSTHROUGH_POLICY_HASH,
+    CONDITION_PROJECTION_PASSTHROUGH_POLICY_VERSION,
     FORBIDDEN_N4_PROJECTION_MATCHER_READ_TABLES,
     PROJECTION_MATCHER_READ_TABLES,
     build_projection_matcher_dry_run_report,
     build_projection_matcher_plans,
+    normalize_context_row,
     summarize_projection_matcher_evaluations,
 )
 
@@ -24,6 +30,147 @@ SYNTHETIC_DENYLIST = (
 
 
 class TriggerProjectionMatcherTest(unittest.TestCase):
+    def test_condition_projection_context_validates_for_stock_index_and_board(self) -> None:
+        self.assertEqual(
+            CONDITION_PROJECTION_PASSTHROUGH_POLICY_HASH,
+            "2cd95d3d427ec07ccd208bc7b939081d104415f6b9da3c4bf78e40b78a6d279e",
+        )
+        rows = [
+            context_row_with_condition_projection(
+                "stock:SH:600000", "buy", "BUY:D", ["BUY"], asset_kind="stock"
+            ),
+            context_row_with_condition_projection(
+                "index:SH:000016", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="index"
+            ),
+            context_row_with_condition_projection(
+                "board:TDX:BK001", "sell", "SELL_HINT", ["SELL_HINT"], asset_kind="board"
+            ),
+        ]
+
+        for row in rows:
+            with self.subTest(asset_kind=row["asset_kind"]):
+                expected = row["period_trigger_baseline_json"]["condition_projection_context"]
+                normalized = normalize_context_row(row)
+                self.assertEqual(normalized["condition_projection_context_status"], "ready")
+                self.assertEqual(normalized["condition_projection_context"], expected)
+                self.assertEqual(normalized["condition_projection_context_trace"]["validation_reasons"], [])
+                self.assertEqual(
+                    normalized["condition_projection_context_trace"]["policy_version"],
+                    CONDITION_PROJECTION_PASSTHROUGH_POLICY_VERSION,
+                )
+                self.assertEqual(
+                    normalized["condition_projection_context_trace"]["policy_hash"],
+                    CONDITION_PROJECTION_PASSTHROUGH_POLICY_HASH,
+                )
+
+        localized = deepcopy(rows[-1])
+        localized_baseline = localized.pop("period_trigger_baseline_json")
+        localized["raw_json"] = {"period_trigger_baseline_json": localized_baseline}
+        localized["condition_projection_context"] = {"contract_version": "polluted-top-level"}
+        normalized_localized = normalize_context_row(localized)
+        self.assertEqual(normalized_localized["condition_projection_context_status"], "ready")
+        self.assertEqual(
+            normalized_localized["condition_projection_context"],
+            localized_baseline["condition_projection_context"],
+        )
+
+    def test_condition_projection_context_contract_errors_are_stable_not_ready_trace(self) -> None:
+        base = context_row_with_condition_projection(
+            "stock:SH:600000", "buy", "BUY:D", ["BUY"], asset_kind="stock"
+        )
+        cases: list[tuple[str, dict[str, object], str]] = []
+
+        missing = deepcopy(base)
+        missing["period_trigger_baseline_json"].pop("condition_projection_context")
+        missing["condition_projection_context"] = condition_projection_context_for_row(missing)
+        cases.append(("missing", missing, "condition_projection_context_missing"))
+
+        not_object = deepcopy(base)
+        not_object["period_trigger_baseline_json"]["condition_projection_context"] = "malformed"
+        cases.append(("not_object", not_object, "condition_projection_context_not_object"))
+
+        def mutated(name: str, reason: str, mutation, *, rehash: bool = True) -> None:
+            row = deepcopy(base)
+            context = row["period_trigger_baseline_json"]["condition_projection_context"]
+            mutation(context)
+            if rehash:
+                rehash_condition_projection_context(context)
+            cases.append((name, row, reason))
+
+        mutated(
+            "version",
+            "condition_projection_contract_version_mismatch",
+            lambda value: value.update(contract_version="old"),
+        )
+        mutated(
+            "source_layer",
+            "condition_projection_source_layer_mismatch",
+            lambda value: value.update(source_layer="N1_ingestion"),
+        )
+        mutated(
+            "asset",
+            "condition_projection_asset_kind_mismatch",
+            lambda value: value.update(asset_kind="index"),
+        )
+        mutated(
+            "identity",
+            "condition_projection_identity_key_mismatch",
+            lambda value: value.update(identity_key="stock:SH:600001"),
+        )
+        mutated(
+            "source_date",
+            "condition_projection_source_trade_date_mismatch",
+            lambda value: value.update(source_trade_date="20260521"),
+        )
+        mutated(
+            "for_date",
+            "condition_projection_for_trade_date_mismatch",
+            lambda value: value.update(for_trade_date="20260526"),
+        )
+        mutated(
+            "source_status",
+            "condition_projection_source_status_not_ready",
+            lambda value: value.update(status="not_ready", not_ready_reasons=["fixture_not_ready"]),
+        )
+        mutated(
+            "field_shape",
+            "condition_projection_field_shape_mismatch",
+            lambda value: value["fields"].pop("buy_target_price"),
+        )
+        mutated(
+            "name",
+            "condition_projection_name_missing",
+            lambda value: value["fields"].update(name=""),
+        )
+        for name, close in (
+            ("close_zero", "0"),
+            ("close_missing", None),
+            ("close_non_numeric", "not-a-number"),
+            ("close_negative", "-1"),
+            ("close_non_canonical", "10.50"),
+        ):
+            mutated(
+                name,
+                "condition_projection_close_invalid",
+                lambda value, close=close: value["fields"].update(close=close),
+            )
+        mutated(
+            "hash",
+            "condition_projection_context_hash_mismatch",
+            lambda value: value["fields"].update(close="10.6"),
+            rehash=False,
+        )
+
+        for name, row, reason in cases:
+            with self.subTest(case=name):
+                normalized = normalize_context_row(row)
+                self.assertEqual(normalized["condition_projection_context_status"], "not_ready")
+                self.assertIn(reason, normalized["condition_projection_context_trace"]["validation_reasons"])
+                if name == "missing":
+                    self.assertEqual(normalized["condition_projection_context"], {})
+                if name == "not_object":
+                    self.assertEqual(normalized["condition_projection_context"], "malformed")
+
     def test_ready_projection_matches_only_hint_and_keeps_30m_out_of_formal_periods(self) -> None:
         evaluations = build_projection_matcher_plans(
             trigger_context_run_id=CONTEXT_RUN_ID,
@@ -244,8 +391,12 @@ class TriggerProjectionMatcherTest(unittest.TestCase):
             trigger_context_run_id=CONTEXT_RUN_ID,
             projection_run_id=PROJECTION_RUN_ID,
             context_rows=[
-                context_row("stock:SH:600000", "buy", "BUY:D", ["BUY"]),
-                context_row("stock:SH:600001", "sell", "SELL:D", ["SELL"]),
+                context_row(
+                    "stock:SH:600000", "buy", "BUY:D", ["BUY"], previous_avg_amount_unit="yuan"
+                ),
+                context_row(
+                    "stock:SH:600001", "sell", "SELL:D", ["SELL"], previous_avg_amount_unit="yuan"
+                ),
             ],
             projection_rows=[
                 v4_projection_row("stock", "stock:SH:600000", direction="buy"),
@@ -544,6 +695,7 @@ def context_row(
     *,
     asset_kind: str = "stock",
     run_id: str = CONTEXT_RUN_ID,
+    previous_avg_amount_unit: str | None = None,
 ) -> dict[str, object]:
     return {
         "trigger_context_id": stable_int(identity_key + condition_key),
@@ -565,8 +717,80 @@ def context_row(
         "is_hint_scope": condition_key in {"BUY_HINT", "SELL_HINT"},
         "context_hash": f"context-{identity_key}-{condition_key}",
         "quality_status": "passed",
-        "period_trigger_baseline_json": period_trigger_baseline_json(),
+        "period_trigger_baseline_json": period_trigger_baseline_json(
+            previous_avg_amount_unit=previous_avg_amount_unit
+        ),
     }
+
+
+def condition_projection_context_for_row(row: dict[str, object]) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "name": "sample",
+        "close": "10.5",
+        "up_reference_period": "W",
+        "buy_target_price": "12.3",
+        "buy_expected_return_pct": "17.142857",
+        "down_reference_period": "M",
+        "sell_target_price": "9.1",
+        "sell_expected_return_pct": "13.333333",
+        "clear_sell_ref_period": "W",
+        "up_secondary_target_price": None,
+        "up_secondary_expected_return_pct": None,
+    }
+    if row["asset_kind"] == "stock":
+        fields.update(score="80", pe_core="12")
+    payload: dict[str, object] = {
+        "contract_version": CONDITION_PROJECTION_CONTEXT_VERSION,
+        "source_layer": "N2_condition",
+        "asset_kind": row["asset_kind"],
+        "identity_key": row["identity_key"],
+        "source_trade_date": row["source_trade_date"],
+        "for_trade_date": row["for_trade_date"],
+        "status": "ready",
+        "fields": fields,
+        "nullable_fields": [
+            field
+            for field, value in fields.items()
+            if field not in {"name", "close"} and value is None
+        ],
+        "not_ready_reasons": [],
+    }
+    payload["context_hash"] = stable_json_hash(payload)
+    return payload
+
+
+def rehash_condition_projection_context(context: dict[str, object]) -> None:
+    payload = {key: value for key, value in context.items() if key != "context_hash"}
+    context["context_hash"] = stable_json_hash(payload)
+
+
+def attach_condition_projection_context(row: dict[str, object]) -> dict[str, object]:
+    output = deepcopy(row)
+    baseline = deepcopy(output["period_trigger_baseline_json"])
+    baseline["condition_projection_context"] = condition_projection_context_for_row(output)
+    output["period_trigger_baseline_json"] = baseline
+    return output
+
+
+def context_row_with_condition_projection(
+    identity_key: str,
+    direction: str,
+    condition_key: str,
+    allowed_signal_types: list[str],
+    *,
+    asset_kind: str = "stock",
+    run_id: str = CONTEXT_RUN_ID,
+) -> dict[str, object]:
+    return attach_condition_projection_context(
+        context_row(
+            identity_key,
+            direction,
+            condition_key,
+            allowed_signal_types,
+            asset_kind=asset_kind,
+            run_id=run_id,
+        )
+    )
 
 
 def projection_row(asset_kind: str, identity_key: str, status: str, signal: str) -> dict[str, object]:
@@ -797,7 +1021,7 @@ def snapshot_projection_row(asset_kind: str, identity_key: str, *, price: str, a
     }
 
 
-def period_trigger_baseline_json() -> dict[str, object]:
+def period_trigger_baseline_json(*, previous_avg_amount_unit: str | None = "yuan") -> dict[str, object]:
     current_keys = {
         "Y": "2026",
         "Q": "2026Q2",
@@ -819,6 +1043,7 @@ def period_trigger_baseline_json() -> dict[str, object]:
                 "previous_entity_low": "10",
                 "previous_amount": "100",
                 "previous_avg_amount": "100",
+                **({"previous_avg_amount_unit": previous_avg_amount_unit} if previous_avg_amount_unit else {}),
                 "previous_amount_baseline": "100",
                 "trigger_previous_entity_high": "10",
                 "trigger_previous_entity_low": "10",

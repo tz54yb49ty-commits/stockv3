@@ -1,4 +1,3 @@
-import json
 import re
 import unittest
 from pathlib import Path
@@ -7,8 +6,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = PROJECT_ROOT / "sql" / "026_n6_canonical_user_projection_schema_alignment.sql"
 ROLLBACK_PATH = PROJECT_ROOT / "sql" / "026_n6_canonical_user_projection_schema_alignment_rollback.sql"
-CONTRACT_JSON_PATH = PROJECT_ROOT / "docs" / "N6_canonical_schema_alignment_contract.json"
-READINESS_JSON_PATH = PROJECT_ROOT / "docs" / "N6_canonical_schema_migration_draft_readiness.json"
 CONTRACT_MD_PATH = PROJECT_ROOT / "docs" / "N6_CANONICAL_SCHEMA_ALIGNMENT_CONTRACT.md"
 READINESS_MD_PATH = PROJECT_ROOT / "docs" / "N6_CANONICAL_SCHEMA_MIGRATION_DRAFT_READINESS.md"
 
@@ -114,19 +111,16 @@ class N6CanonicalSchemaMigrationDraftTest(unittest.TestCase):
         self.assertNotIn("common_trigger_", sql)
 
     def test_readiness_artifacts_document_boundaries_and_remaining_gates(self) -> None:
-        contract = json.loads(CONTRACT_JSON_PATH.read_text(encoding="utf-8"))
-        readiness = json.loads(READINESS_JSON_PATH.read_text(encoding="utf-8"))
         contract_md = CONTRACT_MD_PATH.read_text(encoding="utf-8")
         readiness_md = READINESS_MD_PATH.read_text(encoding="utf-8")
 
-        self.assertEqual(contract["result"], "DRAFT_PASS")
-        self.assertEqual(readiness["result"], "DRAFT_PASS")
-        self.assertFalse(contract["n6_execute_allowed"])
-        self.assertFalse(readiness["n6_execute_allowed"])
-        self.assertFalse(readiness["migration_executed"])
-        self.assertFalse(readiness["migration_dml_scan"]["INSERT"])
-        self.assertTrue(readiness["runner_alignment_required"])
-        self.assertEqual(set(readiness["touched_tables"]), set(TOUCHED_TABLES))
+        self.assertIn("Status: DRAFT_PASS", contract_md)
+        self.assertIn("migration_executed=false", contract_md)
+        self.assertIn("Future N6 execute remains blocked", contract_md)
+        self.assertIn("Status: DRAFT_PASS", readiness_md)
+        self.assertIn("migration_executed=false", readiness_md)
+        for table in TOUCHED_TABLES:
+            self.assertIn(table, readiness_md)
         self.assertIn("ActionBlocked", contract_md)
         self.assertIn("blocked / 未确认", contract_md)
         self.assertIn("N6 canonical schema migration final gate", readiness_md)

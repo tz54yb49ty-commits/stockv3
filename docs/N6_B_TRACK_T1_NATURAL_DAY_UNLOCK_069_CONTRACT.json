@@ -1,0 +1,84 @@
+{
+  "contract_version": "N6_B_TRACK_T1_NATURAL_DAY_UNLOCK_069_V1",
+  "status": "implementation_ready_not_deployed",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "kernel_check": "ACCEPT",
+  "baseline": {
+    "commit": "5e94718c045d6a92f0462661781be7c581e76607",
+    "tree": "2c116558bad14c5b521612dc82214f0ba090e58a",
+    "apply_function_source_sha256": "d9cfbc4e07efce566e40fc642c60ef8ef5720aa2ca2aab942c3d0f4151c76366",
+    "session_helper_source_sha256": "316ed7080aea0f343a7231b338a82f95fbec05755743bb46948583d9c93cac76",
+    "quote_scope_source_sha256": "856bfc57439d85e9f1cab84a93f25dfcf4e4a50274e30c60cfac0e7110b527b1"
+  },
+  "migration": {
+    "number": "069",
+    "forward_sql": "sql/069_n6_btrack_t1_natural_day_unlock.sql",
+    "rollback_sql": "sql/069_n6_btrack_t1_natural_day_unlock_rollback.sql",
+    "rewritten_function": "public.n6_executor_apply_claimed_proposal(bigint,text)",
+    "new_apply_function_source_sha256": "759dfdf9c5422a55d1b4d6d183a4f6a2bca88039265374794d8e66f6f6c833c2",
+    "policy_version": "n6_btrack_t1_natural_day_unlock_069_v1",
+    "business_row_dml": false,
+    "table_schema_change": false,
+    "deployment_authorized_by_this_contract": false
+  },
+  "t1_semantics": {
+    "lot_authority": "public.n6_virtual_position_lot",
+    "available_trade_date_definition": "earliest_natural_date_on_or_after_which_the_lot_may_be_sold_if_all_other_gates_pass",
+    "new_buy_lot_expression": "open_trade_date + 1 natural day",
+    "same_day_sell_allowed": false,
+    "friday_buy_available_trade_date": "Saturday",
+    "weekend_or_closed_day_sell_allowed": false,
+    "next_actual_open_day_sell_allowed": true,
+    "future_common_trade_calendar_detail_required_for_buy": false,
+    "sell_maturity_predicate": "available_trade_date <= current_open_trade_date"
+  },
+  "preserved_gates": {
+    "current_open_trade_date": true,
+    "shanghai_regular_session": [
+      "09:30:00-11:30:00",
+      "13:00:00-15:00:00"
+    ],
+    "fresh_quote_max_age_seconds": 120,
+    "quote_identity_quality_and_positive_finite_price": true,
+    "server_budget_cny": 300000,
+    "board_lot_size_shares": 100,
+    "cash_check": true,
+    "principal_and_monitor_scope": true,
+    "idempotent_atomic_execution": true,
+    "existing_target_price_preserved_on_add": true,
+    "existing_stop_loss_state_preserved_on_add": true,
+    "real_broker_isolation": true
+  },
+  "rollback": {
+    "restores_apply_function_source_sha256": "d9cfbc4e07efce566e40fc642c60ef8ef5720aa2ca2aab942c3d0f4151c76366",
+    "restores_owner": "ashare_v3_user",
+    "restores_security_definer": true,
+    "restores_volatility": "VOLATILE",
+    "restores_search_path": "pg_catalog",
+    "only_execute_grantee": "n6_virtual_executor",
+    "rewrites_existing_lots": false,
+    "deletes_history": false
+  },
+  "scope": {
+    "web_or_api_changed": false,
+    "quote_scope_068_changed": false,
+    "session_helper_066_changed": false,
+    "stop_loss_logic_changed": false,
+    "historical_business_facts_changed": false,
+    "confirmed_proposals_changed": false,
+    "confirmed_proposal_count_observed_before_implementation": 11,
+    "executor_resume_authorized": false,
+    "proposal_processing_authorized": false,
+    "virtual_trade_smoke_authorized": false,
+    "real_trade_authorized": false
+  },
+  "deployment": {
+    "requires_separate_gate": true,
+    "executor_must_remain_paused_during_migration": true,
+    "immutable_release_required": true,
+    "executor_resume_and_confirmed_proposal_allowlist_require_separate_gate": true,
+    "rollback_does_not_rewrite_natural_day_lots_already_created": true
+  }
+}

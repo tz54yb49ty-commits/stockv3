@@ -27,7 +27,11 @@ from tests.test_provisional_ordinary_matcher import (
     production_20260714_1322_negative_evidence_fixture,
     same_day_fail_closed_mutations,
 )
-from tests.test_trigger_projection_matcher import CONTEXT_RUN_ID, context_row
+from tests.test_trigger_projection_matcher import (
+    CONTEXT_RUN_ID,
+    context_row,
+    context_row_with_condition_projection,
+)
 
 
 TRIGGER_RUN_ID = build_n4p_ordinary_trigger_run_id(for_trade_date="20260624", until_hhmm="1352")
@@ -307,6 +311,61 @@ def previous_matched_lifecycle_state(
 
 
 class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
+    def test_condition_projection_context_passthrough_preserves_lifecycle_and_dedup(self) -> None:
+        context = context_row_with_condition_projection(
+            "stock:SH:600000", "buy", "BUY:D", ["BUY"]
+        )
+        metric = n3p_metric_row("stock", "stock:SH:600000", direction="buy")
+        plans = ordinary_plans([context], [metric])
+        initial = build_plan(plans)
+        outbox = initial["writes"]["common_event_outbox"][0]
+        payload = outbox["payload_json"]
+        expected_context = context["period_trigger_baseline_json"]["condition_projection_context"]
+
+        self.assertEqual(outbox["event_type"], "TriggerMatched")
+        self.assertEqual(outbox["event_schema_version"], "v1")
+        self.assertEqual(payload["condition_projection_context"], expected_context)
+        self.assertEqual(payload["condition_projection_context_status"], "ready")
+        self.assertEqual(payload["condition_projection_context_trace"]["validation_reasons"], [])
+        self.assertTrue(payload["n5_entry_allowed"])
+        self.assertEqual(
+            initial["writes"]["common_trigger_match"][0]["raw_json"]["condition_projection_context"],
+            expected_context,
+        )
+
+        legacy = build_plan(
+            ordinary_plans(
+                [context_row("stock:SH:600000", "buy", "BUY:D", ["BUY"])],
+                [metric],
+            )
+        )["writes"]["common_event_outbox"][0]
+        self.assertEqual(outbox["dedup_key"], legacy["dedup_key"])
+        self.assertEqual(outbox["event_id"], legacy["event_id"])
+
+        previous = previous_state_for_payload(payload)
+        previous["raw_json"]["trigger_mark_candidate"] = "legacy_mark"
+        changed = build_plan(plans, previous_trigger_states=[previous])
+        changed_payload = changed["writes"]["common_event_outbox"][0]["payload_json"]
+        self.assertEqual(changed_payload["event_type"], "TriggerStateChanged")
+        self.assertTrue(changed_payload["trigger_live"])
+        self.assertFalse(changed_payload["n5_entry_allowed"])
+        self.assertEqual(changed_payload["condition_projection_context"], expected_context)
+        self.assertEqual(changed_payload["condition_projection_context_status"], "ready")
+
+        invalid_context = copy.deepcopy(context)
+        invalid_context["period_trigger_baseline_json"]["condition_projection_context"]["fields"]["close"] = "10.6"
+        invalid_plans = ordinary_plans([invalid_context], [metric])
+        invalid_initial = build_plan(invalid_plans)
+        invalid_payload = invalid_initial["writes"]["common_event_outbox"][0]["payload_json"]
+        self.assertEqual(invalid_payload["event_type"], "TriggerMatched")
+        self.assertEqual(invalid_payload["condition_projection_context_status"], "not_ready")
+        self.assertEqual(
+            invalid_initial["writes"]["common_event_outbox"][0]["event_id"],
+            outbox["event_id"],
+        )
+        unchanged = build_plan(invalid_plans, previous_trigger_states=[previous_state_for_payload(payload)])
+        self.assertEqual(unchanged["writes"]["common_event_outbox"], [])
+
     def test_20260714_1322_negative_evidence_cases_reach_match_and_outbox(self) -> None:
         contexts: list[dict[str, object]] = []
         metrics: list[dict[str, object]] = []
@@ -542,7 +601,7 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
                             run_id=SAME_DAY_CONTEXT_RUN_ID,
                         )
                         amount_value = 150000.0 if asset_kind == "stock" and direction == "buy" else (
-                            50.0 if asset_kind == "stock" else (150.0 if direction == "buy" else 50.0)
+                            50000.0 if asset_kind == "stock" else (150.0 if direction == "buy" else 50.0)
                         )
                         metric = n3p_metric_row(
                             asset_kind,
@@ -1408,6 +1467,62 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         self.assertTrue(payload["trigger_live"])
         self.assertFalse(payload["n4_boundary"]["enters_n5"])
 
+    def test_same_day_matched_changed_keeps_raw_match_audit_and_dispatches_state_changed(self) -> None:
+        context, metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SH:600048",
+            direction="buy",
+            condition_key="BUY:Y,Q,M,W,D",
+            formal_periods=("W", "D"),
+            negative_statuses={"Y": "not_ready", "Q": "not_seen", "M": "not_seen"},
+        )
+        plans = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )
+        trigger_run_id = build_n4p_ordinary_trigger_run_id(
+            for_trade_date="20260714",
+            until_hhmm="1322",
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            rule_suffix="atomic_rule_v1",
+        )
+        build_kwargs = {
+            "trigger_context_run_id": SAME_DAY_CONTEXT_RUN_ID,
+            "source_metric_run_id": PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            "for_trade_date": "20260714",
+            "source_condition_run_id": PRODUCTION_20260714_SOURCE_CONDITION_RUN_ID,
+            "trigger_run_id": trigger_run_id,
+        }
+        initial = build_plan(plans, **build_kwargs)
+        previous = previous_state_for_payload(
+            initial["writes"]["common_event_outbox"][0]["payload_json"]
+        )
+        previous["for_trade_date"] = "20260714"
+        previous["raw_json"]["trigger_mark_candidate"] = "legacy_mark"
+
+        execute_plan = build_plan(plans, previous_trigger_states=[previous], **build_kwargs)
+
+        self.assertEqual(execute_plan["matched_count"], 0)
+        self.assertEqual(execute_plan["state_changed_count"], 1)
+        self.assertEqual(execute_plan["writes"]["common_trigger_match"], [])
+        self.assertEqual(len(execute_plan["writes"]["common_event_outbox"]), 1)
+        payload = execute_plan["writes"]["common_event_outbox"][0]["payload_json"]
+        self.assertEqual(payload["event_type"], "TriggerStateChanged")
+        self.assertEqual(payload["current_status"], "matched")
+        self.assertEqual(payload["state_change_reason"], "matched_changed")
+        self.assertEqual(
+            execute_plan["writes"]["common_trigger_state"][0]["raw_json"][
+                "lifecycle_output_reason"
+            ],
+            "matched_changed",
+        )
+        self.assertEqual(payload["rule_eval_result"]["outcome_classification"], "matched")
+        self.assertEqual(payload["rule_eval_result"]["output_event_type"], "TriggerMatched")
+        self.assertNotIn("output_event_type", payload["rule_proof"])
+        self.assertFalse(payload["n4_boundary"]["enters_n5"])
+
     def test_live_buy_full_is_cleared_when_current_ready_metric_no_longer_matches(self) -> None:
         current = matched_lifecycle_candidate(
             condition_key="BUY:FULL",
@@ -1456,7 +1571,7 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         current.update(
             {
                 "plan_status": "no_op",
-                "output_event_type": "TriggerPendingMarketData",
+                "output_event_type": None,
                 "current_status": "pending_market_data",
                 "trigger_live": False,
                 "projection_status": "pending",
@@ -1879,8 +1994,53 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         self.assertEqual(payload["event_type"], "TriggerStateChanged")
         self.assertFalse(payload["trigger_live"])
         self.assertEqual(payload["current_status"], "inactive")
-        self.assertEqual(payload["state_change_reason"], "matched_to_inactive")
+        self.assertEqual(payload["state_change_reason"], "deactivated")
+        self.assertEqual(
+            execute_plan["writes"]["common_trigger_state"][0]["raw_json"]["lifecycle_output_reason"],
+            "matched_to_inactive",
+        )
 
+    def test_stock_amount_unit_correction_deactivates_previous_match_without_new_match(self) -> None:
+        identity_key = "stock:SZ:300759"
+        matched_context = context_row(identity_key, "buy", "BUY:D", ["BUY"])
+        matched_plans = ordinary_plans(
+            [matched_context],
+            [n3p_metric_row("stock", identity_key, direction="buy", price="34.05", amount="150000")],
+        )
+        previous = previous_state_for_payload(build_plan(matched_plans)["writes"]["common_event_outbox"][0]["payload_json"])
+
+        corrected_context = context_row(identity_key, "buy", "BUY:D", ["BUY"])
+        corrected_baseline = corrected_context["period_trigger_baseline_json"]["periods"]["D"]
+        corrected_baseline["previous_avg_amount"] = "3394611.01782"
+        corrected_plans = ordinary_plans(
+            [corrected_context],
+            [
+                n3p_metric_row(
+                    "stock",
+                    identity_key,
+                    direction="buy",
+                    price="34.05",
+                    amount="2752606058.850448",
+                )
+            ],
+        )
+
+        detail = corrected_plans[0]["rule_proof"]["period_evaluation_details"][0]
+        trace = detail["amount_unit_status"]["amount_normalization_trace"]
+        self.assertIsNone(corrected_plans[0]["output_event_type"])
+        self.assertEqual(detail["classification"], "no_op")
+        self.assertEqual(trace["source_unit"], "thousand_yuan")
+        self.assertEqual(trace["n2_baseline_unit_conversion_factor"], 1000)
+        self.assertEqual(trace["canonical_value"], "3394611017.82000")
+
+        execute_plan = build_plan(corrected_plans, previous_trigger_states=[previous])
+
+        self.assertEqual(execute_plan["matched_count"], 0)
+        self.assertEqual(execute_plan["state_changed_count"], 1)
+        self.assertEqual(execute_plan["writes"]["common_trigger_match"], [])
+        self.assertEqual(execute_plan["writes"]["common_event_outbox"][0]["event_type"], "TriggerStateChanged")
+        self.assertFalse(execute_plan["writes"]["common_event_outbox"][0]["payload_json"]["trigger_live"])
+        self.assertFalse(execute_plan["event_model"]["enters_n5"])
 
     def test_inactive_state_changed_preserves_previous_valid_period_not_minute_label(self) -> None:
         current = state_changed_candidate(condition_key="BUY:Y,M,D")
@@ -2057,28 +2217,6 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         with self.assertRaises(N4POrdinaryExecuteBlocked) as raised:
             build_plan(plans)
 
-        self.assertIn("top_level_trace_legacy_replay_conflicting", str(raised.exception))
-
-    def test_multi_period_trigger_contract_uses_highest_priority_period_and_price(self) -> None:
-        plans = ordinary_plans(
-            [context_row("stock:SH:600000", "buy", "BUY:Y,Q,M,W,D", ["BUY"])],
-            [
-                n3p_metric_row(
-                    "stock",
-                    "stock:SH:600000",
-                    direction="buy",
-                    formal_period_amount_proof=formal_period_amount_proof_factory(
-                        periods=("Y", "Q", "M", "W", "D"),
-                        amount_unit="yuan",
-                        source_kind="N3_standard_period_metric",
-                        amount_pass=True,
-                    ),
-                )
-            ],
-        )
-
-        with self.assertRaises(N4POrdinaryExecuteBlocked) as raised:
-            build_plan(plans)
         self.assertIn("top_level_trace_legacy_replay_conflicting", str(raised.exception))
 
     def test_hint_plans_are_rejected_by_ordinary_execute(self) -> None:

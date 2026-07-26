@@ -24,11 +24,18 @@ def build_lifecycle_output_plans(
     previous_states: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     previous_by_key = {lifecycle_state_key(state): dict(state) for state in previous_states}
+    previous_by_revalidation_key: dict[str, list[dict[str, Any]]] = {}
+    for state in previous_states:
+        previous_by_revalidation_key.setdefault(lifecycle_revalidation_key(state), []).append(dict(state))
     outputs: list[dict[str, Any]] = []
     for raw_plan in current_plans:
         plan = dict(raw_plan)
         key = lifecycle_state_key(plan)
         previous = previous_by_key.get(key)
+        if previous is None:
+            revalidation_candidates = previous_by_revalidation_key.get(lifecycle_revalidation_key(plan), [])
+            if len(revalidation_candidates) == 1:
+                previous = revalidation_candidates[0]
         was_matched = previous_state_is_matched(previous)
         is_matched = current_plan_is_matched(plan)
         has_ready_evidence = current_plan_has_ready_evidence(plan)
@@ -110,7 +117,11 @@ def annotate_lifecycle_plan(
             output["current_status"] = "matched"
             output["trigger_live"] = True
     output["lifecycle_output_reason"] = lifecycle_output_reason(output, previous_state=previous_state)
-    output["state_change_reason"] = output["lifecycle_output_reason"]
+    output["state_change_reason"] = (
+        "deactivated"
+        if event_type == TRIGGER_STATE_CHANGED_EVENT_TYPE and output.get("current_status") == "inactive"
+        else output["lifecycle_output_reason"]
+    )
     return output
 
 
@@ -140,6 +151,30 @@ def lifecycle_state_key(row: Mapping[str, Any]) -> str:
     )
 
 
+def lifecycle_revalidation_key(row: Mapping[str, Any]) -> str:
+    """Match current evidence to legacy live state without changing persisted keys."""
+
+    return "|".join(
+        [
+            _text(row.get("for_trade_date")),
+            _text(row.get("asset_kind")),
+            _text(row.get("identity_key")),
+            _text(row.get("direction")),
+            normalized_signal_type_for_revalidation(row),
+            _text(row.get("condition_key")),
+        ]
+    )
+
+
+def normalized_signal_type_for_revalidation(row: Mapping[str, Any]) -> str:
+    signal_type = _text(row.get("signal_type") or raw_json_value(row, "signal_type"))
+    if signal_type in {"B_BUY", "BUY"}:
+        return "BUY"
+    if signal_type in {"S_SELL", "SELL"}:
+        return "SELL"
+    return signal_type
+
+
 def current_plan_is_matched(plan: Mapping[str, Any]) -> bool:
     return (
         str(plan.get("plan_status") or "") == "matched"
@@ -157,19 +192,35 @@ def previous_state_is_matched(state: Mapping[str, Any] | None) -> bool:
 def current_plan_has_ready_evidence(plan: Mapping[str, Any]) -> bool:
     if current_plan_is_matched(plan):
         return True
-    if (
+    explicit_projection_ready = (
         str(plan.get("projection_status") or "") == "ready"
         and str(plan.get("projection_quality_status") or "") == "passed"
         and str(plan.get("trace_status") or "") == "passed"
+    )
+    selected_metric = plan.get("rule_proof", {})
+    selected_metric = selected_metric if isinstance(selected_metric, Mapping) else {}
+    selected_metric = selected_metric.get("selected_metric", {})
+    selected_metric = selected_metric if isinstance(selected_metric, Mapping) else {}
+    metric_ready = plan.get("metric_ready") is True or selected_metric.get("metric_ready") is True
+    if not metric_ready:
+        return explicit_projection_ready
+    for quality_key in (
+        "data_quality_status",
+        "metric_quality_status",
+        "current_metric_quality_status",
+        "projection_quality_status",
+        "trace_status",
     ):
-        return True
+        quality = plan.get(quality_key)
+        if quality is not None and str(quality).strip().lower() not in {"", "passed", "pass", "ready", "ok"}:
+            return False
     rule_eval = plan.get("rule_eval_result")
     rule_eval = rule_eval if isinstance(rule_eval, Mapping) else {}
-    rule_proof = plan.get("rule_proof")
-    rule_proof = rule_proof if isinstance(rule_proof, Mapping) else {}
-    selected_metric = rule_proof.get("selected_metric")
-    selected_metric = selected_metric if isinstance(selected_metric, Mapping) else {}
-    return bool(plan.get("metric_ready") or selected_metric.get("metric_ready") or rule_eval)
+    if rule_eval.get("pending_reasons") or rule_eval.get("quality_reasons") or rule_eval.get("blocked_reason"):
+        return False
+    return explicit_projection_ready or plan.get("metric_ready") is True or (
+        str(rule_eval.get("outcome_classification") or "") == "no_op"
+    )
 
 
 def lifecycle_state_materially_changed(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:

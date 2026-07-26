@@ -78,6 +78,37 @@ TRANSITION_WINDOWS = {"Y": 66, "Q": 22, "M": 5, "W": 1}
 PERIOD_TRIGGER_BASELINE_VERSION = "N2-R4-period-trigger-baseline-v1"
 PERIOD_ESCALATION_CONTEXT_VERSION = "N2-period-escalation-context-v1"
 PERIOD_ESCALATION_CONTEXT_GENERATION_MODE = "N2-period-escalation-daily-incremental-v1"
+CONDITION_PROJECTION_CONTEXT_VERSION = "N2-condition-projection-context-v1"
+CONDITION_PROJECTION_COMMON_FIELDS = (
+    "name",
+    "close",
+    "up_reference_period",
+    "buy_target_price",
+    "buy_expected_return_pct",
+    "down_reference_period",
+    "sell_target_price",
+    "sell_expected_return_pct",
+    "clear_sell_ref_period",
+    "up_secondary_target_price",
+    "up_secondary_expected_return_pct",
+)
+CONDITION_PROJECTION_STOCK_FIELDS = CONDITION_PROJECTION_COMMON_FIELDS + ("score", "pe_core")
+CONDITION_PROJECTION_NUMERIC_FIELDS = frozenset(
+    {
+        "close",
+        "buy_target_price",
+        "buy_expected_return_pct",
+        "sell_target_price",
+        "sell_expected_return_pct",
+        "up_secondary_target_price",
+        "up_secondary_expected_return_pct",
+        "score",
+        "pe_core",
+    }
+)
+CONDITION_PROJECTION_PERIOD_FIELDS = frozenset(
+    {"up_reference_period", "down_reference_period", "clear_sell_ref_period"}
+)
 PERIOD_ESCALATION_REQUIREMENTS = {
     "W": {"prerequisite_period": "D", "window_kind": "week"},
     "M": {"prerequisite_period": "W", "window_kind": "month"},
@@ -837,6 +868,12 @@ def attach_period_escalation_context_to_row(
         open_source_dates=open_source_dates,
     )
     output["period_trigger_baseline_json"] = baseline
+    baseline["condition_projection_context"] = build_condition_projection_context(
+        dates=dates,
+        current_row=output,
+        baseline=baseline,
+    )
+    output["period_trigger_baseline_json"] = baseline
     return attach_context_enrichment_to_row(output)
 
 
@@ -1240,6 +1277,120 @@ def basis_identity_key(row: Mapping[str, Any]) -> str:
         or row.get("board_identity_key")
         or ""
     )
+
+
+def build_condition_projection_context(
+    *,
+    dates: DateContext,
+    current_row: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze N2-owned condition fields for downstream projection messages."""
+
+    asset_kind = str(current_row.get("asset_kind") or "").strip().lower()
+    identity_key = basis_identity_key(current_row)
+    source_trade_date = str(dates.source_trade_date or "")
+    for_trade_date = str(dates.for_trade_date or "")
+    raw_json = normalize_mapping(current_row.get("raw_json") or {})
+    baseline_json = normalize_mapping(baseline or current_row.get("period_trigger_baseline_json") or {})
+    periods = baseline_json.get("periods") if isinstance(baseline_json.get("periods"), Mapping) else {}
+    d_baseline = periods.get("D") if isinstance(periods.get("D"), Mapping) else {}
+
+    raw_close = condition_projection_decimal_or_none(raw_json.get("close"))
+    d_close = condition_projection_decimal_or_none(d_baseline.get("current_close_seed"))
+    field_names = CONDITION_PROJECTION_STOCK_FIELDS if asset_kind == "stock" else CONDITION_PROJECTION_COMMON_FIELDS
+    fields: dict[str, Any] = {}
+    for field in field_names:
+        if field == "name":
+            value = current_row.get("board_name") if asset_kind == "board" else current_row.get("name")
+            fields[field] = str(value).strip() if value not in (None, "") else None
+        elif field == "close":
+            fields[field] = decimal_to_string(raw_close)
+        elif field in CONDITION_PROJECTION_NUMERIC_FIELDS:
+            fields[field] = decimal_to_string(
+                condition_projection_decimal_or_none(current_row.get(field))
+            )
+        elif field in CONDITION_PROJECTION_PERIOD_FIELDS:
+            fields[field] = condition_projection_period_or_none(current_row.get(field))
+        else:
+            fields[field] = current_row.get(field)
+
+    reasons: list[str] = []
+    if asset_kind not in PERIOD_ESCALATION_BASIS_TABLES:
+        reasons.append("invalid_asset_kind")
+    if not identity_key or not identity_key.startswith(f"{asset_kind}:"):
+        reasons.append("invalid_identity_key")
+    if not valid_yyyymmdd_text(source_trade_date):
+        reasons.append("invalid_source_trade_date")
+    if not valid_yyyymmdd_text(for_trade_date):
+        reasons.append("invalid_for_trade_date")
+    row_source_trade_date = str(current_row.get("source_trade_date") or "")
+    row_for_trade_date = str(current_row.get("for_trade_date") or "")
+    if row_source_trade_date and row_source_trade_date != source_trade_date:
+        reasons.append("source_trade_date_mismatch")
+    if row_for_trade_date and row_for_trade_date != for_trade_date:
+        reasons.append("for_trade_date_mismatch")
+    if valid_yyyymmdd_text(source_trade_date) and valid_yyyymmdd_text(for_trade_date) and source_trade_date >= for_trade_date:
+        reasons.append("trade_date_order_invalid")
+    if not fields.get("name"):
+        reasons.append("name_missing")
+    if raw_close is None or raw_close <= 0:
+        reasons.append("raw_close_missing_or_non_positive")
+    if d_close is None or d_close <= 0:
+        reasons.append("d_current_close_seed_missing_or_non_positive")
+    if raw_close is not None and d_close is not None and raw_close != d_close:
+        reasons.append("close_source_mismatch")
+    up_reference_period = condition_projection_period_or_none(current_row.get("up_sell_reference_period"))
+    clear_sell_ref_period = fields.get("clear_sell_ref_period")
+    if up_reference_period != clear_sell_ref_period:
+        reasons.append("clear_sell_ref_period_alias_mismatch")
+
+    optional_fields = [field for field in field_names if field not in {"name", "close"}]
+    payload = {
+        "contract_version": CONDITION_PROJECTION_CONTEXT_VERSION,
+        "source_layer": "N2_condition",
+        "asset_kind": asset_kind,
+        "identity_key": identity_key,
+        "source_trade_date": source_trade_date,
+        "for_trade_date": for_trade_date,
+        "status": "not_ready" if reasons else "ready",
+        "fields": fields,
+        "nullable_fields": [field for field in optional_fields if fields.get(field) is None],
+        "not_ready_reasons": reasons,
+    }
+    return {**payload, "context_hash": stable_json_hash(payload)}
+
+
+def condition_projection_context_hash_valid(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    actual_hash = str(value.get("context_hash") or "")
+    payload = {str(key): item for key, item in value.items() if key != "context_hash"}
+    return bool(actual_hash) and actual_hash == stable_json_hash(payload)
+
+
+def condition_projection_decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        numeric = decimal_or_none(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return numeric if numeric is None or numeric.is_finite() else None
+
+
+def condition_projection_period_or_none(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    return text if text in PERIODS else None
+
+
+def valid_yyyymmdd_text(value: Any) -> bool:
+    text = str(value or "")
+    if len(text) != 8 or not text.isdigit():
+        return False
+    try:
+        parse_yyyymmdd(text)
+    except ValueError:
+        return False
+    return True
 
 
 def stable_json_hash(value: Mapping[str, Any]) -> str:

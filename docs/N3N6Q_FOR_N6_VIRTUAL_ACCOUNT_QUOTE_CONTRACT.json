@@ -1,0 +1,275 @@
+{
+  "contract_name": "N3N6Q_FOR_N6_VIRTUAL_ACCOUNT_QUOTE_CONTRACT",
+  "contract_version": "1.0.0",
+  "status": "CONTRACT_REGISTERED_DESIGN_ONLY",
+  "base_commit": "97b0b7c41370f12d923683033882e7afb59ab6bc",
+  "layer_roles": {
+    "governance_owner": "runtime_control",
+    "provider_owner": "N3_market_data",
+    "consumer_owner": "N6_user"
+  },
+  "component": {
+    "name": "N3N6Q",
+    "transport": "in_process_synchronous_facade",
+    "stateful": false,
+    "public_http_route": false,
+    "long_running_process": false,
+    "exclusive_consumer": "N6_virtual_account_internal_one_shot"
+  },
+  "quote_identity_v1": {
+    "collection_type": "array",
+    "min_items": 1,
+    "max_items": 80,
+    "item_fields": [
+      "identity_key",
+      "exchange",
+      "stock_code"
+    ],
+    "additional_properties": false,
+    "field_contract": {
+      "identity_key": {
+        "type": "string",
+        "pattern": "^stock:(SH|SZ|BJ):[0-9]{6}$"
+      },
+      "exchange": {
+        "type": "string",
+        "enum": [
+          "SH",
+          "SZ",
+          "BJ"
+        ]
+      },
+      "stock_code": {
+        "type": "string",
+        "pattern": "^[0-9]{6}$"
+      }
+    },
+    "unique_by": "identity_key",
+    "identity_fields_must_agree": true
+  },
+  "quote_batch_v1": {
+    "exact_fields": [
+      "contract_version",
+      "batch_id",
+      "source_adapter",
+      "source_version",
+      "source_time_semantics",
+      "requested_at",
+      "completed_at",
+      "batch_status",
+      "item_count",
+      "items"
+    ],
+    "additional_properties": false,
+    "fixed_values": {
+      "contract_version": "1.0.0",
+      "source_adapter": "mootdx.std",
+      "source_time_semantics": "provider_intraday_time_without_trade_date"
+    },
+    "batch_status_enum": [
+      "passed",
+      "partial",
+      "failed"
+    ],
+    "item_count_equals_request_count": true,
+    "items_preserve_request_order": true,
+    "quote_item": {
+      "exact_fields": [
+        "identity_key",
+        "exchange",
+        "market",
+        "stock_code",
+        "current_price",
+        "last_close",
+        "day_open",
+        "day_high",
+        "day_low",
+        "source_time_text",
+        "fetched_at",
+        "quality_status",
+        "quality_reason"
+      ],
+      "additional_properties": false,
+      "field_types": {
+        "identity_key": "string",
+        "exchange": "SH|SZ|BJ",
+        "market": "integer|null",
+        "stock_code": "six_digit_string",
+        "current_price": "decimal_string|null",
+        "last_close": "decimal_string|null",
+        "day_open": "decimal_string|null",
+        "day_high": "decimal_string|null",
+        "day_low": "decimal_string|null",
+        "source_time_text": "string|null",
+        "fetched_at": "timezone_aware_iso8601",
+        "quality_status": "passed|not_ready",
+        "quality_reason": "quality_reason_enum"
+      },
+      "quality_status_enum": [
+        "passed",
+        "not_ready"
+      ],
+      "quality_reason_enum": [
+        "ok",
+        "missing",
+        "identity_mismatch",
+        "invalid_price",
+        "invalid_source_time",
+        "provider_error",
+        "unsupported_exchange"
+      ],
+      "decimal_encoding": "base10_fixed_point_string",
+      "raw_provider_payload_allowed": false
+    }
+  },
+  "authority_matrix": {
+    "N3N6Q_owns": [
+      "mootdx_stock_batch_fetch",
+      "request_validation",
+      "provider_code_market_identity_validation",
+      "QuoteBatch_v1_normalization"
+    ],
+    "N6_user_owns": [
+      "virtual_position_scope",
+      "cross_account_identity_deduplication",
+      "minute_scheduling",
+      "market_session_policy",
+      "trade_date_validation",
+      "freshness_classification",
+      "quote_snapshot_persistence",
+      "virtual_account_valuation",
+      "stop_loss_freeze",
+      "stop_sell_proposal",
+      "virtual_sell_confirmation"
+    ],
+    "runtime_control_owns": [
+      "contract_registration",
+      "release_governance"
+    ]
+  },
+  "forbidden_input_fields": [
+    "principal_id",
+    "principal",
+    "user_id",
+    "account_id",
+    "position_id",
+    "holding_episode_no",
+    "quantity",
+    "available_quantity",
+    "cost",
+    "pnl",
+    "stop_loss_price",
+    "stop_loss_status",
+    "proposal_id",
+    "trade_date",
+    "quote_minute",
+    "freshness",
+    "order",
+    "trade",
+    "action_price"
+  ],
+  "frozen_existing_n3_modules": [
+    "N3-A1",
+    "N3-B1",
+    "N3-B2",
+    "N3-C1",
+    "N3P",
+    "N3T"
+  ],
+  "frozen_existing_n3_infrastructure": [
+    "poller",
+    "worker",
+    "LaunchAgent",
+    "schema",
+    "migration",
+    "fact",
+    "quality_table",
+    "event_contract",
+    "outbox",
+    "inbox",
+    "checkpoint"
+  ],
+  "forbidden_module_dependencies": [
+    "existing_N3_adapter",
+    "existing_N3_poller",
+    "existing_N3_worker",
+    "N3-A1",
+    "N3-B1",
+    "N3-B2",
+    "N3-C1",
+    "N3P",
+    "N3T",
+    "N3_database",
+    "N6_database",
+    "minute_target_scope",
+    "market_data_subscription",
+    "N2-N5_raw_tables"
+  ],
+  "provider_gate_file_allowlist": [
+    "src/ashare_v3/n3n6q/__init__.py",
+    "src/ashare_v3/n3n6q/contract.py",
+    "src/ashare_v3/n3n6q/provider.py",
+    "src/ashare_v3/n3n6q/mootdx_adapter.py",
+    "tests/test_n3n6q_quote_provider.py"
+  ],
+  "fail_closed": {
+    "invalid_batch_rejects_before_provider_call": true,
+    "missing_item_is_not_backfilled": true,
+    "identity_mismatch_is_not_ready": true,
+    "non_positive_current_price_is_not_ready": true,
+    "non_positive_day_low_is_not_ready": true,
+    "invalid_source_time_is_not_ready": true,
+    "unproven_exchange_market_mapping_is_not_ready": true,
+    "fallback_to_existing_n3_facts": false,
+    "fallback_to_n2_n5_raw_tables": false,
+    "n6_must_revalidate_identity_trade_date_and_freshness": true
+  },
+  "side_effects": {
+    "reads_n3_database": false,
+    "reads_n6_database": false,
+    "writes_database": false,
+    "writes_n3_fact": false,
+    "writes_n6_fact": false,
+    "generates_event": false,
+    "writes_outbox": false,
+    "consumes_inbox": false,
+    "updates_checkpoint": false,
+    "starts_poller": false,
+    "starts_worker": false,
+    "installs_launch_agent": false,
+    "opens_http_route": false,
+    "connects_broker": false,
+    "creates_real_trade": false
+  },
+  "track_isolation": {
+    "b_track_n6_internal_only": true,
+    "b_track_page_direct_call": false,
+    "a_track_call": false,
+    "admin_status_call": false,
+    "browser_call": false,
+    "n4_call": false,
+    "n5_call": false
+  },
+  "next_gates": [
+    {
+      "gate": "N3N6Q_PROVIDER_AND_FAKE_ADAPTER_IMPLEMENTATION_GATE",
+      "layer_role": "N3_market_data",
+      "network_fetch_allowed": false,
+      "database_access_allowed": false
+    },
+    {
+      "gate": "N3N6Q_MOOTDX_READONLY_LIVE_PROBE_GATE",
+      "layer_role": "N3_market_data",
+      "network_fetch_allowed": true,
+      "database_access_allowed": false
+    },
+    {
+      "gate": "N6_VIRTUAL_QUOTE_SCHEMA_AND_PERSISTENCE_GATE",
+      "layer_role": "N6_user",
+      "network_fetch_allowed": false,
+      "n3_modification_allowed": false
+    }
+  ],
+  "passing_one_gate_authorizes_next_gate": false,
+  "real_trading_authorized": false
+}

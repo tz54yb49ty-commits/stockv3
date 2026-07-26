@@ -8,7 +8,10 @@ tables, call market adapters, write trigger facts, or start workers.
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -57,6 +60,60 @@ TRIGGER_PERIOD = "30m"
 PROJECTION_PERIOD = "30m"
 FORMAL_TRIGGER_PERIODS = {"Y", "Q", "M", "W", "D"}
 LEGACY_TRACE_ONLY_SIGNAL_TYPES = ("B_BUY_30M_VOL", "S_SELL_30M_SHRINK")
+CONDITION_PROJECTION_CONTEXT_VERSION = "N2-condition-projection-context-v1"
+CONDITION_PROJECTION_PASSTHROUGH_POLICY_VERSION = "N4-condition-projection-passthrough-v1"
+CONDITION_PROJECTION_CONTEXT_SOURCE_PATH = (
+    "trigger_context_snapshot.raw_json.period_trigger_baseline_json.condition_projection_context"
+)
+CONDITION_PROJECTION_COMMON_FIELDS = (
+    "name",
+    "close",
+    "up_reference_period",
+    "buy_target_price",
+    "buy_expected_return_pct",
+    "down_reference_period",
+    "sell_target_price",
+    "sell_expected_return_pct",
+    "clear_sell_ref_period",
+    "up_secondary_target_price",
+    "up_secondary_expected_return_pct",
+)
+CONDITION_PROJECTION_STOCK_FIELDS = CONDITION_PROJECTION_COMMON_FIELDS + ("score", "pe_core")
+CONDITION_PROJECTION_PASSTHROUGH_POLICY = {
+    "policy_version": CONDITION_PROJECTION_PASSTHROUGH_POLICY_VERSION,
+    "upstream_contract_version": CONDITION_PROJECTION_CONTEXT_VERSION,
+    "source_path": CONDITION_PROJECTION_CONTEXT_SOURCE_PATH,
+    "required_source_layer": "N2_condition",
+    "common_fields": list(CONDITION_PROJECTION_COMMON_FIELDS),
+    "stock_only_fields": ["score", "pe_core"],
+    "validation_fields": [
+        "contract_version",
+        "source_layer",
+        "context_hash",
+        "asset_kind",
+        "identity_key",
+        "source_trade_date",
+        "for_trade_date",
+        "status",
+        "fields",
+        "nullable_fields",
+        "not_ready_reasons",
+        "fields.name",
+        "fields.close",
+    ],
+    "date_contract": "YYYYMMDD_source_before_for_and_exact_local_context_match",
+    "close_contract": "canonical_positive_decimal_string",
+    "invalid_context_effect": "trace_only_not_ready_no_trigger_lifecycle_dedup_or_n5_entry_change",
+    "event_schema_version": "v1",
+}
+CONDITION_PROJECTION_PASSTHROUGH_POLICY_HASH = sha256(
+    json.dumps(
+        CONDITION_PROJECTION_PASSTHROUGH_POLICY,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 MATCH_SIGNAL_BY_DIRECTION = {
     "buy": {"BUY_HINT": "up_volume_expanding"},
     "sell": {"SELL_HINT": "down_volume_shrinking"},
@@ -311,10 +368,160 @@ def normalize_context_row(row: Mapping[str, Any]) -> dict[str, Any]:
     condition_key = str(output.get("condition_key") or "")
     if condition_key and not output.get("original_condition_key"):
         output["original_condition_key"] = condition_key
-    output["period_trigger_baseline_json"] = (
+    baseline = (
         raw_json.get("period_trigger_baseline_json") if isinstance(raw_json, Mapping) else {}
     ) or output.get("period_trigger_baseline_json") or {}
+    output["period_trigger_baseline_json"] = json_mapping(baseline)
+    output.update(build_condition_projection_context_passthrough(output))
     return output
+
+
+def build_condition_projection_context_passthrough(context_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate localized N2 projection context without changing N4 decisions."""
+
+    baseline = json_mapping(context_row.get("period_trigger_baseline_json"))
+    raw_context = baseline.get("condition_projection_context")
+    context_value = deepcopy(raw_context) if raw_context is not None else {}
+    context = dict(raw_context) if isinstance(raw_context, Mapping) else {}
+    reasons: list[str] = []
+    if raw_context is None or (isinstance(raw_context, Mapping) and not raw_context):
+        reasons.append("condition_projection_context_missing")
+    elif not isinstance(raw_context, Mapping):
+        reasons.append("condition_projection_context_not_object")
+    else:
+        asset_kind = str(context_row.get("asset_kind") or "")
+        identity_key = str(context_row.get("identity_key") or "")
+        source_trade_date = str(context_row.get("source_trade_date") or "")
+        for_trade_date = str(context_row.get("for_trade_date") or "")
+        context_source_trade_date = str(context.get("source_trade_date") or "")
+        context_for_trade_date = str(context.get("for_trade_date") or "")
+        if context.get("contract_version") != CONDITION_PROJECTION_CONTEXT_VERSION:
+            reasons.append("condition_projection_contract_version_mismatch")
+        if context.get("source_layer") != "N2_condition":
+            reasons.append("condition_projection_source_layer_mismatch")
+        if str(context.get("asset_kind") or "") != asset_kind:
+            reasons.append("condition_projection_asset_kind_mismatch")
+        if not identity_key.startswith(f"{asset_kind}:") or str(context.get("identity_key") or "") != identity_key:
+            reasons.append("condition_projection_identity_key_mismatch")
+        if not valid_yyyymmdd_text(context_source_trade_date):
+            reasons.append("condition_projection_source_trade_date_invalid")
+        elif context_source_trade_date != source_trade_date:
+            reasons.append("condition_projection_source_trade_date_mismatch")
+        if not valid_yyyymmdd_text(context_for_trade_date):
+            reasons.append("condition_projection_for_trade_date_invalid")
+        elif context_for_trade_date != for_trade_date:
+            reasons.append("condition_projection_for_trade_date_mismatch")
+        if (
+            valid_yyyymmdd_text(context_source_trade_date)
+            and valid_yyyymmdd_text(context_for_trade_date)
+            and context_source_trade_date >= context_for_trade_date
+        ):
+            reasons.append("condition_projection_trade_date_order_invalid")
+        if context.get("status") != "ready":
+            reasons.append("condition_projection_source_status_not_ready")
+
+        fields = context.get("fields")
+        if not isinstance(fields, Mapping):
+            reasons.append("condition_projection_fields_missing")
+            fields = {}
+        expected_fields = (
+            CONDITION_PROJECTION_STOCK_FIELDS
+            if asset_kind == "stock"
+            else CONDITION_PROJECTION_COMMON_FIELDS
+        )
+        if set(fields) != set(expected_fields):
+            reasons.append("condition_projection_field_shape_mismatch")
+        name = fields.get("name")
+        if not isinstance(name, str) or not name.strip():
+            reasons.append("condition_projection_name_missing")
+        if not canonical_positive_decimal_string(fields.get("close")):
+            reasons.append("condition_projection_close_invalid")
+
+        optional_fields = [field for field in expected_fields if field not in {"name", "close"}]
+        expected_nullable_fields = [field for field in optional_fields if fields.get(field) is None]
+        nullable_fields = context.get("nullable_fields")
+        if not isinstance(nullable_fields, list) or nullable_fields != expected_nullable_fields:
+            reasons.append("condition_projection_nullable_fields_mismatch")
+        not_ready_reasons = context.get("not_ready_reasons")
+        if not isinstance(not_ready_reasons, list):
+            reasons.append("condition_projection_not_ready_reasons_invalid")
+        elif context.get("status") == "ready" and not_ready_reasons:
+            reasons.append("condition_projection_ready_reasons_not_empty")
+        elif context.get("status") == "not_ready" and not not_ready_reasons:
+            reasons.append("condition_projection_not_ready_reasons_missing")
+
+        context_hash = str(context.get("context_hash") or "")
+        if not context_hash:
+            reasons.append("condition_projection_context_hash_missing")
+        elif context_hash != condition_projection_context_hash(context):
+            reasons.append("condition_projection_context_hash_mismatch")
+
+    status = "ready" if not reasons else "not_ready"
+    return {
+        "condition_projection_context": context_value,
+        "condition_projection_context_status": status,
+        "condition_projection_context_trace": {
+            "policy_version": CONDITION_PROJECTION_PASSTHROUGH_POLICY_VERSION,
+            "policy_hash": CONDITION_PROJECTION_PASSTHROUGH_POLICY_HASH,
+            "expected_contract_version": CONDITION_PROJECTION_CONTEXT_VERSION,
+            "source_path": CONDITION_PROJECTION_CONTEXT_SOURCE_PATH,
+            "status": status,
+            "validation_reasons": reasons,
+            "source_context_hash": context.get("context_hash"),
+            "validation_effect": "trace_only_no_trigger_lifecycle_dedup_or_n5_entry_change",
+        },
+    }
+
+
+def condition_projection_context_hash(context: Mapping[str, Any]) -> str:
+    payload = {str(key): value for key, value in context.items() if key != "context_hash"}
+    return sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def canonical_positive_decimal_string(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        numeric = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return False
+    if not numeric.is_finite() or numeric <= 0:
+        return False
+    normalized = format(numeric, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return value == (normalized or "0")
+
+
+def valid_yyyymmdd_text(value: Any) -> bool:
+    text = str(value or "")
+    if len(text) != 8 or not text.isdigit():
+        return False
+    try:
+        datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        return False
+    return True
+
+
+def json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
 
 
 def normalize_projection_row(row: Mapping[str, Any]) -> dict[str, Any]:

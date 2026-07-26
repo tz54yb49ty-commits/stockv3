@@ -1,0 +1,50 @@
+endpoint_pool_version = "mootdx-endpoint-pool-v1"
+transport = "mootdx"
+n1_failover_mode = "observe"
+n3_failover_mode = "observe"
+circuit_open_seconds = 300
+required_empty_object_threshold = 3
+
+[[endpoints]]
+endpoint_id = "tdx-hq-primary-hz"
+host = "115.238.56.198"
+port = 7709
+priority = 10
+enabled = true
+quarantined = false
+provenance_url = "https://github.com/handsomejustin/easy_tdx/blob/3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f/scripts/verify_fixes_20260415.py"
+provenance_commit = "3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f"
+local_validation_status = "protocol_passed"
+
+[[endpoints]]
+endpoint_id = "tdx-hq-secondary-sh"
+host = "180.153.18.170"
+port = 7709
+priority = 20
+enabled = true
+quarantined = false
+provenance_url = "https://github.com/handsomejustin/easy_tdx/blob/3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f/scripts/verify_fixes_20260415.py"
+provenance_commit = "3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f"
+local_validation_status = "protocol_passed"
+
+[[endpoints]]
+endpoint_id = "tdx-hq-quarantined-aliyun"
+host = "124.71.187.122"
+port = 7709
+priority = 90
+enabled = false
+quarantined = true
+provenance_url = "https://github.com/handsomejustin/easy_tdx/blob/3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f/scripts/verify_fixes_20260415.py"
+provenance_commit = "3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f"
+local_validation_status = "protocol_failed_quarantined"
+
+[[endpoints]]
+endpoint_id = "tdx-hq-quarantined-cache"
+host = "218.6.170.47"
+port = 7709
+priority = 100
+enabled = false
+quarantined = true
+provenance_url = "local-mootdx-bestip-cache"
+provenance_commit = "3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f"
+local_validation_status = "protocol_failed_quarantined"

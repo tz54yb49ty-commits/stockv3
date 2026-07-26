@@ -1,0 +1,218 @@
+{
+  "contract_version": "n6_ai_agent_v1",
+  "layer_role": "N6_user",
+  "purpose": "risk_constrained_simulated_investor",
+  "real_broker_connected": false,
+  "real_trade_enabled": false,
+  "autonomous_trading_default_enabled": false,
+  "schema_migration": "055_n6_ai_agent_v1_schema.sql",
+  "rollback_migration": "055_n6_ai_agent_v1_schema_rollback.sql",
+    "identity_seed_migration": "056_n6_ai_agent_v1_identity_account_seed.sql",
+    "tables": [
+        "n6_ai_shared_signal_projection",
+        "n6_ai_context_snapshot",
+    "n6_ai_decision_run",
+    "n6_ai_decision",
+    "n6_ai_daily_summary",
+    "n6_ai_strategy_evaluation"
+  ],
+  "role_contract": {
+    "role": "n6_ai_agent",
+    "required_attributes": {
+      "login": true,
+      "inherit": false,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false
+    },
+    "direct_public_relation_privileges": [],
+    "direct_public_sequence_privileges": [],
+    "credential_in_plist": false,
+    "function_only": true
+  },
+  "function_grants": {
+    "n6_ai_agent": [
+      "n6_ai_agent_context_load(text,date,integer)",
+      "n6_ai_agent_shadow_decision_record(jsonb)",
+      "n6_ai_agent_proposal_create_confirm(jsonb)",
+      "n6_ai_agent_daily_summary_record(jsonb)",
+      "n6_ai_agent_strategy_evaluation_record(jsonb)"
+    ],
+    "n6_virtual_executor": [
+      "n6_ai_executor_risk_recheck(bigint,text)"
+    ],
+    "n6_btrack_web": [
+      "n6_btrack_ai_public_snapshot(text,integer,integer,integer)",
+      "n6_btrack_ai_public_decision_detail(text,bigint)"
+    ],
+    "public_execute": []
+  },
+    "context_boundary": {
+        "allowed": [
+            "current N6 stock signal facts sanitized into n6_ai_shared_signal_projection only from passed runs carrying the explicit b_track_signal_projection producer marker",
+            "the AI principal own virtual account",
+            "the AI principal own cash snapshot",
+            "the AI principal own positions valued from passed fresh v_n6_virtual_quote_latest rows",
+            "current N6 index and board shared signal facts exposed as context_only and never as a tradable identity"
+    ],
+    "forbidden": [
+      "human session or session hash",
+      "human monitor scope",
+      "human realtime scope",
+      "human account, cash, position, proposal, order or trade",
+      "N1-N5 raw tables",
+      "arbitrary SQL",
+      "direct network access from database functions",
+      "model credential or raw hidden reasoning"
+        ]
+    },
+    "decision_integrity": {
+        "input_hash_source": "frozen n6_ai_context_snapshot.decision_input_hash",
+        "client_input_hash_must_match_snapshot": true,
+        "output_hash_computed_by_security_definer": true,
+        "model_may_submit_server_policy": false,
+        "server_risk_columns_are_authoritative": true,
+        "public_risk_status_uses_server_risk_columns": true
+    },
+  "model_output_schema": {
+    "additional_properties": false,
+    "required": [
+      "decision_type",
+      "confidence",
+      "reason_summary",
+      "evidence",
+      "counter_evidence",
+      "risk_assessment"
+    ],
+    "properties": {
+      "decision_type": [
+        "buy",
+        "sell",
+        "hold"
+      ],
+      "identity_key": "stock:(SH|SZ):NNNNNN or null for hold",
+      "source_signal_projection_id": "bigint or null",
+      "source_virtual_position_id": "bigint or null",
+      "confidence": "0..1",
+      "reason_summary": "short auditable explanation, not hidden reasoning",
+      "evidence": "array of approved source references",
+      "counter_evidence": "array of approved source references",
+      "risk_assessment": "structured object",
+      "strategy_candidate_notes": "optional text"
+    },
+    "forbidden_properties": [
+      "price",
+      "quantity",
+      "account",
+      "account_id",
+      "trade_date",
+      "for_trade_date",
+      "principal",
+      "principal_id",
+      "user_id"
+    ]
+  },
+  "proposal_contract": {
+    "actor_exclusivity": "human user_id xor AI actor_ai_user_id",
+    "ai_decision_required_for": [
+      "signal",
+      "ai_risk"
+    ],
+        "ai_signal_buy": "current-trade-date active n6_ai_shared_signal_projection SH/SZ stock buy signal only",
+    "ai_sell": "AI-own sellable position plus current sell signal, stop loss, or portfolio risk",
+    "model_may_submit_price_quantity_account_date_principal": false,
+    "proposal_status_created_by_agent": "confirmed",
+    "expires_seconds": 60,
+    "account_fact_writer": "n6_virtual_executor",
+    "agent_direct_order_trade_position_lot_cash_quote_dml": false
+  },
+  "risk_policy": {
+    "initial_cash_cny": 100000000,
+    "default_buy_budget_cny": 300000,
+    "lot_size": 100,
+    "settlement": "T+1",
+    "max_identity_market_value_cny": 600000,
+    "max_gross_exposure_pct": 10,
+    "max_new_buys_per_day": 10,
+    "initial_autonomous_canary_trading_days": 3,
+    "initial_canary_max_new_buys_per_day": 1,
+        "pause_agent_at_max_drawdown_pct": 5,
+        "position_valuation_source": "passed finite positive v_n6_virtual_quote_latest",
+        "open_confirmed_or_processing_buy_reservations_are_included": true,
+        "intraday_drawdown_is_recomputed_from_fresh_quote_equity": true,
+        "drawdown_pause_is_persisted_as_ai_user_disabled": true,
+        "executor_recheck_required_before_account_dml": true
+    },
+    "daily_summary_contract": {
+        "generated_after": "15:15 Asia/Shanghai on the current open trade date",
+        "daily_net_pnl_is_previous_summary_delta": true,
+        "cumulative_return_is_separate": true,
+        "strategy_version_and_hash_are_frozen": true,
+        "knowledge_bundle_version_and_hash_are_frozen": true,
+        "success_failure_and_next_day_arrays_are_persisted": true,
+        "open_positions_require_same_day_close_window_quote": "14:55-15:05"
+    },
+  "strategy_evolution": {
+    "agent_can_change_production_strategy": false,
+    "minimum_shadow_trading_days": 10,
+    "historical_replay_required": true,
+    "admin_promotion_required": true,
+    "score_formula": "net_return_pct - 1.5 * max_drawdown_pct - 0.02 * turnover_pct"
+  },
+  "public_web_contract": {
+    "authentication_required": true,
+    "methods": [
+      "GET"
+    ],
+    "all_authenticated_btrack_users_see_same_ai_ledger": true,
+    "disabled_ai_history_remains_auditable": true,
+    "exactly_one_public_ai_actor_required": true,
+    "display_names_source": "sanitized n6_ai_shared_signal_projection only",
+    "internal_failure_reason_public": false,
+    "authority_failure_contract": "stable 503 without database detail",
+    "fields": [
+      "account total asset and cash",
+      "positions and market value",
+      "simulated trades",
+      "structured reasons and evidence",
+      "risk checks and execution status",
+      "daily summaries",
+      "strategy and agent run status"
+    ],
+        "forbidden_fields": [
+      "model credential",
+      "raw prompt",
+            "hidden chain of thought",
+            "strategy candidate notes",
+            "human private data",
+      "session token or hash"
+        ],
+        "valuation_policy": {
+            "active_session": "passed finite quote no older than 120 seconds",
+            "midday_break": "current open date 11:28-11:31 close",
+            "after_close_or_non_open_day": "latest completed open date 14:55-15:05 close",
+            "invalid_or_stale_quote": "not_ready with null aggregate equity"
+        },
+        "write_controls": false
+  },
+  "runtime_modes": {
+    "disabled": "no model run and no decision DML",
+    "shadow": "context and decision/report facts only; zero proposal",
+    "autonomous_canary": "risk-gated confirmed proposal routed to the existing executor"
+  },
+  "rollback": {
+    "fail_closed_if_any_ai_identity_or_account_exists": true,
+    "fail_closed_if_any_ai_fact_or_history_exists": true,
+    "deletes_business_rows": false,
+    "restores_pre_055_proposal_constraints": true,
+    "restores_pre_055_lot_constraint": true,
+    "drops_only_055_functions_tables_columns_constraints_and_grants": true,
+    "shared_projection_is_rebuildable_derived_data": true,
+    "shared_projection_drop_requires_exact_source_rebuildability": true,
+    "shared_projection_orphan_pollution_or_drift_blocks_rollback": true,
+    "drops_shared_projection_trigger_and_sanitized_backfill_only_when_ai_history_is_zero": true,
+    "preserves_041_through_054": true
+  }
+}

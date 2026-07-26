@@ -51,6 +51,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
+    report = build_monitor_report(args)
+    if args.active_worker_policy_review_output_path:
+        output_path = Path(args.active_worker_policy_review_output_path)
+        payload = _write_json_artifact(output_path, report["active_worker_policy_review"])
+        report["active_worker_policy_review_output_path"] = str(output_path)
+        report["active_worker_policy_review_sha256"] = hashlib.sha256(payload).hexdigest()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"result={report['result']} final_verdict={report['final_verdict']}")
+    return 0
+
+
+def build_monitor_report(args: argparse.Namespace) -> dict[str, Any]:
+    """Build the canonical review without writing its policy artifact."""
+
     launchd_states = _load_launchd_states(args.launchd_state_path)
     plist_summaries = _read_plist_summaries(Path(args.launchagents_dir))
     recent_log_manifests = _read_recent_log_manifests(Path(args.log_dir))
@@ -70,16 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for_trade_date=args.for_trade_date,
         monitor_review=report,
     )
-    if args.active_worker_policy_review_output_path:
-        output_path = Path(args.active_worker_policy_review_output_path)
-        payload = _write_json_artifact(output_path, report["active_worker_policy_review"])
-        report["active_worker_policy_review_output_path"] = str(output_path)
-        report["active_worker_policy_review_sha256"] = hashlib.sha256(payload).hexdigest()
-    if args.json:
-        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
-    else:
-        print(f"result={report['result']} final_verdict={report['final_verdict']}")
-    return 0
+    return report
 
 
 def _load_chain_evidence(args: argparse.Namespace) -> dict[str, Any]:
@@ -211,6 +218,20 @@ def _read_plist_summaries(launchagents_dir: Path) -> dict[str, Any]:
             summary["activation_config_path"] = activation_config_path
             for trade_date in sorted(set(re.findall(r"20\d{6}", activation_config_path))):
                 summary[f"activation_config_{trade_date}"] = True
+            resolved_config_path = Path(activation_config_path)
+            if not resolved_config_path.is_absolute():
+                resolved_config_path = Path.cwd() / resolved_config_path
+            if resolved_config_path.exists():
+                try:
+                    activation_config = _read_json_object(resolved_config_path)
+                    config_trade_date = str(activation_config.get("for_trade_date") or "")
+                    if re.fullmatch(r"20\d{6}", config_trade_date):
+                        summary[f"activation_config_{config_trade_date}"] = True
+                    summary["activation_config_artifact_type"] = activation_config.get(
+                        "artifact_type"
+                    )
+                except (OSError, ValueError, json.JSONDecodeError, SystemExit):
+                    summary["activation_config_read_error"] = True
         summaries[label] = summary
     return summaries
 

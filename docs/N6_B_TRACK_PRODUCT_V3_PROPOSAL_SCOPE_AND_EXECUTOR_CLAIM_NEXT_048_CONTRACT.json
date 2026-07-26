@@ -1,0 +1,127 @@
+{
+  "contract_id": "N6_B_TRACK_PRODUCT_V3_PROPOSAL_SCOPE_AND_EXECUTOR_CLAIM_NEXT_048",
+  "status": "implementation_draft",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "proposal_create": {
+    "current_date_authority": "common_trade_calendar_exact_asia_shanghai_open_day",
+    "projection_for_trade_date_exact": true,
+    "historical_future_zero_dml": true,
+    "signal_source_chain": [
+      "user_projection_run",
+      "user_signal_projection",
+      "user_signal_card"
+    ],
+    "buy_authorities": [
+      "current_approved_view_and_045_lineage_stock_monitor",
+      "current_approved_view_lineage_valid_realtime_stock_scope",
+      "principal_account_positive_quantity_open_stock_position"
+    ],
+    "sell_authority": "principal_account_open_stock_position_with_matured_remaining_lot",
+    "signal_sell_freeze": [
+      "source_lineage_json.frozen_virtual_position_id",
+      "holding_episode_no"
+    ],
+    "manual_position": "self_account_open_stock_position_with_matured_remaining_lot",
+    "sell_lot_authority": {
+      "table": "n6_virtual_position_lot",
+      "exact_scope": [
+        "virtual_position_id",
+        "virtual_account_id",
+        "principal_id",
+        "principal_type",
+        "identity_key",
+        "holding_episode_no"
+      ],
+      "remaining_quantity_gt_zero": true,
+      "available_trade_date_lte_current_trade_date": true,
+      "lot_status": [
+        "locked_t1",
+        "available"
+      ],
+      "position_available_quantity_authoritative": false,
+      "proposal_create_updates_lots_or_position": false,
+      "final_execution_authority": "046_apply_lot_lock_promote_reconcile"
+    },
+    "pass_through_only": [
+      "score",
+      "reference_price",
+      "target_price"
+    ],
+    "canonical_identity_sources": [
+      "user_signal_projection",
+      "n6_virtual_position"
+    ],
+    "display_payload_sources": [
+      "display_payload_json",
+      "card_payload_json"
+    ],
+    "source_payload_json_allowed": false,
+    "approved_scope_view": "v_n6_stock_condition_display_basis"
+    ,
+    "realtime_scope_policy": {
+      "lifetime": "long_lived_whitelist",
+      "required_row_state": [
+        "active",
+        "deleted_at_null",
+        "single_row",
+        "exact_principal_user_identity",
+        "snapshot_identity_self_consistent"
+      ],
+      "historical_snapshot_date_compared_to_today": false,
+      "historical_snapshot_run_compared_to_current": false,
+      "current_authority": "outer_approved_identity_and_today_projection"
+    }
+  },
+  "claim_next": {
+    "name": "public.n6_executor_claim_next_proposal",
+    "arguments": ["executor_run_id"],
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "allowed_role": "n6_virtual_executor",
+    "public_execute": false,
+    "web_execute": false,
+    "executor_direct_table_privileges": [],
+    "executor_direct_sequence_privileges": [],
+    "owner": "ashare_v3_user",
+    "owner_alter_in_migration": false,
+    "order": ["confirmed_at", "created_at", "proposal_id"],
+    "locking": "FOR UPDATE SKIP LOCKED",
+    "maximum_rows": 1,
+    "candidate_status": "confirmed",
+    "expired_claimed": false,
+    "no_candidate_status": "no_claimable_proposal"
+  },
+  "runner": {
+    "one_shot": true,
+    "keep_alive": false,
+    "default_claim_mode": "claim_next",
+    "explicit_proposal_id_canary": true,
+    "no_execute_zero_connection": true,
+    "outer_transaction": ["claim", "046_apply", "commit"],
+    "no_candidate_rollback": true,
+    "apply_failure_rollback": true,
+    "maximum_proposals": 1,
+    "dsn_or_password_argv_env": false,
+    "required_pgservice": "n6_virtual_executor"
+  },
+  "forbidden": [
+    "common_event_outbox",
+    "stock_identity",
+    "source_payload_json",
+    "N2_N5_raw_tables",
+    "membership",
+    "per_message_enrichment",
+    "table_index_role_trigger_creation",
+    "runtime_execute",
+    "scheduler",
+    "feature_flag_enable"
+  ],
+  "rollback": {
+    "restore_042_proposal_create": true,
+    "restore_original_claim_acl": true,
+    "drop_048_claim_next": true,
+    "preserve_041_047": true,
+    "preserve_business_rows": true
+  }
+}

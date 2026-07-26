@@ -1,0 +1,217 @@
+{
+  "contract_id": "N6_AI_SHADOW_OPEN_TRADE_DATE_NINE_SLOTS_071",
+  "status": "implementation_ready_not_deployed",
+  "layer_role": "N6_user",
+  "mode": "FULL",
+  "initial_runtime_commit": "6ae602f0b227e0df8f731b9b44f385bd140721e0",
+  "initial_compatibility_test_commit": "19e0a612b0beeea1e38eaee003bd35816b2af3be",
+  "implementation_lineage": [
+    "384e85a02ebfe3d3dece371e20a795331116e60a",
+    "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb",
+    "0bd0fc776b58e23e7a4b17d6310edb333a7766db",
+    "fb465c282aad217c63d4c1afdcb44d06c69036da",
+    "58fbed5f9216bf870c2862584623e8f0f1a69b84",
+    "7d1cdb3ee8622e0cbf1c7f0c7804f6542769f05c",
+    "db7e193b911f22415a40b958dc2ecdfdfcc58641",
+    "16770e39f3db32665bdb0e7bce9a2fb930f4de02"
+  ],
+  "deployment_authority": "immutable_release_final_commit_and_tree_recorded_in_deployment_closeout",
+  "schedule_policy_version": "n6_ai_shadow_open_trade_date_nine_slots_071_v1",
+  "supersession": {
+    "supersedes_contract_id": "N6_AI_SHADOW_OPEN_TRADE_DATE_FOUR_SLOTS_067",
+    "supersedes_contract_sha256": "aa10f84db4af2d3024656b60f085adec7140e45f5392c5441ff92c999b5bd5dd",
+    "scope": "schedule_only",
+    "historical_067_contract_preserved": true,
+    "historical_067_sql_preserved": true,
+    "deepseek_protocol_changed": false,
+    "privacy_egress_contract_changed": false,
+    "strategy_policy_changed": false,
+    "risk_or_trading_authority_changed": false
+  },
+  "deepseek_slots": [
+    {
+      "slot": "09:30",
+      "window": "[09:30:00,09:35:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "10:00",
+      "window": "[10:00:00,10:05:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "10:30",
+      "window": "[10:30:00,10:35:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "11:00",
+      "window": "[11:00:00,11:05:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "11:30",
+      "window": "[11:30:00,11:31:00)",
+      "recovery_window_minutes": 1,
+      "final_closed_minute_not_guaranteed": true
+    },
+    {
+      "slot": "13:30",
+      "window": "[13:30:00,13:35:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "14:00",
+      "window": "[14:00:00,14:05:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "14:30",
+      "window": "[14:30:00,14:35:00)",
+      "recovery_window_minutes": 5
+    },
+    {
+      "slot": "15:00",
+      "window": "[15:00:00,15:01:00)",
+      "recovery_window_minutes": 1,
+      "final_closed_minute_not_guaranteed": true
+    }
+  ],
+  "boundary_slot_semantics": "approved_shadow_observation_windows_not_a_continuous_trading_session_claim",
+  "request_time_gate": {
+    "initial_local_shanghai_slot_gate": true,
+    "recheck_immediately_before_identity_probe": true,
+    "recheck_immediately_before_decision_call": true,
+    "provider_request_clock": "current_timezone_aware_clock_not_historical_run_at",
+    "half_open_windows": true,
+    "new_request_after_window_close": false,
+    "in_flight_request_may_finish_after_window_close": true,
+    "clock_error_action": "fail_closed",
+    "identity_probe_close_reason": "shadow_schedule_window_closed_before_identity_probe",
+    "decision_close_reason": "shadow_schedule_window_closed_before_decision"
+  },
+  "call_order": [
+    "local_shanghai_weekday_and_slot_gate",
+    "production_manifest_and_configuration_validation",
+    "database_open_trade_date_and_completed_slot_preflight",
+    "identity_probe_request_time_gate",
+    "deepseek_pseudonymous_identity_probe",
+    "private_shadow_context_load",
+    "decision_request_time_gate",
+    "deepseek_decision_call_when_context_ready"
+  ],
+  "database_preflight": {
+    "function": "public.n6_ai_agent_shadow_schedule_preflight(text,date)",
+    "signature_unchanged": true,
+    "language": "plpgsql",
+    "volatility": "STABLE",
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "owner": "ashare_v3_user",
+    "execute_role": "n6_ai_agent",
+    "public_execute": false,
+    "dml": false,
+    "locks": false,
+    "private_fields_returned": false,
+    "required_schedule_semantics": "071_nine_slot_windows",
+    "migration_file": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight.sql",
+    "migration_file_sha256": "801e0a0f174c3969fc71e03850e54ea08cfecddb66d3ea14543e5176b74c1fd7",
+    "migration_pg_proc_prosrc_sha256": "e3b625acaa39cecc7ac41614ea3a3a129968e19efd8cd8e1cdc41fedbb287aa9",
+    "rollback_file": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight_rollback.sql",
+    "rollback_file_sha256": "4526267b2ce54df8ad09e89249f9489af78a447a552b57e40a19dcb826f0806b",
+    "rollback_restores_067_pg_proc_prosrc_sha256": "1ec882400c5cb95e1743e7f8829327d6cf42e3bfb7ea68a64c70795a1d73731d",
+    "repository_alignment_status": "071_migration_and_rollback_frozen_not_applied",
+    "deployment_gate": "apply_and_postflight_071_before_release_or_launchagent_switch",
+    "statuses": [
+      "open_slot_ready",
+      "outside_shadow_slot",
+      "not_open_trade_date",
+      "already_processed"
+    ],
+    "completed_slot_sources": [
+      "n6_ai_context_snapshot.run_bucket",
+      "n6_ai_decision_run.run_bucket",
+      "n6_ai_shadow_observation_run_audit.started_at"
+    ]
+  },
+  "provider_budget": {
+    "closed_date_or_outside_slot_requests": 0,
+    "maximum_identity_probes_per_ready_slot": 1,
+    "maximum_decision_calls_per_ready_slot": 1,
+    "maximum_requests_per_ready_slot": 2,
+    "no_new_input_requests_per_ready_slot": 1,
+    "maximum_identity_probes_per_open_trade_date": 9,
+    "maximum_decision_calls_per_open_trade_date": 9,
+    "maximum_total_requests_per_open_trade_date": 18,
+    "automatic_retry_count": 0
+  },
+  "launchagent": {
+    "start_calendar_intervals": [
+      {"Hour": 9, "Minute": 30},
+      {"Hour": 10, "Minute": 0},
+      {"Hour": 10, "Minute": 30},
+      {"Hour": 11, "Minute": 0},
+      {"Hour": 11, "Minute": 30},
+      {"Hour": 13, "Minute": 30},
+      {"Hour": 14, "Minute": 0},
+      {"Hour": 14, "Minute": 30},
+      {"Hour": 15, "Minute": 0}
+    ],
+    "start_interval_present": false,
+    "run_at_load": false,
+    "keep_alive": false
+  },
+  "audit_fields": [
+    "schedule_policy_version",
+    "schedule_slot",
+    "schedule_preflight_status",
+    "provider_probe_called",
+    "decision_model_called",
+    "deepseek_request_count"
+  ],
+  "preserved": {
+    "strategy_policy_runner_interval_seconds": 300,
+    "strategy_policy_runner_calls_deepseek": false,
+    "synthetic_network_canary_is_manual_only": true,
+    "shadow_is_read_only": true,
+    "proposal_order_trade_writes": false,
+    "n1_n5_modified": false,
+    "web_executor_modified": false,
+    "deepseek_adapter_request_response_contract": true,
+    "067_historical_evidence": true,
+    "062_append_only_audit_history": true
+  },
+  "idempotency_limit": {
+    "completed_slot_retry_is_suppressed": true,
+    "simultaneous_manual_invocations_are_not_strongly_serializable": true,
+    "reason": "the_preflight_is_intentionally_read_only_and_has_no_slot_claim_dml",
+    "fail_closed_action": "disable_shadow_on_repeated_or_ambiguous_runtime_activity"
+  },
+  "deployment": {
+    "authorized_by_this_contract": false,
+    "database_schedule_alignment_requires_separate_gate": true,
+    "immutable_release_switch_requires_separate_gate": true,
+    "launchagent_switch_requires_separate_gate": true,
+    "provider_canary_authorized": false,
+    "natural_slot_only": true
+  },
+  "rollback": {
+    "restore_schedule_policy_version": "n6_ai_shadow_open_trade_date_four_slots_067_v1",
+    "restore_067_start_calendar_intervals": [
+      {"Hour": 10, "Minute": 25},
+      {"Hour": 11, "Minute": 25},
+      {"Hour": 13, "Minute": 55},
+      {"Hour": 14, "Minute": 55}
+    ],
+    "restore_067_recovery_window_minutes": 5,
+    "restore_immutable_release_and_launchagent": true,
+    "database_function_rollback_file": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight_rollback.sql",
+    "database_function_rollback_file_sha256": "4526267b2ce54df8ad09e89249f9489af78a447a552b57e40a19dcb826f0806b",
+    "database_function_rollback_restores_067_only": true,
+    "database_function_rollback_touches_070_or_062": false,
+    "preserve_067_contract_and_sql_history": true,
+    "preserve_062_audit_history": true,
+    "delete_context_snapshots_or_decisions": false,
+    "automatic_openai_fallback": false
+  }
+}

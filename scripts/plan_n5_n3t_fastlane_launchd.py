@@ -12,9 +12,11 @@ from ashare_v3.runtime_control.n5_n3t_fastlane import (
     DEFAULT_PYTHON_EXECUTABLE,
     build_fastlane_activation_guard,
     build_fastlane_write_enabled_activation_config_full_chain_preflight,
+    default_fastlane_stable_activation_config_path,
     write_fastlane_write_enabled_activation_config,
     write_fastlane_active_launchd_plan,
     write_fastlane_launchd_plan,
+    write_fastlane_policy_review_auto_refresh_launchd_plan,
     write_fastlane_post_close_readiness_config_rollover,
 )
 
@@ -30,6 +32,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dsn")
     parser.add_argument("--current-exchange-time", default="")
     parser.add_argument("--active-plan", action="store_true")
+    parser.add_argument("--policy-review-auto-refresh-plan", action="store_true")
+    parser.add_argument("--policy-review-auto-refresh-interval-seconds", type=int, default=15)
     parser.add_argument("--write-enabled-activation-config", action="store_true")
     parser.add_argument("--post-close-readiness-config-rollover", action="store_true")
     parser.add_argument("--full-chain-activation-preflight", action="store_true")
@@ -78,6 +82,26 @@ def _fetch_next_trade_date_from_calendar(*, dsn: str, for_trade_date: str) -> tu
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
+    if args.policy_review_auto_refresh_plan:
+        activation_config_path = (
+            str(args.activation_config or "").strip()
+            or default_fastlane_stable_activation_config_path()
+        )
+        try:
+            report = write_fastlane_policy_review_auto_refresh_launchd_plan(
+                output_dir=Path(args.output_dir),
+                working_directory=args.working_directory,
+                activation_config_path=activation_config_path,
+                python_executable=args.python_executable,
+                start_interval_seconds=args.policy_review_auto_refresh_interval_seconds,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"result={report['result']} report_path={report['report_path']}")
+        return 0
     if args.post_close_readiness_config_rollover:
         if not args.for_trade_date:
             raise SystemExit("--for-trade-date is required with --post-close-readiness-config-rollover")
