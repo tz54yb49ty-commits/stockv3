@@ -1,0 +1,15 @@
+# Historical-only N6 Strategy Center implementation is retained in Git but
+# excluded from all new deterministic Release archives.
+/config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json export-ignore
+/scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py export-ignore
+/scripts/plan_n6_strategy_center_launchd.py export-ignore
+/scripts/run_n6_strategy_center_auto_once.py export-ignore
+/scripts/run_n6_strategy_center_once.py export-ignore
+/src/ashare_v3/user/strategy_center.py export-ignore
+/src/ashare_v3/user/strategy_center_repository.py export-ignore
+/src/ashare_v3/user/strategy_center_worker.py export-ignore
+
+# Exact f464 Strategy Center activation/install helpers are historical-only.
+/scripts/n6_f464_privileged_materialize_and_install_v2.c export-ignore
+/scripts/n6_f464_release_root_owner_remediation_v1.c export-ignore
+/src/ashare_v3/runtime_control/resumable_activation.py export-ignore

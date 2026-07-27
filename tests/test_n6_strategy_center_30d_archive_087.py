@@ -646,6 +646,10 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
         cls.contract = json.loads(CONTRACT.read_text())
 
     def test_contract_is_conservative_and_never_auto_drops(self) -> None:
+        self.assertEqual(
+            self.contract["archive_schema"],
+            "n6_strategy_center_archive_v1",
+        )
         retention = self.contract["retention"]
         self.assertEqual(retention["duration_days"], 30)
         self.assertTrue(retention["database_anchor_is_conservative"])
@@ -748,7 +752,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                       snapshot.table_name, snapshot.row_count
                       ORDER BY snapshot.table_name
                     )
-                    FROM n6_strategy_center_archive_30d.table_snapshot snapshot
+                    FROM n6_strategy_center_archive_v1.table_snapshot snapshot
                     """
                 )
             )
@@ -763,12 +767,12 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                           'public.' || snapshot.table_name
                         ) IS NULL
                         AND pg_catalog.to_regclass(
-                          'n6_strategy_center_archive_30d.'
+                          'n6_strategy_center_archive_v1.'
                           || snapshot.table_name
                         ) IS NOT NULL
                       )
                     )::text
-                    FROM n6_strategy_center_archive_30d.table_snapshot snapshot
+                    FROM n6_strategy_center_archive_v1.table_snapshot snapshot
                     """
                 ),
                 "true",
@@ -786,10 +790,10 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                     FROM pg_catalog.pg_class relation
                     JOIN pg_catalog.pg_namespace namespace
                       ON namespace.oid = relation.relnamespace
-                    JOIN n6_strategy_center_archive_30d.table_snapshot snapshot
+                    JOIN n6_strategy_center_archive_v1.table_snapshot snapshot
                       ON snapshot.table_name = relation.relname
                     WHERE namespace.nspname =
-                      'n6_strategy_center_archive_30d'
+                      'n6_strategy_center_archive_v1'
                       AND relation.relname = ANY (
                         ARRAY[
                           'n6_strategy_package_catalog',
@@ -814,7 +818,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                     JOIN pg_catalog.pg_namespace namespace
                       ON namespace.oid = relation.relnamespace
                     WHERE namespace.nspname =
-                      'n6_strategy_center_archive_30d'
+                      'n6_strategy_center_archive_v1'
                       AND relation.relname = ANY (
                         ARRAY[
                           'n6_strategy_package_catalog',
@@ -836,7 +840,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                     postgres.scalar(
                         """
                         SELECT pg_catalog.count(*)
-                        FROM n6_strategy_center_archive_30d.function_snapshot
+                        FROM n6_strategy_center_archive_v1.function_snapshot
                         """
                     )
                 ),
@@ -848,17 +852,17 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                     SELECT (
                       NOT pg_catalog.has_schema_privilege(
                         'n6_btrack_web',
-                        'n6_strategy_center_archive_30d',
+                        'n6_strategy_center_archive_v1',
                         'USAGE'
                       )
                       AND NOT pg_catalog.has_schema_privilege(
                         'n6_strategy_worker',
-                        'n6_strategy_center_archive_30d',
+                        'n6_strategy_center_archive_v1',
                         'USAGE'
                       )
                       AND NOT pg_catalog.has_schema_privilege(
                         'n6_virtual_executor',
-                        'n6_strategy_center_archive_30d',
+                        'n6_strategy_center_archive_v1',
                         'USAGE'
                       )
                     )::text
@@ -876,7 +880,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                         + pg_catalog.make_interval(days => 30)
                       AND automatic_drop = false
                     )::text
-                    FROM n6_strategy_center_archive_30d.archive_manifest
+                    FROM n6_strategy_center_archive_v1.archive_manifest
                     """
                 ),
                 "true",
@@ -900,7 +904,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                 postgres.scalar(
                     """
                     SELECT (rolled_back_at IS NOT NULL)::text
-                    FROM n6_strategy_center_archive_30d.archive_manifest
+                    FROM n6_strategy_center_archive_v1.archive_manifest
                     """
                 ),
                 "true",
@@ -941,7 +945,7 @@ class StrategyCenterArchive087Tests(unittest.TestCase):
                     """
                     SELECT (
                       pg_catalog.to_regnamespace(
-                        'n6_strategy_center_archive_30d'
+                        'n6_strategy_center_archive_v1'
                       ) IS NULL
                       AND pg_catalog.to_regclass(
                         'public.n6_strategy_match_projection'

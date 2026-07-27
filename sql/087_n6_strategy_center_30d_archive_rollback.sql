@@ -8,7 +8,7 @@ SET LOCAL statement_timeout = '120s';
 
 DO $preflight$
 DECLARE
-  manifest n6_strategy_center_archive_30d.archive_manifest%ROWTYPE;
+  manifest n6_strategy_center_archive_v1.archive_manifest%ROWTYPE;
   target_oids oid[];
 BEGIN
   IF pg_catalog.current_database() IS DISTINCT FROM 'ashare_v3'
@@ -24,7 +24,7 @@ BEGIN
     RAISE EXCEPTION '087 rollback advisory lock unavailable';
   END IF;
   SELECT * INTO STRICT manifest
-  FROM n6_strategy_center_archive_30d.archive_manifest
+  FROM n6_strategy_center_archive_v1.archive_manifest
   WHERE migration_id = '087_n6_strategy_center_30d_archive_v1'
     AND contract_version =
       'n6_strategy_center_30d_archive_retention_v1'
@@ -41,17 +41,17 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1
-    FROM n6_strategy_center_archive_30d.table_snapshot snapshot
+    FROM n6_strategy_center_archive_v1.table_snapshot snapshot
     WHERE pg_catalog.to_regclass('public.' || snapshot.table_name) IS NOT NULL
        OR pg_catalog.to_regclass(
-            'n6_strategy_center_archive_30d.' || snapshot.table_name
+            'n6_strategy_center_archive_v1.' || snapshot.table_name
           ) IS NULL
   ) THEN
     RAISE EXCEPTION '087 rollback table boundary drift';
   END IF;
   IF EXISTS (
     SELECT 1
-    FROM n6_strategy_center_archive_30d.function_snapshot snapshot
+    FROM n6_strategy_center_archive_v1.function_snapshot snapshot
     WHERE pg_catalog.to_regprocedure(
             snapshot.function_signature
           ) IS NOT NULL
@@ -69,11 +69,11 @@ BEGIN
   FROM pg_catalog.pg_class relation
   JOIN pg_catalog.pg_namespace namespace
     ON namespace.oid = relation.relnamespace
-  WHERE namespace.nspname = 'n6_strategy_center_archive_30d'
+  WHERE namespace.nspname = 'n6_strategy_center_archive_v1'
     AND relation.relkind = 'r'
     AND relation.relname IN (
       SELECT snapshot.table_name
-      FROM n6_strategy_center_archive_30d.table_snapshot snapshot
+      FROM n6_strategy_center_archive_v1.table_snapshot snapshot
     );
   IF pg_catalog.cardinality(target_oids) <> 6 THEN
     RAISE EXCEPTION '087 rollback six-table archive scope missing';
@@ -106,17 +106,17 @@ BEGIN
 END
 $preflight$;
 
-ALTER TABLE n6_strategy_center_archive_30d.n6_strategy_package_catalog
+ALTER TABLE n6_strategy_center_archive_v1.n6_strategy_package_catalog
   SET SCHEMA public;
-ALTER TABLE n6_strategy_center_archive_30d.n6_user_strategy_selection_revision
+ALTER TABLE n6_strategy_center_archive_v1.n6_user_strategy_selection_revision
   SET SCHEMA public;
-ALTER TABLE n6_strategy_center_archive_30d.n6_user_strategy_selection_item
+ALTER TABLE n6_strategy_center_archive_v1.n6_user_strategy_selection_item
   SET SCHEMA public;
-ALTER TABLE n6_strategy_center_archive_30d.n6_strategy_match_projection
+ALTER TABLE n6_strategy_center_archive_v1.n6_strategy_match_projection
   SET SCHEMA public;
-ALTER TABLE n6_strategy_center_archive_30d.n6_strategy_observation_projection
+ALTER TABLE n6_strategy_center_archive_v1.n6_strategy_observation_projection
   SET SCHEMA public;
-ALTER TABLE n6_strategy_center_archive_30d.n6_strategy_match_change
+ALTER TABLE n6_strategy_center_archive_v1.n6_strategy_match_change
   SET SCHEMA public;
 
 DO $move_owned_sequences$
@@ -124,13 +124,13 @@ DECLARE
   snapshot record;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.sequence_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     IF pg_catalog.to_regclass(
-         'n6_strategy_center_archive_30d.' || snapshot.sequence_name
+         'n6_strategy_center_archive_v1.' || snapshot.sequence_name
        ) IS NOT NULL THEN
       EXECUTE pg_catalog.format(
-        'ALTER SEQUENCE n6_strategy_center_archive_30d.%I '
+        'ALTER SEQUENCE n6_strategy_center_archive_v1.%I '
         'SET SCHEMA public',
         snapshot.sequence_name
       );
@@ -149,7 +149,7 @@ DECLARE
   snapshot record;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.table_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.table_snapshot
   LOOP
     EXECUTE pg_catalog.format(
       'ALTER TABLE public.%I OWNER TO %I',
@@ -165,7 +165,7 @@ DECLARE
   snapshot record;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.function_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.function_snapshot
     ORDER BY restore_order
   LOOP
     EXECUTE snapshot.function_definition;
@@ -182,7 +182,7 @@ DECLARE
   trigger_definition text;
 BEGIN
   SELECT snapshot.trigger_definition INTO STRICT trigger_definition
-  FROM n6_strategy_center_archive_30d.trigger_snapshot snapshot
+  FROM n6_strategy_center_archive_v1.trigger_snapshot snapshot
   WHERE snapshot.trigger_name =
     'trg_073_n6_strategy_default_selection';
   EXECUTE trigger_definition;
@@ -203,7 +203,7 @@ DECLARE
   snapshot record;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.sequence_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     EXECUTE pg_catalog.format(
       'REVOKE ALL ON SEQUENCE public.%I '
@@ -222,7 +222,7 @@ DECLARE
 BEGIN
   FOR acl_row IN
     SELECT *
-    FROM n6_strategy_center_archive_30d.object_acl_snapshot
+    FROM n6_strategy_center_archive_v1.object_acl_snapshot
     ORDER BY object_kind, object_identity, grantee_name, privilege_type
   LOOP
     grantee_sql := CASE
@@ -272,11 +272,11 @@ DECLARE
   restored_hash text;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.table_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.table_snapshot
   LOOP
     IF pg_catalog.to_regclass('public.' || snapshot.table_name) IS NULL
        OR pg_catalog.to_regclass(
-            'n6_strategy_center_archive_30d.' || snapshot.table_name
+            'n6_strategy_center_archive_v1.' || snapshot.table_name
           ) IS NOT NULL THEN
       RAISE EXCEPTION '087 rollback table schema restore failed: %',
         snapshot.table_name;
@@ -296,7 +296,7 @@ BEGIN
     END IF;
   END LOOP;
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.function_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.function_snapshot
   LOOP
     IF pg_catalog.to_regprocedure(snapshot.function_signature) IS NULL THEN
       RAISE EXCEPTION '087 rollback function restore failed: %',
@@ -304,7 +304,7 @@ BEGIN
     END IF;
   END LOOP;
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.sequence_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     IF pg_catalog.to_regclass('public.' || snapshot.sequence_name) IS NULL THEN
       RAISE EXCEPTION '087 rollback sequence restore failed: %',
@@ -312,7 +312,7 @@ BEGIN
     END IF;
   END LOOP;
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.index_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.index_snapshot
   LOOP
     IF pg_catalog.to_regclass('public.' || snapshot.index_name) IS NULL THEN
       RAISE EXCEPTION '087 rollback index restore failed: %',
@@ -328,7 +328,7 @@ BEGIN
   ) THEN
     RAISE EXCEPTION '087 rollback trigger restore failed';
   END IF;
-  UPDATE n6_strategy_center_archive_30d.archive_manifest
+  UPDATE n6_strategy_center_archive_v1.archive_manifest
   SET rolled_back_at = pg_catalog.clock_timestamp()
   WHERE migration_id = '087_n6_strategy_center_30d_archive_v1';
 END

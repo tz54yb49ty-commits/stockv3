@@ -1,7 +1,7 @@
 {
   "contract_version": "n6_strategy_center_30d_archive_retention_v1",
   "status": "template_not_executed",
-  "archive_schema": "n6_strategy_center_archive_30d",
+  "archive_schema": "n6_strategy_center_archive_v1",
   "retention": {
     "duration_days": 30,
     "database_clock_authority": "forward_transaction_final_pre_commit_clock_timestamp",
@@ -63,6 +63,9 @@
     "scripts/run_n6_strategy_center_auto_once.py",
     "scripts/plan_n6_strategy_center_launchd.py",
     "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
+    "scripts/n6_f464_privileged_materialize_and_install_v2.c",
+    "scripts/n6_f464_release_root_owner_remediation_v1.c",
+    "src/ashare_v3/runtime_control/resumable_activation.py",
     "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
     "sql/073_n6_strategy_center_schema.sql",
     "sql/073_n6_strategy_center_schema_rollback.sql",

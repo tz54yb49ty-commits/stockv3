@@ -1,7 +1,10 @@
 import inspect
+import io
 import json
+import os
 import subprocess
 import sys
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +31,19 @@ HISTORICAL_CLI = (
     "scripts/run_n6_strategy_center_auto_once.py",
     "scripts/plan_n6_strategy_center_launchd.py",
     "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
+)
+RELEASE_EXCLUDED_PATHS = (
+    "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
+    "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
+    "scripts/plan_n6_strategy_center_launchd.py",
+    "scripts/run_n6_strategy_center_auto_once.py",
+    "scripts/run_n6_strategy_center_once.py",
+    "src/ashare_v3/user/strategy_center.py",
+    "src/ashare_v3/user/strategy_center_repository.py",
+    "src/ashare_v3/user/strategy_center_worker.py",
+    "scripts/n6_f464_privileged_materialize_and_install_v2.c",
+    "scripts/n6_f464_release_root_owner_remediation_v1.c",
+    "src/ashare_v3/runtime_control/resumable_activation.py",
 )
 PRIVATE_FIELDS = {
     "strategy_center_temporal_confluence",
@@ -214,6 +230,48 @@ class StrategyCenterWebRetirementTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("strategy_center_retired", result.stderr)
+
+    def test_git_archive_excludes_historical_runtime_and_keeps_compatibility(
+        self,
+    ) -> None:
+        treeish = os.environ.get("N6_RELEASE_ARCHIVE_TREEISH", "HEAD")
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", treeish],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as release:
+            members = set(release.getnames())
+            self.assertTrue(set(RELEASE_EXCLUDED_PATHS).isdisjoint(members))
+            self.assertIn("src/ashare_v3/web/n6_app_v1.py", members)
+            self.assertIn("src/ashare_v3/web/n6_user_app.py", members)
+            self.assertIn("sql/073_n6_strategy_center_schema.sql", members)
+            self.assertIn("sql/087_n6_strategy_center_30d_archive.sql", members)
+            app_model = release.extractfile(
+                "src/ashare_v3/web/n6_app_v1.py"
+            ).read().decode("utf-8")
+            web_app = release.extractfile(
+                "src/ashare_v3/web/n6_user_app.py"
+            ).read().decode("utf-8")
+
+        self.assertIn("scrub_retired_strategy_center_private_fields", app_model)
+        self.assertIn("strategy_center_retired_response", web_app)
+        self.assertIn(
+            "/n6/app/signals?notice=strategy_center_retired",
+            web_app,
+        )
+        for forbidden in (
+            "app_strategy_center_model",
+            "iter_n6_strategy_center_sse",
+            "fetch_strategy_center_state",
+            "fetch_strategy_center_changes",
+            "put_strategy_center_selection",
+            "n6_btrack_strategy_center_state",
+            "n6_btrack_strategy_center_changes",
+            "n6_btrack_strategy_selection_put",
+        ):
+            self.assertNotIn(forbidden, app_model + web_app)
 
 
 if __name__ == "__main__":

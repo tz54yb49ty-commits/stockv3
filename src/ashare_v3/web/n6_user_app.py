@@ -290,12 +290,6 @@ N6_SIGNAL_COMPACT_FIELDS = (
     "source_run_id",
     "projection_run_id",
 )
-N6_STRATEGY_SSE_BATCH_LIMIT = 100
-N6_STRATEGY_SSE_DB_READ_INTERVAL_SECONDS = 2.0
-N6_STRATEGY_SSE_HEARTBEAT_SECONDS = 15.0
-N6_STRATEGY_SSE_RETRY_MILLISECONDS = 5000
-
-
 def encode_n6_signal_page_cursor(row: Mapping[str, Any]) -> str:
     projection_id = canonical_bigint_id(
         row.get("user_signal_projection_id"),
@@ -509,57 +503,6 @@ async def iter_n6_signal_sse(
             yield encode_n6_signal_sse_heartbeat(current_time())
             heartbeat_at = current_tick + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
         await sleep(N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS)
-
-
-def encode_n6_strategy_center_sse_event(payload: Mapping[str, Any]) -> str:
-    change_id = str(payload.get("change_id") or "")
-    event_type = str(payload.get("event") or "")
-    surface_kind = str(payload.get("surface_kind") or "")
-    if (
-        not re.fullmatch(r"[1-9][0-9]*", change_id)
-        or int(change_id) > N6_SIGNAL_SSE_MAX_CURSOR
-        or event_type not in {"upsert", "remove", "reset"}
-        or surface_kind not in {"qualified_match", "observation"}
-    ):
-        raise ValueError("invalid_strategy_center_sse_event")
-    data = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return f"event: {event_type}\nid: {change_id}\ndata: {data}\n\n"
-
-
-async def iter_n6_strategy_center_sse(
-    *,
-    after_id: int,
-    read_batch: Callable[[int, int], Any],
-    is_disconnected: Callable[[], Any],
-    sleep: Callable[[float], Any] = asyncio.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-    now: Callable[[], datetime] | None = None,
-) -> Any:
-    current_time = now or (lambda: datetime.now(timezone.utc))
-    cursor = int(after_id)
-    heartbeat_at = monotonic() + N6_STRATEGY_SSE_HEARTBEAT_SECONDS
-    yield f"retry: {N6_STRATEGY_SSE_RETRY_MILLISECONDS}\n\n"
-    while True:
-        if await is_disconnected():
-            return
-        try:
-            batch = await read_batch(cursor, N6_STRATEGY_SSE_BATCH_LIMIT)
-            events = list(batch.get("events") or [])
-        except Exception:
-            return
-        for event in events:
-            change_id = int(str(event.get("change_id") or "0"))
-            if change_id <= cursor or change_id > N6_SIGNAL_SSE_MAX_CURSOR:
-                return
-            yield encode_n6_strategy_center_sse_event(event)
-            cursor = change_id
-        if bool(batch.get("has_more")):
-            continue
-        current_tick = monotonic()
-        if current_tick >= heartbeat_at:
-            yield encode_n6_signal_sse_heartbeat(current_time())
-            heartbeat_at = current_tick + N6_STRATEGY_SSE_HEARTBEAT_SECONDS
-        await sleep(N6_STRATEGY_SSE_DB_READ_INTERVAL_SECONDS)
 
 
 def _sql_text_literal(value: object) -> str:
@@ -1250,26 +1193,6 @@ class N6UserRepository(Protocol):
         filters: dict[str, Any],
         limit: int,
     ) -> list[dict[str, Any]]:
-        ...
-
-    def fetch_strategy_center_state(
-        self, session_token_hash: str
-    ) -> dict[str, Any] | None:
-        ...
-
-    def fetch_strategy_center_changes(
-        self, session_token_hash: str, *, after_id: int, limit: int
-    ) -> dict[str, Any] | None:
-        ...
-
-    def put_strategy_center_selection(
-        self,
-        session_token_hash: str,
-        *,
-        selected_package_keys: list[str],
-        expected_revision: int,
-        request_id: str,
-    ) -> dict[str, Any] | None:
         ...
 
     def fetch_app_signal_events(
@@ -4514,85 +4437,6 @@ class PostgresN6UserRepository:
                 (principal_id, principal_type),
             )
             return [dict(row) for row in cur.fetchall()]
-
-    def fetch_strategy_center_state(
-        self, session_token_hash: str
-    ) -> dict[str, Any] | None:
-        with self._readonly_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT public.n6_btrack_strategy_center_state(%s) AS result",
-                (session_token_hash,),
-            )
-            row = cur.fetchone() or {}
-        result = row.get("result")
-        return dict(result) if isinstance(result, dict) else None
-
-    def fetch_strategy_center_changes(
-        self, session_token_hash: str, *, after_id: int, limit: int
-    ) -> dict[str, Any] | None:
-        with self._readonly_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT public.n6_btrack_strategy_center_changes(
-                  %s, %s, %s
-                ) AS result
-                """,
-                (session_token_hash, after_id, limit),
-            )
-            row = cur.fetchone() or {}
-        result = row.get("result")
-        return dict(result) if isinstance(result, dict) else None
-
-    def put_strategy_center_selection(
-        self,
-        session_token_hash: str,
-        *,
-        selected_package_keys: list[str],
-        expected_revision: int,
-        request_id: str,
-    ) -> dict[str, Any] | None:
-        try:
-            with psycopg.connect(
-                self.dsn,
-                connect_timeout=10,
-                row_factory=dict_row,
-                autocommit=False,
-            ) as conn:
-                with conn.transaction(), conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT public.n6_btrack_strategy_selection_put(
-                          %s, %s::text[], %s, %s
-                        ) AS result
-                        """,
-                        (
-                            session_token_hash,
-                            selected_package_keys,
-                            expected_revision,
-                            request_id,
-                        ),
-                    )
-                    row = cur.fetchone() or {}
-        except psycopg.Error as exc:
-            message = str(exc)
-            for code in (
-                "strategy_selection_unauthorized",
-                "strategy_selection_request_id_invalid",
-                "strategy_selection_expected_revision_invalid",
-                "strategy_selection_package_keys_invalid",
-                "strategy_selection_package_keys_duplicate",
-                "strategy_selection_idempotency_conflict",
-                "strategy_selection_replay_pending",
-                "strategy_selection_active_revision_missing",
-                "strategy_selection_revision_conflict",
-                "strategy_selection_next_open_trade_date_missing",
-                "strategy_selection_catalog_authority_missing",
-            ):
-                if code in message:
-                    raise ValueError(code) from exc
-            raise
-        result = row.get("result")
-        return dict(result) if isinstance(result, dict) else None
 
     def fetch_app_signals(
         self,

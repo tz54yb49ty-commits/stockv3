@@ -22,7 +22,7 @@ BEGIN
      ) THEN
     RAISE EXCEPTION '087 archive advisory lock unavailable';
   END IF;
-  IF pg_catalog.to_regnamespace('n6_strategy_center_archive_30d') IS NOT NULL THEN
+  IF pg_catalog.to_regnamespace('n6_strategy_center_archive_v1') IS NOT NULL THEN
     RAISE EXCEPTION '087 archive schema already exists';
   END IF;
   IF NOT EXISTS (
@@ -105,13 +105,13 @@ BEGIN
 END
 $preflight$;
 
-CREATE SCHEMA n6_strategy_center_archive_30d
+CREATE SCHEMA n6_strategy_center_archive_v1
   AUTHORIZATION ashare_v3_user;
 
-REVOKE ALL ON SCHEMA n6_strategy_center_archive_30d
+REVOKE ALL ON SCHEMA n6_strategy_center_archive_v1
 FROM PUBLIC, n6_btrack_web, n6_strategy_worker, n6_virtual_executor;
 
-CREATE TABLE n6_strategy_center_archive_30d.archive_manifest (
+CREATE TABLE n6_strategy_center_archive_v1.archive_manifest (
   migration_id text PRIMARY KEY,
   contract_version text NOT NULL,
   archive_xid_text text NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE n6_strategy_center_archive_30d.archive_manifest (
   rolled_back_at timestamptz
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.function_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.function_snapshot (
   function_signature text PRIMARY KEY,
   function_name text NOT NULL,
   function_definition text NOT NULL,
@@ -133,12 +133,12 @@ CREATE TABLE n6_strategy_center_archive_30d.function_snapshot (
   optional_at_archive boolean NOT NULL
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.trigger_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.trigger_snapshot (
   trigger_name text PRIMARY KEY,
   trigger_definition text NOT NULL
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.object_acl_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.object_acl_snapshot (
   object_kind text NOT NULL,
   object_identity text NOT NULL,
   grantee_name text NOT NULL,
@@ -149,27 +149,27 @@ CREATE TABLE n6_strategy_center_archive_30d.object_acl_snapshot (
   )
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.table_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.table_snapshot (
   table_name text PRIMARY KEY,
   owner_name text NOT NULL,
   row_count bigint NOT NULL,
   row_hash text NOT NULL
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.sequence_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.sequence_snapshot (
   sequence_name text PRIMARY KEY,
   owner_name text NOT NULL,
   owned_table_name text NOT NULL,
   owned_column_name text NOT NULL
 );
 
-CREATE TABLE n6_strategy_center_archive_30d.index_snapshot (
+CREATE TABLE n6_strategy_center_archive_v1.index_snapshot (
   index_name text PRIMARY KEY,
   table_name text NOT NULL,
   index_definition text NOT NULL
 );
 
-INSERT INTO n6_strategy_center_archive_30d.archive_manifest (
+INSERT INTO n6_strategy_center_archive_v1.archive_manifest (
   migration_id,
   contract_version,
   archive_xid_text,
@@ -237,7 +237,7 @@ BEGIN
       RAISE EXCEPTION '087 function owner drift: %',
         function_row.function_signature;
     END IF;
-    INSERT INTO n6_strategy_center_archive_30d.function_snapshot (
+    INSERT INTO n6_strategy_center_archive_v1.function_snapshot (
       function_signature,
       function_name,
       function_definition,
@@ -257,7 +257,7 @@ BEGIN
 END
 $freeze_functions$;
 
-INSERT INTO n6_strategy_center_archive_30d.trigger_snapshot (
+INSERT INTO n6_strategy_center_archive_v1.trigger_snapshot (
   trigger_name, trigger_definition
 )
 SELECT trigger_row.tgname,
@@ -298,7 +298,7 @@ BEGIN
       'FROM public.%I row_value',
       table_name
     ) INTO frozen_count, frozen_hash;
-    INSERT INTO n6_strategy_center_archive_30d.table_snapshot (
+    INSERT INTO n6_strategy_center_archive_v1.table_snapshot (
       table_name, owner_name, row_count, row_hash
     ) VALUES (
       table_name, table_owner, frozen_count, frozen_hash
@@ -307,7 +307,7 @@ BEGIN
 END
 $freeze_tables$;
 
-INSERT INTO n6_strategy_center_archive_30d.sequence_snapshot (
+INSERT INTO n6_strategy_center_archive_v1.sequence_snapshot (
   sequence_name, owner_name, owned_table_name, owned_column_name
 )
 SELECT sequence.relname,
@@ -341,7 +341,7 @@ WHERE sequence.relkind = 'S'
     'n6_strategy_match_change'
   ]);
 
-INSERT INTO n6_strategy_center_archive_30d.index_snapshot (
+INSERT INTO n6_strategy_center_archive_v1.index_snapshot (
   index_name, table_name, index_definition
 )
 SELECT index_relation.relname,
@@ -364,7 +364,7 @@ WHERE namespace.nspname = 'public'
     'n6_strategy_match_change'
   ]);
 
-INSERT INTO n6_strategy_center_archive_30d.object_acl_snapshot (
+INSERT INTO n6_strategy_center_archive_v1.object_acl_snapshot (
   object_kind,
   object_identity,
   grantee_name,
@@ -396,15 +396,15 @@ WHERE namespace.nspname = 'public'
   AND (
     relation.relname IN (
       SELECT snapshot.table_name
-      FROM n6_strategy_center_archive_30d.table_snapshot snapshot
+      FROM n6_strategy_center_archive_v1.table_snapshot snapshot
     )
     OR relation.relname IN (
       SELECT snapshot.sequence_name
-      FROM n6_strategy_center_archive_30d.sequence_snapshot snapshot
+      FROM n6_strategy_center_archive_v1.sequence_snapshot snapshot
     )
   );
 
-INSERT INTO n6_strategy_center_archive_30d.object_acl_snapshot (
+INSERT INTO n6_strategy_center_archive_v1.object_acl_snapshot (
   object_kind,
   object_identity,
   grantee_name,
@@ -419,7 +419,7 @@ SELECT 'function',
        END,
        acl.privilege_type,
        acl.is_grantable
-FROM n6_strategy_center_archive_30d.function_snapshot snapshot
+FROM n6_strategy_center_archive_v1.function_snapshot snapshot
 JOIN pg_catalog.pg_proc procedure
   ON procedure.oid =
      pg_catalog.to_regprocedure(snapshot.function_signature)
@@ -439,7 +439,7 @@ DECLARE
 BEGIN
   FOR snapshot IN
     SELECT function_signature
-    FROM n6_strategy_center_archive_30d.function_snapshot
+    FROM n6_strategy_center_archive_v1.function_snapshot
     ORDER BY restore_order DESC
   LOOP
     EXECUTE 'REVOKE ALL ON FUNCTION ' || snapshot.function_signature ||
@@ -464,7 +464,7 @@ DECLARE
 BEGIN
   FOR sequence_row IN
     SELECT sequence_name
-    FROM n6_strategy_center_archive_30d.sequence_snapshot
+    FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     EXECUTE pg_catalog.format(
       'REVOKE ALL ON SEQUENCE public.%I '
@@ -476,17 +476,17 @@ END
 $revoke_sequences$;
 
 ALTER TABLE public.n6_strategy_match_change
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 ALTER TABLE public.n6_strategy_observation_projection
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 ALTER TABLE public.n6_strategy_match_projection
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 ALTER TABLE public.n6_user_strategy_selection_item
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 ALTER TABLE public.n6_user_strategy_selection_revision
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 ALTER TABLE public.n6_strategy_package_catalog
-  SET SCHEMA n6_strategy_center_archive_30d;
+  SET SCHEMA n6_strategy_center_archive_v1;
 
 DO $move_owned_sequences$
 DECLARE
@@ -494,14 +494,14 @@ DECLARE
 BEGIN
   FOR sequence_row IN
     SELECT sequence_name
-    FROM n6_strategy_center_archive_30d.sequence_snapshot
+    FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     IF pg_catalog.to_regclass(
          'public.' || sequence_row.sequence_name
        ) IS NOT NULL THEN
       EXECUTE pg_catalog.format(
         'ALTER SEQUENCE public.%I '
-        'SET SCHEMA n6_strategy_center_archive_30d',
+        'SET SCHEMA n6_strategy_center_archive_v1',
         sequence_row.sequence_name
       );
     END IF;
@@ -509,9 +509,9 @@ BEGIN
 END
 $move_owned_sequences$;
 
-REVOKE ALL ON ALL TABLES IN SCHEMA n6_strategy_center_archive_30d
+REVOKE ALL ON ALL TABLES IN SCHEMA n6_strategy_center_archive_v1
 FROM PUBLIC, n6_btrack_web, n6_strategy_worker, n6_virtual_executor;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA n6_strategy_center_archive_30d
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA n6_strategy_center_archive_v1
 FROM PUBLIC, n6_btrack_web, n6_strategy_worker, n6_virtual_executor;
 
 DO $postflight$
@@ -521,11 +521,11 @@ DECLARE
   archived_hash text;
 BEGIN
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.table_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.table_snapshot
   LOOP
     IF pg_catalog.to_regclass('public.' || snapshot.table_name) IS NOT NULL
        OR pg_catalog.to_regclass(
-            'n6_strategy_center_archive_30d.' || snapshot.table_name
+            'n6_strategy_center_archive_v1.' || snapshot.table_name
           ) IS NULL THEN
       RAISE EXCEPTION '087 table schema move failed: %',
         snapshot.table_name;
@@ -535,7 +535,7 @@ BEGIN
       'pg_catalog.md5(coalesce('
       'pg_catalog.string_agg(pg_catalog.to_jsonb(row_value)::text, '
       '''|'' ORDER BY pg_catalog.to_jsonb(row_value)::text), '''')) '
-      'FROM n6_strategy_center_archive_30d.%I row_value',
+      'FROM n6_strategy_center_archive_v1.%I row_value',
       snapshot.table_name
     ) INTO archived_count, archived_hash;
     IF archived_count IS DISTINCT FROM snapshot.row_count
@@ -545,27 +545,27 @@ BEGIN
     END IF;
   END LOOP;
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.sequence_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.sequence_snapshot
   LOOP
     IF pg_catalog.to_regclass(
-         'n6_strategy_center_archive_30d.' || snapshot.sequence_name
+         'n6_strategy_center_archive_v1.' || snapshot.sequence_name
        ) IS NULL THEN
       RAISE EXCEPTION '087 owned sequence move failed: %',
         snapshot.sequence_name;
     END IF;
   END LOOP;
   FOR snapshot IN
-    SELECT * FROM n6_strategy_center_archive_30d.index_snapshot
+    SELECT * FROM n6_strategy_center_archive_v1.index_snapshot
   LOOP
     IF pg_catalog.to_regclass(
-         'n6_strategy_center_archive_30d.' || snapshot.index_name
+         'n6_strategy_center_archive_v1.' || snapshot.index_name
        ) IS NULL THEN
       RAISE EXCEPTION '087 index move failed: %', snapshot.index_name;
     END IF;
   END LOOP;
   IF EXISTS (
     SELECT 1
-    FROM n6_strategy_center_archive_30d.function_snapshot function_row
+    FROM n6_strategy_center_archive_v1.function_snapshot function_row
     WHERE pg_catalog.to_regprocedure(
             function_row.function_signature
           ) IS NOT NULL
@@ -580,17 +580,17 @@ BEGIN
   END IF;
   IF pg_catalog.has_schema_privilege(
        'n6_btrack_web',
-       'n6_strategy_center_archive_30d',
+       'n6_strategy_center_archive_v1',
        'USAGE'
      )
      OR pg_catalog.has_schema_privilege(
           'n6_strategy_worker',
-          'n6_strategy_center_archive_30d',
+          'n6_strategy_center_archive_v1',
           'USAGE'
         )
      OR pg_catalog.has_schema_privilege(
           'n6_virtual_executor',
-          'n6_strategy_center_archive_30d',
+          'n6_strategy_center_archive_v1',
           'USAGE'
         )
      OR EXISTS (
@@ -602,7 +602,7 @@ BEGIN
            pg_catalog.acldefault('n', namespace.nspowner)
          )
        ) acl
-       WHERE namespace.nspname = 'n6_strategy_center_archive_30d'
+       WHERE namespace.nspname = 'n6_strategy_center_archive_v1'
          AND acl.grantee = 0
          AND acl.privilege_type = 'USAGE'
   ) THEN
@@ -611,7 +611,7 @@ BEGIN
   WITH retention AS (
     SELECT pg_catalog.clock_timestamp() AS anchor_at
   )
-  UPDATE n6_strategy_center_archive_30d.archive_manifest manifest
+  UPDATE n6_strategy_center_archive_v1.archive_manifest manifest
   SET retention_anchor_at = retention.anchor_at,
       conservative_deadline_at =
         retention.anchor_at + pg_catalog.make_interval(days => 30)
@@ -620,7 +620,7 @@ BEGIN
     '087_n6_strategy_center_30d_archive_v1';
   IF NOT EXISTS (
     SELECT 1
-    FROM n6_strategy_center_archive_30d.archive_manifest manifest
+    FROM n6_strategy_center_archive_v1.archive_manifest manifest
     WHERE manifest.migration_id =
       '087_n6_strategy_center_30d_archive_v1'
       AND manifest.retention_anchor_at IS NOT NULL
