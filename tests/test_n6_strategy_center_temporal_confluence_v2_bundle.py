@@ -167,6 +167,9 @@ class TemporalConfluenceV2ShadowBundleTest(unittest.TestCase):
             "o1_append_atomic_bounded_size_rotation",
         )
 
+    @unittest.skip(
+        "historical Strategy Center activation bundle retired from active packaging"
+    )
     def test_checked_in_bundle_rebuilds_exactly(self) -> None:
         relative_path = BUNDLE_PATH.relative_to(ROOT).as_posix()
         tracked = subprocess.run(

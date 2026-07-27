@@ -165,6 +165,31 @@ APP_SIGNAL_FROZEN_PROJECTION_FIELDS = (
     "industry_status",
     "industry_provenance",
 )
+RETIRED_STRATEGY_CENTER_PRIVATE_FIELDS = frozenset(
+    {
+        "strategy_center_temporal_confluence",
+        "strategy_match_projection_id",
+        "strategy_observation_projection_id",
+        "strategy_match_change_id",
+        "selection_revision_id",
+        "selected_package_keys",
+        "selected_packages",
+        "matched_packages",
+        "observed_packages",
+        "package_evidence",
+        "confluence",
+        "coherence_episode_key",
+        "coherence_level",
+        "coherence_span_trading_minutes",
+        "evaluator_policy_hash",
+        "freshness_status",
+        "market_heat_evidence",
+        "market_heat_state",
+        "observation_reason",
+        "strategy_version",
+        "surface_kind",
+    }
+)
 APP_V2_SAFETY_LABELS = (
     "投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped",
 )
@@ -612,7 +637,6 @@ def app_nav_context(active: str) -> dict[str, Any]:
         {"key": "filter-center", "label": APP_NAV_LABELS["filter-center"], "href": "/n6/app/filter-center"},
         {"key": "my-monitor", "label": APP_NAV_LABELS["my-monitor"], "href": "/n6/app/my-monitor"},
         {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
-        {"key": "strategy-center", "label": APP_NAV_LABELS["strategy-center"], "href": "/n6/app/strategy-center"},
         {"key": "signals", "label": APP_NAV_LABELS["signals"], "href": "/n6/app/signals"},
         {"key": "messages", "label": APP_NAV_LABELS["messages"], "href": "/n6/app/messages"},
         {"key": "account", "label": APP_NAV_LABELS["account"], "href": "/n6/app/account"},
@@ -3235,6 +3259,7 @@ def _status_monitor_current_status(signal: dict[str, Any]) -> str:
 
 
 def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
+    row = scrub_retired_strategy_center_private_fields(row)
     item = signal_list_item(row)
     item["user_signal_projection_id"] = canonical_bigint_id(
         row.get("user_signal_projection_id"),
@@ -3295,6 +3320,24 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item["tags"] = app_signal_tags(item, row)
     item["detail_page"] = app_signal_detail_policy(row)
     return item
+
+
+def scrub_retired_strategy_center_private_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: scrub_retired_strategy_center_private_fields(item)
+            for key, item in value.items()
+            if key not in RETIRED_STRATEGY_CENTER_PRIVATE_FIELDS
+        }
+    if isinstance(value, list):
+        return [
+            scrub_retired_strategy_center_private_fields(item) for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            scrub_retired_strategy_center_private_fields(item) for item in value
+        )
+    return value
 
 
 def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:

@@ -80,9 +80,6 @@ from ashare_v3.web.n6_app_v1 import (
     app_signal_sse_data_model,
     app_signals_model,
     app_status_monitor_model,
-    app_strategy_center_change_batch_model,
-    app_strategy_center_model,
-    app_strategy_center_selection_result_model,
     app_trade_proposals_model,
     app_virtual_trades_model,
     app_watchlist_model,
@@ -913,7 +910,6 @@ class N6UserWebConfig:
     scope_write_enabled: bool = False
     scope_bulk_write_enabled: bool = False
     proposal_write_enabled: bool = False
-    strategy_center_write_enabled: bool = False
     csrf_secret_file: str = ""
 
 
@@ -9195,10 +9191,6 @@ def config_from_env() -> N6UserWebConfig:
         )
         == "1",
         proposal_write_enabled=os.environ.get("ASHARE_V3_N6_PROPOSAL_WRITE_ENABLED", "0") == "1",
-        strategy_center_write_enabled=os.environ.get(
-            "ASHARE_V3_N6_STRATEGY_CENTER_WRITE_ENABLED", "0"
-        )
-        == "1",
         csrf_secret_file=csrf_secret_file,
     )
 
@@ -9262,19 +9254,13 @@ def build_runtime_btrack_authority_repository(
         return None
 
 
-def build_runtime_strategy_center_repository(
-    environ: Mapping[str, str] | None = None,
-) -> N6UserRepository | None:
-    source = os.environ if environ is None else environ
-    if source.get("PGSERVICE") != N6_BTRACK_WEB_DB_SERVICE:
-        return None
-    if "PGPASSWORD" in source or "ASHARE_V3_POSTGRES_DSN" in source:
-        return None
-    for key in ("PGSERVICEFILE", "PGPASSFILE"):
-        path = str(source.get(key) or "")
-        if not path or not os.path.isabs(path) or any(char in path for char in "\x00\r\n"):
-            return None
-    return PostgresN6UserRepository(f"service={N6_BTRACK_WEB_DB_SERVICE}")
+def strategy_center_retired_response() -> JSONResponse:
+    response = JSONResponse(
+        {"ok": False, "code": "strategy_center_retired"},
+        status_code=410,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def create_app(
@@ -9282,8 +9268,6 @@ def create_app(
     repository: N6UserRepository | None = None,
     btrack_authority_repository: N6BTrackAuthorityRepository | None = None,
     btrack_authority_required: bool = False,
-    strategy_center_repository: N6UserRepository | None = None,
-    strategy_center_repository_required: bool = False,
     config: N6UserWebConfig | None = None,
     password_verifier: PasswordVerifier | None = None,
     password_hasher: PasswordHasher | None = None,
@@ -9295,18 +9279,10 @@ def create_app(
             web_config.scope_write_enabled
             or web_config.scope_bulk_write_enabled
             or web_config.proposal_write_enabled
-            or web_config.strategy_center_write_enabled
         )
         else ""
     )
     repo = repository or PostgresN6UserRepository(web_config.dsn)
-    strategy_repo = (
-        strategy_center_repository
-        if strategy_center_repository is not None
-        else None
-        if strategy_center_repository_required
-        else repo
-    )
     verifier = password_verifier or verify_password
     hasher = password_hasher or hash_password
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -9326,9 +9302,6 @@ def create_app(
         web_config.proposal_write_enabled
         and csrf_secret
         and btrack_authority_repository is not None
-    )
-    strategy_center_write_active = bool(
-        web_config.strategy_center_write_enabled and csrf_secret
     )
 
     @app.get("/n6/login", response_class=HTMLResponse)
@@ -9972,186 +9945,16 @@ def create_app(
         return session, principal, session_token_hash
 
     @app.get("/api/n6/app/v3/strategy-center")
-    async def app_v3_strategy_center(request: Request) -> JSONResponse:
-        context = await app_v3_authority_context(request)
-        if isinstance(context, JSONResponse):
-            return context
-        session, principal, session_token_hash = context
-        reader = getattr(strategy_repo, "fetch_strategy_center_state", None)
-        if not callable(reader):
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_service_unavailable"},
-                status_code=503,
-            )
-        try:
-            state = await asyncio.to_thread(reader, session_token_hash)
-            if not isinstance(state, dict):
-                return JSONResponse(
-                    {"ok": False, "error": "principal_scope_unavailable"},
-                    status_code=403,
-                )
-            payload = app_strategy_center_model(
-                principal,
-                user=session_user_payload(session),
-                state=state,
-                write_enabled=strategy_center_write_active,
-            )
-        except (AttributeError, TypeError, ValueError, psycopg.Error):
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_service_unavailable"},
-                status_code=503,
-            )
-        response = n6_json_response(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response
+    async def app_v3_strategy_center(_request: Request) -> JSONResponse:
+        return strategy_center_retired_response()
 
     @app.put("/api/n6/app/v3/strategy-center/selection")
-    async def app_v3_strategy_center_selection(request: Request) -> JSONResponse:
-        context = await app_v3_authority_context(request)
-        if isinstance(context, JSONResponse):
-            return context
-        session, _principal, session_token_hash = context
-        if not web_config.strategy_center_write_enabled:
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_write_disabled"},
-                status_code=403,
-            )
-        if not csrf_secret:
-            return JSONResponse(
-                {"ok": False, "error": "csrf_not_configured"},
-                status_code=503,
-            )
-        if not n6_csrf_valid(request, session, csrf_secret):
-            return JSONResponse(
-                {"ok": False, "error": "csrf_rejected"},
-                status_code=403,
-            )
-        payload = await read_json_object(request)
-        if set(payload) != {
-            "selected_package_keys",
-            "expected_revision",
-            "request_id",
-        }:
-            return JSONResponse(
-                {"ok": False, "error": "client_scope_not_allowed"},
-                status_code=400,
-            )
-        selected = payload.get("selected_package_keys")
-        expected_revision = payload.get("expected_revision")
-        request_id = str(payload.get("request_id") or "").strip()
-        if (
-            not isinstance(selected, list)
-            or not 1 <= len(selected) <= 2
-            or len(set(selected)) != len(selected)
-            or any(item not in {"package_1", "package_2"} for item in selected)
-            or isinstance(expected_revision, bool)
-            or not isinstance(expected_revision, int)
-            or expected_revision < 0
-            or not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", request_id)
-        ):
-            return JSONResponse(
-                {"ok": False, "error": "invalid_strategy_selection_request"},
-                status_code=400,
-            )
-        writer = getattr(strategy_repo, "put_strategy_center_selection", None)
-        if not callable(writer):
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_service_unavailable"},
-                status_code=503,
-            )
-        try:
-            result = await asyncio.to_thread(
-                writer,
-                session_token_hash,
-                selected_package_keys=selected,
-                expected_revision=expected_revision,
-                request_id=request_id,
-            )
-            if not isinstance(result, dict):
-                return JSONResponse(
-                    {"ok": False, "error": "principal_scope_unavailable"},
-                    status_code=403,
-                )
-            response_payload = app_strategy_center_selection_result_model(result)
-        except ValueError as exc:
-            code = str(exc)
-            status_code = (
-                409
-                if code in {
-                    "strategy_selection_idempotency_conflict",
-                    "strategy_selection_replay_pending",
-                    "strategy_selection_active_revision_missing",
-                    "strategy_selection_revision_conflict",
-                }
-                else 403
-                if code == "strategy_selection_unauthorized"
-                else 400
-                if code.endswith("_invalid") or code.endswith("_duplicate")
-                else 503
-            )
-            return JSONResponse({"ok": False, "error": code}, status_code=status_code)
-        except (AttributeError, TypeError, psycopg.Error):
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_service_unavailable"},
-                status_code=503,
-            )
-        response = n6_json_response(response_payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response
+    async def app_v3_strategy_center_selection(_request: Request) -> JSONResponse:
+        return strategy_center_retired_response()
 
     @app.get("/api/n6/app/v3/strategy-center/stream")
-    async def app_v3_strategy_center_stream(request: Request) -> Response:
-        if {"principal_id", "principal_type", "user_id"}.intersection(
-            request.query_params.keys()
-        ):
-            return JSONResponse(
-                {"ok": False, "error": "client_scope_not_allowed"},
-                status_code=400,
-            )
-        context = await app_v3_authority_context(request)
-        if isinstance(context, JSONResponse):
-            return context
-        _session, _principal, session_token_hash = context
-        try:
-            after_id = parse_n6_signal_sse_cursor(
-                last_event_id=request.headers.get("last-event-id"),
-                after_id=request.query_params.get("after_id"),
-            )
-        except ValueError:
-            return JSONResponse(
-                {"ok": False, "error": "invalid_strategy_center_sse_cursor"},
-                status_code=400,
-            )
-        reader = getattr(strategy_repo, "fetch_strategy_center_changes", None)
-        if not callable(reader):
-            return JSONResponse(
-                {"ok": False, "error": "strategy_center_service_unavailable"},
-                status_code=503,
-            )
-
-        async def read_batch(cursor: int, limit: int) -> dict[str, Any]:
-            result = await asyncio.to_thread(
-                reader,
-                session_token_hash,
-                after_id=cursor,
-                limit=limit,
-            )
-            if not isinstance(result, dict):
-                raise ValueError("strategy_center_authority_missing")
-            return app_strategy_center_change_batch_model(result)
-
-        return StreamingResponse(
-            iter_n6_strategy_center_sse(
-                after_id=after_id,
-                read_batch=read_batch,
-                is_disconnected=request.is_disconnected,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-store",
-                "X-Accel-Buffering": "no",
-            },
-        )
+    async def app_v3_strategy_center_stream(_request: Request) -> JSONResponse:
+        return strategy_center_retired_response()
 
     async def app_v3_ai_agent_public_snapshot(
         request: Request,
@@ -11708,6 +11511,11 @@ def create_app(
 
     @app.get("/n6/app/{page_key}", response_class=HTMLResponse)
     async def app_shell_page(request: Request, page_key: str) -> Response:
+        if page_key == "strategy-center":
+            return RedirectResponse(
+                "/n6/app/signals?notice=strategy_center_retired",
+                status_code=307,
+            )
         if page_key == "watchlist":
             return RedirectResponse("/n6/app/my-monitor", status_code=307)
         if page_key == "buy-messages":
@@ -11718,7 +11526,6 @@ def create_app(
             "signals",
             "messages",
             "realtime-scope",
-            "strategy-center",
             "trade-log",
             "filter-center",
             "filter-center:indexes",
@@ -11832,13 +11639,12 @@ def create_app(
         )
         page_model["csrf_token"] = (
             n6_csrf_token(session, csrf_secret)
-            if scope_write_active or proposal_write_active or strategy_center_write_active
+            if scope_write_active or proposal_write_active
             else ""
         )
         page_model["scope_write_enabled"] = scope_write_active
         page_model["scope_bulk_write_enabled"] = scope_bulk_write_active
         page_model["proposal_write_enabled"] = proposal_write_active
-        page_model["strategy_center_write_enabled"] = strategy_center_write_active
         page_model["ux_safety_status"] = (
             "投影只读模式；"
             f"本人监控范围{'可管理' if scope_write_active else '管理未启用'}；"
@@ -13586,8 +13392,6 @@ def create_runtime_app() -> FastAPI:
     return create_app(
         btrack_authority_repository=build_runtime_btrack_authority_repository(),
         btrack_authority_required=True,
-        strategy_center_repository=build_runtime_strategy_center_repository(),
-        strategy_center_repository_required=True,
     )
 
 

@@ -9,6 +9,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+raise unittest.SkipTest(
+    "historical Strategy Center API contract retired by 30-day archive gate"
+)
+
 from fastapi.testclient import TestClient
 
 from ashare_v3.web.n6_app_v1 import (

@@ -854,26 +854,20 @@ class N6BTrackDbRolePolicy042Test(unittest.TestCase):
 
     def test_runtime_app_injects_separate_repository_without_import_time_db_connection(self) -> None:
         repository = object()
-        strategy_repository = object()
         runtime_app = object()
         with patch.object(
             n6_user_app,
             "build_runtime_btrack_authority_repository",
             return_value=repository,
-        ), patch.object(
-            n6_user_app,
-            "build_runtime_strategy_center_repository",
-            return_value=strategy_repository,
         ), patch.object(n6_user_app, "create_app", return_value=runtime_app) as create:
             self.assertIs(n6_user_app.create_runtime_app(), runtime_app)
         create.assert_called_once_with(
             btrack_authority_repository=repository,
             btrack_authority_required=True,
-            strategy_center_repository=strategy_repository,
-            strategy_center_repository_required=True,
         )
         module_source = inspect.getsource(n6_user_app)
         self.assertIn("app = create_runtime_app()", module_source)
+        self.assertNotIn("build_runtime_strategy_center_repository", module_source)
         factory_source = inspect.getsource(n6_user_app.build_runtime_btrack_authority_repository)
         self.assertNotIn("psycopg.connect", factory_source)
         self.assertNotIn("PGPASSFILE", factory_source)

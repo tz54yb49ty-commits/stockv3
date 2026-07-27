@@ -1,0 +1,94 @@
+{
+  "contract_version": "n6_strategy_center_30d_archive_retention_v1",
+  "status": "template_not_executed",
+  "archive_schema": "n6_strategy_center_archive_30d",
+  "retention": {
+    "duration_days": 30,
+    "database_clock_authority": "forward_transaction_final_pre_commit_clock_timestamp",
+    "database_anchor_is_conservative": true,
+    "database_retention_anchor_at": null,
+    "database_conservative_deadline_at": null,
+    "production_archive_transaction_id": null,
+    "production_archive_committed_at": null,
+    "artifact_commit_deadline_at": null,
+    "physical_drop_not_before": "max(database_conservative_deadline_at, artifact_commit_deadline_at)",
+    "automatic_drop": false,
+    "drop_requires_independent_authorization": true
+  },
+  "production_execution_artifact": {
+    "required_after_successful_forward_commit": true,
+    "must_record": [
+      "production_archive_transaction_id",
+      "production_archive_committed_at",
+      "artifact_commit_deadline_at"
+    ],
+    "artifact_commit_deadline_rule": "production_archive_committed_at + 30 days",
+    "physical_drop_gate": "current_time >= max(database_conservative_deadline_at, artifact_commit_deadline_at)",
+    "physical_drop_authorized": false
+  },
+  "execution_preconditions": {
+    "strategy_center_runner_absent": true,
+    "strategy_center_database_sessions_absent": true,
+    "target_relation_conflicting_locks_absent": true,
+    "external_child_table_dependencies_absent": true,
+    "dedicated_advisory_lock_required": true
+  },
+  "sql": {
+    "forward": "sql/087_n6_strategy_center_30d_archive.sql",
+    "rollback": "sql/087_n6_strategy_center_30d_archive_rollback.sql",
+    "executed": false
+  },
+  "core_tables": [
+    "n6_strategy_package_catalog",
+    "n6_user_strategy_selection_revision",
+    "n6_user_strategy_selection_item",
+    "n6_strategy_match_projection",
+    "n6_strategy_observation_projection",
+    "n6_strategy_match_change"
+  ],
+  "candidate_readonly_baseline": {
+    "source": "coordinating_thread_readonly_candidate_not_live_verified_by_this_change",
+    "n6_strategy_package_catalog": 4,
+    "n6_user_strategy_selection_revision": 23,
+    "n6_user_strategy_selection_item": 32,
+    "n6_strategy_match_projection": 863,
+    "n6_strategy_observation_projection": 4,
+    "n6_strategy_match_change": 186
+  },
+  "historical_only_allowlist": [
+    "src/ashare_v3/user/strategy_center.py",
+    "src/ashare_v3/user/strategy_center_repository.py",
+    "src/ashare_v3/user/strategy_center_worker.py",
+    "scripts/run_n6_strategy_center_once.py",
+    "scripts/run_n6_strategy_center_auto_once.py",
+    "scripts/plan_n6_strategy_center_launchd.py",
+    "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
+    "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
+    "sql/073_n6_strategy_center_schema.sql",
+    "sql/073_n6_strategy_center_schema_rollback.sql",
+    "sql/081_n6_strategy_center_temporal_confluence_v2_catalog.sql",
+    "sql/081_n6_strategy_center_temporal_confluence_v2_catalog_rollback.sql",
+    "sql/082_n6_strategy_center_v2_user_compensation.sql",
+    "sql/082_n6_strategy_center_v2_user_compensation_rollback.sql",
+    "sql/083_n6_strategy_center_v2_catalog_activation.sql",
+    "sql/083_n6_strategy_center_v2_catalog_activation_rollback.sql",
+    "sql/084_n6_strategy_center_n6_trade_date_authority.sql",
+    "sql/084_n6_strategy_center_n6_trade_date_authority_rollback.sql",
+    "sql/085_n6_strategy_center_multi_user_v2_selection_migration.sql",
+    "sql/085_n6_strategy_center_multi_user_v2_selection_migration_rollback.sql",
+    "sql/086_n6_strategy_center_owner_pending_v2.sql",
+    "sql/086_n6_strategy_center_owner_pending_v2_rollback.sql"
+  ],
+  "active_strategy_center_entrypoints": [],
+  "protected_objects": [
+    "role:n6_strategy_worker",
+    "acl:079_n6_strategy_worker_canonical_signal_acl",
+    "schema:n6_strategy",
+    "schema:n6_ai_strategy_evaluation",
+    "schema:n6_ai_strategy_action",
+    "schema:n6_ai_position_strategy_episode",
+    "runtime:Virtual Executor",
+    "domain:proposal_order_trade_position_cash_broker",
+    "layers:N1-N5"
+  ]
+}

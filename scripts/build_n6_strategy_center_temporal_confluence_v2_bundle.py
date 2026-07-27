@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("strategy_center_retired")
+
 import argparse
 from hashlib import sha256
 import json
