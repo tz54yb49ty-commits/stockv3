@@ -1,0 +1,53 @@
+{
+  "contract_version": "N6_VIRTUAL_STOP_LOSS_NUMERIC_COALESCE_FIX_087_V1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "baseline": {
+    "commit": "d85df6328bde223e912dabc3bd65e16df984aa45",
+    "tree": "d6d5ae1d68a1255ea9f05d8e7ce40a837a572ea1",
+    "highest_migration": "086",
+    "candidate_migration": "087",
+    "evaluator_source_sha256": "a858e12f58ef032946fa08c8eb067ae680cd6660389880f4c664fd739fdebccb"
+  },
+  "repair": {
+    "function": "public.n6_executor_evaluate_next_stop_loss(text)",
+    "old_expression": "IF pg_catalog.coalesce(matured_quantity, 0) <= 0 THEN",
+    "new_expression": "IF COALESCE(matured_quantity, 0::numeric) <= 0 THEN",
+    "new_evaluator_source_sha256": "fe3b0ac7297f24fc0a5925d178ccb1f26e575716baea48dce40ef6b2af0a1443",
+    "changes_business_policy": false,
+    "changes_schema": false,
+    "writes_business_rows": false
+  },
+  "preserved_rules": {
+    "two_adjacent_minutes_at_or_below_stop": true,
+    "open_trade_date_and_session_required": true,
+    "fresh_passed_quote_required": true,
+    "exact_principal_account_and_episode_scope": true,
+    "matured_t1_lots_required": true,
+    "confirmed_proposal_is_idempotent": true,
+    "real_broker_connected": false
+  },
+  "acl": {
+    "owner": "ashare_v3_user",
+    "security_definer": true,
+    "volatility": "VOLATILE",
+    "parallel": "UNSAFE",
+    "search_path": "pg_catalog",
+    "execute_roles": [
+      "ashare_v3_user",
+      "n6_virtual_executor"
+    ]
+  },
+  "rollback": {
+    "restores_source_sha256": "a858e12f58ef032946fa08c8eb067ae680cd6660389880f4c664fd739fdebccb",
+    "restores_owner_acl_and_function_attributes": true,
+    "deletes_history": false,
+    "rewrites_business_rows": false
+  },
+  "historical_missed_stops": {
+    "backfilled": false,
+    "synthetic_trade_or_log_created": false,
+    "next_open_session_uses_current_fresh_quotes": true
+  }
+}

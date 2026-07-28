@@ -34,6 +34,16 @@ Web、quote writer/executor、stop-loss 仍为三条分叉 lineage，且同时�
 不同的 `087` migration 文件；它不授权部署或自动合并。正常目标是四个服务从
 同一 commit 构建；确需不同 commit 时必须登记兼容原因和关键 blob 证明。
 
+`n6_btrack_service_lineage_convergence_v1` 已在独立候选分支完成离线文件级
+收敛：只从 `edfb66d2…` 导入 stop-loss 087 四文件、从 `17d30207…` 导入
+088 四文件，没有 merge/cherry-pick 完整 quote/stop lineage。版本化身份清单
+`N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` 同时保留 Web archive 087
+和 stop-loss 087 的原路径、Git blob 与 SHA256，migration 选择必须使用完整
+文件身份，不得按数字 glob、静默改号、覆盖或改写历史。Registry 已纠正
+quote→stop-loss merge-base 为 `658ebb39…`；生产状态仍为 `FRAGMENTED`、
+`database_state=NOT_READ`、`deployment_authorized=false`。本候选不表示统一
+生产 Release，也不授权数据库、migration 或服务操作。
+
 受管活跃工作树目标不超过 5 个：生产集成、当前开发、当前治理、紧急修复和
 验收。已有工作树只能在 commit、测试、rollback、tracked/untracked/ignored
 均为零的证据冻结后归档，不得批量删除或改写用户文件。

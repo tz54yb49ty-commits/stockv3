@@ -61,11 +61,14 @@
   },
   "lineage": {
     "status": "FRAGMENTED",
+    "topology": "TWO_UNRELATED_ROOTS_WITH_LINEAR_QUOTE_TO_STOP_LOSS",
     "web_quote_merge_base": null,
     "web_stop_loss_merge_base": null,
-    "quote_stop_loss_merge_base": null,
+    "quote_stop_loss_merge_base": "658ebb3995a7c539ac211258c378af6499635df4",
+    "quote_is_ancestor_of_stop_loss": true,
     "single_release_ready": false,
-    "database_migration_state": "NOT_READ_NO_DATABASE_ACCESS"
+    "database_state": "NOT_READ",
+    "database_accessed": false
   },
   "runtime_blob_compatibility": {
     "scripts/run_n6_virtual_quote_once.py": "5b2bb6c87e692ce824c6ec8ae79931f5c5fb8d1f",
@@ -79,7 +82,12 @@
       "numeric_id": "087",
       "web_lineage_file": "sql/087_n6_strategy_center_30d_archive.sql",
       "stop_loss_lineage_file": "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix.sql",
-      "rule": "do_not_silently_renumber_or_merge; use full filename identity and a separate reconciliation gate"
+      "rule": "do_not_silently_renumber_or_merge; use full filename identity and the versioned reconciliation manifest",
+      "reconciliation_manifest": "docs/N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1.json",
+      "logical_versions": [
+        "strategy_center_archive_087_web_v1",
+        "virtual_stop_loss_coalesce_087_stop_v1"
+      ]
     }
   ],
   "worktrees": {
@@ -89,8 +97,15 @@
     "cleanup_executed": false
   },
   "convergence": {
-    "status": "GOVERNANCE_READY_RUNTIME_NOT_CONVERGED",
-    "required_next_gate": "n6_btrack_service_lineage_convergence_v1",
+    "status": "OFFLINE_CANDIDATE_IMPLEMENTED_RUNTIME_NOT_CONVERGED",
+    "required_next_gate": "n6_btrack_canonical_integration_fast_forward_v1",
+    "candidate_scope": {
+      "migration_reconciliation_manifest": "docs/N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1.json",
+      "stop_loss_087_source_commit": "edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+      "stop_loss_088_source_commit": "17d30207981de436d11c1467616434853de92b0b",
+      "database_state": "NOT_READ",
+      "deployment_authorized": false
+    },
     "requirements": [
       "preserve active Web and Strategy Center blobs",
       "preserve quote/executor/stop-loss runner and authority blobs",

@@ -131,7 +131,7 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
         )
         self.assertEqual(
             self.registry["convergence"]["required_next_gate"],
-            "n6_btrack_service_lineage_convergence_v1",
+            "n6_btrack_canonical_integration_fast_forward_v1",
         )
         self.assertEqual(
             self.registry["migration_identity_anomalies"][0]["numeric_id"],

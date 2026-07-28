@@ -1,0 +1,191 @@
+{
+  "manifest_version": "N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1",
+  "gate": "n6_btrack_service_lineage_convergence_v1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "status": "OFFLINE_CANDIDATE_NOT_DEPLOYED",
+  "canonical_baseline": {
+    "commit": "2eeb05a56663477159c0f60c2a4be3525eae7753",
+    "tree": "4228bd1efa345d9af5369c08905ac4184e4798fa"
+  },
+  "source_commits": {
+    "web": "081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
+    "quote_executor": "658ebb3995a7c539ac211258c378af6499635df4",
+    "stop_loss_087": "edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+    "stop_loss_088": "17d30207981de436d11c1467616434853de92b0b"
+  },
+  "production_state": {
+    "lineage": "FRAGMENTED",
+    "topology": "TWO_UNRELATED_ROOTS_WITH_LINEAR_QUOTE_TO_STOP_LOSS",
+    "web_quote_merge_base": null,
+    "web_stop_loss_merge_base": null,
+    "quote_stop_loss_merge_base": "658ebb3995a7c539ac211258c378af6499635df4",
+    "database_state": "NOT_READ",
+    "deployment_authorized": false
+  },
+  "identity_rule": {
+    "numeric_prefix_is_unique_identity": false,
+    "canonical_identity_components": [
+      "logical_version",
+      "full_path",
+      "git_blob",
+      "sha256"
+    ],
+    "numeric_glob_execution_allowed": false,
+    "silent_renumber_allowed": false,
+    "historical_file_rewrite_allowed": false,
+    "historical_file_overwrite_allowed": false
+  },
+  "migration_identities": [
+    {
+      "logical_version": "strategy_center_archive_087_web_v1",
+      "numeric_id": "087",
+      "lineage": "web",
+      "source_commit": "2eeb05a56663477159c0f60c2a4be3525eae7753",
+      "files": [
+        {
+          "role": "contract",
+          "path": "config/n6_strategy_center/N6_STRATEGY_CENTER_30D_ARCHIVE_RETENTION_CONTRACT_V1.json",
+          "git_blob": "5dee3407ee7dfd81345d789921a9678f3243c287",
+          "sha256": "be1895c0b4c701b2b764319059204869d59bff642813cd9d694888b09f4903b0"
+        },
+        {
+          "role": "forward",
+          "path": "sql/087_n6_strategy_center_30d_archive.sql",
+          "git_blob": "1efa5ce55f3cb38772a918542cf6d3dcfa5a1ab4",
+          "sha256": "770b90667886f150d7e8e725dcb8c4add6b1d76c63abb5180418ca9ec1420300"
+        },
+        {
+          "role": "rollback",
+          "path": "sql/087_n6_strategy_center_30d_archive_rollback.sql",
+          "git_blob": "2b1752d40f77337eab870413b8d7fcce3999b222",
+          "sha256": "b351c59bfc52eeb901b090710d46a151d184862e94de685b1e28e7554b3b57d3"
+        },
+        {
+          "role": "test",
+          "path": "tests/test_n6_strategy_center_30d_archive_087.py",
+          "git_blob": "4b18231f618323a8d005b4a2f3ca7e4dacba349a",
+          "sha256": "087470822695ba5caf84b896fa0496fa42d5545f0e98fd0f9d2dfbecf21651cc"
+        }
+      ]
+    },
+    {
+      "logical_version": "virtual_stop_loss_coalesce_087_stop_v1",
+      "numeric_id": "087",
+      "lineage": "stop_loss",
+      "source_commit": "edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+      "files": [
+        {
+          "role": "contract",
+          "path": "docs/N6_VIRTUAL_STOP_LOSS_NUMERIC_COALESCE_FIX_087_CONTRACT.json",
+          "git_blob": "3939f0a2e6d667eeafb071a1035d590ba95e5b03",
+          "sha256": "1f9e89af7d8b817ab768d57ce9521f8f6c019e2b9b4a0b2de19a85804689a144"
+        },
+        {
+          "role": "forward",
+          "path": "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix.sql",
+          "git_blob": "ab053357315f865d6966028900d4511e28b12950",
+          "sha256": "4aa1a58456f479288fa0da4516ad13e52843f51492abf3e0a0b7fd1817745570"
+        },
+        {
+          "role": "rollback",
+          "path": "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix_rollback.sql",
+          "git_blob": "71f3dfb5164e704211231459091a9045304cc356",
+          "sha256": "fa7218ea4b62d24478b58cf633ca44421d44cb85c2b460e5dbd6c0b742876c95"
+        },
+        {
+          "role": "test",
+          "path": "tests/test_n6_087_virtual_stop_loss_numeric_coalesce_fix.py",
+          "git_blob": "be26c721b5721d4b6e6232f6bee5bf65cd8bba59",
+          "sha256": "15053b5c28eba9806e5d9dc3e82c7dc4462e5073b8cc702da5d1a388516a6bfd"
+        }
+      ]
+    },
+    {
+      "logical_version": "virtual_stop_loss_guard_088_v1",
+      "numeric_id": "088",
+      "lineage": "stop_loss",
+      "source_commit": "17d30207981de436d11c1467616434853de92b0b",
+      "files": [
+        {
+          "role": "contract",
+          "path": "docs/N6_VIRTUAL_STOP_LOSS_EXECUTOR_INSERT_GUARD_088_CONTRACT.json",
+          "git_blob": "3ac49b122cd633923b4bc56d63023f1d80afa71c",
+          "sha256": "9d123efd751f1ae801e8d8aa239ab628270f242277e7bb2063aa4de0e17bab68"
+        },
+        {
+          "role": "forward",
+          "path": "sql/088_n6_virtual_stop_loss_executor_insert_guard.sql",
+          "git_blob": "c6b37499e09045c584073fa59b9b7b57e0ee03c6",
+          "sha256": "276f26dd4d5e65dbe38e5918826fae546ebc285b41a97ba68ec2aa1dc6e07a2d"
+        },
+        {
+          "role": "rollback",
+          "path": "sql/088_n6_virtual_stop_loss_executor_insert_guard_rollback.sql",
+          "git_blob": "db63676a483d1ea8abe50f41ebfe857eab058924",
+          "sha256": "7a46ad6384926b6a99ea7dec2a8767eab27d681a32a29a6163ed5f3736bae844"
+        },
+        {
+          "role": "test",
+          "path": "tests/test_n6_088_virtual_stop_loss_executor_insert_guard.py",
+          "git_blob": "48e82757fc0803c61fb85f381c6bc4e9436a27e2",
+          "sha256": "ae2d1e0fc924708ba2b744084fd2dc17be24b8f1203fb444d91589a1a0b8f8b8"
+        }
+      ]
+    }
+  ],
+  "preserved_blob_locks": {
+    "web_strategy_center": {
+      "src/ashare_v3/user/strategy_center.py": "745f592b95e41fa088dce570c41bef2a048155bd",
+      "src/ashare_v3/user/strategy_center_repository.py": "3bf099edfddeb1aeee3b85405b073a3eb8544cf5",
+      "src/ashare_v3/user/strategy_center_worker.py": "e356efcb3019d20e2c6d18b5cbec485d1d7fda38",
+      "src/ashare_v3/web/n6_app_v1.py": "0309e7be0faabb36d473e15bd4d33044b11af1e5",
+      "src/ashare_v3/web/n6_user_app.py": "9de18aef6bc94aafd1bd26d1a85b1b3f9e54d25e",
+      "src/ashare_v3/web/templates/n6_app_shell.html": "58b2390df35abda9a2346cde55374aa83195c269"
+    },
+    "runners_clients_authority": {
+      "scripts/run_n6_virtual_quote_once.py": "5b2bb6c87e692ce824c6ec8ae79931f5c5fb8d1f",
+      "scripts/run_n6_virtual_executor_once.py": "cb22b3d635d21b5d0db923a2189d3f5fd866a431",
+      "scripts/run_n6_virtual_stop_loss_once.py": "6b568db26fd4f7357e52311fcac9a81625332889",
+      "src/ashare_v3/user/n6_virtual_quote_client.py": "60f56143016e9302aab99f641457e89e1bc2be65",
+      "src/ashare_v3/web/n6_btrack_authority.py": "6e058bf1a51f2447c8642ffbad6e19e4d76262a8"
+    },
+    "claim_apply_t1_scope_cancel": {
+      "sql/046_n6_btrack_virtual_executor_apply.sql": "8d5805ba6c24dc871a39ebdc03d42e347229c5bb",
+      "sql/048_n6_btrack_proposal_scope_and_executor_claim_next.sql": "12bb9680f838a095def309ad26a48ad84678ff91",
+      "sql/065a_n6_btrack_confirmed_manual_buy_claim_scope_fix.sql": "450e32962f7ca64d5a87030b75d91f077a9b6d40",
+      "sql/065b_n6_btrack_confirmed_manual_buy_apply_scope_fix.sql": "519f21651ad8b8b7465bdc6330fb34ad69a372f2",
+      "sql/068_n6_quote_writer_mootdx_compat.sql": "1dc420093fded0ae379647e05e443d76b128add2",
+      "sql/069_n6_btrack_t1_natural_day_unlock.sql": "27c2f8d81439afdc7f3894dc405582460d1e60b0",
+      "sql/075_n6_executor_quote_ready_claim.sql": "6daf5e4aafa487de4e3641a179e8df4390eb5935",
+      "sql/076_n6_shared_signal_buyer_identity_split.sql": "ab364c2b5bd2a478367794b9de97e84808687f59",
+      "sql/077_n6_shared_signal_quote_scope.sql": "8ed7e851b66d9750b43e0c720c7f85f7303d3777",
+      "sql/078_n6_proposal_atomic_batch_cancel.sql": "3ec24c0715992e8b37c77acc86f43a0b76f7c2b8"
+    }
+  },
+  "implementation_allowlist": [
+    "docs/N6_VIRTUAL_STOP_LOSS_NUMERIC_COALESCE_FIX_087_CONTRACT.json",
+    "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix.sql",
+    "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix_rollback.sql",
+    "tests/test_n6_087_virtual_stop_loss_numeric_coalesce_fix.py",
+    "docs/N6_VIRTUAL_STOP_LOSS_EXECUTOR_INSERT_GUARD_088_CONTRACT.json",
+    "sql/088_n6_virtual_stop_loss_executor_insert_guard.sql",
+    "sql/088_n6_virtual_stop_loss_executor_insert_guard_rollback.sql",
+    "tests/test_n6_088_virtual_stop_loss_executor_insert_guard.py",
+    "docs/N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1.json",
+    "tests/test_n6_btrack_service_lineage_convergence.py",
+    "docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json",
+    "docs/Architecture.md",
+    "docs/Roadmap.md",
+    "docs/Tasks.md",
+    "docs/N6_AI_KNOWLEDGE_BUNDLE_MANIFEST.json"
+  ],
+  "acceptance": {
+    "isolated_pg16_required": true,
+    "active_database_allowed": false,
+    "baseline_aware_complete_test_n6_required": true,
+    "new_failure_allowed": false,
+    "existing_failure_signature_drift_allowed": false,
+    "deployment_or_runtime_operation_allowed": false
+  }
+}

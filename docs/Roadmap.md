@@ -7,8 +7,9 @@
 
 ### 2026-07-28 N6 B轨治理瘦身路线
 
-状态：三通道治理 implementation ready；当前服务血缘仍为
-`FRAGMENTED`，本阶段不部署。
+状态：三通道治理 implementation ready；R3 已形成单一离线候选，当前生产服务
+血缘仍为 `FRAGMENTED`，`database_state=NOT_READ`、
+`deployment_authorized=false`，本阶段不部署。
 
 ```text
 R0 冻结当前 Web / quote writer / executor / stop-loss 基线
@@ -22,9 +23,11 @@ R0 冻结当前 Web / quote writer / executor / stop-loss 基线
 -> R6 以 L1/L2 分类实施筛选中心改造
 ```
 
-R0-R2 只产生 Git/文档/静态测试，不连接数据库或操作服务。R3 必须先解决
-两个不同 `087` migration 文件的完整身份冲突，再生成统一 commit/Release；
-不得仅按 migration 数字静默覆盖。R5 不允许按目录名或年龄批量删除，必须逐
+R0-R2 只产生 Git/文档/静态测试，不连接数据库或操作服务。R3 使用
+`N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` 解决两个不同 `087`
+migration 文件的完整身份冲突，并精确导入 stop-loss 087/088 八文件；不得仅按
+migration 数字静默覆盖。R3 当前只生成统一候选 commit/tree 和离线测试证据，
+不生成或部署 Release。R5 不允许按目录名或年龄批量删除，必须逐
 工作树证明无 tracked、untracked、ignored 残留。L1 普通页面需求目标最多两个
 mutating gate；L2/L3 继续保留 migration、rollback、权限、资金和 runtime
 审计。

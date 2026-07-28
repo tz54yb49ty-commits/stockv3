@@ -12,7 +12,7 @@
   "full_field_dictionary_sha256": "3ece7e856c5ca3a0b3b1ce978b3014dc22cfca9c1e2ea3866b081201556f66d4",
   "compact_all_fields_sha256": "b04e4a2abcb5f64e35b3258f0ebc6a245dd12570344a91b8b836f912bb22ef81",
   "execution_boundary_sha256": "0f066e8e4e96a04d6d795e597f9de3c75ff5ff24587a2877b2914da2a90de165",
-  "project_architecture_sha256": "c6e9fa233cabafc25b280f216072184bc34bfa2bb70529725571c5a6e0495b05",
+  "project_architecture_sha256": "f71a70764645cd492d653d80ddf60f635903d8865101aae9695e25b49b2753d3",
   "planned_schema_055_sha256": "ad13f8d0a1db3a91b01dd154e69f74abf1cee5458572f2210343f5d3c07d34a8",
   "allowed_sources_sha256": "98b3e2b0a03ce632d82c3eda9a10b4115a58c910b84639b9d4f605e0a9b601bc",
   "forbidden_sources_sha256": "f52b4300858110df0632a437942119f560107b44bbcba2577ec58b1e3f507e06",
@@ -7726,5 +7726,5 @@
     "db_context_requires_058_hardened_function": true,
     "human_memory_promotion_required": true
   },
-  "bundle_sha256": "2f3993f14fe17e9337b7e468ed812860722633897290e152d5829c536e68a245"
+  "bundle_sha256": "b3ab9eddea521709b3d17f562622f05022610a89277da899fcacf0a92051a6d5"
 }

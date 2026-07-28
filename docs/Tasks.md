@@ -7,7 +7,9 @@
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 
-状态：IMPLEMENTATION_READY；未部署、未清理工作树。
+状态：`n6_btrack_service_lineage_convergence_v1` 已完成；
+`PASS_NO_NEW_REGRESSION_OFFLINE_CANDIDATE`；
+`NO_NEW_REGRESSION_PASS_WITH_BASELINE_FAILURES`；未部署、未清理工作树。
 
 目标：用 `n6_btrack_delivery_lanes_v1` 取代普通新需求不断新增一次性 policy
 的做法，并将所有后续 B轨发布收敛到
@@ -24,13 +26,34 @@
 下一 gate：
 
 ```text
-n6_btrack_service_lineage_convergence_v1
+n6_btrack_canonical_integration_fast_forward_v1
 ```
 
-该 gate 只允许在新的隔离集成分支中合并当前 Web、quote/executor 和
-stop-loss 能力，解决两个 `087` 文件冲突并运行完整 N6 回归。它不得连接活动
-数据库、切换 plist、启动 worker 或处理 proposal。血缘收敛完成前不得宣称
-已有统一生产基线。
+`n6_btrack_service_lineage_convergence_v1` 已在新的隔离集成分支中按精确
+15 文件 allowlist 完成：从
+`edfb66d2…` 导入 stop-loss 087 四文件，从 `17d30207…` 导入 088 四文件，
+并用 `N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` 保留 Web 087 与
+stop-loss 087 的完整路径、Git blob 和 SHA256。未 merge/cherry-pick 完整
+quote/stop lineage。Registry 的 quote→stop-loss merge-base 已纠正为
+`658ebb39…`；生产仍为 `FRAGMENTED`、`database_state=NOT_READ`、
+`deployment_authorized=false`。最终离线验收结果为
+`PASS_NO_NEW_REGRESSION_OFFLINE_CANDIDATE`；完整 `test_n6*.py` 对照存在既有
+baseline failures，但 `NEW_FAIL=0` 且失败签名无漂移，因此分类严格保持
+`NO_NEW_REGRESSION_PASS_WITH_BASELINE_FAILURES`。旧候选
+`a7ff0b744230d5897eed27fbc6fedbeff1bbc15f` 已由本 closeout amend
+supersede；唯一 candidate commit/tree 以 amend 后 `HEAD`/`HEAD^{tree}` 的
+Git object 最终值为准（commit 不内嵌自身 hash，最终值在本 gate closeout
+证据中冻结）。
+
+下一 gate `n6_btrack_canonical_integration_fast_forward_v1` 只允许将
+`codex/n6-btrack-integration` 从
+`2eeb05a56663477159c0f60c2a4be3525eae7753` ff-only 到本 gate 产生的唯一
+amend candidate commit。该下一 gate 不部署、不 push、不构建 Release，也不
+安装或切换 Release。
+
+本 gate 未连接活动数据库，未执行 migration/rollback，未切换 plist，未启动
+worker/executor/writer/stop-loss，未处理 proposal/order/trade/cash/position/
+lot，也不得宣称数据库、Release 或生产血缘已经收敛。
 
 工作树归档是再下一独立 gate。任何删除都必须先证明对应工作树的 commit、
 测试、rollback 和 tracked/untracked/ignored 均为零；主工作树始终

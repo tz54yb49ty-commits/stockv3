@@ -1,0 +1,61 @@
+{
+  "contract_version": "N6_VIRTUAL_STOP_LOSS_EXECUTOR_INSERT_GUARD_088_V1",
+  "layer_role": "N6_user",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "baseline": {
+    "commit": "edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+    "tree": "4707ae5e7141df6e592bf3e8ec63f912edc5e5d3",
+    "highest_migration": "087",
+    "candidate_migration": "088",
+    "proposal_guard_source_sha256": "8c0e5f213c7c3e83eb7c488bb3302f94de86db98c4a95901f4776e44aec2ebf8",
+    "stop_loss_evaluator_source_sha256": "fe3b0ac7297f24fc0a5925d178ccb1f26e575716baea48dce40ef6b2af0a1443"
+  },
+  "repair": {
+    "function": "public.n6_btrack_proposal_transition_guard()",
+    "new_guard_source_sha256": "28aaea4f21b22cece83fa6f494d6d19ad67ec753af3778765749094ccbb21f58",
+    "policy_version": "n6_virtual_stop_loss_executor_insert_guard_088_v1",
+    "allowed_insert": {
+      "session_user": "n6_virtual_executor",
+      "source_type": "stop_loss",
+      "proposal_side": "sell",
+      "proposal_status": "confirmed",
+      "signal_reference_kind": "stop_loss",
+      "server_owned_position_and_lineage_match_required": true
+    },
+    "changes_schema": false,
+    "writes_business_rows": false
+  },
+  "preserved_rules": {
+    "two_adjacent_minutes_at_or_below_stop": true,
+    "open_trade_date_and_session_required": true,
+    "fresh_passed_quote_required": true,
+    "exact_principal_account_position_and_episode_scope": true,
+    "matured_t1_lots_required": true,
+    "confirmed_proposal_is_idempotent": true,
+    "web_cancellation_078_unchanged": true,
+    "executor_claim_apply_transitions_unchanged": true,
+    "real_broker_connected": false
+  },
+  "privilege_boundary": {
+    "executor_direct_proposal_insert": false,
+    "executor_direct_proposal_update": false,
+    "executor_direct_proposal_delete": false,
+    "guard_owner": "ashare_v3_user",
+    "guard_security_definer": true,
+    "guard_execute_roles": [
+      "ashare_v3_user"
+    ]
+  },
+  "rollback": {
+    "restores_guard_source_sha256": "8c0e5f213c7c3e83eb7c488bb3302f94de86db98c4a95901f4776e44aec2ebf8",
+    "restores_owner_acl_and_function_attributes": true,
+    "deletes_history": false,
+    "rewrites_business_rows": false
+  },
+  "historical_missed_stops": {
+    "backfilled": false,
+    "synthetic_trade_or_log_created": false,
+    "next_open_session_uses_current_fresh_quotes": true
+  }
+}
