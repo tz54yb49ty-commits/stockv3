@@ -5920,6 +5920,16 @@ class PostgresN6UserRepository:
             )
             recommendation_where_sql = str(level_up_recommendation.get("_where_sql") or "TRUE")
             level_up_recommendation.pop("_where_sql", None)
+            stock_industry_join_sql = (
+                self._app_v2_stock_industry_join_sql()
+                if asset_kind == "stock"
+                else ""
+            )
+            count_stock_industry_join_sql = (
+                stock_industry_join_sql
+                if asset_kind == "stock" and normalize_filter_value(filters.get("q"))
+                else ""
+            )
             cur.execute(
                 f"""
                 SELECT count(*) FILTER (WHERE {source_where_sql})::int AS total_count,
@@ -5945,7 +5955,8 @@ class PostgresN6UserRepository:
                            AND level_up_score IS NOT NULL
                            AND level_down_score IS NOT NULL
                        )::int AS score_sample_count
-                FROM {table_name}
+                FROM {table_name} t
+                {count_stock_industry_join_sql}
                 WHERE for_trade_date = %(selected_for_trade_date)s
                 """,
                 params,
@@ -5981,11 +5992,6 @@ class PostgresN6UserRepository:
                 table_name,
                 asset_kind,
                 include_stock_industry=asset_kind == "stock",
-            )
-            stock_industry_join_sql = (
-                self._app_v2_stock_industry_join_sql()
-                if asset_kind == "stock"
-                else ""
             )
             cur.execute(
                 f"""
@@ -8789,7 +8795,17 @@ class PostgresN6UserRepository:
         keyword = normalize_filter_value(filters.get("q"))
         if keyword:
             params["q_like"] = f"%{keyword}%"
-            where_clauses.append("(code ILIKE %(q_like)s OR name ILIKE %(q_like)s OR identity_key ILIKE %(q_like)s)")
+            if asset_kind == "board":
+                search_columns = ("board_code", "board_name", "identity_key")
+            elif asset_kind == "stock":
+                search_columns = ("code", "name", "identity_key", "industry.industry_code")
+            else:
+                search_columns = ("code", "name", "identity_key")
+            where_clauses.append(
+                "("
+                + " OR ".join(f"{column} ILIKE %(q_like)s" for column in search_columns)
+                + ")"
+            )
         expected_return_min = app_v2_expected_return_threshold(filters.get("buy_expected_return_pct_min"))
         if expected_return_min is not None:
             params["buy_expected_return_pct_min"] = expected_return_min

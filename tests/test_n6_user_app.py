@@ -3671,6 +3671,9 @@ class FakeN6UserRepository:
                 if (str(row.get("identity_key") or "").strip() in stock_keys)
                 or (str(row.get("stock_identity_key") or "").strip() in stock_keys)
             ]
+        if asset_kind == "stock":
+            rows = [dict(row) for row in rows]
+            self._fake_enrich_stock_membership_display_cache(rows)
         total_count = len(rows)
         for key in ("direction", "board_type"):
             value = filters.get(key)
@@ -3695,12 +3698,17 @@ class FakeN6UserRepository:
                     rows = [row for row in rows if row.get(field) == value]
         keyword = str(filters.get("q") or "").strip().casefold()
         if keyword:
+            search_fields = {
+                "stock": ("code", "name", "identity_key", "industry_code"),
+                "index": ("code", "name", "identity_key"),
+                "board": ("board_code", "board_name", "identity_key"),
+            }.get(asset_kind, ("identity_key",))
             rows = [
                 row
                 for row in rows
                 if any(
                     keyword in str(row.get(field) or "").casefold()
-                    for field in ("code", "name", "identity_key")
+                    for field in search_fields
                 )
             ]
         expected_return_min = n6_app_v1_module.app_v2_expected_return_threshold(
@@ -3777,9 +3785,6 @@ class FakeN6UserRepository:
             if asset_kind in {"index", "board"}
             else []
         )
-        if asset_kind == "stock":
-            rows = [dict(row) for row in rows]
-            self._fake_enrich_stock_membership_display_cache(rows)
         sort_key = str(filters.get("sort") or "").strip()
         if sort_key:
             reverse = str(filters.get("sort_dir") or "asc").strip().lower() == "desc"
@@ -9150,7 +9155,7 @@ class N6UserAppTest(unittest.TestCase):
                     principal_type="admin",
                     user_id=1,
                     asset_kind="index",
-                    filters={"direction": "buy"},
+                    filters={"direction": "buy", "q": "沪深"},
                     limit=200,
                 )["cache_ready"]
             )
@@ -9160,7 +9165,11 @@ class N6UserAppTest(unittest.TestCase):
                     principal_type="admin",
                     user_id=1,
                     asset_kind="board",
-                    filters={"board_type": "tdx_industry", "day_overheat_level": "启动"},
+                    filters={
+                        "board_type": "tdx_industry",
+                        "day_overheat_level": "启动",
+                        "q": "银行",
+                    },
                     limit=200,
                 )["cache_ready"]
             )
@@ -9236,6 +9245,21 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("CASE WHEN count(*) = 1", sql_blob)
         self.assertNotIn("SELECT t.*", sql_blob)
         self.assertNotRegex(sql_blob.upper(), r"\b(?:INSERT|UPDATE|DELETE|MERGE)\b")
+        count_queries = [
+            sql
+            for sql, _ in cursor.executions
+            if "AS filtered_count" in sql and "AS score_sample_count" in sql
+        ]
+        self.assertEqual(len(count_queries), 3)
+        stock_count_sql, index_count_sql, board_count_sql = count_queries
+        self.assertIn("LEFT JOIN LATERAL", stock_count_sql)
+        self.assertIn("industry.industry_code ILIKE %(q_like)s", stock_count_sql)
+        self.assertNotIn("industry.industry_name ILIKE %(q_like)s", stock_count_sql)
+        self.assertIn("code ILIKE %(q_like)s", index_count_sql)
+        self.assertIn("name ILIKE %(q_like)s", index_count_sql)
+        self.assertIn("board_code ILIKE %(q_like)s", board_count_sql)
+        self.assertIn("board_name ILIKE %(q_like)s", board_count_sql)
+        self.assertNotIn("(code ILIKE %(q_like)s", board_count_sql)
 
     def test_b_track_v2_filter_and_monitor_queries_use_explicit_column_allowlists(self) -> None:
         filter_source = inspect.getsource(PostgresN6UserRepository.fetch_app_filter_items)
@@ -11313,14 +11337,16 @@ class N6UserAppTest(unittest.TestCase):
         repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
         for asset_kind in ("stock", "index", "board"):
             base = dict(repo.app_filter_rows[asset_kind][0])
+            code_field = "board_code" if asset_kind == "board" else "code"
+            name_field = "board_name" if asset_kind == "board" else "name"
             repo.app_filter_rows[asset_kind] = [
                 {
                     **base,
                     "identity_key": f"{asset_kind}:SEARCH:ALPHA",
                     f"{asset_kind}_identity_key": f"{asset_kind}:SEARCH:ALPHA",
-                    "code": "123456",
+                    code_field: "123456",
                     "display_code": "123456",
-                    "name": "北辰样本",
+                    name_field: "北辰样本",
                     "display_name": "北辰样本",
                     "year_overheat_level": "volume_up",
                     "for_trade_date": "20260728",
@@ -11329,9 +11355,9 @@ class N6UserAppTest(unittest.TestCase):
                     **base,
                     "identity_key": f"{asset_kind}:SEARCH:BETA",
                     f"{asset_kind}_identity_key": f"{asset_kind}:SEARCH:BETA",
-                    "code": "654321",
+                    code_field: "654321",
                     "display_code": "654321",
-                    "name": "南星样本",
+                    name_field: "南星样本",
                     "display_name": "南星样本",
                     "year_overheat_level": "volume_up",
                     "for_trade_date": "20260728",
@@ -11352,6 +11378,11 @@ class N6UserAppTest(unittest.TestCase):
                     self.assertEqual(payload["filtered_count"], 1)
                     self.assertEqual(payload["rows"][0]["identity_key"], expected_identity)
 
+        board_miss = client.get("/api/n6/app/v2/filter/boards?q=不存在")
+        self.assertEqual(board_miss.status_code, 200)
+        self.assertEqual(board_miss.json()["filtered_count"], 0)
+        self.assertEqual(board_miss.json()["rows"], [])
+
         page = client.get(
             "/n6/app/filter-center/stocks"
             "?for_trade_date=20260728&year_overheat_level=volume_up"
@@ -11368,6 +11399,7 @@ class N6UserAppTest(unittest.TestCase):
             ("sort_dir", "desc"),
         ):
             self.assertIn(f'name="{name}" value="{value}"', page.text)
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_filter_center_table_hides_stock_forecast_bulk_realtime_and_empty_display_code(self) -> None:
         client, repo, _, _ = build_client(
@@ -11414,6 +11446,50 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("<summary>技术来源</summary>", page.text)
         self.assertIn('data-score-regime="bull"', page.text)
         self.assertIn("牛市", page.text)
+
+    def test_filter_center_action_cell_uses_one_shared_action_line_for_all_assets(self) -> None:
+        enabled_client, enabled_repo, _, _ = build_client(
+            scope_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        enabled_repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        enabled_client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        for page in ("stocks", "indexes", "boards"):
+            with self.subTest(page=page, write_enabled=True):
+                response = enabled_client.get(f"/n6/app/filter-center/{page}")
+                self.assertEqual(response.status_code, 200)
+                action_cell = re.search(
+                    r'<td class="filter-action-cell">(.*?)</td>',
+                    response.text,
+                    re.DOTALL,
+                )
+                self.assertIsNotNone(action_cell)
+                self.assertEqual(action_cell.group(1).count('class="row-action-line"'), 1)
+                self.assertIn("加入监控对象", action_cell.group(1))
+                self.assertIn("加入实时监控范围", action_cell.group(1))
+
+        disabled_client, disabled_repo, _, _ = build_client()
+        disabled_repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        disabled_client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        disabled_response = disabled_client.get("/n6/app/filter-center/stocks")
+        disabled_action_cell = re.search(
+            r'<td class="filter-action-cell">(.*?)</td>',
+            disabled_response.text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(disabled_action_cell)
+        self.assertEqual(disabled_action_cell.group(1).count('class="row-action-line"'), 1)
+        self.assertNotIn("加入监控对象", disabled_action_cell.group(1))
+        self.assertNotIn("加入实时监控范围", disabled_action_cell.group(1))
+        self.assertFalse(any(enabled_repo.forbidden_writes.values()))
+        self.assertFalse(any(disabled_repo.forbidden_writes.values()))
 
     def test_b_track_v2_filter_expected_return_slider_filters_all_asset_pages(self) -> None:
         client, repo, _, _ = build_client()
@@ -12221,6 +12297,9 @@ class N6UserAppTest(unittest.TestCase):
                 "name": "历史行业",
                 "source_trade_date": "20260710",
                 "for_trade_date": "20260711",
+                "period_transition_y": "volume_up",
+                "level_up_score": "30",
+                "level_down_score": "10",
             },
             {
                 **base,
@@ -12230,6 +12309,9 @@ class N6UserAppTest(unittest.TestCase):
                 "name": "重复同一行业",
                 "source_trade_date": "20260710",
                 "for_trade_date": "20260711",
+                "period_transition_y": "volume_down",
+                "level_up_score": "10",
+                "level_down_score": "30",
             },
         ]
         repo.app_member_rows["board"] = [
@@ -12302,6 +12384,16 @@ class N6UserAppTest(unittest.TestCase):
             "/api/n6/app/v2/filter/stocks"
             "?for_trade_date=20260711&sort=industry_name&sort_dir=asc&limit=1"
         ).json()
+        exact_industry = client.get(
+            "/api/n6/app/v2/filter/stocks?for_trade_date=20260711&q=881001&limit=1"
+        ).json()
+        fuzzy_industry = client.get(
+            "/api/n6/app/v2/filter/stocks?for_trade_date=20260711&q=88100&limit=1"
+        ).json()
+        industry_and_period = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?for_trade_date=20260711&q=88100&year_overheat_level=volume_up&limit=1"
+        ).json()
         page = client.get(
             "/n6/app/filter-center/stocks"
             "?for_trade_date=20260711&sort=industry_name&sort_dir=asc"
@@ -12333,6 +12425,23 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("industry_name", [column["key"] for column in payload["columns"]])
         self.assertIn("881001", page.text)
         self.assertIn("保险", page.text)
+        self.assertEqual(exact_industry["total_count"], 4)
+        self.assertEqual(exact_industry["filtered_count"], 1)
+        self.assertEqual(exact_industry["rows"][0]["identity_key"], "stock:ASOF")
+        self.assertEqual(fuzzy_industry["total_count"], 4)
+        self.assertEqual(fuzzy_industry["filtered_count"], 2)
+        self.assertEqual(fuzzy_industry["returned_count"], 1)
+        self.assertEqual(fuzzy_industry["score_comparison"]["sample_count"], 2)
+        self.assertEqual(industry_and_period["filtered_count"], 1)
+        self.assertEqual(industry_and_period["rows"][0]["identity_key"], "stock:ASOF")
+        for excluded_query in ("保险", "881002", "881003", "889999", "000000"):
+            with self.subTest(excluded_query=excluded_query):
+                excluded = client.get(
+                    "/api/n6/app/v2/filter/stocks"
+                    f"?for_trade_date=20260711&q={excluded_query}"
+                )
+                self.assertEqual(excluded.status_code, 200)
+                self.assertEqual(excluded.json()["filtered_count"], 0)
         self.assertEqual(sum(repo.forbidden_writes.values()), 0)
 
     def test_b_track_v2_filter_linked_stock_apis_return_membership_intersection(self) -> None:

@@ -1498,13 +1498,11 @@
                   {% if item.display_code and item.display_code != "—" %}
                   <span class="subtle">{{ item.display_code }}</span>
                   {% endif %}
-                </div>
-                {% if section.controls.add_monitor_enabled %}
-                <div class="row-action-line">
+                  {% if section.controls.add_monitor_enabled %}
                   <button type="button" class="row-action" data-n6-add-monitor>加入监控对象</button>
                   <button type="button" class="row-action" data-n6-add-realtime>加入实时监控范围</button>
+                  {% endif %}
                 </div>
-                {% endif %}
               </td>
               {% for cell in item.cells %}
               <td
