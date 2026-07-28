@@ -4418,6 +4418,9 @@ class PostgresN6UserRepository:
                        p.stop_loss_frozen_at,
                        p.stop_loss_policy_version,
                        p.stop_loss_policy_hash,
+                       stock_identity.stock_name,
+                       industry_identity.industry_code,
+                       industry_identity.industry_name,
                        q.exchange AS quote_exchange,
                        q.current_price,
                        q.quote_minute,
@@ -4429,6 +4432,45 @@ class PostgresN6UserRepository:
                   ON r.virtual_position_id = p.virtual_position_id
                 LEFT JOIN v_n6_virtual_quote_latest q
                   ON q.identity_key = p.identity_key
+                LEFT JOIN LATERAL (
+                  SELECT CASE WHEN count(*) = 1 THEN max(latest_name.stock_name) END AS stock_name
+                  FROM (
+                    SELECT DISTINCT btrim(basis.display_name::text) AS stock_name
+                    FROM v_n6_stock_condition_display_basis basis
+                    WHERE basis.identity_key = p.identity_key
+                      AND NULLIF(btrim(basis.display_name::text), '') IS NOT NULL
+                      AND basis.for_trade_date = (
+                        SELECT max(asof_basis.for_trade_date)
+                        FROM v_n6_stock_condition_display_basis asof_basis
+                        WHERE asof_basis.identity_key = p.identity_key
+                          AND asof_basis.for_trade_date <= to_char(p.current_trade_date, 'YYYYMMDD')
+                      )
+                  ) latest_name
+                ) stock_identity ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT
+                    CASE WHEN count(*) = 1 THEN max(latest_industry.board_code) END AS industry_code,
+                    CASE WHEN count(*) = 1 THEN max(latest_industry.board_name) END AS industry_name
+                  FROM (
+                    SELECT DISTINCT
+                           membership.board_identity_key,
+                           membership.board_code,
+                           membership.board_name
+                    FROM v_n6_board_membership_fact membership
+                    WHERE membership.stock_identity_key = p.identity_key
+                      AND membership.board_type = 'tdx_industry'
+                      AND NULLIF(btrim(membership.board_identity_key::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_code::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_name::text), '') IS NOT NULL
+                      AND membership.trade_date = (
+                        SELECT max(asof_membership.trade_date)
+                        FROM v_n6_board_membership_fact asof_membership
+                        WHERE asof_membership.stock_identity_key = p.identity_key
+                          AND asof_membership.board_type = 'tdx_industry'
+                          AND asof_membership.trade_date <= to_char(p.current_trade_date, 'YYYYMMDD')
+                      )
+                  ) latest_industry
+                ) industry_identity ON TRUE
                 WHERE r.lot_quantity_total = p.quantity
                   AND coalesce(r.lot_scope_mismatch, false) IS FALSE
                   AND coalesce(r.lot_status_mismatch, false) IS FALSE
@@ -8210,25 +8252,74 @@ class PostgresN6UserRepository:
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT virtual_trade_id,
-                       virtual_order_id,
-                       virtual_account_id,
-                       identity_key,
-                       trade_side,
-                       filled_quantity,
-                       filled_price,
-                       gross_amount,
-                       total_fee_amount,
-                       net_amount,
-                       trade_status,
-                       trade_time,
-                       source_proposal_id,
-                       signal_reference_kind,
-                       signal_reference_price,
-                       fill_quote_snapshot_id
-                FROM n6_virtual_trade
-                WHERE principal_id = %(principal_id)s
-                  AND principal_type = %(principal_type)s
+                SELECT t.virtual_trade_id,
+                       t.virtual_order_id,
+                       t.virtual_account_id,
+                       t.identity_key,
+                       split_part(t.identity_key, ':', 3) AS stock_code,
+                       stock_identity.stock_name,
+                       industry_identity.industry_code,
+                       industry_identity.industry_name,
+                       t.trade_side,
+                       t.filled_quantity,
+                       t.filled_price,
+                       t.gross_amount,
+                       t.total_fee_amount,
+                       t.net_amount,
+                       t.trade_status,
+                       t.trade_time,
+                       t.source_proposal_id,
+                       t.signal_reference_kind,
+                       t.signal_reference_price,
+                       t.fill_quote_snapshot_id
+                FROM n6_virtual_trade t
+                LEFT JOIN LATERAL (
+                  SELECT CASE WHEN count(*) = 1 THEN max(latest_name.stock_name) END AS stock_name
+                  FROM (
+                    SELECT DISTINCT btrim(basis.display_name::text) AS stock_name
+                    FROM v_n6_stock_condition_display_basis basis
+                    WHERE basis.identity_key = t.identity_key
+                      AND NULLIF(btrim(basis.display_name::text), '') IS NOT NULL
+                      AND basis.for_trade_date = (
+                        SELECT max(asof_basis.for_trade_date)
+                        FROM v_n6_stock_condition_display_basis asof_basis
+                        WHERE asof_basis.identity_key = t.identity_key
+                          AND asof_basis.for_trade_date <= to_char(
+                                t.trade_time AT TIME ZONE 'Asia/Shanghai',
+                                'YYYYMMDD'
+                              )
+                      )
+                  ) latest_name
+                ) stock_identity ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT
+                    CASE WHEN count(*) = 1 THEN max(latest_industry.board_code) END AS industry_code,
+                    CASE WHEN count(*) = 1 THEN max(latest_industry.board_name) END AS industry_name
+                  FROM (
+                    SELECT DISTINCT
+                           membership.board_identity_key,
+                           membership.board_code,
+                           membership.board_name
+                    FROM v_n6_board_membership_fact membership
+                    WHERE membership.stock_identity_key = t.identity_key
+                      AND membership.board_type = 'tdx_industry'
+                      AND NULLIF(btrim(membership.board_identity_key::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_code::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_name::text), '') IS NOT NULL
+                      AND membership.trade_date = (
+                        SELECT max(asof_membership.trade_date)
+                        FROM v_n6_board_membership_fact asof_membership
+                        WHERE asof_membership.stock_identity_key = t.identity_key
+                          AND asof_membership.board_type = 'tdx_industry'
+                          AND asof_membership.trade_date <= to_char(
+                                t.trade_time AT TIME ZONE 'Asia/Shanghai',
+                                'YYYYMMDD'
+                              )
+                      )
+                  ) latest_industry
+                ) industry_identity ON TRUE
+                WHERE t.principal_id = %(principal_id)s
+                  AND t.principal_type = %(principal_type)s
                   AND EXISTS (
                     SELECT 1
                     FROM n6_principal p
@@ -8237,7 +8328,7 @@ class PostgresN6UserRepository:
                       AND p.owner_user_id = %(user_id)s
                       AND p.principal_status = 'active'
                   )
-                ORDER BY trade_time DESC, virtual_trade_id DESC
+                ORDER BY t.trade_time DESC, t.virtual_trade_id DESC
                 LIMIT %(limit)s
                 """,
                 {

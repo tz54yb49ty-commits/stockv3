@@ -14512,6 +14512,10 @@ class N6UserAppTest(unittest.TestCase):
                 **base_trade,
                 "virtual_trade_id": 701,
                 "identity_key": "stock:SH:600001",
+                "stock_code": "600001",
+                "stock_name": "浦发银行",
+                "industry_code": "880301",
+                "industry_name": "银行",
                 "filled_price": "10.11",
                 "signal_reference_kind": "trigger_price",
                 "fill_quote_snapshot_id": 901,
@@ -14556,7 +14560,10 @@ class N6UserAppTest(unittest.TestCase):
             rows[identity_key] = row_markup
         self.assertIn("行情成交价", rows["stock:SH:600001"])
         self.assertNotIn("触发价虚拟成交", rows["stock:SH:600001"])
+        self.assertIn("600001 浦发银行", rows["stock:SH:600001"])
+        self.assertIn("880301 银行", rows["stock:SH:600001"])
         self.assertIn("触发价虚拟成交", rows["stock:SH:600002"])
+        self.assertIn("— —", rows["stock:SH:600002"])
         self.assertIn("动作价虚拟成交", rows["stock:SH:600003"])
 
     def test_b_track_v3_pending_reload_repeat_expiry_and_failure_are_fail_closed(self) -> None:
@@ -16977,6 +16984,9 @@ class N6UserAppTest(unittest.TestCase):
                 "principal_type": "admin",
                 "identity_key": "stock:SH:600000",
                 "stock_code": "600000",
+                "stock_name": "浦发银行",
+                "industry_code": "880301",
+                "industry_name": "银行",
                 "position_exchange": "SH",
                 "quote_exchange": "SH",
                 "quantity": Decimal("100"),
@@ -17043,6 +17053,9 @@ class N6UserAppTest(unittest.TestCase):
                 "virtual_position_id",
                 "identity_key",
                 "stock_code",
+                "stock_name",
+                "industry_code",
+                "industry_name",
                 "quantity",
                 "sellable_quantity",
                 "t1_locked_quantity",
@@ -17078,6 +17091,9 @@ class N6UserAppTest(unittest.TestCase):
         self.assertFalse(item["manual_sell_available"])
         self.assertEqual(item["manual_sell_disabled_reason"], "交易申请未启用")
         self.assertEqual(item["identity_key"], "stock:SH:600000")
+        self.assertEqual(item["stock_name"], "浦发银行")
+        self.assertEqual(item["industry_code"], "880301")
+        self.assertEqual(item["industry_name"], "银行")
         self.assertEqual(item["quote_status"], "fresh")
         self.assertEqual(item["quality_reason"], "ok")
         self.assertEqual(Decimal(item["market_value"]), Decimal("1100"))
@@ -17087,6 +17103,15 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(item["stop_loss_price"], "9.2")
         self.assertEqual(item["stop_loss_status"], "frozen")
         self.assertEqual(item["stop_loss_source_quote_snapshot_id"], "9007199254740993")
+        self.assertIn(
+            "v_n6_stock_condition_display_basis",
+            payload["source_policy"]["allowed_sources"],
+        )
+        self.assertIn(
+            "v_n6_board_membership_fact",
+            payload["source_policy"]["allowed_sources"],
+        )
+        self.assertFalse(payload["source_policy"]["n2_n5_raw_facts_read"])
 
     def test_b_track_portfolio_manual_sell_creates_source_only_proposal_when_enabled(self) -> None:
         client, repo, _, _ = build_client(proposal_write_enabled=True, csrf_secret="proposal-secret")
@@ -17380,6 +17405,16 @@ class N6UserAppTest(unittest.TestCase):
             "join n6_virtual_position p",
             "join n6_virtual_position_lot",
             "left join v_n6_virtual_quote_latest",
+            "from v_n6_stock_condition_display_basis basis",
+            "from v_n6_board_membership_fact membership",
+            "basis.for_trade_date <= to_char(p.current_trade_date, 'yyyymmdd')",
+            "asof_membership.trade_date <= to_char(p.current_trade_date, 'yyyymmdd')",
+            "membership.board_type = 'tdx_industry'",
+            "select distinct btrim(basis.display_name::text) as stock_name",
+            "select distinct membership.board_identity_key, membership.board_code, membership.board_name",
+            "case when count(*) = 1 then max(latest_name.stock_name) end",
+            "case when count(*) = 1 then max(latest_industry.board_code) end",
+            "case when count(*) = 1 then max(latest_industry.board_name) end",
             "principal_status = 'active'",
             "virtual_account_status = 'active'",
             "position_status = 'open_virtual'",
@@ -17405,16 +17440,172 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("select *", normalized)
         self.assertNotIn("select p.*", normalized)
         self.assertNotIn("select q.*", normalized)
-        for forbidden in (
+        for forbidden_relation in (
             "condition_basis",
             "condition_pool",
             "common_trigger",
             "common_action",
             "realtime_daily_snapshot",
             "minute_bar_1m",
-            "mootdx",
         ):
-            self.assertNotIn(forbidden, normalized)
+            self.assertNotRegex(
+                normalized,
+                rf"\b(from|join)\s+(public\.)?{forbidden_relation}\b",
+            )
+        self.assertNotIn("mootdx", normalized)
+
+    def test_b_track_trade_log_postgres_identity_query_is_asof_readonly_and_unambiguous(self) -> None:
+        cursor = RecordingCursor(existing_relations={"n6_virtual_trade"})
+        repo = PostgresN6UserRepository("postgresql://unused")
+        repo._readonly_connection = lambda: RecordingConnection(cursor)  # type: ignore[method-assign]
+
+        result = repo.fetch_app_virtual_trades(
+            principal_id=1,
+            principal_type="admin",
+            user_id=1,
+        )
+
+        self.assertTrue(result["tables_ready"])
+        self.assertEqual(result["items"], [])
+        sql, params = cursor.executions[-1]
+        normalized = " ".join(sql.split()).lower()
+        self.assertEqual(
+            params,
+            {
+                "principal_id": 1,
+                "principal_type": "admin",
+                "user_id": 1,
+                "limit": 200,
+            },
+        )
+        for required in (
+            "from n6_virtual_trade t",
+            "from v_n6_stock_condition_display_basis basis",
+            "from v_n6_board_membership_fact membership",
+            "t.trade_time at time zone 'asia/shanghai'",
+            "basis.for_trade_date <= to_char(",
+            "asof_membership.trade_date <= to_char(",
+            "membership.board_type = 'tdx_industry'",
+            "select distinct btrim(basis.display_name::text) as stock_name",
+            "select distinct membership.board_identity_key, membership.board_code, membership.board_name",
+            "case when count(*) = 1 then max(latest_name.stock_name) end",
+            "case when count(*) = 1 then max(latest_industry.board_code) end",
+            "case when count(*) = 1 then max(latest_industry.board_name) end",
+        ):
+            self.assertIn(required, normalized)
+        self.assertGreaterEqual(normalized.count("select distinct"), 2)
+        for forbidden_relation in (
+            "condition_basis",
+            "condition_pool",
+            "common_trigger",
+            "common_action",
+            "realtime_daily_snapshot",
+            "minute_bar_1m",
+        ):
+            self.assertNotRegex(
+                normalized,
+                rf"\b(from|join)\s+(public\.)?{forbidden_relation}\b",
+            )
+        for forbidden_write in (" insert ", " update ", " delete ", " merge ", " truncate "):
+            self.assertNotIn(forbidden_write, f" {normalized} ")
+        self.assertNotIn("mootdx", normalized)
+
+    def test_b_track_portfolio_and_trade_log_render_compact_stock_identity_or_dashes(self) -> None:
+        client, repo, _, _ = build_client()
+        position_base = {
+            "principal_id": 1,
+            "principal_type": "admin",
+            "position_status": "open_virtual",
+            "quantity": Decimal("100"),
+            "sellable_quantity": Decimal("100"),
+            "t1_locked_quantity": Decimal("0"),
+            "lot_quantity_total": Decimal("100"),
+            "average_cost": Decimal("10"),
+            "current_trade_date": "2026-07-20",
+            "holding_episode_no": 1,
+            "first_open_trade_date": "2026-07-17",
+        }
+        repo.app_positions = [
+            {
+                **position_base,
+                "virtual_position_id": 71,
+                "identity_key": "stock:SH:600000",
+                "stock_code": "600000",
+                "stock_name": "浦发银行",
+                "industry_code": "880301",
+                "industry_name": "银行",
+            },
+            {
+                **position_base,
+                "virtual_position_id": 72,
+                "identity_key": "stock:SH:600001",
+                "stock_code": "600001",
+            },
+        ]
+        trade_base = {
+            "virtual_order_id": 801,
+            "virtual_account_id": 1,
+            "principal_id": 1,
+            "principal_type": "admin",
+            "trade_side": "buy",
+            "filled_quantity": "100",
+            "filled_price": "10",
+            "gross_amount": "1000",
+            "total_fee_amount": "0",
+            "net_amount": "1000",
+            "trade_status": "filled_virtual",
+            "trade_time": datetime(2026, 7, 20, 2, 0, tzinfo=timezone.utc),
+        }
+        repo.app_virtual_trades = [
+            {
+                **trade_base,
+                "virtual_trade_id": 701,
+                "identity_key": "stock:SH:600000",
+                "stock_code": "600000",
+                "stock_name": "浦发银行",
+                "industry_code": "880301",
+                "industry_name": "银行",
+            },
+            {
+                **trade_base,
+                "virtual_trade_id": 702,
+                "virtual_order_id": 802,
+                "identity_key": "stock:SH:600001",
+                "stock_code": "600001",
+            },
+        ]
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        portfolio = client.get("/n6/app/portfolio")
+        trade_log = client.get("/n6/app/trade-log")
+
+        self.assertEqual(portfolio.status_code, 200)
+        self.assertEqual(trade_log.status_code, 200)
+        for response in (portfolio, trade_log):
+            unique_row = next(
+                row
+                for row in re.findall(r"<tr>.*?</tr>", response.text, re.S)
+                if "stock:SH:600000" in row
+            )
+            missing_row = next(
+                row
+                for row in re.findall(r"<tr>.*?</tr>", response.text, re.S)
+                if "stock:SH:600001" in row
+            )
+            self.assertLess(
+                unique_row.index("600000 浦发银行"),
+                unique_row.index("stock:SH:600000"),
+            )
+            self.assertLess(
+                unique_row.index("stock:SH:600000"),
+                unique_row.index("880301 银行"),
+            )
+            self.assertIn("600001 —", missing_row)
+            self.assertIn("— —", missing_row)
+        self.assertEqual(sum(repo.forbidden_writes.values()), 0)
 
     def test_b_track_portfolio_lot_maturity_controls_manual_sell_without_position_available_quantity(self) -> None:
         common = {

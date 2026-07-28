@@ -100,6 +100,8 @@ PORTFOLIO_ALLOWED_SOURCES = [
     "n6_virtual_position",
     "n6_virtual_position_lot",
     "v_n6_virtual_quote_latest",
+    "v_n6_stock_condition_display_basis",
+    "v_n6_board_membership_fact",
 ]
 PORTFOLIO_FORBIDDEN_SOURCES = [
     "N1-N5 raw facts",
@@ -1155,6 +1157,10 @@ def app_virtual_trades_model(
                     row.get("virtual_account_id"), field_name="virtual_account_id", required=True
                 ),
                 "identity_key": _first_text(row, "identity_key"),
+                "stock_code": _first_text(row, "stock_code"),
+                "stock_name": _first_text(row, "stock_name"),
+                "industry_code": _first_text(row, "industry_code"),
+                "industry_name": _first_text(row, "industry_name"),
                 "trade_side": _first_text(row, "trade_side"),
                 "filled_quantity": number_or_none(row.get("filled_quantity")),
                 "filled_price": number_or_none(row.get("filled_price")),
@@ -5439,6 +5445,9 @@ def app_position_item(
         "virtual_position_id": virtual_position_id,
         "identity_key": identity_key,
         "stock_code": str(row.get("stock_code") or (identity_parts[2] if len(identity_parts) == 3 else "")),
+        "stock_name": str(row.get("stock_name") or "").strip(),
+        "industry_code": str(row.get("industry_code") or "").strip(),
+        "industry_name": str(row.get("industry_name") or "").strip(),
         "quantity": _portfolio_decimal_text(quantity),
         "sellable_quantity": _portfolio_decimal_text(sellable_quantity),
         "t1_locked_quantity": _portfolio_decimal_text(t1_locked_quantity),

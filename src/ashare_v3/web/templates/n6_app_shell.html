@@ -1655,7 +1655,11 @@
           {% for item in page.data['items'] %}
           <tr>
             <td>{{ item.trade_time }}</td>
-            <td>{{ item.identity_key }}</td>
+            <td>
+              {{ item.stock_code or "—" }} {{ item.stock_name or "—" }}<br>
+              <span class="subtle">{{ item.identity_key or "—" }}</span><br>
+              <span class="subtle">{{ item.industry_code or "—" }} {{ item.industry_name or "—" }}</span>
+            </td>
             <td>{{ item.trade_side }}</td>
             <td>{{ item.filled_quantity }}</td>
             <td>
@@ -1762,7 +1766,11 @@
           <tbody>
             {% for item in page.data['items'] %}
             <tr>
-              <td>{{ item.stock_code }}<br><span class="subtle">{{ item.identity_key }}</span></td>
+              <td>
+                {{ item.stock_code or "—" }} {{ item.stock_name or "—" }}<br>
+                <span class="subtle">{{ item.identity_key or "—" }}</span><br>
+                <span class="subtle">{{ item.industry_code or "—" }} {{ item.industry_name or "—" }}</span>
+              </td>
               <td>{{ item.quantity }}</td>
               <td>{{ item.sellable_quantity or "0" }} / {{ item.t1_locked_quantity or "0" }}<br><span class="subtle">批次合计 {{ item.lot_quantity_total or "—" }}</span></td>
               <td>{{ item.average_cost if item.average_cost is not none else "—" }}</td>
