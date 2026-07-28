@@ -14542,10 +14542,10 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("buy_target", dynamic_cells)
 
         create_branch = source.split("if (!proposalId) {", 1)[1].split(
-            'if (!window.confirm("再次确认本次虚拟交易申请？', 1
+            "if (!window.confirm(`再次确认本次虚拟交易申请？", 1
         )[0]
         confirm_branch = source.split(
-            'if (!window.confirm("再次确认本次虚拟交易申请？', 1
+            "if (!window.confirm(`再次确认本次虚拟交易申请？", 1
         )[1]
         self.assertIn('"/api/n6/app/v3/virtual-account/proposals"', create_branch)
         self.assertNotIn("/confirm", create_branch)
@@ -14653,15 +14653,14 @@ class N6UserAppTest(unittest.TestCase):
             )
             self.assertIsNotNone(match, projection_id)
             rows[projection_id] = match.group(0)
-        for projection_id, action_label, target_label in (
-            (801, "买入准备", "buy_target=12.34"),
-            (802, "买入准备", "buy_target=—"),
-            (803, "买入确认", "buy_target=12.34"),
-            (804, "买入确认", "buy_target=—"),
+        for projection_id, action_label in (
+            (801, "买入准备"),
+            (802, "买入准备"),
+            (803, "买入确认"),
+            (804, "买入确认"),
         ):
             row_markup = rows[projection_id]
             self.assertIn(action_label, row_markup)
-            self.assertIn(target_label, row_markup)
             self.assertEqual(
                 row_markup.count("data-n6-create-proposal"),
                 1,
@@ -14780,11 +14779,12 @@ class N6UserAppTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "`${actionLabel}：仅创建待确认申请，不会成交；是否继续？`",
+            "`${actionLabel}：${proposalConstraintCopy(button)}；仅创建待确认申请，不会成交；是否继续？`",
             source,
         )
         self.assertIn(
-            "再次确认本次虚拟交易申请？仅在交易时段内使用两分钟内有效行情价"
+            "再次确认本次虚拟交易申请？${proposalConstraintCopy(button)}；"
+            "仅在交易时段内使用两分钟内有效行情价"
             "完成虚拟成交。是否继续？",
             source,
         )
@@ -16115,6 +16115,220 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(card["industry_name"], "银行")
         self.assertEqual(card["projection_message_status"], "ready")
 
+    def test_signals_compact_display_values_are_directional_precise_and_sse_aligned(self) -> None:
+        base = {
+            "user_signal_projection_id": 9101,
+            "user_signal_card_id": 9102,
+            "user_projection_run_id": "projection-run-compact",
+            "event_type": "ActionExecuted",
+            "event_time": datetime(2026, 7, 16, 10, 0, 59, 987654, tzinfo=timezone.utc),
+            "trade_date": "20260716",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "code": "600000",
+            "name": "浦发银行",
+            "direction": "buy",
+            "action_state": "executed",
+            "action_mark": "normal",
+            "target_price": "12.345",
+            "trigger_price": "0",
+            "action_price": None,
+            "buy_expected_return_pct": "1.005",
+            "up_secondary_expected_return_pct": "-0.004",
+            "sell_expected_return_pct": "NaN",
+            "trigger_pct": "2.675",
+            "score": "88.000",
+            "pe_core": "15.206",
+            "condition_projection_context": {
+                "fields": {
+                    "buy_target_price": "11.205",
+                    "sell_target_price": "-0.004",
+                }
+            },
+        }
+
+        item = n6_app_v1_module.app_signal_item(base)
+        sse_signal = n6_app_v1_module.app_signal_sse_data_model(base)["signal"]
+
+        self.assertEqual(item["buy_target_price"], "11.205")
+        self.assertEqual(item["sell_target_price"], "-0.004")
+        self.assertEqual(
+            item["display_values"],
+            {
+                "event_time": "18:00:59",
+                "buy_target_price": "11.21",
+                "sell_target_price": "0",
+                "trigger_price": "0",
+                "action_price": "—",
+                "buy_expected_return_pct": "1.01",
+                "up_secondary_expected_return_pct": "0",
+                "sell_expected_return_pct": "—",
+                "trigger_pct": "2.68",
+                "score": "88",
+                "pe_core": "15.21",
+            },
+        )
+        self.assertEqual(sse_signal["buy_target_price"], item["buy_target_price"])
+        self.assertEqual(sse_signal["sell_target_price"], item["sell_target_price"])
+        self.assertEqual(sse_signal["display_values"], item["display_values"])
+        self.assertEqual(item["event_time"], "2026-07-16 18:00")
+
+        buy_fallback = dict(base)
+        buy_fallback["condition_projection_context"] = {"fields": {}}
+        buy_item = n6_app_v1_module.app_signal_item(buy_fallback)
+        self.assertEqual(buy_item["buy_target_price"], "12.345")
+        self.assertIsNone(buy_item["sell_target_price"])
+
+        sell_fallback = dict(buy_fallback)
+        sell_fallback["user_signal_projection_id"] = 9103
+        sell_fallback["direction"] = "sell"
+        sell_item = n6_app_v1_module.app_signal_item(sell_fallback)
+        self.assertIsNone(sell_item["buy_target_price"])
+        self.assertEqual(sell_item["sell_target_price"], "12.345")
+
+        no_target_derivation = dict(buy_fallback)
+        no_target_derivation["user_signal_projection_id"] = 9104
+        no_target_derivation["target_price"] = None
+        no_target_derivation["buy_expected_return_pct"] = "99.99"
+        derived_item = n6_app_v1_module.app_signal_item(no_target_derivation)
+        self.assertIsNone(derived_item["buy_target_price"])
+        self.assertEqual(derived_item["display_values"]["buy_target_price"], "—")
+
+    def test_signals_compact_ssr_and_dynamic_rows_share_columns_and_hide_audit_copy(self) -> None:
+        client, repo, _, _ = build_client(
+            proposal_write_enabled=True,
+            csrf_secret="proposal-secret",
+        )
+        signal = copy.deepcopy(repo.ui_v1_signals[1])
+        signal["trade_date"] = "20260605"
+        signal["condition_projection_context"] = {
+            "fields": {"buy_target_price": "12.345", "sell_target_price": "9.800"}
+        }
+        signal["trigger_price"] = "10.005"
+        signal["action_price"] = "10.004"
+        signal["buy_expected_return_pct"] = "2.675"
+        signal["trigger_pct"] = "0"
+        index_signal = copy.deepcopy(signal)
+        index_signal.update(
+            {
+                "user_signal_projection_id": 9202,
+                "user_signal_card_id": 9302,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        board_signal = copy.deepcopy(signal)
+        board_signal.update(
+            {
+                "user_signal_projection_id": 9203,
+                "user_signal_card_id": 9303,
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "code": "881001",
+                "name": "煤炭开采",
+            }
+        )
+        repo.ui_v1_signals = [signal, index_signal, board_signal]
+        for row in repo.ui_v1_signals:
+            seed_effective_monitor_for_signal(repo, row)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/signals?trade_date=20260605&asset_kind=stock")
+        api_response = client.get("/api/n6/app/v1/signals?trade_date=20260605&asset_kind=stock")
+        index_response = client.get("/n6/app/signals?trade_date=20260605&asset_kind=index")
+        board_response = client.get("/n6/app/signals?trade_date=20260605&asset_kind=board")
+        account_response = client.get("/n6/app/account")
+        rendered_markup = response.text.split("<script", 1)[0]
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        dynamic_row = source.split("const signalRowMarkup = (item, assetKind) => {", 1)[1].split(
+            "const renderSignals =", 1
+        )[0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        api_item = api_response.json()["items"][0]
+        self.assertEqual(api_item["buy_target_price"], "12.345")
+        self.assertEqual(api_item["sell_target_price"], "9.800")
+        self.assertEqual(api_item["display_values"]["event_time"], "11:05:00")
+        for compatible_field in (
+            "event_time",
+            "identity_key",
+            "blocked_reason",
+            "condition_rendering_policy",
+            "action_mark",
+        ):
+            self.assertIn(compatible_field, api_item)
+        for heading in (
+            "股票代码",
+            "股票名称",
+            "行业代码",
+            "行业名称",
+            "买入目标价",
+            "卖出目标价",
+            "触发价",
+            "动作价",
+            "上参考周期",
+            "下参考周期",
+            "买入收益率",
+            "次级收益率",
+            "卖出收益率",
+            "触发涨跌幅",
+            "projection 状态",
+            "动作状态",
+            "action_mark",
+        ):
+            self.assertIn(f"<th>{heading}</th>", rendered_markup)
+        for hidden_heading in ("标的", "identity_key", "未确认原因", "数量"):
+            self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
+        self.assertNotIn("source_trace_only_not_advice", rendered_markup)
+        self.assertNotIn("30万预算，确认时按行情取整", rendered_markup)
+        self.assertNotIn("全部 T+1 可卖数量", rendered_markup)
+        self.assertIn('<td class="numeric">12.35</td>', rendered_markup)
+        self.assertIn('<td class="numeric">9.8</td>', rendered_markup)
+        self.assertIn("display.buy_target_price", dynamic_row)
+        self.assertIn("display.sell_target_price", dynamic_row)
+        self.assertIn("display.trigger_pct", dynamic_row)
+        self.assertNotIn("renderingPolicy", dynamic_row)
+        self.assertNotIn("blocked_reason_label", dynamic_row)
+        self.assertNotIn("quantity", dynamic_row)
+        self.assertIn("signals-table-wrap", rendered_markup)
+        self.assertIn('class="wrap n6-signals-workspace"', rendered_markup)
+        self.assertNotIn('class="wrap n6-signals-workspace"', account_response.text)
+        self.assertIn("proposalConstraintCopy(button)", source)
+        self.assertIn("30万预算，确认时按行情取整；买入后遵守 T+1", source)
+        self.assertIn("仅使用全部 T+1 可卖数量", source)
+        self.assertIn(
+            '{ source_type: button.dataset.sourceType || "signal", source_id: button.dataset.sourceId }',
+            source,
+        )
+        self.assertRegex(
+            source,
+            r'/confirm`,\s+"POST",\s+\{\},\s+\{ "Idempotency-Key": idempotencyKey \}',
+        )
+        self.assertIn(
+            "p.list_payload_json->'condition_projection_context' AS condition_projection_context",
+            inspect.getsource(
+                n6_user_app_module.PostgresN6UserRepository._app_v1_signal_sse_select_list
+            ),
+        )
+        for asset_response, code_heading, name_heading in (
+            (index_response, "指数代码", "指数名称"),
+            (board_response, "板块代码", "板块名称"),
+        ):
+            asset_markup = asset_response.text.split("<script", 1)[0]
+            self.assertEqual(asset_response.status_code, 200)
+            self.assertIn(f"<th>{code_heading}</th>", asset_markup)
+            self.assertIn(f"<th>{name_heading}</th>", asset_markup)
+            self.assertNotIn("data-n6-create-proposal", asset_markup)
+            self.assertNotIn("<th>score</th>", asset_markup)
+            self.assertNotIn("<th>pe_core</th>", asset_markup)
+            for heading in ("买入目标价", "卖出目标价", "projection 状态", "动作状态", "action_mark"):
+                self.assertIn(f"<th>{heading}</th>", asset_markup)
+        self.assertEqual(n6_app_v1_module._signal_display_decimal("-0"), "0")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
     def test_b_track_signal_item_falls_back_to_selected_list_payload_columns(self) -> None:
         condition_context = {
             "contract_version": "N2-condition-projection-context-v1",
@@ -16541,6 +16755,8 @@ class N6UserAppTest(unittest.TestCase):
             "summary:focus-visible",
             ".table-wrap table th:first-child",
             ".table-wrap .sticky-action",
+            "main.n6-signals-workspace",
+            ".signals-table-wrap th,",
             ".message-summary-grid",
             ".filter-action-cell",
         ):
@@ -16548,6 +16764,9 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("@media (max-width: 980px)", source)
         self.assertIn("@media (max-width: 800px)", source)
         self.assertIn("overflow-x: auto", source)
+        self.assertIn("width: calc(100vw - 16px)", source)
+        self.assertIn("max-width: none", source)
+        self.assertIn("white-space: nowrap", source)
         self.assertIn("flex-wrap: nowrap", source)
         self.assertIn('aria-label="筛选结果表格，可横向滚动，操作列固定在左侧"', source)
         self.assertIn("对象 / 操作", source)

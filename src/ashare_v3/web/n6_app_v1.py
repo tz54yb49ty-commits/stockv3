@@ -93,6 +93,7 @@ APP_SIGNAL_BIGINT_ID_FIELDS = (
 )
 PORTFOLIO_TIMEZONE = ZoneInfo("Asia/Shanghai")
 PORTFOLIO_FRESH_SECONDS = Decimal("120")
+SIGNAL_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
 PORTFOLIO_ALLOWED_SOURCES = [
     "common_trade_calendar",
     "n6_principal",
@@ -2828,12 +2829,22 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item["down_ref"] = _first_text(item, "down_reference_period")
     item["trigger_periods"] = item.get("all_trigger_periods")
     item["buy_target"] = number_or_none(item.get("target_price"))
+    buy_target_price, sell_target_price = _signal_target_prices(
+        item,
+        fallback_target_price=row.get("target_price"),
+    )
+    item["buy_target_price"] = buy_target_price
+    item["sell_target_price"] = sell_target_price
     item["reference_price"] = (
         number_or_none(item.get("action_price"))
         if item.get("action_state") == "executed"
         else number_or_none(item.get("trigger_price"))
     )
     item["event_time"] = display_datetime(row.get("event_time") or row.get("trigger_time"))
+    item["display_values"] = _signal_display_values(
+        item,
+        event_time=row.get("event_time") or row.get("trigger_time"),
+    )
     item["asset_kind_label"] = _asset_kind_label(item.get("asset_kind"))
     item["direction_label"] = _direction_label(item.get("direction"))
     item["action_state_label"] = _state_label(item.get("action_state"))
@@ -2865,6 +2876,7 @@ def scrub_retired_strategy_center_private_fields(value: Any) -> Any:
 
 
 def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = app_signal_item(row)
     projection_id = canonical_bigint_id(
         row.get("user_signal_projection_id"),
         field_name="user_signal_projection_id",
@@ -2899,6 +2911,9 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
         "primary_trigger_period": _first_text(row, "primary_trigger_period"),
         "target_price": number_or_none(row.get("target_price")),
         "buy_target": number_or_none(row.get("target_price")),
+        "buy_target_price": normalized["buy_target_price"],
+        "sell_target_price": normalized["sell_target_price"],
+        "display_values": normalized["display_values"],
         "current_price": number_or_none(row.get("current_price")),
         "trigger_price": number_or_none(row.get("trigger_price")),
         "action_price": number_or_none(row.get("action_price")),
@@ -2936,6 +2951,94 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
         "contract_version": SIGNAL_SSE_CONTRACT_VERSION,
         "signal": signal,
         "card": card,
+    }
+
+
+def _signal_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value == "—":
+            return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return decimal_value if decimal_value.is_finite() else None
+
+
+def _signal_raw_decimal(value: Any) -> Any:
+    decimal_value = _signal_decimal(value)
+    if decimal_value is None:
+        return None
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return value
+
+
+def _signal_display_decimal(value: Any) -> str:
+    decimal_value = _signal_decimal(value)
+    if decimal_value is None:
+        return "—"
+    rounded = decimal_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        return "0"
+    return format(rounded, "f").rstrip("0").rstrip(".")
+
+
+def _signal_display_time(value: Any) -> str:
+    if value is None:
+        return "—"
+    parsed = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return "—"
+        normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return "—"
+    if not isinstance(parsed, datetime):
+        return "—"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed.astimezone(SIGNAL_DISPLAY_TIMEZONE).strftime("%H:%M:%S")
+
+
+def _signal_target_prices(
+    item: dict[str, Any],
+    *,
+    fallback_target_price: Any,
+) -> tuple[Any, Any]:
+    context = _json_object(item.get("condition_projection_context"))
+    fields = _json_object(context.get("fields"))
+    buy_target_price = _signal_raw_decimal(fields.get("buy_target_price"))
+    sell_target_price = _signal_raw_decimal(fields.get("sell_target_price"))
+    direction = str(item.get("direction") or "").strip().lower()
+    if buy_target_price is None and direction == "buy":
+        buy_target_price = _signal_raw_decimal(fallback_target_price)
+    if sell_target_price is None and direction == "sell":
+        sell_target_price = _signal_raw_decimal(fallback_target_price)
+    return buy_target_price, sell_target_price
+
+
+def _signal_display_values(item: dict[str, Any], *, event_time: Any) -> dict[str, str]:
+    return {
+        "event_time": _signal_display_time(event_time),
+        "buy_target_price": _signal_display_decimal(item.get("buy_target_price")),
+        "sell_target_price": _signal_display_decimal(item.get("sell_target_price")),
+        "trigger_price": _signal_display_decimal(item.get("trigger_price")),
+        "action_price": _signal_display_decimal(item.get("action_price")),
+        "buy_expected_return_pct": _signal_display_decimal(item.get("buy_expected_return_pct")),
+        "up_secondary_expected_return_pct": _signal_display_decimal(
+            item.get("up_secondary_expected_return_pct")
+        ),
+        "sell_expected_return_pct": _signal_display_decimal(item.get("sell_expected_return_pct")),
+        "trigger_pct": _signal_display_decimal(item.get("trigger_pct")),
+        "score": _signal_display_decimal(item.get("score")),
+        "pe_core": _signal_display_decimal(item.get("pe_core")),
     }
 
 

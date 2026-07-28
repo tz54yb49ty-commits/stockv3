@@ -37,6 +37,10 @@
       width: calc(100vw - 16px);
       max-width: none;
     }
+    main.n6-signals-workspace {
+      width: calc(100vw - 16px);
+      max-width: none;
+    }
     .topbar {
       min-height: 74px;
       display: flex;
@@ -579,6 +583,15 @@
       z-index: 3;
       background: var(--soft);
     }
+    .signals-table-wrap table {
+      width: max-content;
+      min-width: 100%;
+    }
+    .signals-table-wrap th,
+    .signals-table-wrap td {
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
     .filter-action-cell {
       position: sticky;
       left: 0;
@@ -815,7 +828,7 @@
       </nav>
     </div>
   </header>
-  <main class="wrap{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
+  <main class="wrap{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}{% if page.page_key == 'signals' %} n6-signals-workspace{% endif %}">
     <section class="banner" aria-label="安全提示">
       <span>{{ page.ux_safety_status|default("投影只读模式；本人监控范围管理未启用；交易申请未启用；不连接真实券商；不执行真实下单") }}</span>
     </section>
@@ -997,62 +1010,83 @@
           <div class="n6-skeleton" data-n6-skeleton hidden aria-label="消息加载中"><span></span><span></span><span></span></div>
         </div>
       </div>
-      <div class="table-wrap" data-n6-signals-table{% if not page.data['items'] %} hidden{% endif %}>
-        <table>
+      <div class="table-wrap signals-table-wrap" data-n6-signals-table{% if not page.data['items'] %} hidden{% endif %}>
+        <table class="signals-table">
           <thead>
             <tr>
               <th>交易日</th>
               <th>时间</th>
               <th>类型</th>
-              <th>标的</th>
-              <th>identity_key</th>
               {% if selected_signal_asset_kind == "stock" %}
+              <th>股票代码</th>
               <th>股票名称</th>
               <th>行业代码</th>
               <th>行业名称</th>
               {% elif selected_signal_asset_kind == "board" %}
+              <th>板块代码</th>
               <th>板块名称</th>
               {% elif selected_signal_asset_kind == "index" %}
+              <th>指数代码</th>
               <th>指数名称</th>
               {% endif %}
               <th>方向</th>
-              <th>条件 trace</th>
+              <th>条件</th>
               <th>触发周期</th>
               <th>主触发周期</th>
-              <th>价格</th>
-              <th>收益率 / projection</th>
+              <th>买入目标价</th>
+              <th>卖出目标价</th>
+              <th>触发价</th>
+              <th>动作价</th>
+              <th>上参考周期</th>
+              <th>下参考周期</th>
+              <th>买入收益率</th>
+              <th>次级收益率</th>
+              <th>卖出收益率</th>
+              <th>触发涨跌幅</th>
+              {% if selected_signal_asset_kind == "stock" %}<th>score</th><th>pe_core</th>{% endif %}
+              <th>projection 状态</th>
               <th>动作状态</th>
               <th>action_mark</th>
-              <th>未确认原因</th>
-              {% if selected_signal_asset_kind == "stock" %}<th>数量</th><th class="sticky-action">操作</th>{% endif %}
+              {% if selected_signal_asset_kind == "stock" %}<th class="sticky-action">操作</th>{% endif %}
             </tr>
           </thead>
           <tbody data-n6-signals-body data-asset-kind="{{ selected_signal_asset_kind }}">
             {% for item in page.data['items'] %}
             <tr data-n6-projection-id="{{ item.user_signal_projection_id }}">
               <td>{{ item.trade_date }}</td>
-              <td>{{ item.event_time }}</td>
+              <td>{{ item.display_values.event_time }}</td>
               <td>{{ item.asset_kind_label }}</td>
-              <td>{{ item.display_name }}<br><span class="subtle">{{ item.display_code }}</span></td>
-              <td>{{ item.identity_key }}</td>
               {% if selected_signal_asset_kind == "stock" %}
+              <td>{{ item.display_code if item.asset_kind == "stock" else "—" }}</td>
               <td>{{ item.display_name if item.asset_kind == "stock" else "—" }}</td>
               <td>{{ item.industry_code if item.asset_kind == "stock" else "—" }}</td>
               <td>{{ item.industry_name if item.asset_kind == "stock" else "—" }}</td>
               {% elif selected_signal_asset_kind in ["board", "index"] %}
+              <td>{{ item.display_code }}</td>
               <td>{{ item.display_name }}</td>
               {% endif %}
               <td>{{ item.direction_label }}</td>
-              <td>{{ item.condition_key }}<br><span class="subtle">{{ item.condition_rendering_policy }}</span></td>
+              <td>{{ item.condition_key }}</td>
               <td>{{ item.triggered_periods }}</td>
               <td>{{ item.primary_trigger_period }}</td>
-              <td>buy_target={{ item.buy_target or "—" }}<br>trigger={{ item.trigger_price or "—" }} · action={{ item.action_price or "—" }}<br>up_ref={{ item.up_ref or "—" }} · down_ref={{ item.down_ref or "—" }}</td>
-              <td>buy={{ item.buy_return if item.buy_return is not none else "—" }}% · secondary={{ item.secondary_return if item.secondary_return is not none else "—" }}%<br>sell={{ item.sell_return if item.sell_return is not none else "—" }}% · trigger={{ item.trigger_pct or "—" }}%<br>{% if item.asset_kind == "stock" %}score={{ item.score or "—" }} · pe_core={{ item.pe_core or "—" }} · {% endif %}{{ item.projection_message_status or "not_ready" }}</td>
+              <td class="numeric">{{ item.display_values.buy_target_price }}</td>
+              <td class="numeric">{{ item.display_values.sell_target_price }}</td>
+              <td class="numeric">{{ item.display_values.trigger_price }}</td>
+              <td class="numeric">{{ item.display_values.action_price }}</td>
+              <td>{{ item.up_ref or "—" }}</td>
+              <td>{{ item.down_ref or "—" }}</td>
+              <td class="numeric">{{ item.display_values.buy_expected_return_pct }}</td>
+              <td class="numeric">{{ item.display_values.up_secondary_expected_return_pct }}</td>
+              <td class="numeric">{{ item.display_values.sell_expected_return_pct }}</td>
+              <td class="numeric">{{ item.display_values.trigger_pct }}</td>
+              {% if selected_signal_asset_kind == "stock" %}
+              <td class="numeric">{{ item.display_values.score }}</td>
+              <td class="numeric">{{ item.display_values.pe_core }}</td>
+              {% endif %}
+              <td>{{ item.projection_message_status or "not_ready" }}</td>
               <td>{{ item.action_state_label }}</td>
               <td>{{ item.action_mark }}</td>
-              <td>{{ item.blocked_reason_label }}</td>
               {% if selected_signal_asset_kind == "stock" %}
-              <td>{{ "30万预算，确认时按行情取整" if item.direction == "buy" else "全部 T+1 可卖数量" }}</td>
               <td class="sticky-action">
                 {% if page.proposal_write_enabled and item.action_state in ["eligible", "executed"] %}
                 <button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="{{ item.user_signal_projection_id }}">
@@ -2384,52 +2418,59 @@
       const renderAssetNameCells = (item, assetKind) => {
         if (assetKind === "stock") {
           return `
+            <td>${item.asset_kind === "stock" ? escapeHtml(item.display_code || "—") : "—"}</td>
             <td>${item.asset_kind === "stock" ? escapeHtml(item.display_name) : "—"}</td>
             <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_code || "—") : "—"}</td>
             <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_name || "—") : "—"}</td>
           `;
         }
         if (assetKind === "board" || assetKind === "index") {
-          return `<td>${escapeHtml(item.display_name || "—")}</td>`;
+          return `<td>${escapeHtml(item.display_code || "—")}</td><td>${escapeHtml(item.display_name || "—")}</td>`;
         }
         return "";
       };
 
       const signalProposalCells = (item, assetKind) => {
         if (assetKind !== "stock") return "";
-        const quantity = item.direction === "buy" ? "30万预算，确认时按行情取整" : "全部 T+1 可卖数量";
         const actionable = ["eligible", "executed"].includes(item.action_state);
         const enabled = document.body.dataset.n6ProposalWriteEnabled === "true";
         if (!actionable || !enabled) {
-          return `<td>${escapeHtml(quantity)}</td><td><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
+          return `<td><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
         }
         const side = item.direction === "buy" ? "买入" : "卖出";
         const stage = item.action_state === "executed" ? "确认" : "准备";
-        return `<td>${escapeHtml(quantity)}</td><td><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
+        return `<td><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
       };
 
       const signalRowMarkup = (item, assetKind) => {
         const projectionId = canonicalProjectionId(item.user_signal_projection_id);
         if (!projectionId) return "";
         const conditionKey = item.condition_trace?.condition_key ?? item.condition_key;
-        const renderingPolicy = item.condition_trace?.rendering_policy ?? item.condition_rendering_policy;
+        const display = item.display_values || {};
         return `
           <tr data-n6-projection-id="${projectionId}">
             <td>${escapeHtml(item.trade_date)}</td>
-            <td>${escapeHtml(item.event_time)}</td>
+            <td>${escapeHtml(display.event_time || "—")}</td>
             <td>${escapeHtml(item.asset_kind_label)}</td>
-            <td>${escapeHtml(item.display_name)}<br><span class="subtle">${escapeHtml(item.display_code)}</span></td>
-            <td>${escapeHtml(item.identity_key)}</td>
             ${renderAssetNameCells(item, assetKind)}
             <td>${escapeHtml(item.direction_label)}</td>
-            <td>${escapeHtml(conditionKey)}<br><span class="subtle">${escapeHtml(renderingPolicy)}</span></td>
+            <td>${escapeHtml(conditionKey)}</td>
             <td>${escapeHtml(formatList(item.triggered_periods))}</td>
             <td>${escapeHtml(item.primary_trigger_period || "—")}</td>
-            <td>buy_target=${escapeHtml(item.buy_target ?? item.target_price ?? "—")}<br>trigger=${escapeHtml(item.trigger_price ?? "—")} · action=${escapeHtml(item.action_price ?? "—")}<br>up_ref=${escapeHtml(item.up_ref ?? "—")} · down_ref=${escapeHtml(item.down_ref ?? "—")}</td>
-            <td>buy=${escapeHtml(item.buy_return ?? "—")}% · secondary=${escapeHtml(item.secondary_return ?? "—")}%<br>sell=${escapeHtml(item.sell_return ?? "—")}% · trigger=${escapeHtml(item.trigger_pct ?? "—")}%<br>${item.asset_kind === "stock" ? "score=" + escapeHtml(item.score ?? "—") + " · pe_core=" + escapeHtml(item.pe_core ?? "—") + " · " : ""}${escapeHtml(item.projection_message_status || "not_ready")}</td>
+            <td class="numeric">${escapeHtml(display.buy_target_price || "—")}</td>
+            <td class="numeric">${escapeHtml(display.sell_target_price || "—")}</td>
+            <td class="numeric">${escapeHtml(display.trigger_price || "—")}</td>
+            <td class="numeric">${escapeHtml(display.action_price || "—")}</td>
+            <td>${escapeHtml(item.up_ref || "—")}</td>
+            <td>${escapeHtml(item.down_ref || "—")}</td>
+            <td class="numeric">${escapeHtml(display.buy_expected_return_pct || "—")}</td>
+            <td class="numeric">${escapeHtml(display.up_secondary_expected_return_pct || "—")}</td>
+            <td class="numeric">${escapeHtml(display.sell_expected_return_pct || "—")}</td>
+            <td class="numeric">${escapeHtml(display.trigger_pct || "—")}</td>
+            ${item.asset_kind === "stock" ? `<td class="numeric">${escapeHtml(display.score || "—")}</td><td class="numeric">${escapeHtml(display.pe_core || "—")}</td>` : ""}
+            <td>${escapeHtml(item.projection_message_status || "not_ready")}</td>
             <td>${escapeHtml(item.action_state_label)}</td>
             <td>${escapeHtml(item.action_mark || "—")}</td>
-            <td>${escapeHtml(item.blocked_reason_label || "—")}</td>
             ${signalProposalCells(item, assetKind)}
           </tr>
         `;
@@ -2829,6 +2870,11 @@
         return payload;
       };
       const proposalSourceKey = (sourceType, sourceId) => `${sourceType || "signal"}:${sourceId || ""}`;
+      const proposalConstraintCopy = (button) => (
+        (button.dataset.proposalActionLabel || button.textContent || "").includes("买入")
+          ? "30万预算，确认时按行情取整；买入后遵守 T+1"
+          : "仅使用全部 T+1 可卖数量"
+      );
       const proposalMessage = (message, button = null) => {
         if (proposalStatus) {
           proposalStatus.hidden = false;
@@ -3046,7 +3092,7 @@
           const actionLabel = button.dataset.proposalActionLabel || button.textContent.trim();
           button.dataset.proposalActionLabel = actionLabel;
           if (!proposalId) {
-            if (!window.confirm(`${actionLabel}：仅创建待确认申请，不会成交；是否继续？`)) return;
+            if (!window.confirm(`${actionLabel}：${proposalConstraintCopy(button)}；仅创建待确认申请，不会成交；是否继续？`)) return;
             button.disabled = true;
             proposalMessage(`${actionLabel}申请处理中…`, button);
             try {
@@ -3072,7 +3118,7 @@
             }
             return;
           }
-          if (!window.confirm("再次确认本次虚拟交易申请？仅在交易时段内使用两分钟内有效行情价完成虚拟成交。是否继续？")) return;
+          if (!window.confirm(`再次确认本次虚拟交易申请？${proposalConstraintCopy(button)}；仅在交易时段内使用两分钟内有效行情价完成虚拟成交。是否继续？`)) return;
           button.disabled = true;
           proposalMessage("正在确认虚拟交易申请…", button);
           try {
