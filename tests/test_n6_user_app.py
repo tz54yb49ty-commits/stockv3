@@ -10649,6 +10649,86 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("v_n6_index_membership_fact", metadata_source)
         self.assertNotIn("v_n6_board_membership_fact", metadata_source)
 
+    def test_b_track_postgres_historical_signal_scope_uses_projection_date_without_current_batch(self) -> None:
+        required_relations = {
+            "user_monitor_stock",
+            "user_monitor_index",
+            "user_monitor_board",
+            "v_n6_stock_condition_display_basis",
+            "v_n6_index_condition_display_basis",
+            "v_n6_board_condition_display_basis",
+            n6_user_app_module.APP_REALTIME_SCOPE_TABLE,
+            "n6_virtual_account",
+            "n6_virtual_position",
+        }
+        cursor = RecordingCursor(existing_relations=required_relations)
+        repo = PostgresN6UserRepository("postgresql://unused")
+        repo._readonly_connection = lambda: RecordingConnection(cursor)  # type: ignore[method-assign]
+
+        repo.fetch_app_signals(
+            principal_id=12,
+            principal_type="human_user",
+            user_id=11,
+            filters={
+                "asset_kind": "index",
+                "trade_date": "20260728",
+                "historical_projection_mode": True,
+            },
+            limit=100,
+        )
+        historical_sql, historical_params = next(
+            (sql, params)
+            for sql, params in reversed(cursor.executions)
+            if "FROM user_signal_projection p" in sql
+        )
+        historical_normalized = " ".join(historical_sql.split()).lower()
+
+        self.assertEqual(historical_normalized.count("status <> 'removed'"), 3)
+        self.assertEqual(historical_normalized.count("principal_id = %(principal_id)s"), 3)
+        self.assertEqual(historical_normalized.count("principal_type = %(principal_type)s"), 3)
+        self.assertEqual(historical_normalized.count("user_id = %(user_id)s"), 3)
+        self.assertEqual(
+            historical_normalized.count("nullif(m.valid_for_trade_date::text, '') is not null"),
+            3,
+        )
+        self.assertIn("monitor_scope.valid_for_trade_date = (", historical_normalized)
+        self.assertIn("pg_catalog.to_char(p.for_trade_date, 'yyyymmdd')", historical_normalized)
+        self.assertNotIn("current_stock_approved_batch", historical_normalized)
+        self.assertNotIn("current_index_approved_batch", historical_normalized)
+        self.assertNotIn("current_board_approved_batch", historical_normalized)
+        self.assertNotIn("from user_realtime_monitor_scope", historical_normalized)
+        self.assertNotIn("from n6_virtual_account", historical_normalized)
+        self.assertEqual(historical_params["principal_id"], 12)
+        self.assertEqual(historical_params["principal_type"], "human_user")
+        self.assertEqual(historical_params["user_id"], 11)
+        self.assertEqual(historical_params["trade_date"], "20260728")
+
+        repo.fetch_app_signals(
+            principal_id=12,
+            principal_type="human_user",
+            user_id=11,
+            filters={"asset_kind": "index", "trade_date": "20260729"},
+            limit=100,
+        )
+        current_sql = next(
+            sql
+            for sql, _ in reversed(cursor.executions)
+            if "FROM user_signal_projection p" in sql
+        )
+        current_normalized = " ".join(current_sql.split()).lower()
+
+        self.assertEqual(current_normalized.count("approved_batch as materialized"), 3)
+        for asset_kind in ("stock", "index", "board"):
+            self.assertIn(
+                f"join current_{asset_kind}_approved_batch current_batch",
+                current_normalized,
+            )
+            self.assertIn(
+                f"from v_n6_{asset_kind}_condition_display_basis approved",
+                current_normalized,
+            )
+        self.assertEqual(current_normalized.count("and status = 'active' and ('"), 3)
+
     def test_b_track_postgres_signal_scope_fails_closed_when_lineage_columns_are_absent(self) -> None:
         legacy_monitor_columns = {
             table_name: [

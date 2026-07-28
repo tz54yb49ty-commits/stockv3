@@ -4503,6 +4503,7 @@ class PostgresN6UserRepository:
         scope_cte_sql = self._app_v1_web_signal_scope_cte(
             include_expired=historical_projection_mode,
             include_realtime_scope=not historical_projection_mode,
+            use_current_approved_batch=not historical_projection_mode,
         )
         with self._readonly_connection() as conn, conn.cursor() as cur:
             cur.execute(
@@ -5196,10 +5197,12 @@ class PostgresN6UserRepository:
         *,
         include_expired: bool = False,
         include_realtime_scope: bool = True,
+        use_current_approved_batch: bool = True,
     ) -> str:
         effective_scope_cte = self._app_v1_effective_monitor_scope_cte(
             include_expired=include_expired,
             include_realtime_scope=include_realtime_scope,
+            use_current_approved_batch=use_current_approved_batch,
         )
         return f"""
         {effective_scope_cte},
@@ -5241,6 +5244,7 @@ class PostgresN6UserRepository:
         *,
         include_expired: bool = False,
         include_realtime_scope: bool = True,
+        use_current_approved_batch: bool = True,
     ) -> str:
         realtime_scope_union = ""
         if include_realtime_scope and not include_expired and self._app_v2_relation_exists(APP_REALTIME_SCOPE_TABLE):
@@ -5255,7 +5259,9 @@ class PostgresN6UserRepository:
           UNION ALL
           {self._app_v1_holding_scope_select()}
             """
-        return f"""
+        current_approved_batch_ctes = ""
+        if use_current_approved_batch:
+            current_approved_batch_ctes = f"""
         {self._app_v1_current_approved_batch_cte(
             asset_kind="stock",
             view_name="v_n6_stock_condition_display_basis",
@@ -5268,6 +5274,9 @@ class PostgresN6UserRepository:
             asset_kind="board",
             view_name="v_n6_board_condition_display_basis",
         )},
+            """
+        return f"""
+        {current_approved_batch_ctes}
         {self._app_v1_principal_monitor_cte(
             asset_kind="stock",
             table_name="user_monitor_stock",
@@ -5288,18 +5297,21 @@ class PostgresN6UserRepository:
               asset_kind="stock",
               table_name="user_monitor_stock",
               view_name="v_n6_stock_condition_display_basis",
+              use_current_approved_batch=use_current_approved_batch,
           )}
           UNION ALL
           {self._app_v1_effective_monitor_scope_select(
               asset_kind="index",
               table_name="user_monitor_index",
               view_name="v_n6_index_condition_display_basis",
+              use_current_approved_batch=use_current_approved_batch,
           )}
           UNION ALL
           {self._app_v1_effective_monitor_scope_select(
               asset_kind="board",
               table_name="user_monitor_board",
               view_name="v_n6_board_condition_display_basis",
+              use_current_approved_batch=use_current_approved_batch,
           )}
           {realtime_scope_union}
           {holding_scope_union}
@@ -5397,6 +5409,7 @@ class PostgresN6UserRepository:
         asset_kind: str,
         table_name: str,
         view_name: str,
+        use_current_approved_batch: bool = True,
     ) -> str:
         source_run_expr, valid_source_trade_expr, valid_for_trade_expr, valid_run_expr = (
             self._app_v1_monitor_validity_sql_exprs(table_name)
@@ -5411,6 +5424,25 @@ class PostgresN6UserRepository:
               ELSE {source_type_raw_expr}
             END
         """
+        scope_gate_sql = f"""
+          WHERE NULLIF({valid_for_trade_expr}, '') IS NOT NULL
+        """
+        if use_current_approved_batch:
+            scope_gate_sql = f"""
+          JOIN current_{asset_kind}_approved_batch current_batch
+            ON NULLIF({source_run_expr}, '') = current_batch.source_run_id
+           AND NULLIF({valid_source_trade_expr}, '') = current_batch.source_trade_date
+           AND NULLIF({valid_for_trade_expr}, '') = current_batch.for_trade_date
+           AND NULLIF({valid_run_expr}, '') = current_batch.source_run_id
+          WHERE EXISTS (
+            SELECT 1
+            FROM {view_name} approved
+            WHERE approved.identity_key = m.identity_key
+              AND approved.source_trade_date::text = current_batch.source_trade_date
+              AND approved.for_trade_date::text = current_batch.for_trade_date
+              AND approved.run_id::text = current_batch.source_run_id
+          )
+            """
         return f"""
           SELECT m.monitor_id,
                  m.principal_id,
@@ -5445,19 +5477,7 @@ class PostgresN6UserRepository:
                  CASE WHEN {source_type_expr} = 'direct' THEN NULL ELSE NULLIF(m.source_snapshot_json->>'parent_name', '') END AS source_object_name,
                  CASE WHEN {source_type_expr} = 'direct' THEN NULL ELSE NULLIF(m.source_snapshot_json->>'membership_trade_date', '') END AS membership_relation_date
           FROM current_{asset_kind}_principal_monitors m
-          JOIN current_{asset_kind}_approved_batch current_batch
-            ON NULLIF({source_run_expr}, '') = current_batch.source_run_id
-           AND NULLIF({valid_source_trade_expr}, '') = current_batch.source_trade_date
-           AND NULLIF({valid_for_trade_expr}, '') = current_batch.for_trade_date
-           AND NULLIF({valid_run_expr}, '') = current_batch.source_run_id
-          WHERE EXISTS (
-            SELECT 1
-            FROM {view_name} approved
-            WHERE approved.identity_key = m.identity_key
-              AND approved.source_trade_date::text = current_batch.source_trade_date
-              AND approved.for_trade_date::text = current_batch.for_trade_date
-              AND approved.run_id::text = current_batch.source_run_id
-          )
+          {scope_gate_sql}
         """
 
     def _app_v1_realtime_scope_select(self) -> str:
