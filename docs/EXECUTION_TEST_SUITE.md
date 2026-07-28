@@ -1051,6 +1051,30 @@ or business/trading/N1-N5 writes. The existing session-token Web function and
 manual SQL must be rejected as creation authority; general runtime and
 database writes remain `REJECT`.
 
+### 6.23 N6 B-track Delivery Lane Governance
+
+Static tests must prove:
+
+```text
+complete UI/read-only brief -> n6_btrack_delivery_l1_web_readonly_v1
+N6 schema/business-rule brief without automatic money effect -> n6_btrack_delivery_l2_n6_business_v1
+virtual money/executor/automatic stop-loss brief -> n6_btrack_delivery_l3_virtual_runtime_v1
+missing brief field -> BLOCK
+mixed lane -> BLOCK
+real broker/order -> REJECT
+N6 writeback to N1-N5 -> REJECT
+automatic proposal creation or confirmation -> REJECT
+ordinary request asking for a new one-off policy -> REJECT
+```
+
+The tests must also parse
+`docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`, require an honest `FRAGMENTED`
+status while active services use different Release lineages, and prove the
+read-only inspector invokes no database client, `launchctl`, service mutation,
+or filesystem cleanup surface. Compiler, Kernel, Runtime Gate, Trace, Sandbox,
+Architecture, Roadmap, Tasks, and runtime-control documents must all contain
+the same three policy IDs.
+
 ## 7. Acceptance Criteria
 
 The Execution Test Suite is valid only if it can evaluate:

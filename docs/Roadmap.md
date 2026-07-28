@@ -5,6 +5,30 @@
 
 ## 状态总览
 
+### 2026-07-28 N6 B轨治理瘦身路线
+
+状态：三通道治理 implementation ready；当前服务血缘仍为
+`FRAGMENTED`，本阶段不部署。
+
+```text
+R0 冻结当前 Web / quote writer / executor / stop-loss 基线
+-> R1 建立 codex/n6-btrack-integration 唯一候选发布主线
+-> R2 登记 L1 n6_btrack_delivery_l1_web_readonly_v1
+      / L2 n6_btrack_delivery_l2_n6_business_v1
+      / L3 n6_btrack_delivery_l3_virtual_runtime_v1
+-> R3 独立完成 n6_btrack_service_lineage_convergence_v1
+-> R4 从新需求开始停止新增一次性 policy 和孤立发布血缘
+-> R5 逐个审计并归档已完成工作树
+-> R6 以 L1/L2 分类实施筛选中心改造
+```
+
+R0-R2 只产生 Git/文档/静态测试，不连接数据库或操作服务。R3 必须先解决
+两个不同 `087` migration 文件的完整身份冲突，再生成统一 commit/Release；
+不得仅按 migration 数字静默覆盖。R5 不允许按目录名或年龄批量删除，必须逐
+工作树证明无 tracked、untracked、ignored 残留。L1 普通页面需求目标最多两个
+mutating gate；L2/L3 继续保留 migration、rollback、权限、资金和 runtime
+审计。
+
 ### 2026-07-22 N6 B 轨 virtual-executor 前向路线
 
 本节只登记 `N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` 的后续 gate 顺序，不授权本文件所在会话执行任何 runtime：

@@ -1,0 +1,182 @@
+{
+  "contract_version": "N6_B_TRACK_DELIVERY_GOVERNANCE_V1",
+  "policy_family_id": "n6_btrack_delivery_lanes_v1",
+  "default_decision": "REJECT",
+  "default_mode": "balanced",
+  "user_brief": {
+    "required_fields": [
+      "page_or_feature",
+      "users",
+      "expected_behavior",
+      "affects_virtual_money_proposals_or_positions"
+    ],
+    "user_must_not_supply": [
+      "git_commit",
+      "git_tree",
+      "function_sha256",
+      "migration_number",
+      "release_path",
+      "database_role"
+    ]
+  },
+  "global_boundaries": {
+    "layer_direction": "N1 -> N2 -> N3 -> N4 -> N5 -> N6",
+    "real_broker_allowed": false,
+    "real_order_allowed": false,
+    "n6_writeback_to_n1_n5_allowed": false,
+    "automatic_proposal_creation_allowed": false,
+    "automatic_proposal_confirmation_allowed": false,
+    "historical_gate_rewrite_allowed": false,
+    "main_checkout_mode": "preserve_only",
+    "runtime_default": "REJECT"
+  },
+  "lanes": {
+    "L1": {
+      "policy_id": "n6_btrack_delivery_l1_web_readonly_v1",
+      "title": "Web/read-only fast lane",
+      "classification": {
+        "ui_or_copy_only": true,
+        "read_only_query_only": true,
+        "database_schema_or_dml": false,
+        "virtual_money_proposal_or_position_effect": false,
+        "worker_or_launchagent_change": false
+      },
+      "implementation_layer_role": "N6_user",
+      "deployment_layer_role": "runtime_control",
+      "maximum_mutating_gates": 2,
+      "required_sequence": [
+        "isolated_implementation_and_offline_tests",
+        "single_web_immutable_release_rebind"
+      ],
+      "required_evidence": [
+        "active_web_baseline",
+        "exact_file_allowlist",
+        "web_and_n6_regression",
+        "immutable_release",
+        "web_rollback"
+      ],
+      "forbidden_effects": [
+        "database_write",
+        "migration",
+        "quote_writer_operation",
+        "executor_operation",
+        "stop_loss_operation",
+        "proposal_order_trade_cash_position_lot"
+      ]
+    },
+    "L2": {
+      "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+      "title": "N6 business/schema standard lane",
+      "classification": {
+        "n6_schema_or_business_rule": true,
+        "monitor_scope_or_strategy_configuration": true,
+        "virtual_money_proposal_or_position_effect": false,
+        "automatic_execution": false
+      },
+      "implementation_layer_role": "N6_user",
+      "migration_layer_role": "N6_user",
+      "release_rebind_layer_role": "runtime_control",
+      "required_sequence": [
+        "isolated_implementation_and_pg16_tests",
+        "single_forward_migration_with_exact_rollback",
+        "immutable_release_rebind",
+        "read_only_acceptance"
+      ],
+      "required_evidence": [
+        "canonical_integration_baseline",
+        "migration_identity_and_collision_check",
+        "preflight_and_postflight",
+        "zero_unapproved_business_dml",
+        "immutable_release",
+        "rollback"
+      ],
+      "forbidden_effects": [
+        "real_broker",
+        "real_order",
+        "n6_writeback_to_n1_n5",
+        "automatic_proposal_creation",
+        "automatic_proposal_confirmation",
+        "unapproved_executor_or_stop_loss_operation"
+      ]
+    },
+    "L3": {
+      "policy_id": "n6_btrack_delivery_l3_virtual_runtime_v1",
+      "title": "Virtual-money/runtime strict lane",
+      "classification": {
+        "virtual_money_proposal_or_position_effect": true,
+        "executor_or_stop_loss_change": true,
+        "automatic_virtual_execution": true
+      },
+      "implementation_layer_role": "N6_user",
+      "runtime_governance_layer_role": "runtime_control",
+      "execution_layer_role": "N6_user",
+      "required_sequence": [
+        "isolated_implementation_and_full_n6_regression",
+        "migration_and_immutable_release_deployment",
+        "bounded_virtual_smoke",
+        "confirmed_queue_governance",
+        "separate_continuous_runtime_authorization"
+      ],
+      "required_evidence": [
+        "unified_immutable_release",
+        "explicit_current_request_authorization",
+        "two_stage_human_confirmation",
+        "open_trade_date_and_session",
+        "two_minute_passed_ok_identity_matched_quote",
+        "principal_account_scope",
+        "cash_budget_board_lot_and_natural_day_t1",
+        "claim_and_apply_fail_closed",
+        "independent_service_role",
+        "proposal_order_trade_cash_position_lot_audit",
+        "bounded_smoke_pass",
+        "bootout_command"
+      ],
+      "forbidden_effects": [
+        "real_broker",
+        "real_order",
+        "n6_writeback_to_n1_n5",
+        "automatic_proposal_creation",
+        "automatic_proposal_confirmation",
+        "runtime_without_preflight_rollback_and_bootout"
+      ]
+    }
+  },
+  "policy_lifecycle": {
+    "new_one_off_policy_for_normal_n6_delivery_allowed": false,
+    "legacy_named_policies": "append_only_compatibility",
+    "legacy_policy_removal": "separate_retirement_gate_only",
+    "new_requests": "must_classify_into_L1_L2_L3_or_REJECT"
+  },
+  "worktree_governance": {
+    "canonical_branch": "codex/n6-btrack-integration",
+    "canonical_worktree": "/Users/chuanfuchen/Documents/A股监控系统v3_n6_btrack_integration",
+    "managed_active_limit": 5,
+    "managed_roles": [
+      "integration",
+      "current_development",
+      "current_governance",
+      "emergency_fix",
+      "acceptance"
+    ],
+    "cleanup_requires": [
+      "clean_index",
+      "clean_tracked_worktree",
+      "zero_untracked_files",
+      "zero_ignored_artifacts",
+      "commit_and_rollback_evidence_frozen"
+    ],
+    "automatic_delete_allowed": false
+  },
+  "release_governance": {
+    "default_service_set": [
+      "web",
+      "quote_writer",
+      "virtual_executor",
+      "stop_loss"
+    ],
+    "single_commit_default": true,
+    "divergence_requires_compatibility_registration": true,
+    "database_state_must_be_recorded": true,
+    "immutable_release_required": true
+  }
+}

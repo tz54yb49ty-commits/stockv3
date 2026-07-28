@@ -333,6 +333,26 @@ touch the filesystem
 change runtime state
 ```
 
+### 6.1 N6 B-track Lane Simulation
+
+For `n6_btrack_delivery_l1_web_readonly_v1`, simulation must predict only the
+exact Web diff and, when separately authorized, one Web immutable-Release
+rebind. Any database, quote-writer, executor, stop-loss, or virtual-account
+effect predicts `STOP`.
+
+For `n6_btrack_delivery_l2_n6_business_v1`, implementation, migration,
+Release rebind, and acceptance are simulated as separate gates. The simulation
+must bind the complete migration filename, rollback, function/ACL contract, and
+business-table before/after digest. It must not execute those phases.
+
+For `n6_btrack_delivery_l3_virtual_runtime_v1`, simulation additionally
+requires bounded-smoke evidence, confirmed-queue disposition, independent
+service role, immutable lineage, complete virtual-account audit, and an
+immediate bootout plan. Missing any item predicts `STOP`.
+
+The sandbox must reject requests that mix lanes or ask for a new one-off policy
+where one of the three reusable lanes already applies.
+
 ## 7. Golden Rule
 
 Sandbox simulation is not execution.

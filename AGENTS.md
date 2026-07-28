@@ -60,6 +60,9 @@ Final safety enforcement:
   - `n6_strategy_center_post_canary_web_write_restore_v1`
   - `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`
   - `n6_strategy_center_shadow_activation_grant_v1`
+  - `n6_btrack_delivery_l1_web_readonly_v1`
+  - `n6_btrack_delivery_l2_n6_business_v1`
+  - `n6_btrack_delivery_l3_virtual_runtime_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -277,8 +280,10 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
   允许 all-users、Web PUT、手工 DML 或复用首个用户的冻结 scope
 - 语音播报
 - mobile projection
-- 模拟账户
-- 前端页面
+- 未按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` L3 合同授权的虚拟账户资金、
+  proposal、position 或自动执行变更
+- 未按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` L1/L2 合同分类、验证和发布的
+  N6 前端页面变更
 - 真实交易
 - 长期 worker 启动；唯一调度例外是独立 `N6_user` 请求完整满足
   `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 的 exact-label、5 秒
@@ -373,13 +378,13 @@ N6_user
 
 | layer_role | 允许写入/执行 | 允许只读 | 禁止事项 |
 |---|---|---|---|
-| `runtime_control` | runtime pipeline run/stage/command registry/rollback registry/timeline/dashboard 的文档、schema 草案、测试、只读 dashboard 输出；用户当前请求明确授权时，可修改控制面 Kernel/Compiler 合同及其静态测试，但不得在同一会话使用新增例外执行 N1-N6；精确满足 `n6_user_web_immutable_release_bounded_rebind_v1` 时，可对单个 `com.ashare-v3.n6.user-web` 执行一次 immutable Release rebind 和失败时的一次原 Release 恢复；精确满足 `n6_strategy_center_schema_migration_maintenance_window_v1` 时，可关闭 Strategy Center selection 写入口、有界重启该 Web、仅 quiesce exact evaluator，并写一个只读水位绑定的 immutable maintenance token；081 已提交后精确满足 `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 时，可保持 strategy write=0、evaluator quiesced、virtual executor 不被操作，仅对该 Web 执行一次 V2 immutable Release rebind | N1-N6 合同、报告、rollback SQL 路径、run_id lineage、quality gate 摘要 | 执行 registry command、执行 nightly run、执行 rollback SQL、连接数据库写 runtime 表、消费 outbox、启动业务 worker、写 N1-N6 事实；除命名策略外修改 LaunchAgent 或重启服务 |
+| `runtime_control` | runtime pipeline run/stage/command registry/rollback registry/timeline/dashboard 的文档、schema 草案、测试、只读 dashboard 输出；用户当前请求明确授权时，可修改控制面 Kernel/Compiler 合同及其静态测试，但不得在同一会话使用新增例外执行 N1-N6；可按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` 只读分类 L1/L2/L3、维护 canonical integration baseline 和 service compatibility registry；后续独立请求精确满足 `n6_btrack_delivery_l1_web_readonly_v1`、`n6_btrack_delivery_l2_n6_business_v1` 或 `n6_btrack_delivery_l3_virtual_runtime_v1` 的 runtime-control 阶段时，才可执行该阶段列明的 exact immutable Release/service 操作；既有具名 policy 仅保留为历史兼容，不得作为普通新需求继续复制；精确满足 `n6_user_web_immutable_release_bounded_rebind_v1` 时，可对单个 `com.ashare-v3.n6.user-web` 执行一次 immutable Release rebind 和失败时的一次原 Release 恢复；精确满足 `n6_strategy_center_schema_migration_maintenance_window_v1` 时，可关闭 Strategy Center selection 写入口、有界重启该 Web、仅 quiesce exact evaluator，并写一个只读水位绑定的 immutable maintenance token；081 已提交后精确满足 `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 时，可保持 strategy write=0、evaluator quiesced、virtual executor 不被操作，仅对该 Web 执行一次 V2 immutable Release rebind | N1-N6 合同、报告、rollback SQL 路径、run_id lineage、quality gate 摘要 | 执行 registry command、执行 nightly run、执行 rollback SQL、连接数据库写 runtime 表、消费 outbox、启动业务 worker、写 N1-N6 事实；除命名策略或 N6 delivery lane exact phase 外修改 LaunchAgent 或重启服务 |
 | `N1_ingestion` | raw ingest、source_version、quality gate、active source_version、PostgreSQL/Parquet fact、N3 sealed runtime 的归档执行、入库回滚与入库文档 | N2 readiness 缺口报告、N3 archive_request / sealed runtime 分区 | 运行 condition_basis/condition_pool execute、写 `condition_*`、盘中拉分钟 K、触发/动作/用户层、worker |
 | `N2_condition` | `condition_basis`、`condition_pool`、`minute_target_scope`、`condition_display_basis`、条件层质量项、条件层回滚 SQL、条件层文档 | N1 active source_version、N1 ready check、入库 fact | 外拉 Tushare/mootdx/实时行情、修 N1 fact、写 ingest 表、拉 1 分钟 K、进入 N3/N4/N5/N6 |
 | `N3_market_data` | market_data_subscription、market_data_pull_plan、`previous_day_minute_bar_1m`、今日分钟 K、实时日 K/快照、行情质量项、N3 标准行情事件、低频行情展示事件、盘后封账与 archive_request 元数据 | N2 active condition run 和 `minute_target_scope` | 改条件层、重新计算条件、写 trigger/action/user、写用户卡片、播放语音、直接写 Parquet 归档或外接盘、启动交易 worker |
 | `N4_trigger` | trigger event/state、trigger quality item、trigger dry-run/execute 合同 | N2 condition_pool、N3 行情快照/分钟 K | 拉行情、改条件、写 action、写 mobile/voice/sim |
 | `N5_action` | action event、hint/risk/action 归一化事件、position event、动作质量项 | N4 trigger、N3 分钟 K、必要的 N2 条件摘要 | 改 N1/N2/N3/N4、写用户投影、播放语音、写真实交易 |
-| `N6_user` | user projection、voice policy、mobile/card projection、sim shadow、用户偏好表；精确满足 `n6_strategy_center_display_only_bounded_run_once_v1` 时，可执行单 principal/user/revision/current reviewed-N6 trade-date 的策略中心 display-only bounded run-once；在 20260727 当前开放日自然 N6 input 的 exact F464 canary PASS 且精确满足 `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 时，可安装/启用唯一 exact-label、StartInterval=5、每 tick 单 scope 的 immutable-Release run-once 调度器；在 081 已提交、Web strategy write=0、evaluator quiesced 的维护窗口中，精确满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 时，可先单独执行一次 082，完成 postflight 后再由另一个独立请求单独执行一次 083；083 已提交后可按首用户及 remaining-user 命名 policy 每次创建一个 pending V2 revision；全部活动 scope 已为 V2 且 pending=0 后，可按命名 V1 retirement policy 单独退休 V1 catalog | N2 条件摘要、N5 输出事件 | 回写 N1-N5、直接改 trigger/action 事实、启动真实交易 |
+| `N6_user` | user projection、voice policy、mobile/card projection、sim shadow、用户偏好表；普通 B轨新需求必须先由 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` 分类为 L1/L2/L3：L1 仅 Web/read-only，L2 仅 N6 schema/business 且不得自动影响资金，L3 才允许在完整 bounded smoke、queue governance、独立授权和 fail-closed 证据下处理虚拟资金/runtime；精确满足 `n6_strategy_center_display_only_bounded_run_once_v1` 时，可执行单 principal/user/revision/current reviewed-N6 trade-date 的策略中心 display-only bounded run-once；在 20260727 当前开放日自然 N6 input 的 exact F464 canary PASS 且精确满足 `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 时，可安装/启用唯一 exact-label、StartInterval=5、每 tick 单 scope 的 immutable-Release run-once 调度器；在 081 已提交、Web strategy write=0、evaluator quiesced 的维护窗口中，精确满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 时，可先单独执行一次 082，完成 postflight 后再由另一个独立请求单独执行一次 083；083 已提交后可按首用户及 remaining-user 命名 policy 每次创建一个 pending V2 revision；全部活动 scope 已为 V2 且 pending=0 后，可按命名 V1 retirement policy 单独退休 V1 catalog | N2 条件摘要、N5 输出事件 | 回写 N1-N5、直接改 trigger/action 事实、真实交易、未分类或跨 lane 扩权 |
 
 trigger / action 写入硬规则：
 
@@ -1387,6 +1392,43 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
 - 除上述唯一 N6 strategy-center 调度例外外，长期 worker 始终后置，
   必须先有 run-once 和 bounded worker smoke 的单独授权。
 
+## N6 B轨交付通道硬规则
+
+普通 N6 B轨新需求统一使用
+`docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json`，不得再为相同类型需求创建
+一次性 migration/rebind/runtime policy。三个可复用 policy 是：
+
+```text
+L1 = n6_btrack_delivery_l1_web_readonly_v1
+L2 = n6_btrack_delivery_l2_n6_business_v1
+L3 = n6_btrack_delivery_l3_virtual_runtime_v1
+```
+
+分类规则：
+
+- L1：页面、文案、只读查询和筛选展示；不得 migration、数据库写入或操作
+  quote/executor/stop-loss。
+- L2：N6 schema、监控范围、策略配置和不自动影响资金的 N6 业务规则；必须有
+  forward/rollback、PG16 和独立部署/只读验收。
+- L3：任何 proposal、虚拟资金、position/lot、executor、stop-loss 或自动虚拟执行；
+  必须保留 bounded smoke、confirmed queue 治理、独立持续运行授权和立即 bootout。
+
+永久禁止真实券商、真实订单、自动创建/确认 proposal 和 N6 回写 N1-N5。
+历史具名 policy 与 BLOCKED/PASS 证据保持 append-only；只有独立 retirement gate
+可以停用，不得静默删除或改写。新需求无法可靠分类时必须 `BLOCK`，不得猜测。
+
+Git 与 Release 规则：
+
+- canonical branch/worktree 固定为
+  `codex/n6-btrack-integration` /
+  `/Users/chuanfuchen/Documents/A股监控系统v3_n6_btrack_integration`。
+- 主检出 preserve-only；临时任务从 canonical baseline 创建隔离 worktree。
+- 管理中的活动 N6 worktree 目标上限为 5；任何删除必须另行授权，并先证明
+  tracked/untracked/ignored 全部为零且证据已冻结。
+- Web、quote writer、virtual executor、stop-loss 默认从一个 commit 构建；
+  分叉必须登记在 `docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`，不得在发布时临时猜测。
+- 当前 registry 的 `deployment_authorized=false`；本治理提交不得据此切换服务。
+
 
 ## N2-R2 静态参考周期硬规则
 
@@ -1503,6 +1545,9 @@ Final safety enforcement:
   - `n6_strategy_center_reviewed_view_date_authority_084_v1`
   - `n6_strategy_center_post_canary_web_write_restore_v1`
   - `n6_strategy_center_shadow_activation_grant_v1`
+  - `n6_btrack_delivery_l1_web_readonly_v1`
+  - `n6_btrack_delivery_l2_n6_business_v1`
+  - `n6_btrack_delivery_l3_virtual_runtime_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP

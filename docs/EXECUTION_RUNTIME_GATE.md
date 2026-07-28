@@ -124,7 +124,10 @@ Detailed rules:
      `n6_strategy_center_pre_canary_web_write_quiesce_v1`, or
      `n6_strategy_center_reviewed_view_date_authority_084_v1`, or
      `n6_strategy_center_post_canary_web_write_restore_v1`, or
-     `n6_strategy_center_shadow_activation_grant_v1`;
+     `n6_strategy_center_shadow_activation_grant_v1`, or
+     `n6_btrack_delivery_l1_web_readonly_v1`, or
+     `n6_btrack_delivery_l2_n6_business_v1`, or
+     `n6_btrack_delivery_l3_virtual_runtime_v1`;
    - `named_policy_evaluated == true`;
    - `named_policy_passed == true`;
    - the complete machine-readable Kernel policy still matches fresh Runtime
@@ -325,6 +328,29 @@ Detailed rules:
     returns `REJECT`.
 16. General N6 execute, general `runtime_control` service operations, and every
     other runtime/database-write request continue to return `REJECT`.
+17. The three `n6_btrack_delivery_*_v1` policy ids are one reusable policy
+    family. A request must match exactly one lane from
+    `N6_B_TRACK_DELIVERY_GOVERNANCE_V1`; ambiguous or mixed-lane requests
+    return `BLOCK`, and a request for a new one-off N6 delivery policy returns
+    `REJECT`.
+18. L1 accepts only a separate, explicitly authorized Web-only immutable
+    Release rebind after an isolated implementation/test gate. Database,
+    migration, quote writer, executor, stop-loss and
+    proposal/order/trade/cash/position/lot effects must all be zero.
+19. L2 accepts only separate N6-user migration and runtime-control Web rebind
+    phases. The full migration filename is the identity, forward/rollback and
+    PG16 evidence are mandatory, and automatic proposal, virtual-money or
+    worker effects return `REJECT`.
+20. L3 accepts only N6 virtual-account work with current-request authorization,
+    a unified immutable Release, bounded smoke, governed confirmed queue,
+    two-stage human confirmation, current open date/session, two-minute
+    `passed/ok` identity-matched quote, principal/account/scope, cash/budget/
+    board-lot/natural-day-T+1 checks, independent role, full audit and a frozen
+    bootout command. Real broker/order, automatic proposal creation or
+    confirmation, N6 writeback to N1-N5, or missing evidence returns `REJECT`.
+21. Historical named policies remain append-only compatibility evidence.
+    Their existence does not authorize cloning another per-migration or
+    per-release policy for a normal new N6 request.
 
 ## 5. Execution Contract
 

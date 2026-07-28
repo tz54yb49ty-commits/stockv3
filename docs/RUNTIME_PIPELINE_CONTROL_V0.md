@@ -61,6 +61,30 @@ rollback registry 只登记 rollback SQL 路径，不执行 rollback。
 dashboard 只读展示 pipeline/stage/timeline/registry。
 ```
 
+### 3.0 N6 B轨交付分类控制面
+
+`runtime_control` 只登记和验证 N6 B轨交付分类，不在分类治理会话中部署或
+运行对应业务：
+
+```text
+n6_btrack_delivery_l1_web_readonly_v1
+n6_btrack_delivery_l2_n6_business_v1
+n6_btrack_delivery_l3_virtual_runtime_v1
+```
+
+分类输入固定为页面/功能、使用用户、期望结果、是否自动影响虚拟资金/申请/
+持仓四项。分类结果、生产基线和服务分叉状态分别以
+`docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json` 和
+`docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json` 为准。
+
+L1 的后续 runtime_control 权限最多是另行授权的 exact Web Release rebind；
+L2 只在独立 gate 处理 N6 migration 与 Release 对齐；L3 必须把 bounded
+smoke、confirmed 队列治理和持续运行授权分开。分类控制面不得连接数据库、
+修改 plist、执行 launchctl、处理 proposal/order/trade 或清理工作树。
+
+工作树数量治理也是独立 artifact-only gate。目标受管活跃工作树不超过 5
+个，但不得为了达到数量指标删除未证明干净的历史工作树。
+
 ## 3.1 Fast Gate Split
 
 为降低 gate 延迟，runtime_control gate 必须拆成三类职责：

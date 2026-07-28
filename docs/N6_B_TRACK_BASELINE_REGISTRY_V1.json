@@ -1,0 +1,103 @@
+{
+  "registry_version": "N6_B_TRACK_BASELINE_REGISTRY_V1",
+  "observed_at": "2026-07-28T08:28:29+08:00",
+  "observation_mode": "read_only_git_and_plist",
+  "main_checkout": {
+    "path": "/Users/chuanfuchen/Documents/A股监控系统v3",
+    "branch": "codex/new-demand-n2-n5-20260710",
+    "head": "627b7fe2a144db20fe2a040c41e9f90408418cdb",
+    "porcelain_entry_count_at_observation": 158,
+    "mode": "preserve_only"
+  },
+  "canonical_integration": {
+    "branch": "codex/n6-btrack-integration",
+    "worktree": "/Users/chuanfuchen/Documents/A股监控系统v3_n6_btrack_integration",
+    "parent_commit": "081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
+    "parent_tree": "f85afef6402afa4db9cd93e0359694ddc654066b",
+    "parent_subject": "align N6 retirement release archive contract",
+    "deployment_authorized": false
+  },
+  "runtime_services": {
+    "web": {
+      "plist_sha256": "07da341ca95ea74a29c977337301acdf3f4148509cbf9dca548c299ba8245d76",
+      "release_id": "20260727_174450__081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
+      "commit": "081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
+      "tree": "f85afef6402afa4db9cd93e0359694ddc654066b",
+      "git_archive_sha256": "1bb7289616d6cfabde8fba396b847fcfcf9867d7661d4249bf39c48a89ec35de",
+      "file_count": 6243,
+      "writable_entries": 0,
+      "symlinks": 0
+    },
+    "quote_writer": {
+      "plist_sha256": "dd6dd1c50e1c826c23bc3e3d7dc0cfcc562e38d83897b08c3c3d1cd3dbf9cee7",
+      "release_id": "20260722_234251__658ebb3995a7c539ac211258c378af6499635df4",
+      "commit": "658ebb3995a7c539ac211258c378af6499635df4",
+      "tree": "016f154e6716ce0c4f2c7dcee74808e9f95c6dc9",
+      "git_archive_sha256": "23fee95a3f7be5a640992e33c567258e3c073b59cfa5d44719b473d9eed82ecd",
+      "file_count": 6207,
+      "writable_entries": 0,
+      "symlinks": 0
+    },
+    "virtual_executor": {
+      "plist_sha256": "bae58f9d30938f13a6d9d1d4d92daa2c6be3d7b244fa819b0d6ea6b2b9c7b469",
+      "release_id": "20260722_234251__658ebb3995a7c539ac211258c378af6499635df4",
+      "commit": "658ebb3995a7c539ac211258c378af6499635df4",
+      "tree": "016f154e6716ce0c4f2c7dcee74808e9f95c6dc9",
+      "git_archive_sha256": "23fee95a3f7be5a640992e33c567258e3c073b59cfa5d44719b473d9eed82ecd",
+      "file_count": 6207,
+      "writable_entries": 0,
+      "symlinks": 0
+    },
+    "stop_loss": {
+      "plist_sha256": "12918ee97170f7c213ea0a82e1a7e4d99e79bfff53f91f9b05c4d19ceef96442",
+      "release_id": "20260726_112158__edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+      "commit": "edfb66d2a89fd0600a447379f4b0cd532c5d46d7",
+      "tree": "4707ae5e7141df6e592bf3e8ec63f912edc5e5d3",
+      "git_archive_sha256": "677f14773753ecb21290b81ad6ead950b573f46356c211159b07bcc3402cd6ec",
+      "file_count": 6246,
+      "writable_entries": 0,
+      "symlinks": 0
+    }
+  },
+  "lineage": {
+    "status": "FRAGMENTED",
+    "web_quote_merge_base": null,
+    "web_stop_loss_merge_base": null,
+    "quote_stop_loss_merge_base": null,
+    "single_release_ready": false,
+    "database_migration_state": "NOT_READ_NO_DATABASE_ACCESS"
+  },
+  "runtime_blob_compatibility": {
+    "scripts/run_n6_virtual_quote_once.py": "5b2bb6c87e692ce824c6ec8ae79931f5c5fb8d1f",
+    "scripts/run_n6_virtual_executor_once.py": "cb22b3d635d21b5d0db923a2189d3f5fd866a431",
+    "scripts/run_n6_virtual_stop_loss_once.py": "6b568db26fd4f7357e52311fcac9a81625332889",
+    "src/ashare_v3/user/n6_virtual_quote_client.py": "60f56143016e9302aab99f641457e89e1bc2be65",
+    "src/ashare_v3/web/n6_btrack_authority.py": "6e058bf1a51f2447c8642ffbad6e19e4d76262a8"
+  },
+  "migration_identity_anomalies": [
+    {
+      "numeric_id": "087",
+      "web_lineage_file": "sql/087_n6_strategy_center_30d_archive.sql",
+      "stop_loss_lineage_file": "sql/087_n6_virtual_stop_loss_numeric_coalesce_fix.sql",
+      "rule": "do_not_silently_renumber_or_merge; use full filename identity and a separate reconciliation gate"
+    }
+  ],
+  "worktrees": {
+    "total_linked_after_canonical_creation": 277,
+    "n6_prefixed_linked_after_canonical_creation": 151,
+    "managed_active_limit": 5,
+    "cleanup_executed": false
+  },
+  "convergence": {
+    "status": "GOVERNANCE_READY_RUNTIME_NOT_CONVERGED",
+    "required_next_gate": "n6_btrack_service_lineage_convergence_v1",
+    "requirements": [
+      "preserve active Web and Strategy Center blobs",
+      "preserve quote/executor/stop-loss runner and authority blobs",
+      "reconcile both 087 migration identities without rewriting history",
+      "run complete test_n6 regression",
+      "build one immutable release",
+      "switch services only in separately authorized runtime gates"
+    ]
+  }
+}

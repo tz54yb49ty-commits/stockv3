@@ -84,7 +84,10 @@ Detailed rules:
    `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`, and
    `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`, and
    `n6_strategy_center_pre_canary_web_write_quiesce_v1`, and
-   `n6_strategy_center_shadow_activation_grant_v1`; any other
+   `n6_strategy_center_shadow_activation_grant_v1`, and
+   `n6_btrack_delivery_l1_web_readonly_v1`, and
+   `n6_btrack_delivery_l2_n6_business_v1`, and
+   `n6_btrack_delivery_l3_virtual_runtime_v1`; any other
    runtime policy id must trace `REJECT` and `STOP`.
 8. A Web bounded-rebind `ACCEPT` must additionally record the exact label/plist,
    source and target Release identities and hashes, lineage verdict, frozen
@@ -92,6 +95,12 @@ Detailed rules:
    attempt counts, readiness/route/stability timestamps, whether rollback was
    triggered, and proof that evaluator/executor and all forbidden effects stayed
    absent.
+8a. An N6 B-track delivery trace must record the four normalized user brief
+    fields, exactly one L1/L2/L3 policy id, canonical integration commit/tree,
+    baseline-registry version, exact affected services/tables, gate phase,
+    rollback/bootout evidence required by that lane, and a forbidden-effect
+    zero summary. Mixed lanes or a new one-off policy request must trace
+    `BLOCK`/`REJECT` before runtime.
 9. A scheduled-evaluator `ACCEPT` must additionally record the exact label/plist,
    immutable Release commit/tree/archive/manifest/filesystem hashes, auto
    runner/planner blobs, dependency lock/runtime-env and argv hashes, the frozen

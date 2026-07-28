@@ -663,6 +663,44 @@ virtual-executor operation, activation, catalog/schema/projection/change,
 business, trading, and N1-N5 effects are compile-time rejects. A running
 evaluator may be observed but cannot be operated by this policy.
 
+### 4.9 N6 B-track Delivery Lane Compilation
+
+New N6 B-track work must compile through exactly one reusable lane declared in
+`docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json`:
+
+```text
+n6_btrack_delivery_l1_web_readonly_v1
+n6_btrack_delivery_l2_n6_business_v1
+n6_btrack_delivery_l3_virtual_runtime_v1
+```
+
+Compilation requires the four user brief fields `page_or_feature`, `users`,
+`expected_behavior`, and `affects_virtual_money_proposals_or_positions`.
+Missing, ambiguous, mixed-lane, real-broker, real-order, N6-to-N1-N5 writeback,
+automatic-proposal-creation, or automatic-proposal-confirmation requests
+compile to `REJECT`.
+
+L1 compiles to an offline implementation/test gate followed by at most one
+exact N6 Web immutable-Release rebind gate. It may not compile database,
+quote-writer, executor, stop-loss, proposal, order, trade, cash, position, or
+lot effects.
+
+L2 compiles into separately authorized phases: offline implementation and
+isolated PG16 verification, one exact N6 migration gate with rollback, one
+immutable-Release rebind gate, and read-only acceptance. Migration identity is
+the full filename and contract, never the numeric prefix alone. L2 cannot
+compile automatic virtual-money effects.
+
+L3 compiles into separately authorized implementation/regression, migration
+and immutable-Release deployment, bounded smoke, confirmed-queue governance,
+and continuous-runtime authorization phases. Missing bounded-smoke evidence,
+queue disposition, immutable lineage, service-role boundary, full business
+audit, or immediate bootout proof compiles to `REJECT`.
+
+Legacy one-off policies remain historical compatibility evidence. The compiler
+must not mint a new one-off policy for an ordinary request already covered by
+L1, L2, or L3.
+
 ## 5. Output Format
 
 The compiler output must be YAML:

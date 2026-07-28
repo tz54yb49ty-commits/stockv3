@@ -2503,6 +2503,117 @@ single-scope CAS and unchanged other-user/projection/change hashes. Any
 all-users request, key change, predecessor/date/hash drift, missing owner
 function, retry, second mutation, or forbidden side effect returns `REJECT`.
 
+### 4.9 N6 B-track Reusable Delivery Policies
+
+<!-- policy:n6_btrack_delivery_l1_web_readonly_v1:begin -->
+```json
+{
+  "policy_id": "n6_btrack_delivery_l1_web_readonly_v1",
+  "policy_family": "n6_btrack_delivery_lanes_v1",
+  "layer_role": "N6_user",
+  "lane": "L1",
+  "default_runtime_execution_decision": "REJECT",
+  "required_brief_fields": [
+    "page_or_feature",
+    "users",
+    "expected_behavior",
+    "affects_virtual_money_proposals_or_positions"
+  ],
+  "allowed_effects": [
+    "n6_web_layout",
+    "n6_web_copy",
+    "n6_read_only_query",
+    "n6_filter_display",
+    "separate_exact_web_release_rebind"
+  ],
+  "forbidden_effects": [
+    "database_write",
+    "migration",
+    "quote_writer_change",
+    "executor_change",
+    "stop_loss_change",
+    "proposal_order_trade_cash_position_lot",
+    "real_broker",
+    "n1_n5_writeback"
+  ],
+  "max_mutating_gates": 2,
+  "governance_session_cannot_execute": true
+}
+```
+<!-- policy:n6_btrack_delivery_l1_web_readonly_v1:end -->
+
+<!-- policy:n6_btrack_delivery_l2_n6_business_v1:begin -->
+```json
+{
+  "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+  "policy_family": "n6_btrack_delivery_lanes_v1",
+  "layer_role": "N6_user",
+  "lane": "L2",
+  "default_runtime_execution_decision": "REJECT",
+  "required_phases": [
+    "offline_implementation_and_pg16",
+    "exact_n6_migration_with_rollback",
+    "immutable_release_rebind",
+    "read_only_acceptance"
+  ],
+  "required_controls": [
+    "full_migration_filename_identity",
+    "owner_acl_security_definer_search_path",
+    "business_table_pre_post_digest",
+    "rollback_round_trip"
+  ],
+  "forbidden_effects": [
+    "automatic_virtual_money_effect",
+    "automatic_proposal_creation",
+    "automatic_proposal_confirmation",
+    "real_broker",
+    "n1_n5_writeback"
+  ],
+  "governance_session_cannot_execute": true
+}
+```
+<!-- policy:n6_btrack_delivery_l2_n6_business_v1:end -->
+
+<!-- policy:n6_btrack_delivery_l3_virtual_runtime_v1:begin -->
+```json
+{
+  "policy_id": "n6_btrack_delivery_l3_virtual_runtime_v1",
+  "policy_family": "n6_btrack_delivery_lanes_v1",
+  "layer_role": "N6_user",
+  "lane": "L3",
+  "default_runtime_execution_decision": "REJECT",
+  "required_phases": [
+    "offline_implementation_and_full_n6_regression",
+    "migration_and_immutable_release",
+    "bounded_virtual_smoke",
+    "confirmed_queue_governance",
+    "separate_continuous_runtime_authorization"
+  ],
+  "required_controls": [
+    "explicit_current_request_authorization",
+    "two_stage_human_confirmation",
+    "claim_apply_fail_closed",
+    "independent_service_role",
+    "proposal_order_trade_cash_position_lot_audit",
+    "immediate_bootout_plan"
+  ],
+  "forbidden_effects": [
+    "automatic_proposal_creation",
+    "automatic_proposal_confirmation",
+    "real_broker",
+    "real_order",
+    "n1_n5_writeback"
+  ],
+  "governance_session_cannot_execute": true
+}
+```
+<!-- policy:n6_btrack_delivery_l3_virtual_runtime_v1:end -->
+
+These policies classify and constrain work; they do not authorize their
+defining governance session to deploy or execute it. Exactly one lane must
+match. Missing brief fields, mixed lanes, a request for a new one-off policy
+where a reusable lane applies, or any forbidden effect returns `REJECT`.
+
 ## 5. Execution Flow
 
 ```text

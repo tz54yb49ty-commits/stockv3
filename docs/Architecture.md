@@ -13,6 +13,31 @@ v3 的核心原则是：上游只产生可追溯事实，下游只消费正式�
 
 `runtime_control` 是 N1-N6 之外的总控控制面，只登记 runtime pipeline state machine / dashboard / command registry / rollback registry / timeline，不执行 N1-N6 命令，不修改 N1-N6 execute contract。dashboard v0.2 已新增 20260602 action-confirmation timeline detector：保留 20260527 nightly v0 七阶段，同时在 `/runtime/20260602` 和 `/api/runtime/20260602/dashboard` 只读展示 9 阶段 all PASS、N5 pending outbox=ActionExecuted 4 / ActionBlocked 1、N6 shadow rows=1/5/5/5、N2-N6 rollback paths complete；routes 仍只有 GET/HEAD，无 form、无 execute button。
 
+### 1.1 N6 B轨交付主线与三通道
+
+N6 B轨的唯一候选发布主线为
+`codex/n6-btrack-integration`，对应隔离工作树
+`/Users/chuanfuchen/Documents/A股监控系统v3_n6_btrack_integration`。临时需求
+从当前生产权威基线分出，验证后只能汇入该主线；脏主工作树继续
+preserve-only。
+
+普通需求必须复用以下三条交付通道：
+
+| 通道 | policy_id | 边界 |
+|---|---|---|
+| L1 | `n6_btrack_delivery_l1_web_readonly_v1` | 页面、文案、只读查询、筛选展示；无数据库和交易 runtime |
+| L2 | `n6_btrack_delivery_l2_n6_business_v1` | N6 schema、监控范围、策略配置、虚拟账户业务规则；migration 与 Release 分 gate |
+| L3 | `n6_btrack_delivery_l3_virtual_runtime_v1` | executor、自动止损、申请或资金/持仓变化；bounded smoke、队列治理和持续运行授权分离 |
+
+服务基线登记在 `docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`。本次登记只确认
+Web、quote writer/executor、stop-loss 仍为三条分叉 lineage，且同时存在两个
+不同的 `087` migration 文件；它不授权部署或自动合并。正常目标是四个服务从
+同一 commit 构建；确需不同 commit 时必须登记兼容原因和关键 blob 证明。
+
+受管活跃工作树目标不超过 5 个：生产集成、当前开发、当前治理、紧急修复和
+验收。已有工作树只能在 commit、测试、rollback、tracked/untracked/ignored
+均为零的证据冻结后归档，不得批量删除或改写用户文件。
+
 ## 2. 分层职责
 
 | 层级 | layer_role | 职责 | 当前边界 |

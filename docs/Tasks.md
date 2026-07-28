@@ -5,6 +5,37 @@
 
 ## P0 当前优先级
 
+### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
+
+状态：IMPLEMENTATION_READY；未部署、未清理工作树。
+
+目标：用 `n6_btrack_delivery_lanes_v1` 取代普通新需求不断新增一次性 policy
+的做法，并将所有后续 B轨发布收敛到
+`codex/n6-btrack-integration`。
+
+当前交付：
+
+- L1 `n6_btrack_delivery_l1_web_readonly_v1`
+- L2 `n6_btrack_delivery_l2_n6_business_v1`
+- L3 `n6_btrack_delivery_l3_virtual_runtime_v1`
+- `docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`
+- 无副作用的 `scripts/plan_n6_btrack_delivery.py`
+
+下一 gate：
+
+```text
+n6_btrack_service_lineage_convergence_v1
+```
+
+该 gate 只允许在新的隔离集成分支中合并当前 Web、quote/executor 和
+stop-loss 能力，解决两个 `087` 文件冲突并运行完整 N6 回归。它不得连接活动
+数据库、切换 plist、启动 worker 或处理 proposal。血缘收敛完成前不得宣称
+已有统一生产基线。
+
+工作树归档是再下一独立 gate。任何删除都必须先证明对应工作树的 commit、
+测试、rollback 和 tracked/untracked/ignored 均为零；主工作树始终
+preserve-only。
+
 ### T0.GOV-N6. N6 B 轨 virtual-executor 权限治理 v1
 
 状态：governance registration ready；runtime not executed。
