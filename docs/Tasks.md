@@ -29,6 +29,26 @@
 n6_btrack_canonical_integration_fast_forward_v1
 ```
 
+前置 forward-scope closeout
+`n6_btrack_preserved_capability_blob_lock_forward_scope_closeout_v1` 已完成：
+历史 preserved-capability blob 锁只从冻结 commit `2eeb05a5…` 读取；旧
+`N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` byte-for-byte 不变；L1 /
+GET-only 功能候选
+`75470cc4ee06e94c79fb925b74e28bb7e2f5a617` 的原四文件 path、Git blob、SHA256
+已 append-only 登记，功能分类为 `POST_REVIEW_PASS`。该 gate 只修改
+Git/docs/tests，未部署、未连接数据库、未执行 migration、Release、服务或
+worker。baseline-aware 测试必须以
+`09718870086ff2611b7e19ab741b636bae542d97` 为 canonical baseline，并将
+`FUNCTIONAL_NEW_FAIL` 与历史/环境失败分离；三个 moving-checkout 假阳性不再
+计入 L1 candidate failure。
+验收结果：focused 21/21、筛选中心/N6 Web 定向 303/303；完整
+`test_n6*.py` canonical baseline/candidate 分别为
+1743（22 failures / 41 errors / 22 skipped）和
+1756（24 failures / 41 errors / 22 skipped）。`FUNCTIONAL_NEW_FAIL=0`，
+历史/环境 baseline 失败签名漂移=0；新增两项仅为冻结
+`N6_AI_KNOWLEDGE_BUNDLE_MANIFEST` 对本 gate allowlist 的历史 artifact hash
+失败，未通过新增第七文件、skip 或弱化断言获得绿测。
+
 `n6_btrack_service_lineage_convergence_v1` 已在新的隔离集成分支中按精确
 15 文件 allowlist 完成：从
 `edfb66d2…` 导入 stop-loss 087 四文件，从 `17d30207…` 导入 088 四文件，

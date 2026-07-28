@@ -21,6 +21,8 @@ R0 冻结当前 Web / quote writer / executor / stop-loss 基线
 -> R4 从新需求开始停止新增一次性 policy 和孤立发布血缘
 -> R5 逐个审计并归档已完成工作树
 -> R6 以 L1/L2 分类实施筛选中心改造
+-> R7 完成 n6_btrack_preserved_capability_blob_lock_forward_scope_closeout_v1
+-> R8 n6_btrack_canonical_integration_fast_forward_v1（ff-only）
 ```
 
 R0-R2 只产生 Git/文档/静态测试，不连接数据库或操作服务。R3 使用
@@ -31,6 +33,19 @@ migration 数字静默覆盖。R3 当前只生成统一候选 commit/tree 和离
 工作树证明无 tracked、untracked、ignored 残留。L1 普通页面需求目标最多两个
 mutating gate；L2/L3 继续保留 migration、rollback、权限、资金和 runtime
 审计。
+
+R7 已把历史 preserved-capability 锁限定为冻结 commit `2eeb05a5…`，旧
+`N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` 保持 byte-for-byte 不变；
+L1/GET-only 功能候选
+`75470cc4ee06e94c79fb925b74e28bb7e2f5a617` 的原四文件 path/blob/SHA256 已由
+append-only artifact 登记，分类为 `POST_REVIEW_PASS`。该 closeout 未部署、
+未访问数据库、未执行 migration 或服务操作。下一 gate 仅允许从 canonical
+baseline `09718870086ff2611b7e19ab741b636bae542d97` 对本 closeout 单一提交链
+执行 `n6_btrack_canonical_integration_fast_forward_v1` ff-only。
+Focused/定向回归为 21/21 与 303/303；完整 `test_n6*.py` baseline/candidate
+为 1743（22 failures / 41 errors / 22 skipped）和 1756（24 / 41 / 22）。
+`FUNCTIONAL_NEW_FAIL=0`、历史/环境 baseline 签名漂移=0；额外两项是冻结 N6
+AI knowledge bundle 的历史 artifact hash 失败，未扩展 allowlist 改写 manifest。
 
 ### 2026-07-22 N6 B 轨 virtual-executor 前向路线
 

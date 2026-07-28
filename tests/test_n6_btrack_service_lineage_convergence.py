@@ -164,14 +164,13 @@ class N6BTrackServiceLineageConvergenceTest(unittest.TestCase):
                 )
                 self.assertEqual(file_git_blob(row["path"]), row["git_blob"])
 
-    def test_preserved_capability_blobs_match_current_files(self) -> None:
+    def test_preserved_capability_blobs_match_frozen_convergence_commit(
+        self,
+    ) -> None:
         locks = self.manifest["preserved_blob_locks"]
         for family, rows in locks.items():
             for relative_path, expected_blob in rows.items():
                 with self.subTest(family=family, path=relative_path):
-                    self.assertEqual(
-                        file_git_blob(relative_path), expected_blob
-                    )
                     self.assertEqual(
                         git(
                             "rev-parse",

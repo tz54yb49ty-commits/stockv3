@@ -1,0 +1,138 @@
+{
+  "artifact_version": "N6_B_TRACK_PRESERVED_CAPABILITY_BLOB_LOCK_FORWARD_SCOPE_CLOSEOUT_V1",
+  "gate": "n6_btrack_preserved_capability_blob_lock_forward_scope_closeout_v1",
+  "layer_role": "runtime_control",
+  "execution_mode": "FULL_MODE",
+  "risk_level": "medium",
+  "result": "PASS_NO_FUNCTIONAL_NEW_FAIL_WITH_HISTORICAL_ARTIFACT_FAILURES",
+  "status": "OFFLINE_GIT_DOCS_TESTS_ONLY_NOT_DEPLOYED",
+  "historical_convergence_authority": {
+    "commit": "2eeb05a56663477159c0f60c2a4be3525eae7753",
+    "tree": "4228bd1efa345d9af5369c08905ac4184e4798fa",
+    "parent": "081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
+    "manifest": {
+      "path": "docs/N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1.json",
+      "git_blob": "afb01d3eafc4ac95acf8f2b16740836fb7e414fc",
+      "sha256": "97a9e5e182b38dadee139179cc138b6d2a145406a23742f13b9b353354150047",
+      "byte_count": 8843,
+      "rewrite_allowed": false
+    }
+  },
+  "lock_scope_policy": {
+    "historical_preserved_blob_locks_read_from_frozen_commit": true,
+    "historical_preserved_blob_lock_commit": "2eeb05a56663477159c0f60c2a4be3525eae7753",
+    "moving_checkout_is_historical_lock_authority": false,
+    "forward_candidates_require_append_only_identity_artifact": true,
+    "historical_manifest_rewrite_allowed": false
+  },
+  "functional_candidate": {
+    "commit": "75470cc4ee06e94c79fb925b74e28bb7e2f5a617",
+    "tree": "687db80dca64868f75a449c0780bcab1165eb255",
+    "parent": "09718870086ff2611b7e19ab741b636bae542d97",
+    "subject": "feat(n6): unify three-asset filter center readonly",
+    "delivery_lane": "L1",
+    "policy_id": "n6_btrack_delivery_l1_web_readonly_v1",
+    "route_scope": "GET_ONLY",
+    "database_write_allowed": false,
+    "runtime_operation_allowed": false,
+    "review_classification": "POST_REVIEW_PASS",
+    "original_implementation_allowlist": [
+      "src/ashare_v3/web/n6_app_v1.py",
+      "src/ashare_v3/web/n6_user_app.py",
+      "src/ashare_v3/web/templates/n6_app_shell.html",
+      "tests/test_n6_user_app.py"
+    ],
+    "files": [
+      {
+        "path": "src/ashare_v3/web/n6_app_v1.py",
+        "git_blob": "628780a4fd546e3c2feb0d3dcc806ebdfafdd077",
+        "sha256": "0a041718afc55d55d6403bbae2ad6ae899bbe52487bd20663023c32e3e953b0d"
+      },
+      {
+        "path": "src/ashare_v3/web/n6_user_app.py",
+        "git_blob": "47c97bdf85dea9aaa6cbf09e6957d2b6fda227bd",
+        "sha256": "76a52a48f3e1b5cf5c7081bac8d9961405c9dcbccf211f22a73e4b543fd104e0"
+      },
+      {
+        "path": "src/ashare_v3/web/templates/n6_app_shell.html",
+        "git_blob": "5d812bf3a8e137173c5c3d8d81f12f0116ede894",
+        "sha256": "79ddfa3e8887a1ae9cb5722ebcb1e6ee94e7e962b919606b22e4557bb3f04fb2"
+      },
+      {
+        "path": "tests/test_n6_user_app.py",
+        "git_blob": "28f11bbbb362b1b99971474860d33f68cf473516",
+        "sha256": "454d6839e8b01a0e47480da727757f070f6ace2182d99bc1169b0c9c46b808e5"
+      }
+    ]
+  },
+  "test_classification_contract": {
+    "canonical_baseline_commit": "09718870086ff2611b7e19ab741b636bae542d97",
+    "functional_candidate_commit": "75470cc4ee06e94c79fb925b74e28bb7e2f5a617",
+    "functional_new_fail_required": 0,
+    "historical_or_environment_failures_must_be_reported_separately": true,
+    "preserved_lock_false_positive_paths_removed": [
+      "src/ashare_v3/web/n6_app_v1.py",
+      "src/ashare_v3/web/n6_user_app.py",
+      "src/ashare_v3/web/templates/n6_app_shell.html"
+    ],
+    "skip_or_assertion_weakening_allowed": false,
+    "focused_convergence_and_forward_scope": {
+      "tests_run": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "filter_center_and_n6_web_targeted": {
+      "tests_run": 303,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "complete_test_n6_baseline": {
+      "tests_run": 1743,
+      "failures": 22,
+      "errors": 41,
+      "skipped": 22
+    },
+    "complete_test_n6_closeout_candidate": {
+      "tests_run": 1756,
+      "failures": 24,
+      "errors": 41,
+      "skipped": 22
+    },
+    "functional_new_fail": 0,
+    "historical_environment_baseline_signature_drift": 0,
+    "historical_artifact_scope_failures": [
+      "test_n6_ai_knowledge_manifest.N6AiKnowledgeManifestTests.test_manifest_rebuilds_byte_for_byte",
+      "test_n6_ai_knowledge_manifest.N6AiKnowledgeManifestTests.test_sources_and_non_readable_components_are_bound"
+    ],
+    "historical_artifact_scope_failure_reason": "immutable N6 AI knowledge bundle hash excludes this gate allowlist; no seventh-file manifest rewrite is authorized"
+  },
+  "next_gate": {
+    "gate": "n6_btrack_canonical_integration_fast_forward_v1",
+    "operation": "FF_ONLY",
+    "canonical_branch": "codex/n6-btrack-integration",
+    "expected_current_commit": "09718870086ff2611b7e19ab741b636bae542d97",
+    "target": "single closeout commit whose parent is 75470cc4ee06e94c79fb925b74e28bb7e2f5a617",
+    "push_allowed": false,
+    "deployment_allowed": false
+  },
+  "prohibitions": [
+    "push",
+    "deployment",
+    "database",
+    "migration",
+    "release",
+    "plist",
+    "launchctl",
+    "service",
+    "worker",
+    "proposal",
+    "order",
+    "trade",
+    "cash",
+    "position",
+    "lot",
+    "real_trading"
+  ]
+}

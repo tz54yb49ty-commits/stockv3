@@ -44,6 +44,22 @@ quote→stop-loss merge-base 为 `658ebb39…`；生产状态仍为 `FRAGMENTED`
 `database_state=NOT_READ`、`deployment_authorized=false`。本候选不表示统一
 生产 Release，也不授权数据库、migration 或服务操作。
 
+`n6_btrack_preserved_capability_blob_lock_forward_scope_closeout_v1` 已将上述
+历史 convergence blob 锁收口为只读取冻结 commit `2eeb05a5…`，不再把 moving
+checkout 当作历史身份权威。L1/GET-only 功能候选
+`75470cc4ee06e94c79fb925b74e28bb7e2f5a617` 已按原四文件 allowlist 登记完整
+path、Git blob 与 SHA256，分类保持 `POST_REVIEW_PASS`；旧
+`N6_B_TRACK_MIGRATION_IDENTITY_RECONCILIATION_V1` byte-for-byte 不变。该
+forward-scope closeout 仅为 Git/docs/tests 离线证据，未部署、未读取数据库、
+未操作 Release 或服务。下一 gate 仅为
+`n6_btrack_canonical_integration_fast_forward_v1` 的 ff-only 集成。
+Focused 与筛选中心/N6 Web 定向回归分别为 21/21、303/303；完整
+`test_n6*.py` 对照为 canonical baseline 1743 项（22 failures / 41 errors /
+22 skipped）与 closeout candidate 1756 项（24 / 41 / 22）。
+`FUNCTIONAL_NEW_FAIL=0`，历史/环境 baseline 失败签名漂移为 0；新增两项仅为
+冻结 `N6_AI_KNOWLEDGE_BUNDLE_MANIFEST` 对本 gate allowlist 的历史 artifact
+hash 不匹配，未通过扩展第七文件或弱化断言掩盖。
+
 受管活跃工作树目标不超过 5 个：生产集成、当前开发、当前治理、紧急修复和
 验收。已有工作树只能在 commit、测试、rollback、tracked/untracked/ignored
 均为零的证据冻结后归档，不得批量删除或改写用户文件。
