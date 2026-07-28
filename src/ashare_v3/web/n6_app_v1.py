@@ -460,8 +460,22 @@ V2_FILTER_ASSET_ORDER = ("index", "board", "stock")
 V2_FILTER_DEFAULT_LIMIT_BY_ASSET = {
     "index": 200,
     "board": 200,
-    "stock": 100,
+    "stock": 200,
 }
+V2_FILTER_COMMON_QUERY_FIELDS = (
+    "for_trade_date",
+    "q",
+    "direction",
+    "year_overheat_level",
+    "quarter_overheat_level",
+    "month_overheat_level",
+    "week_overheat_level",
+    "day_overheat_level",
+    "buy_expected_return_pct_min",
+    "condition_key",
+    "quality_status",
+    "source_run_id",
+)
 V2_FILTER_PERCENT_FIELDS = frozenset(
     {
         "cash_realization_rate",
@@ -3234,6 +3248,26 @@ def _filter_query_pairs_without(filters: dict[str, Any], excluded_fields: set[st
     ]
 
 
+def _app_v2_filter_common_query_pairs(filters: dict[str, Any]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    valid_grade_values = {
+        str(option["value"])
+        for option in V2_PERIOD_GRADE_OPTIONS
+    }
+    grade_fields = {field for field, _ in V2_PERIOD_GRADE_FILTERS}
+    for field in V2_FILTER_COMMON_QUERY_FIELDS:
+        values = _filter_value_list(filters.get(field))
+        if field == "direction":
+            values = [value for value in values if value in APP_DIRECTION_LABELS]
+        elif field in grade_fields:
+            values = [value for value in values if value in valid_grade_values]
+        elif field == V2_EXPECTED_RETURN_FILTER_KEY:
+            value = app_v2_expected_return_value_text(filters.get(field))
+            values = [value] if value else []
+        pairs.extend((field, value) for value in values)
+    return pairs
+
+
 def app_v2_expected_return_threshold(value: Any) -> Decimal | None:
     decimal_value = _decimal_or_none(value)
     if decimal_value is None or decimal_value < 0 or decimal_value > 100:
@@ -3418,10 +3452,7 @@ def _app_v2_filter_linked_stock_filter_context(
                 normalized_source_identity_keys.append(identity_key)
     if not normalized_source_identity_keys:
         return None
-    pairs = _filter_query_pairs_without(
-        filters,
-        {"asset_kind", "board_type", "source_asset_type", "source_identity_key", "source_identity_keys"},
-    )
+    pairs = _app_v2_filter_common_query_pairs(filters)
     if selected_for_trade_date and not any(key == "for_trade_date" for key, _ in pairs):
         pairs.insert(0, ("for_trade_date", selected_for_trade_date))
     pairs.append(("source_asset_type", asset_kind))
@@ -4206,10 +4237,7 @@ def app_v2_filter_center_model(
         section.pop("_api_items", None)
     selected_section_key = V2_FILTER_PAGE_BY_ASSET[selected_asset_kind]
     sections = {selected_section_key: all_sections[selected_section_key]}
-    subinterface_pairs: list[tuple[str, str]] = []
-    selected_for_trade_date = str(filters.get("for_trade_date") or "").strip()
-    if selected_for_trade_date:
-        subinterface_pairs.append(("for_trade_date", selected_for_trade_date))
+    subinterface_pairs = _app_v2_filter_common_query_pairs(filters)
     subinterfaces = [
         {
             "key": key,
@@ -4222,6 +4250,13 @@ def app_v2_filter_center_model(
         }
         for key, section in all_sections.items()
     ]
+    selected_base_href = f"/n6/app/filter-center/{selected_section_key}"
+    filter_reset = {
+        "label": "清除全部筛选",
+        "href": selected_base_href,
+        "active": bool(_filter_query_pairs(filters) or show_all),
+        "readonly": True,
+    }
     return {
         "ok": True,
         "component": component,
@@ -4232,6 +4267,12 @@ def app_v2_filter_center_model(
         "sections": sections,
         "date_selector": sections[selected_section_key]["date_selector"],
         "subinterfaces": subinterfaces,
+        "common_filter_fields": list(V2_FILTER_COMMON_QUERY_FIELDS),
+        "common_filter_pairs": [
+            {"name": key, "value": value}
+            for key, value in subinterface_pairs
+        ],
+        "filter_reset": filter_reset,
         "filter_labels": dict(V2_OVERHEAT_FILTER_LABELS),
         "direction_options": [
             {"value": "buy", "label": APP_DIRECTION_LABELS["buy"]},

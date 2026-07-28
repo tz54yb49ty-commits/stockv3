@@ -822,7 +822,7 @@ APP_V2_FILTER_PAGE_MAX_ROWS = 10000
 APP_V2_FILTER_DEFAULT_ROWS_BY_ASSET = {
     "index": 200,
     "board": 200,
-    "stock": 100,
+    "stock": 200,
 }
 N6_TRADING_SESSION_HISTORY_BLOCKER = "historical_query_disabled_during_trading_session"
 N6_TRADING_SESSION_HISTORY_MESSAGE = "实时消息页仅显示当前交易日；历史消息必须使用独立只读归档入口"
@@ -12518,12 +12518,13 @@ def app_v2_filter_filters_from_request(request: Request) -> dict[str, Any]:
         *request.query_params.getlist("source_identity_keys"),
         *request.query_params.getlist("source_identity_key"),
     ]
+    direction = normalize_filter_value(request.query_params.get("direction"))
     return {
         "asset_kind": normalize_filter_value(request.query_params.get("asset_kind")),
         "for_trade_date": normalize_filter_value(request.query_params.get("for_trade_date")),
         "source_asset_type": normalize_filter_value(request.query_params.get("source_asset_type")),
         "source_identity_keys": normalize_filter_identity_values(source_identity_values),
-        "direction": normalize_filter_value(request.query_params.get("direction")),
+        "direction": direction if direction in APP_V2_VALID_DIRECTIONS else None,
         "board_type": normalize_filter_value(request.query_params.get("board_type")),
         "year_overheat_level": period_filters["year_overheat_level"],
         "quarter_overheat_level": period_filters["quarter_overheat_level"],

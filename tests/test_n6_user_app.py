@@ -11559,6 +11559,102 @@ class N6UserAppTest(unittest.TestCase):
         self.assertFalse(repo.app_monitor_writes)
         self.assertFalse(any(repo.forbidden_writes.values()))
 
+    def test_b_track_v2_filter_center_tabs_keep_only_common_filters_and_clear_all_readonly(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260605"
+            "&q=600000"
+            "&direction=buy"
+            "&year_overheat_level=volume_up"
+            "&quarter_overheat_level=volume_down"
+            "&month_overheat_level=low_volume_up"
+            "&week_overheat_level=low_volume_down"
+            "&day_overheat_level=flat"
+            "&buy_expected_return_pct_min=12"
+            "&condition_key=BUY"
+            "&quality_status=reviewed"
+            "&source_run_id=run-1"
+            "&sort=identity_key"
+            "&sort_dir=desc"
+            "&board_type=tdx_industry"
+            "&source_asset_type=board"
+            "&source_identity_keys=board:TDX:881001"
+            "&level_up_score_recommendation=index_max"
+            "&show_all=1"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        common_query = (
+            "for_trade_date=20260605"
+            "&amp;q=600000"
+            "&amp;direction=buy"
+            "&amp;year_overheat_level=volume_up"
+            "&amp;quarter_overheat_level=volume_down"
+            "&amp;month_overheat_level=low_volume_up"
+            "&amp;week_overheat_level=low_volume_down"
+            "&amp;day_overheat_level=flat"
+            "&amp;buy_expected_return_pct_min=12"
+            "&amp;condition_key=BUY"
+            "&amp;quality_status=reviewed"
+            "&amp;source_run_id=run-1"
+        )
+        self.assertIn(f'href="/n6/app/filter-center/indexes?{common_query}"', response.text)
+        self.assertIn(f'href="/n6/app/filter-center/boards?{common_query}"', response.text)
+        for forbidden in (
+            "sort=identity_key",
+            "sort_dir=desc",
+            "board_type=tdx_industry",
+            "source_asset_type=board",
+            "source_identity_keys=board%3ATDX%3A881001",
+            "level_up_score_recommendation=index_max",
+            "show_all=1",
+        ):
+            tab_hrefs = re.findall(
+                r'href="(/n6/app/filter-center/(?:indexes|boards)\?[^"]+)"',
+                response.text,
+            )
+            self.assertTrue(tab_hrefs)
+            self.assertTrue(all(forbidden not in href for href in tab_hrefs))
+        self.assertIn(
+            'href="/n6/app/filter-center/stocks"\n'
+            "          data-clear-all-filters\n"
+            '          data-readonly="true"',
+            response.text,
+        )
+        self.assertNotIn('method="post"', response.text.lower())
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v2_filter_center_invalid_direction_is_ignored_and_not_carried_between_tabs(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/indexes"
+            "?direction=sideways"
+            "&sort=not_a_column"
+            "&sort_dir=sideways"
+            "&buy_expected_return_pct_min=101"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        tab_hrefs = re.findall(
+            r'href="(/n6/app/filter-center/(?:boards|stocks)[^"]*)"',
+            response.text,
+        )
+        self.assertTrue(tab_hrefs)
+        for href in tab_hrefs:
+            self.assertNotIn("direction=", href)
+            self.assertNotIn("sort=", href)
+            self.assertNotIn("sort_dir=", href)
+            self.assertNotIn("buy_expected_return_pct_min=", href)
+        self.assertEqual(repo.app_filter_reads[-1][-1].get("direction"), None)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
     def test_b_track_v2_filter_center_table_markup_stabilizes_dynamic_grid_layout(self) -> None:
         client, repo, _, _ = build_client()
         repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
@@ -12050,7 +12146,7 @@ class N6UserAppTest(unittest.TestCase):
         cases = (
             ("/n6/app/filter-center/indexes", 200, "测试指数200", "测试指数250"),
             ("/n6/app/filter-center/boards", 200, "测试板块200", "测试板块250"),
-            ("/n6/app/filter-center/stocks", 100, "测试个股100", "测试个股250"),
+            ("/n6/app/filter-center/stocks", 200, "测试个股200", "测试个股250"),
         )
         for path, expected_default_count, expected_default_last_name, expected_all_last_name in cases:
             with self.subTest(path=path):
@@ -12956,7 +13052,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(preview.json()["matched_count"], 250)
         self.assertEqual(preview.json()["direction_row_count"], 250)
         self.assertIn("筛选后数量: 250", page.text)
-        self.assertIn("当前显示: 100", page.text)
+        self.assertIn("当前显示: 200", page.text)
         self.assertIn("将筛选结果全部加入监控对象（250）", page.text)
         self.assertIn('data-n6-scope-write-mode="bulk-and-single"', page.text)
         self.assertNotIn("identity_keys:", page.text)

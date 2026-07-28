@@ -1254,6 +1254,14 @@
         {% for sub in page.data.subinterfaces %}
         <a class="chip{% if sub.active %} active{% endif %}" href="{{ sub.href }}">{{ sub.label }}</a>
         {% endfor %}
+        {% set filter_reset = page.data.get("filter_reset") %}
+        {% if filter_reset %}
+        <a
+          href="{{ filter_reset.href }}"
+          data-clear-all-filters
+          data-readonly="true"
+        >{{ filter_reset.label }}</a>
+        {% endif %}
       </div>
       {% for section_key, section in page.data.sections.items() %}
       {% set expected_return = section.expected_return_filter %}
