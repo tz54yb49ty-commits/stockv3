@@ -343,6 +343,11 @@ class FakeN6UserRepository:
                     "month_overheat_level": "低位",
                     "week_overheat_level": "回升",
                     "day_overheat_level": "启动",
+                    "period_transition_y": "低位",
+                    "period_transition_q": "回升",
+                    "period_transition_m": "低位",
+                    "period_transition_w": "回升",
+                    "period_transition_d": "启动",
                     "last_signal_state": "blocked",
                     "quality_status": "reviewed",
                     "source_display_basis_id": 3001,
@@ -373,6 +378,11 @@ class FakeN6UserRepository:
                     "month_overheat_level": "回升",
                     "week_overheat_level": "启动",
                     "day_overheat_level": "启动",
+                    "period_transition_y": "低位",
+                    "period_transition_q": "低位",
+                    "period_transition_m": "回升",
+                    "period_transition_w": "启动",
+                    "period_transition_d": "启动",
                     "last_signal_state": "executed",
                     "quality_status": "reviewed",
                     "source_display_basis_id": 1001,
@@ -404,6 +414,11 @@ class FakeN6UserRepository:
                     "month_overheat_level": "启动",
                     "week_overheat_level": "启动",
                     "day_overheat_level": "启动",
+                    "period_transition_y": "低位",
+                    "period_transition_q": "回升",
+                    "period_transition_m": "启动",
+                    "period_transition_w": "启动",
+                    "period_transition_d": "启动",
                     "last_signal_state": "blocked",
                     "quality_status": "reviewed",
                     "source_display_basis_id": 2001,
@@ -3657,21 +3672,27 @@ class FakeN6UserRepository:
                 or (str(row.get("stock_identity_key") or "").strip() in stock_keys)
             ]
         total_count = len(rows)
-        for key in (
-            "direction",
-            "board_type",
-            "year_overheat_level",
-            "quarter_overheat_level",
-            "month_overheat_level",
-            "week_overheat_level",
-            "day_overheat_level",
-        ):
+        for key in ("direction", "board_type"):
             value = filters.get(key)
             if value:
                 if isinstance(value, (list, tuple, set)):
                     rows = [row for row in rows if row.get(key) in value]
                 else:
                     rows = [row for row in rows if row.get(key) == value]
+        period_filters = {
+            "year_overheat_level": "period_transition_y",
+            "quarter_overheat_level": "period_transition_q",
+            "month_overheat_level": "period_transition_m",
+            "week_overheat_level": "period_transition_w",
+            "day_overheat_level": "period_transition_d",
+        }
+        for key, field in period_filters.items():
+            value = filters.get(key)
+            if value:
+                if isinstance(value, (list, tuple, set)):
+                    rows = [row for row in rows if row.get(field) in value]
+                else:
+                    rows = [row for row in rows if row.get(field) == value]
         keyword = str(filters.get("q") or "").strip().casefold()
         if keyword:
             rows = [
@@ -3679,7 +3700,7 @@ class FakeN6UserRepository:
                 for row in rows
                 if any(
                     keyword in str(row.get(field) or "").casefold()
-                    for field in ("code", "display_code", "name", "display_name", "identity_key")
+                    for field in ("code", "name", "identity_key")
                 )
             ]
         expected_return_min = n6_app_v1_module.app_v2_expected_return_threshold(
@@ -3756,9 +3777,23 @@ class FakeN6UserRepository:
             if asset_kind in {"index", "board"}
             else []
         )
-        rows = [dict(row) for row in rows[:limit]]
         if asset_kind == "stock":
+            rows = [dict(row) for row in rows]
             self._fake_enrich_stock_membership_display_cache(rows)
+        sort_key = str(filters.get("sort") or "").strip()
+        if sort_key:
+            reverse = str(filters.get("sort_dir") or "asc").strip().lower() == "desc"
+            present_rows = [row for row in rows if row.get(sort_key) not in (None, "")]
+            missing_rows = [row for row in rows if row.get(sort_key) in (None, "")]
+            present_rows.sort(
+                key=lambda row: (
+                    str(row.get(sort_key) or "").casefold(),
+                    str(row.get("identity_key") or ""),
+                ),
+                reverse=reverse,
+            )
+            rows = present_rows + missing_rows
+        rows = [dict(row) for row in rows[:limit]]
         result = {
             "cache_ready": True,
             "items": rows,
@@ -3867,13 +3902,6 @@ class FakeN6UserRepository:
         }
 
     def _fake_enrich_stock_membership_display_cache(self, rows: list[dict[str, Any]]) -> None:
-        industry_by_stock: dict[str, dict[str, Any]] = {}
-        for membership in self.app_member_rows.get("board", []):
-            if str(membership.get("board_type") or "").strip() != "tdx_industry":
-                continue
-            stock_key = str(membership.get("stock_identity_key") or "").strip()
-            if stock_key and stock_key not in industry_by_stock:
-                industry_by_stock[stock_key] = membership
         index_by_stock: dict[str, list[dict[str, Any]]] = {}
         for membership in self.app_member_rows.get("index", []):
             stock_key = str(membership.get("stock_identity_key") or "").strip()
@@ -3881,10 +3909,42 @@ class FakeN6UserRepository:
                 index_by_stock.setdefault(stock_key, []).append(membership)
         for row in rows:
             stock_key = str(row.get("identity_key") or row.get("stock_identity_key") or "").strip()
-            industry = industry_by_stock.get(stock_key)
-            if industry:
-                row["industry_code"] = industry.get("parent_code")
-                row["industry_name"] = industry.get("parent_name")
+            source_trade_date = str(row.get("source_trade_date") or "").strip()
+            industry_memberships = [
+                membership
+                for membership in self.app_member_rows.get("board", [])
+                if str(membership.get("stock_identity_key") or "").strip() == stock_key
+                and str(membership.get("board_type") or "").strip() == "tdx_industry"
+                and str(membership.get("trade_date") or "").strip()
+                and str(membership.get("trade_date") or "").strip() <= source_trade_date
+            ]
+            latest_trade_date = max(
+                (
+                    str(membership.get("trade_date") or "").strip()
+                    for membership in industry_memberships
+                ),
+                default="",
+            )
+            industry_identities = {
+                (
+                    str(
+                        membership.get("board_identity_key")
+                        or membership.get("parent_identity_key")
+                        or ""
+                    ).strip(),
+                    str(membership.get("board_code") or membership.get("parent_code") or "").strip(),
+                    str(membership.get("board_name") or membership.get("parent_name") or "").strip(),
+                )
+                for membership in industry_memberships
+                if str(membership.get("trade_date") or "").strip() == latest_trade_date
+            }
+            if len(industry_identities) == 1:
+                _, industry_code, industry_name = next(iter(industry_identities))
+                row["industry_code"] = industry_code or None
+                row["industry_name"] = industry_name or None
+            else:
+                row["industry_code"] = None
+                row["industry_name"] = None
             index_memberships = index_by_stock.get(stock_key) or []
             if index_memberships:
                 row["index_codes"] = ",".join(
@@ -9155,13 +9215,27 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("FROM v_n6_board_membership_fact", sql_blob)
         self.assertIn("JOIN v_n6_stock_condition_display_basis", sql_blob)
         self.assertIn("membership_rows", sql_blob)
-        self.assertIn("period_grade_y", sql_blob)
-        self.assertIn("period_grade_d", sql_blob)
+        self.assertIn("period_transition_y", sql_blob)
+        self.assertIn("period_transition_d", sql_blob)
+        self.assertNotIn("period_grade_y = %(year_overheat_level)s", sql_blob)
+        self.assertNotIn("period_grade_d = %(day_overheat_level)s", sql_blob)
         self.assertIn("selected_directions", sql_blob)
         self.assertIn("selected_condition_keys", sql_blob)
         self.assertNotIn("period_summary_json->>'year_overheat_level'", sql_blob)
         self.assertIn('t."identity_key" AS "identity_key"', sql_blob)
+        self.assertIn('industry."industry_code" AS "industry_code"', sql_blob)
+        self.assertIn('industry."industry_name" AS "industry_name"', sql_blob)
+        self.assertIn("LEFT JOIN LATERAL", sql_blob)
+        self.assertIn("FROM v_n6_board_membership_fact membership", sql_blob)
+        self.assertIn("membership.board_type = 'tdx_industry'", sql_blob)
+        self.assertIn("asof_membership.trade_date <= t.source_trade_date", sql_blob)
+        self.assertIn("SELECT DISTINCT", sql_blob)
+        self.assertIn("membership.board_identity_key", sql_blob)
+        self.assertIn("membership.board_code", sql_blob)
+        self.assertIn("membership.board_name", sql_blob)
+        self.assertIn("CASE WHEN count(*) = 1", sql_blob)
         self.assertNotIn("SELECT t.*", sql_blob)
+        self.assertNotRegex(sql_blob.upper(), r"\b(?:INSERT|UPDATE|DELETE|MERGE)\b")
 
     def test_b_track_v2_filter_and_monitor_queries_use_explicit_column_allowlists(self) -> None:
         filter_source = inspect.getsource(PostgresN6UserRepository.fetch_app_filter_items)
@@ -9227,6 +9301,62 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("monitor_object", sql_blob)
         self.assertNotIn("user_monitor_", sql_blob)
         self.assertNotIn("n6_virtual", sql_blob)
+
+    def test_b_track_v2_stock_industry_sort_uses_lateral_value_before_limit(self) -> None:
+        source_views = {
+            "v_n6_stock_condition_display_basis",
+            "v_n6_board_membership_fact",
+        }
+        cursor = RecordingCursor(existing_relations=source_views)
+        original_connect = n6_user_app_module.psycopg.connect
+
+        def fake_connect(*_: Any, **__: Any) -> RecordingConnection:
+            return RecordingConnection(cursor)
+
+        n6_user_app_module.psycopg.connect = fake_connect
+        try:
+            repo = PostgresN6UserRepository("postgresql://example.invalid/test")
+            repo.fetch_app_filter_items(
+                principal_id=1,
+                principal_type="admin",
+                user_id=1,
+                asset_kind="stock",
+                filters={"sort": "industry_name", "sort_dir": "asc"},
+                limit=1,
+            )
+            repo.fetch_app_filter_items(
+                principal_id=1,
+                principal_type="admin",
+                user_id=1,
+                asset_kind="stock",
+                filters={"sort": "industry_code", "sort_dir": "desc"},
+                limit=1,
+            )
+        finally:
+            n6_user_app_module.psycopg.connect = original_connect
+
+        result_sqls = [
+            sql
+            for sql, _ in cursor.executions
+            if "LEFT JOIN LATERAL" in sql and "LIMIT %(limit)s" in sql
+        ]
+        result_sql = result_sqls[0]
+        count_sql = next(
+            sql
+            for sql, _ in cursor.executions
+            if "score_sample_count" in sql
+        )
+        self.assertIn(
+            'ORDER BY industry."industry_name" ASC NULLS LAST, t.identity_key ASC',
+            result_sql,
+        )
+        self.assertIn(
+            'ORDER BY industry."industry_code" DESC NULLS LAST, t.identity_key ASC',
+            result_sqls[1],
+        )
+        self.assertLess(result_sql.index("LEFT JOIN LATERAL"), result_sql.index("ORDER BY"))
+        self.assertLess(result_sql.index("ORDER BY"), result_sql.index("LIMIT %(limit)s"))
+        self.assertNotIn("v_n6_board_membership_fact", count_sql)
 
     def test_b_track_v2_filter_repository_ignores_unsafe_sort_columns(self) -> None:
         source_views = {"v_n6_stock_condition_display_basis"}
@@ -11088,15 +11218,15 @@ class N6UserAppTest(unittest.TestCase):
         repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
         period_fields = (
-            "year_overheat_level",
-            "quarter_overheat_level",
-            "month_overheat_level",
-            "week_overheat_level",
-            "day_overheat_level",
+            ("year_overheat_level", "period_grade_y", "period_transition_y"),
+            ("quarter_overheat_level", "period_grade_q", "period_transition_q"),
+            ("month_overheat_level", "period_grade_m", "period_transition_m"),
+            ("week_overheat_level", "period_grade_w", "period_transition_w"),
+            ("day_overheat_level", "period_grade_d", "period_transition_d"),
         )
 
         for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
-            for period_field in period_fields:
+            for period_field, grade_field, transition_field in period_fields:
                 with self.subTest(asset_kind=asset_kind, period_field=period_field):
                     base = dict(repo.app_filter_rows[asset_kind][0])
                     repo.app_filter_rows[asset_kind] = [
@@ -11104,9 +11234,12 @@ class N6UserAppTest(unittest.TestCase):
                             **base,
                             "identity_key": f"{asset_kind}:{period_value}",
                             f"{asset_kind}_identity_key": f"{asset_kind}:{period_value}",
-                            period_field: period_value,
+                            grade_field: "volume_down" if period_value == "volume_up" else "volume_up",
+                            transition_field: period_value,
+                            "level_up_score": 30 if period_value == "volume_up" else 10,
+                            "level_down_score": 10 if period_value == "volume_up" else 30,
                         }
-                        for period_value in ("volume_up", "volume_down")
+                        for period_value in ("volume_up", "volume_down", "flat")
                     ]
                     single = client.get(
                         f"/api/n6/app/v2/filter/{page}?{period_field}=volume_up"
@@ -11115,8 +11248,17 @@ class N6UserAppTest(unittest.TestCase):
                         f"/api/n6/app/v2/filter/{page}"
                         f"?{period_field}=volume_up&{period_field}=volume_down"
                     ).json()
+                    flat = client.get(
+                        f"/api/n6/app/v2/filter/{page}?{period_field}=flat"
+                    ).json()
                     self.assertEqual(single["filtered_count"], 1)
+                    self.assertEqual(single["rows"][0][transition_field], "volume_up")
+                    self.assertEqual(single["score_comparison"]["regime"], "bull")
                     self.assertEqual(within_period_or["filtered_count"], 2)
+                    self.assertEqual(within_period_or["score_comparison"]["sample_count"], 2)
+                    self.assertEqual(within_period_or["score_comparison"]["regime"], "bear")
+                    self.assertEqual(flat["filtered_count"], 1)
+                    self.assertEqual(flat["rows"][0][transition_field], "flat")
 
             base = dict(repo.app_filter_rows[asset_kind][0])
             repo.app_filter_rows[asset_kind] = [
@@ -11124,15 +11266,19 @@ class N6UserAppTest(unittest.TestCase):
                     **base,
                     "identity_key": f"{asset_kind}:AND:1",
                     f"{asset_kind}_identity_key": f"{asset_kind}:AND:1",
-                    "year_overheat_level": "volume_up",
-                    "quarter_overheat_level": "volume_up",
+                    "period_grade_y": "volume_down",
+                    "period_grade_q": "volume_down",
+                    "period_transition_y": "volume_up",
+                    "period_transition_q": "volume_up",
                 },
                 {
                     **base,
                     "identity_key": f"{asset_kind}:AND:2",
                     f"{asset_kind}_identity_key": f"{asset_kind}:AND:2",
-                    "year_overheat_level": "volume_up",
-                    "quarter_overheat_level": "volume_down",
+                    "period_grade_y": "volume_down",
+                    "period_grade_q": "volume_up",
+                    "period_transition_y": "volume_up",
+                    "period_transition_q": "volume_down",
                 },
             ]
             across_period_and = client.get(
@@ -11140,6 +11286,7 @@ class N6UserAppTest(unittest.TestCase):
                 "?year_overheat_level=volume_up&quarter_overheat_level=volume_up"
             ).json()
             self.assertEqual(across_period_and["filtered_count"], 1)
+            self.assertEqual(across_period_and["rows"][0]["identity_key"], f"{asset_kind}:AND:1")
 
         default_page = client.get("/n6/app/filter-center/indexes")
         selected_page = client.get(
@@ -11150,6 +11297,9 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn('class="filter-token is-selected"', default_page.text)
         self.assertIn("year_overheat_level=volume_up", default_page.text)
         self.assertNotIn("__none__", selected_page.text)
+        for label in ("年过渡状态", "季过渡状态", "月过渡状态", "周过渡状态", "日过渡状态"):
+            self.assertIn(label, selected_page.text)
+        self.assertNotIn("过度分级", selected_page.text)
         selected_token = re.search(
             r'class="filter-token is-selected"[^>]+href="([^"]+)"[^>]+'
             r'data-filter-field="year_overheat_level"[^>]+data-filter-value="volume_up"',
@@ -11317,7 +11467,8 @@ class N6UserAppTest(unittest.TestCase):
                 "board_identity_key": f"board:TDX:{881000 + index}",
                 "for_trade_date": "20260706",
                 "buy_expected_return_pct": "30",
-                "year_overheat_level": "volume_up",
+                "period_grade_y": "volume_down",
+                "period_transition_y": "volume_up",
             }
             for index in range(1, 205)
         ]
@@ -12038,6 +12189,151 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("industry_name", response.text)
         self.assertIn("881001", response.text)
         self.assertIn("银行", response.text)
+
+    def test_b_track_v2_stock_industry_is_asof_unique_and_sorted_before_limit(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        base = dict(repo.app_filter_rows["stock"][0])
+        repo.app_filter_rows["stock"] = [
+            {
+                **base,
+                "identity_key": "stock:NO_INDUSTRY",
+                "stock_identity_key": "stock:NO_INDUSTRY",
+                "code": "000001",
+                "name": "无行业",
+                "source_trade_date": "20260710",
+                "for_trade_date": "20260711",
+            },
+            {
+                **base,
+                "identity_key": "stock:MULTIPLE",
+                "stock_identity_key": "stock:MULTIPLE",
+                "code": "000002",
+                "name": "多行业",
+                "source_trade_date": "20260710",
+                "for_trade_date": "20260711",
+            },
+            {
+                **base,
+                "identity_key": "stock:ASOF",
+                "stock_identity_key": "stock:ASOF",
+                "code": "000003",
+                "name": "历史行业",
+                "source_trade_date": "20260710",
+                "for_trade_date": "20260711",
+            },
+            {
+                **base,
+                "identity_key": "stock:DUPLICATE",
+                "stock_identity_key": "stock:DUPLICATE",
+                "code": "000004",
+                "name": "重复同一行业",
+                "source_trade_date": "20260710",
+                "for_trade_date": "20260711",
+            },
+        ]
+        repo.app_member_rows["board"] = [
+            {
+                "stock_identity_key": "stock:MULTIPLE",
+                "board_identity_key": "board:TDX:881002",
+                "board_code": "881002",
+                "board_name": "银行",
+                "board_type": "tdx_industry",
+                "trade_date": "20260709",
+            },
+            {
+                "stock_identity_key": "stock:MULTIPLE",
+                "board_identity_key": "board:TDX:881003",
+                "board_code": "881003",
+                "board_name": "证券",
+                "board_type": "tdx_industry",
+                "trade_date": "20260709",
+            },
+            {
+                "stock_identity_key": "stock:ASOF",
+                "board_identity_key": "board:TDX:881001",
+                "board_code": "881001",
+                "board_name": "保险",
+                "board_type": "tdx_industry",
+                "trade_date": "20260701",
+            },
+            {
+                "stock_identity_key": "stock:ASOF",
+                "board_identity_key": "board:TDX:889999",
+                "board_code": "889999",
+                "board_name": "未来行业",
+                "board_type": "tdx_industry",
+                "trade_date": "20260712",
+            },
+            {
+                "stock_identity_key": "stock:ASOF",
+                "board_identity_key": "board:OTHER:1",
+                "board_code": "000000",
+                "board_name": "其他板块",
+                "board_type": "concept",
+                "trade_date": "20260709",
+            },
+            {
+                "stock_identity_key": "stock:DUPLICATE",
+                "board_identity_key": "board:TDX:881004",
+                "board_code": "881004",
+                "board_name": "半导体",
+                "board_type": "tdx_industry",
+                "trade_date": "20260708",
+            },
+            {
+                "stock_identity_key": "stock:DUPLICATE",
+                "board_identity_key": "board:TDX:881004",
+                "board_code": "881004",
+                "board_name": "半导体",
+                "board_type": "tdx_industry",
+                "trade_date": "20260708",
+            },
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        payload = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?for_trade_date=20260711&sort=industry_name&sort_dir=asc&limit=10"
+        ).json()
+        rows_by_identity = {row["identity_key"]: row for row in payload["rows"]}
+        items_by_identity = {item["identity_key"]: item for item in payload["items"]}
+        limited = client.get(
+            "/api/n6/app/v2/filter/stocks"
+            "?for_trade_date=20260711&sort=industry_name&sort_dir=asc&limit=1"
+        ).json()
+        page = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260711&sort=industry_name&sort_dir=asc"
+        )
+
+        self.assertEqual(rows_by_identity["stock:ASOF"]["industry_code"], "881001")
+        self.assertEqual(rows_by_identity["stock:ASOF"]["industry_name"], "保险")
+        self.assertEqual(rows_by_identity["stock:DUPLICATE"]["industry_code"], "881004")
+        self.assertEqual(rows_by_identity["stock:DUPLICATE"]["industry_name"], "半导体")
+        self.assertEqual(items_by_identity["stock:ASOF"]["industry_code"], "881001")
+        self.assertEqual(items_by_identity["stock:ASOF"]["industry_name"], "保险")
+        self.assertEqual(items_by_identity["stock:DUPLICATE"]["industry_code"], "881004")
+        self.assertEqual(items_by_identity["stock:DUPLICATE"]["industry_name"], "半导体")
+        self.assertIsNone(rows_by_identity["stock:NO_INDUSTRY"]["industry_code"])
+        self.assertIsNone(rows_by_identity["stock:NO_INDUSTRY"]["industry_name"])
+        self.assertIsNone(rows_by_identity["stock:MULTIPLE"]["industry_code"])
+        self.assertIsNone(rows_by_identity["stock:MULTIPLE"]["industry_name"])
+        self.assertIsNone(items_by_identity["stock:NO_INDUSTRY"]["industry_code"])
+        self.assertIsNone(items_by_identity["stock:NO_INDUSTRY"]["industry_name"])
+        self.assertIsNone(items_by_identity["stock:MULTIPLE"]["industry_code"])
+        self.assertIsNone(items_by_identity["stock:MULTIPLE"]["industry_name"])
+        self.assertEqual(limited["rows"][0]["identity_key"], "stock:ASOF")
+        self.assertEqual(limited["items"][0]["identity_key"], "stock:ASOF")
+        self.assertEqual(limited["items"][0]["industry_code"], "881001")
+        self.assertEqual(limited["items"][0]["industry_name"], "保险")
+        self.assertIn("industry_code", payload["schema"])
+        self.assertIn("industry_name", payload["schema"])
+        self.assertIn("industry_code", [column["key"] for column in payload["columns"]])
+        self.assertIn("industry_name", [column["key"] for column in payload["columns"]])
+        self.assertIn("881001", page.text)
+        self.assertIn("保险", page.text)
+        self.assertEqual(sum(repo.forbidden_writes.values()), 0)
 
     def test_b_track_v2_filter_linked_stock_apis_return_membership_intersection(self) -> None:
         client, repo, _, _ = build_client()

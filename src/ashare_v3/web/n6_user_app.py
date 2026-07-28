@@ -5972,12 +5972,26 @@ class PostgresN6UserRepository:
                     else "暂无数据"
                 ),
             }
-            order_sql = self._app_v2_filter_order_sql(table_name, filters)
-            select_sql = self._app_v2_filter_select_sql(table_name, asset_kind)
+            order_sql = self._app_v2_filter_order_sql(
+                table_name,
+                filters,
+                asset_kind=asset_kind,
+            )
+            select_sql = self._app_v2_filter_select_sql(
+                table_name,
+                asset_kind,
+                include_stock_industry=asset_kind == "stock",
+            )
+            stock_industry_join_sql = (
+                self._app_v2_stock_industry_join_sql()
+                if asset_kind == "stock"
+                else ""
+            )
             cur.execute(
                 f"""
                 SELECT {select_sql}
                 FROM {table_name} t
+                {stock_industry_join_sql}
                 WHERE {where_sql}
                   AND {source_where_sql}
                   AND {recommendation_where_sql}
@@ -8429,30 +8443,76 @@ class PostgresN6UserRepository:
         self._app_v2_filter_column_cache[table_name] = set(columns)
         return columns
 
-    def _app_v2_filter_select_sql(self, table_name: str, asset_kind: str, *, alias: str = "t") -> str:
+    def _app_v2_filter_select_sql(
+        self,
+        table_name: str,
+        asset_kind: str,
+        *,
+        alias: str = "t",
+        include_stock_industry: bool = False,
+    ) -> str:
         available_columns = self._app_v2_filter_columns(table_name)
-        selected_columns = [
-            field
-            for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ())
-            if field in available_columns and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field)
-        ]
-        if not selected_columns:
+        select_expressions: list[str] = []
+        for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ()):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field):
+                continue
+            if include_stock_industry and field in {"industry_code", "industry_name"}:
+                select_expressions.append(f'industry."{field}" AS "{field}"')
+            elif field in available_columns:
+                select_expressions.append(f'{alias}."{field}" AS "{field}"')
+        if not select_expressions:
             raise RuntimeError("approved N6 filter view exposes no approved visible columns")
-        return ",\n                       ".join(
-            f'{alias}."{field}" AS "{field}"'
-            for field in selected_columns
-        )
+        return ",\n                       ".join(select_expressions)
 
-    def _app_v2_filter_order_sql(self, table_name: str, filters: dict[str, Any]) -> str:
+    @staticmethod
+    def _app_v2_stock_industry_join_sql() -> str:
+        return """
+                LEFT JOIN LATERAL (
+                  SELECT
+                    CASE WHEN count(*) = 1 THEN max(industry_identity.board_code) END AS industry_code,
+                    CASE WHEN count(*) = 1 THEN max(industry_identity.board_name) END AS industry_name
+                  FROM (
+                    SELECT DISTINCT
+                           membership.board_identity_key,
+                           membership.board_code,
+                           membership.board_name
+                    FROM v_n6_board_membership_fact membership
+                    WHERE membership.stock_identity_key = t.identity_key
+                      AND membership.board_type = 'tdx_industry'
+                      AND NULLIF(btrim(membership.board_identity_key::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_code::text), '') IS NOT NULL
+                      AND NULLIF(btrim(membership.board_name::text), '') IS NOT NULL
+                      AND membership.trade_date = (
+                        SELECT max(asof_membership.trade_date)
+                        FROM v_n6_board_membership_fact asof_membership
+                        WHERE asof_membership.stock_identity_key = t.identity_key
+                          AND asof_membership.board_type = 'tdx_industry'
+                          AND asof_membership.trade_date <= t.source_trade_date
+                      )
+                  ) industry_identity
+                ) industry ON TRUE
+        """
+
+    def _app_v2_filter_order_sql(
+        self,
+        table_name: str,
+        filters: dict[str, Any],
+        *,
+        asset_kind: str = "",
+    ) -> str:
         default_order = "t.updated_at DESC NULLS LAST, t.identity_key ASC"
         sort_key = normalize_filter_value(filters.get("sort"))
         if not sort_key or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", sort_key):
             return default_order
-        if sort_key not in self._app_v2_filter_columns(table_name):
+        if asset_kind == "stock" and sort_key in {"industry_code", "industry_name"}:
+            sort_expression = f'industry."{sort_key}"'
+        elif sort_key in self._app_v2_filter_columns(table_name):
+            sort_expression = f't."{sort_key}"'
+        else:
             return default_order
         sort_dir = str(filters.get("sort_dir") or "asc").strip().lower()
         direction = "DESC" if sort_dir == "desc" else "ASC"
-        return f't."{sort_key}" {direction} NULLS LAST, t.identity_key ASC'
+        return f"{sort_expression} {direction} NULLS LAST, t.identity_key ASC"
 
     def _app_v2_monitor_relation_exists(self, relation_name: str) -> bool:
         if relation_name not in set(APP_V2_MONITOR_TABLE_BY_ASSET.values()):
@@ -8712,11 +8772,11 @@ class PostgresN6UserRepository:
             params["condition_key"] = condition_key
             where_clauses.append("%(condition_key)s = ANY(selected_condition_keys)")
         period_filters = {
-            "year_overheat_level": "period_grade_y",
-            "quarter_overheat_level": "period_grade_q",
-            "month_overheat_level": "period_grade_m",
-            "week_overheat_level": "period_grade_w",
-            "day_overheat_level": "period_grade_d",
+            "year_overheat_level": "period_transition_y",
+            "quarter_overheat_level": "period_transition_q",
+            "month_overheat_level": "period_transition_m",
+            "week_overheat_level": "period_transition_w",
+            "day_overheat_level": "period_transition_d",
         }
         for key, expression in period_filters.items():
             values = normalize_filter_values(filters.get(key))

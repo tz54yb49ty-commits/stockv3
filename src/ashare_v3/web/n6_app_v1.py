@@ -624,18 +624,18 @@ V2_MONITOR_SOURCE_OBJECT_KIND_BY_TYPE = {
     "board_linked_stock": "board",
 }
 V2_OVERHEAT_FILTER_LABELS = {
-    "year_overheat_level": "年过度分级",
-    "quarter_overheat_level": "季过度分级",
-    "month_overheat_level": "月过度分级",
-    "week_overheat_level": "周过度分级",
-    "day_overheat_level": "日过度分级",
+    "year_overheat_level": "年过渡状态",
+    "quarter_overheat_level": "季过渡状态",
+    "month_overheat_level": "月过渡状态",
+    "week_overheat_level": "周过渡状态",
+    "day_overheat_level": "日过渡状态",
 }
 V2_PERIOD_GRADE_FILTERS = (
-    ("year_overheat_level", "年过度分级"),
-    ("quarter_overheat_level", "季过度分级"),
-    ("month_overheat_level", "月过度分级"),
-    ("week_overheat_level", "周过度分级"),
-    ("day_overheat_level", "日过度分级"),
+    ("year_overheat_level", "年过渡状态"),
+    ("quarter_overheat_level", "季过渡状态"),
+    ("month_overheat_level", "月过渡状态"),
+    ("week_overheat_level", "周过渡状态"),
+    ("day_overheat_level", "日过渡状态"),
 )
 V2_PERIOD_GRADE_OPTIONS = (
     {"value": "volume_up", "label": "放量上涨"},
@@ -3977,6 +3977,8 @@ def _app_v2_filter_item(
             "code": _first_text(row, "code"),
             "exchange": _first_text(row, "exchange"),
             "name": _first_text(row, "name"),
+            "industry_code": row.get("industry_code"),
+            "industry_name": row.get("industry_name"),
             "total_mv": _first_text(row, "total_mv"),
             "circ_mv": _first_text(row, "circ_mv"),
             "score": _first_text(row, "score"),
