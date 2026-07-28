@@ -692,6 +692,17 @@
       margin-top: 6px;
       gap: 6px;
     }
+    .n6-data-workspace .filter-primary-row,
+    .n6-data-workspace .filter-secondary-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .n6-data-workspace .filter-primary-row .monitor-actions,
+    .n6-data-workspace .filter-secondary-row .monitor-actions {
+      margin-top: 0;
+    }
     .n6-data-workspace .table-wrap {
       max-height: calc(100vh - 260px);
       overflow: auto;
@@ -1225,17 +1236,14 @@
       </div>
       {% endfor %}
       {% elif page.page_key == "filter-center" %}
-      <div class="text-block">
-        <h3>筛选中心</h3>
-        <span class="chip">只读筛选</span>
-        <span class="chip">买向观察</span>
-        <span class="chip">卖向观察</span>
-        <span class="chip">asset_kind</span>
-        <span class="chip">board_type</span>
-      </div>
+      {% set selected_section = page.data.sections.get(page.data.selected_section_key) %}
       {% set date_selector = page.data.get("date_selector") %}
-      {% if date_selector and date_selector.enabled %}
-      <div class="text-block">
+      {% set filter_reset = page.data.get("filter_reset") %}
+      <div class="text-block filter-primary-row" aria-label="筛选中心主筛选">
+        {% for sub in page.data.subinterfaces %}
+        <a class="chip{% if sub.active %} active{% endif %}" href="{{ sub.href }}">{{ sub.label }}</a>
+        {% endfor %}
+        {% if date_selector and date_selector.enabled %}
         <form method="get" action="{{ date_selector.base_href }}" class="monitor-actions">
           <label for="filter-for-trade-date">{{ date_selector.label }}</label>
           {% for hidden in date_selector.hidden_fields %}
@@ -1248,13 +1256,23 @@
           </select>
           <button type="submit">切换日期</button>
         </form>
-      </div>
-      {% endif %}
-      <div class="text-block" aria-label="筛选子界面">
-        {% for sub in page.data.subinterfaces %}
-        <a class="chip{% if sub.active %} active{% endif %}" href="{{ sub.href }}">{{ sub.label }}</a>
-        {% endfor %}
-        {% set filter_reset = page.data.get("filter_reset") %}
+        {% endif %}
+        {% if selected_section and selected_section.search_filter %}
+        <form method="get" action="{{ selected_section.search_filter.base_href }}" class="monitor-actions" data-code-search>
+          {% for hidden in selected_section.search_filter.hidden_fields %}
+          <input type="hidden" name="{{ hidden.name }}" value="{{ hidden.value }}">
+          {% endfor %}
+          <label for="filter-code-search">代码查找</label>
+          <input
+            id="filter-code-search"
+            type="search"
+            name="q"
+            value="{{ selected_section.search_filter.value }}"
+            placeholder="代码 / 名称 / identity_key"
+          >
+          <button type="submit">查找</button>
+        </form>
+        {% endif %}
         {% if filter_reset %}
         <a
           href="{{ filter_reset.href }}"
@@ -1263,10 +1281,11 @@
         >{{ filter_reset.label }}</a>
         {% endif %}
       </div>
-      {% for section_key, section in page.data.sections.items() %}
-      {% set expected_return = section.expected_return_filter %}
+      {% if selected_section %}
+      {% set expected_return = selected_section.expected_return_filter %}
+      {% set recommendation = selected_section.level_up_recommendation_filter %}
+      <div class="text-block filter-secondary-row" aria-label="收益与推荐筛选">
       {% if expected_return and expected_return.enabled %}
-      <div class="text-block" aria-label="预期收益率筛选">
         <form method="get" action="{{ expected_return.base_href }}" class="monitor-actions" data-expected-return-filter>
           {% for hidden in expected_return.hidden_fields %}
           <input type="hidden" name="{{ hidden.name }}" value="{{ hidden.value }}">
@@ -1277,9 +1296,9 @@
             value="{{ expected_return.value }}"
             data-expected-return-hidden
           >
-          <label for="filter-expected-return-{{ section.asset_kind }}">{{ expected_return.label }}</label>
+          <label for="filter-expected-return-{{ selected_section.asset_kind }}">{{ expected_return.label }}</label>
           <input
-            id="filter-expected-return-{{ section.asset_kind }}"
+            id="filter-expected-return-{{ selected_section.asset_kind }}"
             type="range"
             min="{{ expected_return.min }}"
             max="{{ expected_return.max }}"
@@ -1296,13 +1315,8 @@
           <a href="{{ expected_return.clear_href }}">清除预期收益率</a>
           {% endif %}
         </form>
-      </div>
       {% endif %}
-      {% endfor %}
-      {% for section_key, section in page.data.sections.items() %}
-      {% set recommendation = section.level_up_recommendation_filter %}
       {% if recommendation and recommendation.enabled %}
-      <div class="text-block" aria-label="推荐筛选">
         <div class="monitor-actions">
           <a href="{{ recommendation.href }}">{{ recommendation.label }}</a>
           {% if recommendation.active %}
@@ -1310,9 +1324,9 @@
           <a href="{{ recommendation.clear_href }}">清除推荐筛选</a>
           {% endif %}
         </div>
+      {% endif %}
       </div>
       {% endif %}
-      {% endfor %}
       {% for section_key, section in page.data.sections.items() %}
       <details class="grade-filter-panel" data-filter-panel="period-grade" open>
         <summary><span aria-hidden="true">⌄</span><span>分级筛选</span></summary>
@@ -1331,7 +1345,9 @@
                 aria-pressed="{% if option.selected %}true{% else %}false{% endif %}"
               >
                 <span>{{ option.label }}</span>
+                {% if option.selected %}
                 <span class="token-remove" aria-hidden="true">×</span>
+                {% endif %}
               </a>
               {% endfor %}
               <a
@@ -1354,20 +1370,32 @@
       {% for section_key, section in page.data.sections.items() %}
       <div class="text-block" id="{{ section.anchor_id }}">
         <h3>{{ section.component_label }}</h3>
+        <span
+          class="chip{% if section.score_comparison.regime == 'bear' %} warn{% endif %}"
+          data-score-regime="{{ section.score_comparison.regime }}"
+        >{{ section.score_comparison.label }}</span>
         <span class="chip">状态: {{ section.status_label }}</span>
         <span class="chip">总记录数: {{ section.total_count }}</span>
         <span class="chip">筛选后数量: {{ section.filtered_count }}</span>
         <span class="chip">当前显示: {{ section.returned_count }}</span>
-        <span class="chip">读取表: {{ section.read_source_table }}</span>
-        <span class="chip">展示标签: {{ section.source_table }}</span>
         {% if section.date_policy_message %}
         <span class="chip">{{ section.date_policy_message }}</span>
         {% endif %}
-        {% if section.membership_read_source_table %}
-        <span class="chip">成分表: {{ section.membership_read_source_table }}</span>
-        {% endif %}
-        <span class="chip">默认方向: {{ section.default_monitor_direction_label }}</span>
         <div class="monitor-actions"><span class="chip">筛选结果只读；可按授权保存到本人范围</span></div>
+        <details class="technical-details">
+          <summary>技术来源</summary>
+          <div class="monitor-actions">
+            <span class="chip">读取表: {{ section.read_source_table }}</span>
+            <span class="chip">展示标签: {{ section.source_table }}</span>
+            {% if section.membership_read_source_table %}
+            <span class="chip">成分表: {{ section.membership_read_source_table }}</span>
+            {% endif %}
+            <span class="chip">默认方向: {{ section.default_monitor_direction_label }}</span>
+            <span class="chip">up均值: {{ section.score_comparison.level_up_score_avg if section.score_comparison.level_up_score_avg is not none else "—" }}</span>
+            <span class="chip">down均值: {{ section.score_comparison.level_down_score_avg if section.score_comparison.level_down_score_avg is not none else "—" }}</span>
+            <span class="chip">比较样本: {{ section.score_comparison.sample_count }}</span>
+          </div>
+        </details>
         {% if section.controls.bulk_add_enabled and section.filtered_count %}
         <div
           class="monitor-actions"
@@ -1377,9 +1405,6 @@
         >
           <button type="button" class="row-action" data-n6-bulk-monitor>
             将筛选结果全部加入监控对象（{{ section.filtered_count }}）
-          </button>
-          <button type="button" class="row-action" data-n6-bulk-realtime>
-            将筛选结果全部加入实时监控范围（{{ section.filtered_count }}）
           </button>
           <span class="chip" data-n6-bulk-status role="status" aria-live="polite" hidden></span>
         </div>
@@ -1470,7 +1495,9 @@
               <td class="filter-action-cell">
                 <div class="row-action-line">
                   <span>{{ item.asset_kind_label }}</span>
+                  {% if item.display_code and item.display_code != "—" %}
                   <span class="subtle">{{ item.display_code }}</span>
+                  {% endif %}
                 </div>
                 {% if section.controls.add_monitor_enabled %}
                 <div class="row-action-line">

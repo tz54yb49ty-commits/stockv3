@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 import inspect
 import os
 from typing import Any
+from urllib.parse import quote
 from unittest.mock import call, patch
 
 import httpx
@@ -3671,6 +3672,16 @@ class FakeN6UserRepository:
                     rows = [row for row in rows if row.get(key) in value]
                 else:
                     rows = [row for row in rows if row.get(key) == value]
+        keyword = str(filters.get("q") or "").strip().casefold()
+        if keyword:
+            rows = [
+                row
+                for row in rows
+                if any(
+                    keyword in str(row.get(field) or "").casefold()
+                    for field in ("code", "display_code", "name", "display_name", "identity_key")
+                )
+            ]
         expected_return_min = n6_app_v1_module.app_v2_expected_return_threshold(
             filters.get("buy_expected_return_pct_min")
         )
@@ -3700,6 +3711,30 @@ class FakeN6UserRepository:
                     and self._fake_decimal_or_none(row.get("level_up_score")) >= threshold
                 ]
         filtered_count = len(rows)
+        score_pairs = [
+            (up_score, down_score)
+            for row in rows
+            if (up_score := self._fake_decimal_or_none(row.get("level_up_score"))) is not None
+            and (down_score := self._fake_decimal_or_none(row.get("level_down_score"))) is not None
+        ]
+        score_sample_count = len(score_pairs)
+        level_up_score_avg = (
+            sum((pair[0] for pair in score_pairs), Decimal("0")) / score_sample_count
+            if score_sample_count
+            else None
+        )
+        level_down_score_avg = (
+            sum((pair[1] for pair in score_pairs), Decimal("0")) / score_sample_count
+            if score_sample_count
+            else None
+        )
+        score_regime = (
+            "bull"
+            if score_sample_count and level_up_score_avg > level_down_score_avg
+            else "bear"
+            if score_sample_count
+            else "unavailable"
+        )
         if source_context is not None:
             source_context["matched_stock_count"] = filtered_count
             if (
@@ -3741,6 +3776,19 @@ class FakeN6UserRepository:
                 "",
             ),
             "level_up_recommendation": level_up_recommendation,
+            "score_comparison": {
+                "level_up_score_avg": level_up_score_avg,
+                "level_down_score_avg": level_down_score_avg,
+                "sample_count": score_sample_count,
+                "regime": score_regime,
+                "label": (
+                    "牛市"
+                    if score_regime == "bull"
+                    else "熊市"
+                    if score_regime == "bear"
+                    else "暂无数据"
+                ),
+            },
             "linked_stock_filter_source_identity_keys": linked_stock_filter_source_identity_keys,
         }
         if source_context is not None:
@@ -10989,6 +11037,234 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(stock_payload["rows"][0]["buy_target_price"], "15.01343344034499350862073709")
         self.assertFalse(any(repo.forbidden_writes.values()))
 
+    def test_filter_center_score_comparison_uses_full_filtered_pre_limit_sample(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        score_cases = {
+            "stock": (("20", "10"), ("40", "30"), "bull", "牛市", "30", "20"),
+            "index": (("10", "20"), ("30", "40"), "bear", "熊市", "20", "30"),
+            "board": ((None, "20"), ("30", None), "unavailable", "暂无数据", None, None),
+        }
+        for asset_kind, case in score_cases.items():
+            base = dict(repo.app_filter_rows[asset_kind][0])
+            first_pair, second_pair, *_ = case
+            repo.app_filter_rows[asset_kind] = [
+                {
+                    **base,
+                    "identity_key": f"{asset_kind}:SCORE:{index}",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:SCORE:{index}",
+                    "code": f"00000{index}",
+                    "name": f"分数样本{index}",
+                    "for_trade_date": "20260728",
+                    "level_up_score": pair[0],
+                    "level_down_score": pair[1],
+                }
+                for index, pair in enumerate((first_pair, second_pair), start=1)
+            ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
+            with self.subTest(asset_kind=asset_kind):
+                response = client.get(f"/api/n6/app/v2/filter/{page}?limit=1")
+                payload = response.json()
+                comparison = payload["score_comparison"]
+                expected = score_cases[asset_kind]
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(payload["returned_count"], 1)
+                self.assertEqual(comparison["sample_count"], 2 if asset_kind != "board" else 0)
+                self.assertEqual(comparison["regime"], expected[2])
+                self.assertEqual(comparison["label"], expected[3])
+                self.assertEqual(comparison["level_up_score_avg"], expected[4])
+                self.assertEqual(comparison["level_down_score_avg"], expected[5])
+                column_keys = [column["key"] for column in payload["columns"]]
+                self.assertEqual(
+                    column_keys.index("level_down_score"),
+                    column_keys.index("level_up_score") + 1,
+                )
+
+    def test_filter_center_period_grades_are_unlimited_then_or_within_and_across_periods(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        period_fields = (
+            "year_overheat_level",
+            "quarter_overheat_level",
+            "month_overheat_level",
+            "week_overheat_level",
+            "day_overheat_level",
+        )
+
+        for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
+            for period_field in period_fields:
+                with self.subTest(asset_kind=asset_kind, period_field=period_field):
+                    base = dict(repo.app_filter_rows[asset_kind][0])
+                    repo.app_filter_rows[asset_kind] = [
+                        {
+                            **base,
+                            "identity_key": f"{asset_kind}:{period_value}",
+                            f"{asset_kind}_identity_key": f"{asset_kind}:{period_value}",
+                            period_field: period_value,
+                        }
+                        for period_value in ("volume_up", "volume_down")
+                    ]
+                    single = client.get(
+                        f"/api/n6/app/v2/filter/{page}?{period_field}=volume_up"
+                    ).json()
+                    within_period_or = client.get(
+                        f"/api/n6/app/v2/filter/{page}"
+                        f"?{period_field}=volume_up&{period_field}=volume_down"
+                    ).json()
+                    self.assertEqual(single["filtered_count"], 1)
+                    self.assertEqual(within_period_or["filtered_count"], 2)
+
+            base = dict(repo.app_filter_rows[asset_kind][0])
+            repo.app_filter_rows[asset_kind] = [
+                {
+                    **base,
+                    "identity_key": f"{asset_kind}:AND:1",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:AND:1",
+                    "year_overheat_level": "volume_up",
+                    "quarter_overheat_level": "volume_up",
+                },
+                {
+                    **base,
+                    "identity_key": f"{asset_kind}:AND:2",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:AND:2",
+                    "year_overheat_level": "volume_up",
+                    "quarter_overheat_level": "volume_down",
+                },
+            ]
+            across_period_and = client.get(
+                f"/api/n6/app/v2/filter/{page}"
+                "?year_overheat_level=volume_up&quarter_overheat_level=volume_up"
+            ).json()
+            self.assertEqual(across_period_and["filtered_count"], 1)
+
+        default_page = client.get("/n6/app/filter-center/indexes")
+        selected_page = client.get(
+            "/n6/app/filter-center/indexes?year_overheat_level=volume_up"
+        )
+        self.assertNotIn("__none__", default_page.text)
+        self.assertNotIn('<span class="token-remove"', default_page.text)
+        self.assertNotIn('class="filter-token is-selected"', default_page.text)
+        self.assertIn("year_overheat_level=volume_up", default_page.text)
+        self.assertNotIn("__none__", selected_page.text)
+        selected_token = re.search(
+            r'class="filter-token is-selected"[^>]+href="([^"]+)"[^>]+'
+            r'data-filter-field="year_overheat_level"[^>]+data-filter-value="volume_up"',
+            selected_page.text,
+        )
+        self.assertIsNotNone(selected_token)
+        self.assertNotIn("year_overheat_level", selected_token.group(1))
+
+    def test_filter_center_get_search_matches_code_name_identity_and_preserves_filters(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        for asset_kind in ("stock", "index", "board"):
+            base = dict(repo.app_filter_rows[asset_kind][0])
+            repo.app_filter_rows[asset_kind] = [
+                {
+                    **base,
+                    "identity_key": f"{asset_kind}:SEARCH:ALPHA",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:SEARCH:ALPHA",
+                    "code": "123456",
+                    "display_code": "123456",
+                    "name": "北辰样本",
+                    "display_name": "北辰样本",
+                    "year_overheat_level": "volume_up",
+                    "for_trade_date": "20260728",
+                },
+                {
+                    **base,
+                    "identity_key": f"{asset_kind}:SEARCH:BETA",
+                    f"{asset_kind}_identity_key": f"{asset_kind}:SEARCH:BETA",
+                    "code": "654321",
+                    "display_code": "654321",
+                    "name": "南星样本",
+                    "display_name": "南星样本",
+                    "year_overheat_level": "volume_up",
+                    "for_trade_date": "20260728",
+                },
+            ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
+            for query, expected_identity in (
+                ("1234", f"{asset_kind}:SEARCH:ALPHA"),
+                ("南星", f"{asset_kind}:SEARCH:BETA"),
+                ("search:alpha", f"{asset_kind}:SEARCH:ALPHA"),
+            ):
+                with self.subTest(asset_kind=asset_kind, query=query):
+                    payload = client.get(
+                        f"/api/n6/app/v2/filter/{page}?q={quote(query)}"
+                    ).json()
+                    self.assertEqual(payload["filtered_count"], 1)
+                    self.assertEqual(payload["rows"][0]["identity_key"], expected_identity)
+
+        page = client.get(
+            "/n6/app/filter-center/stocks"
+            "?for_trade_date=20260728&year_overheat_level=volume_up"
+            "&sort=level_up_score&sort_dir=desc&q=1234"
+        )
+        self.assertIn('method="get"', page.text)
+        self.assertIn('data-code-search', page.text)
+        self.assertIn('name="q"', page.text)
+        self.assertIn('value="1234"', page.text)
+        for name, value in (
+            ("for_trade_date", "20260728"),
+            ("year_overheat_level", "volume_up"),
+            ("sort", "level_up_score"),
+            ("sort_dir", "desc"),
+        ):
+            self.assertIn(f'name="{name}" value="{value}"', page.text)
+
+    def test_filter_center_table_hides_stock_forecast_bulk_realtime_and_empty_display_code(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0].update(
+            {
+                "display_code": "—",
+                "forecast_type": "预增",
+                "forecast_score": "88",
+                "level_up_score": "20",
+                "level_down_score": "10",
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_payload = client.get("/api/n6/app/v2/filter/stocks").json()
+        page = client.get("/n6/app/filter-center/stocks")
+        column_keys = [column["key"] for column in api_payload["columns"]]
+
+        self.assertIn("forecast_type", api_payload["schema"])
+        self.assertIn("forecast_score", api_payload["schema"])
+        self.assertEqual(api_payload["rows"][0]["forecast_type"], "预增")
+        self.assertEqual(api_payload["rows"][0]["forecast_score"], "88")
+        self.assertNotIn("forecast_type", column_keys)
+        self.assertNotIn("forecast_score", column_keys)
+        self.assertNotIn('data-column-key="forecast_type"', page.text)
+        self.assertNotIn('data-column-key="forecast_score"', page.text)
+        self.assertNotIn('<span class="subtle">—</span>', page.text)
+        self.assertIn('data-n6-bulk-monitor', page.text)
+        self.assertNotIn(
+            '<button type="button" class="row-action" data-n6-bulk-realtime>',
+            page.text,
+        )
+        self.assertIn('data-n6-add-realtime', page.text)
+        primary_row = '<div class="text-block filter-primary-row"'
+        secondary_row = '<div class="text-block filter-secondary-row"'
+        grade_panel = '<details class="grade-filter-panel"'
+        self.assertLess(page.text.index(primary_row), page.text.index(secondary_row))
+        self.assertLess(page.text.index(secondary_row), page.text.index(grade_panel))
+        self.assertIn("<summary>技术来源</summary>", page.text)
+        self.assertIn('data-score-regime="bull"', page.text)
+        self.assertIn("牛市", page.text)
+
     def test_b_track_v2_filter_expected_return_slider_filters_all_asset_pages(self) -> None:
         client, repo, _, _ = build_client()
         repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
@@ -11230,7 +11506,11 @@ class N6UserAppTest(unittest.TestCase):
         self.assertTrue(set(index_board_required_fields).issubset(set(index_payload["schema"])))
         self.assertTrue(set(index_board_required_fields).issubset(set(board_payload["schema"])))
         expected_columns = {
-            "stock": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["stock"]),
+            "stock": [
+                field
+                for field in n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["stock"]
+                if field not in n6_app_v1_module.V2_FILTER_TABLE_HIDDEN_FIELDS_BY_ASSET["stock"]
+            ],
             "index": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["index"]),
             "board": list(n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET["board"]),
         }
@@ -12026,6 +12306,7 @@ class N6UserAppTest(unittest.TestCase):
             "source_context",
             "expected_return_filter",
             "level_up_recommendation_filter",
+            "score_comparison",
             "default_monitor_direction",
             "default_monitor_direction_label",
             "read_source_table",
@@ -13102,11 +13383,11 @@ class N6UserAppTest(unittest.TestCase):
                     response.text,
                 )
                 self.assertIn("将筛选结果全部加入监控对象（", response.text)
-                self.assertIn(
+                self.assertNotIn(
                     '<button type="button" class="row-action" data-n6-bulk-realtime>',
                     response.text,
                 )
-                self.assertIn("将筛选结果全部加入实时监控范围（", response.text)
+                self.assertNotIn("将筛选结果全部加入实时监控范围（", response.text)
 
     def test_filter_bulk_token_is_target_session_and_snapshot_bound(self) -> None:
         client, repo, _, _ = build_client(

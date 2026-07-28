@@ -503,6 +503,7 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "prev_up_str",
         "prev_dn_str",
         "level_up_score",
+        "level_down_score",
         "period_transition_y",
         "period_transition_q",
         "period_transition_m",
@@ -532,6 +533,7 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "prev_up_str",
         "prev_dn_str",
         "level_up_score",
+        "level_down_score",
         "period_transition_y",
         "period_transition_q",
         "period_transition_m",
@@ -549,12 +551,16 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "prev_up_str",
         "prev_dn_str",
         "level_up_score",
+        "level_down_score",
         "period_transition_y",
         "period_transition_q",
         "period_transition_m",
         "period_transition_w",
         "period_transition_d",
     ),
+}
+V2_FILTER_TABLE_HIDDEN_FIELDS_BY_ASSET = {
+    "stock": frozenset({"forecast_type", "forecast_score"}),
 }
 V2_FILTER_PAGE_BY_ASSET = {
     "index": "indexes",
@@ -3048,6 +3054,12 @@ def app_v2_filter_model(
     ]
     if show_all:
         date_hidden_fields.append({"name": "show_all", "value": "1"})
+    search_hidden_fields = [
+        {"name": key, "value": value}
+        for key, value in _filter_query_pairs(filters, exclude_field="q")
+    ]
+    if show_all:
+        search_hidden_fields.append({"name": "show_all", "value": "1"})
     has_more_rows = cache_ready and not show_all and returned_count < filtered_count
     component = V2_FILTER_COMPONENT_BY_ASSET.get(asset_kind, "B Track V2 Stock Filter")
     status = "data_not_ready" if not cache_ready else "ready"
@@ -3138,6 +3150,19 @@ def app_v2_filter_model(
             show_all=show_all,
             recommendation=result.get("level_up_recommendation"),
         ),
+        "search_filter": {
+            "base_href": base_href,
+            "value": str(filters.get("q") or "").strip(),
+            "hidden_fields": search_hidden_fields,
+            "clear_href": _filter_href(
+                base_href,
+                [
+                    *_filter_query_pairs(filters, exclude_field="q"),
+                    *(((("show_all", "1"),) if show_all else ())),
+                ],
+            ),
+        },
+        "score_comparison": _app_v2_score_comparison_model(result.get("score_comparison")),
         "filters": clean_filters,
         "filters_json": json.dumps(clean_filters, ensure_ascii=False, sort_keys=True),
         "default_monitor_direction": monitor_direction,
@@ -3188,6 +3213,7 @@ def app_v2_filter_api_model(model: dict[str, Any], *, asset_kind: str) -> dict[s
         "source_context": model.get("source_context") or {},
         "expected_return_filter": model.get("expected_return_filter") or {},
         "level_up_recommendation_filter": model.get("level_up_recommendation_filter") or {},
+        "score_comparison": model.get("score_comparison") or _app_v2_score_comparison_model(None),
         "default_monitor_direction": model.get("default_monitor_direction") or "buy",
         "default_monitor_direction_label": model.get("default_monitor_direction_label") or "",
         "read_source_table": model.get("read_source_table") or "",
@@ -3574,7 +3600,12 @@ def _app_v2_filter_columns(
 ) -> list[dict[str, Any]]:
     columns: list[dict[str, Any]] = []
     schema_set = set(schema)
-    visible_fields = [field for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ()) if field in schema_set]
+    hidden_fields = V2_FILTER_TABLE_HIDDEN_FIELDS_BY_ASSET.get(asset_kind, frozenset())
+    visible_fields = [
+        field
+        for field in V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ())
+        if field in schema_set and field not in hidden_fields
+    ]
     fields = visible_fields or list(schema)
     for field in fields:
         sort_type = _app_v2_filter_infer_sort_type([row.get(field) for row in rows])
@@ -3715,7 +3746,6 @@ def _period_grade_filter_href(
     field: str,
     value: str,
     selected_values: list[str],
-    option_values: list[str],
 ) -> str:
     next_values = list(selected_values)
     if value in next_values:
@@ -3724,10 +3754,6 @@ def _period_grade_filter_href(
         next_values.append(value)
 
     pairs = _filter_query_pairs(filters, exclude_field=field)
-    if len(next_values) == len(option_values):
-        return _filter_href(base_href, pairs)
-    if not next_values:
-        next_values = ["__none__"]
     pairs.extend((field, item) for item in next_values)
     return _filter_href(base_href, pairs)
 
@@ -3742,14 +3768,13 @@ def app_v2_period_grade_filter_rows(
     for field, label in V2_PERIOD_GRADE_FILTERS:
         raw_values = _filter_value_list(filters.get(field))
         selected_values = [value for value in raw_values if value in option_values]
-        if not raw_values:
-            selected_values = list(option_values)
         rows.append(
             {
                 "field": field,
                 "label": label,
                 "selected_values": selected_values,
-                "all_selected": len(selected_values) == len(option_values),
+                "all_selected": bool(selected_values) and len(selected_values) == len(option_values),
+                "unlimited": not selected_values,
                 "reset_href": _filter_href(
                     base_href,
                     _filter_query_pairs(filters, exclude_field=field),
@@ -3765,7 +3790,6 @@ def app_v2_period_grade_filter_rows(
                             field=field,
                             value=str(option["value"]),
                             selected_values=selected_values,
-                            option_values=option_values,
                         ),
                     }
                     for option in V2_PERIOD_GRADE_OPTIONS
@@ -3773,6 +3797,33 @@ def app_v2_period_grade_filter_rows(
             }
         )
     return rows
+
+
+def _app_v2_score_comparison_model(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    sample_count = int(raw.get("sample_count") or 0)
+    if sample_count <= 0:
+        return {
+            "level_up_score_avg": None,
+            "level_down_score_avg": None,
+            "sample_count": 0,
+            "regime": "unavailable",
+            "label": "暂无数据",
+        }
+    avg_up = _app_v2_filter_json_value(raw.get("level_up_score_avg"))
+    avg_down = _app_v2_filter_json_value(raw.get("level_down_score_avg"))
+    regime = str(raw.get("regime") or "").strip()
+    if regime not in {"bull", "bear"}:
+        up_value = _decimal_or_none(avg_up)
+        down_value = _decimal_or_none(avg_down)
+        regime = "bull" if up_value is not None and down_value is not None and up_value > down_value else "bear"
+    return {
+        "level_up_score_avg": avg_up,
+        "level_down_score_avg": avg_down,
+        "sample_count": sample_count,
+        "regime": regime,
+        "label": "牛市" if regime == "bull" else "熊市",
+    }
 
 
 def _app_v2_filter_grid_row(

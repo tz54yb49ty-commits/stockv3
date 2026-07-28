@@ -5923,7 +5923,28 @@ class PostgresN6UserRepository:
             cur.execute(
                 f"""
                 SELECT count(*) FILTER (WHERE {source_where_sql})::int AS total_count,
-                       count(*) FILTER (WHERE {source_where_sql} AND {where_sql} AND {recommendation_where_sql})::int AS filtered_count
+                       count(*) FILTER (WHERE {source_where_sql} AND {where_sql} AND {recommendation_where_sql})::int AS filtered_count,
+                       avg(level_up_score) FILTER (
+                         WHERE {source_where_sql}
+                           AND {where_sql}
+                           AND {recommendation_where_sql}
+                           AND level_up_score IS NOT NULL
+                           AND level_down_score IS NOT NULL
+                       ) AS level_up_score_avg,
+                       avg(level_down_score) FILTER (
+                         WHERE {source_where_sql}
+                           AND {where_sql}
+                           AND {recommendation_where_sql}
+                           AND level_up_score IS NOT NULL
+                           AND level_down_score IS NOT NULL
+                       ) AS level_down_score_avg,
+                       count(*) FILTER (
+                         WHERE {source_where_sql}
+                           AND {where_sql}
+                           AND {recommendation_where_sql}
+                           AND level_up_score IS NOT NULL
+                           AND level_down_score IS NOT NULL
+                       )::int AS score_sample_count
                 FROM {table_name}
                 WHERE for_trade_date = %(selected_for_trade_date)s
                 """,
@@ -5932,6 +5953,25 @@ class PostgresN6UserRepository:
             count_row = cur.fetchone() or {}
             total_count = int(count_row.get("total_count") or 0)
             filtered_count = int(count_row.get("filtered_count") or 0)
+            score_sample_count = int(count_row.get("score_sample_count") or 0)
+            level_up_score_avg = count_row.get("level_up_score_avg")
+            level_down_score_avg = count_row.get("level_down_score_avg")
+            score_regime = "unavailable"
+            if score_sample_count:
+                score_regime = "bull" if level_up_score_avg > level_down_score_avg else "bear"
+            score_comparison = {
+                "level_up_score_avg": level_up_score_avg if score_sample_count else None,
+                "level_down_score_avg": level_down_score_avg if score_sample_count else None,
+                "sample_count": score_sample_count,
+                "regime": score_regime,
+                "label": (
+                    "牛市"
+                    if score_regime == "bull"
+                    else "熊市"
+                    if score_regime == "bear"
+                    else "暂无数据"
+                ),
+            }
             order_sql = self._app_v2_filter_order_sql(table_name, filters)
             select_sql = self._app_v2_filter_select_sql(table_name, asset_kind)
             cur.execute(
@@ -5990,6 +6030,7 @@ class PostgresN6UserRepository:
             "source_run_id": source_run_id,
             "source_context": source_context,
             "level_up_recommendation": level_up_recommendation,
+            "score_comparison": score_comparison,
             "linked_stock_filter_source_identity_keys": linked_stock_filter_source_identity_keys,
         }
         self._app_shared_cache_set(self._app_filter_result_cache, cache_key, result)
