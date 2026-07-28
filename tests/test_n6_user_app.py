@@ -2936,7 +2936,7 @@ class FakeN6UserRepository:
                 row["status"] == "active"
                 or (historical_projection_mode and row["status"] != "removed")
             )
-            and candidate.get("effective_active")
+            and (candidate.get("effective_active") or historical_projection_mode)
         ]
         effective_scope = {}
         for row in monitor_rows:
@@ -10101,17 +10101,24 @@ class N6UserAppTest(unittest.TestCase):
             for_trade_date="20260703",
             source_trade_date="20260702",
             source_run_id="condition_layer_20260702_to_20260703",
-        )["direction"] = "buy"
+        )["direction"] = "sell"
         repo.ui_v1_signals = [monitored, unmonitored_sz, unmonitored_sh]
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
         response = client.get("/api/n6/app/v1/signals?asset_kind=index&trade_date=20260703")
         cards_response = client.get("/api/n6/app/v2/message-dashboard?asset_kind=index&trade_date=20260703")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["error"], "historical_query_disabled_during_trading_session")
-        self.assertEqual(cards_response.status_code, 409)
-        self.assertEqual(cards_response.json()["error"], "historical_query_disabled_during_trading_session")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scope_mode"], "historical_projection")
+        self.assertEqual(
+            [item["user_signal_projection_id"] for item in response.json()["items"]],
+            ["9302"],
+        )
+        self.assertEqual(cards_response.status_code, 200)
+        self.assertEqual(
+            [item["user_signal_projection_id"] for item in cards_response.json()["card_items"]],
+            ["9302"],
+        )
 
     def test_app_signals_explicit_historical_trade_date_uses_non_removed_historical_monitor_scope(self) -> None:
         client, repo, _, _ = build_client()
@@ -10143,8 +10150,16 @@ class N6UserAppTest(unittest.TestCase):
         response = client.get("/api/n6/app/v1/signals?asset_kind=index&trade_date=20260703")
         cards_response = client.get("/api/n6/app/v2/message-dashboard?asset_kind=index&trade_date=20260703")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(cards_response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["user_signal_projection_id"] for item in response.json()["items"]],
+            ["9361"],
+        )
+        self.assertEqual(cards_response.status_code, 200)
+        self.assertEqual(
+            [item["user_signal_projection_id"] for item in cards_response.json()["card_items"]],
+            ["9361"],
+        )
 
     def test_app_signals_current_trade_date_does_not_use_expired_monitor_scope(self) -> None:
         client, repo, _, _ = build_client()
@@ -10224,7 +10239,9 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(current_payload["scope_mode"], "effective_monitor")
         self.assertEqual([item["user_signal_projection_id"] for item in current_payload["items"]], ["9601"])
         self.assertEqual(current_payload["items"][0]["identity_key"], "index:SH:000001")
-        self.assertEqual(historical_response.status_code, 409)
+        self.assertEqual(historical_response.status_code, 200)
+        self.assertEqual(historical_response.json()["scope_mode"], "historical_projection")
+        self.assertEqual(historical_response.json()["items"], [])
 
     def test_app_signals_historical_api_and_page_fail_before_projection_reads(self) -> None:
         client, repo, _, _ = build_client()
@@ -10239,8 +10256,13 @@ class N6UserAppTest(unittest.TestCase):
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
         metadata_reads = repo.app_signal_scope_metadata_reads
         signal_reads = len(repo.app_signal_reads)
-        api_response = client.get("/api/n6/app/v1/signals?trade_date=20260602")
-        page_response = client.get("/n6/app/signals?trade_date=20260602")
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+        ):
+            api_response = client.get("/api/n6/app/v1/signals?trade_date=20260602")
+            page_response = client.get("/n6/app/signals?trade_date=20260602")
 
         self.assertEqual(api_response.status_code, 409)
         self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
@@ -10248,6 +10270,111 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(repo.app_signal_scope_metadata_reads, metadata_reads)
         self.assertEqual(len(repo.app_signal_reads), signal_reads)
         self.assertGreaterEqual(repo.app_current_signal_trade_date_reads, 2)
+
+    def test_historical_query_gate_uses_asia_shanghai_session_boundaries(self) -> None:
+        current_trade_date = "20260605"
+        cases = (
+            ("09:24", datetime(2026, 6, 5, 9, 24), False),
+            ("09:25", datetime(2026, 6, 5, 9, 25), True),
+            ("lunch", datetime(2026, 6, 5, 12, 0), True),
+            ("15:00", datetime(2026, 6, 5, 15, 0), True),
+            ("15:01", datetime(2026, 6, 5, 15, 1), False),
+            ("weekend", datetime(2026, 6, 6, 10, 0), False),
+        )
+
+        for label, value, blocked in cases:
+            with self.subTest(label=label):
+                policy = n6_user_app_module.n6_trade_date_access_policy(
+                    current_trade_date=current_trade_date,
+                    requested_trade_date="20260604",
+                    now=value.replace(tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+                )
+                self.assertEqual(policy["blocked"], blocked)
+                self.assertEqual(
+                    policy["blocker"],
+                    "historical_query_disabled_during_trading_session" if blocked else "",
+                )
+
+    def test_off_session_historical_signals_and_messages_support_all_asset_kinds(self) -> None:
+        asset_specs = (
+            ("stock", "stock:SH:600000", "600000", "历史个股"),
+            ("index", "index:SH:000300", "000300", "历史指数"),
+            ("board", "board:TDX:881001", "881001", "历史板块"),
+        )
+        client, repo, _, _ = build_client()
+        historical_rows = []
+        for projection_id, (asset_kind, identity_key, code, name) in enumerate(asset_specs, start=9701):
+            historical = copy.deepcopy(repo.ui_v1_signals[1])
+            historical.update(
+                {
+                    "user_signal_projection_id": projection_id,
+                    "user_signal_card_id": projection_id + 100,
+                    "trade_date": "20260604",
+                    "asset_kind": asset_kind,
+                    "identity_key": identity_key,
+                    "code": code,
+                    "name": name,
+                }
+            )
+            historical["display_payload_json"].update(
+                {
+                    "trade_date": "20260604",
+                    "asset_kind": asset_kind,
+                    "identity_key": identity_key,
+                    "code": code,
+                    "name": name,
+                }
+            )
+            seed_effective_monitor_for_signal(
+                repo,
+                historical,
+                for_trade_date="20260604",
+                source_trade_date="20260603",
+                source_run_id=f"condition_layer_20260603_{asset_kind}_v1",
+            )
+            historical_rows.append(historical)
+        repo.ui_v1_signals = historical_rows
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 15, 1, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+        ):
+            for projection_id, (asset_kind, _, _, _) in enumerate(asset_specs, start=9701):
+                with self.subTest(asset_kind=asset_kind):
+                    signals = client.get(
+                        f"/api/n6/app/v1/signals?trade_date=20260604&asset_kind={asset_kind}"
+                    )
+                    messages = client.get(
+                        f"/api/n6/app/v2/message-dashboard?trade_date=20260604&asset_kind={asset_kind}"
+                    )
+                    groups = client.get(
+                        f"/api/n6/app/v2/message-dashboard/groups?trade_date=20260604&asset_kind={asset_kind}"
+                    )
+                    projection_status = client.get(
+                        "/api/n6/app/v2/message-dashboard/projection-status"
+                        f"?trade_date=20260604&asset_kind={asset_kind}"
+                    )
+
+                    self.assertEqual(signals.status_code, 200)
+                    self.assertEqual(messages.status_code, 200)
+                    self.assertEqual(groups.status_code, 200)
+                    self.assertEqual(projection_status.status_code, 200)
+                    self.assertEqual(signals.json()["scope_mode"], "historical_projection")
+                    self.assertEqual(messages.json()["scope_mode"], "historical_projection")
+                    self.assertEqual(
+                        [item["user_signal_projection_id"] for item in signals.json()["items"]],
+                        [str(projection_id)],
+                    )
+                    self.assertEqual(
+                        [item["user_signal_projection_id"] for item in messages.json()["card_items"]],
+                        [str(projection_id)],
+                    )
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_missing_current_filter_trade_date_fails_closed_before_projection_reads(self) -> None:
         client, repo, _, _ = build_client()
@@ -10290,7 +10417,10 @@ class N6UserAppTest(unittest.TestCase):
 
         response = client.get("/n6/app/signals?trade_date=20260602")
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('value="20260602" selected', response.text)
+        self.assertEqual(repo.app_signal_filter_reads[-1]["trade_date"], "20260602")
+        self.assertTrue(repo.app_signal_filter_reads[-1]["historical_projection_mode"])
 
     def test_b_track_signals_exclude_stale_hint_30m_source_action_runs(self) -> None:
         client, repo, _, _ = build_client()
@@ -13187,6 +13317,136 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("浦发银行", page_response.text)
         self.assertNotIn("principal_id=2", page_response.text)
 
+    def test_my_monitor_historical_gate_and_readonly_controls_cover_all_asset_kinds(self) -> None:
+        asset_specs = (
+            ("stock", "stocks", "stock:SH:600004", "历史个股"),
+            ("board", "boards", "board:TDX:881004", "历史板块"),
+            ("index", "indexes", "index:SH:000004", "历史指数"),
+        )
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        for asset_kind, route_slug, identity_key, display_name in asset_specs:
+            current_source = repo.app_filter_rows[asset_kind][0]
+            historical_source = dict(current_source)
+            historical_source.update(
+                {
+                    "identity_key": identity_key,
+                    f"{asset_kind}_identity_key": identity_key,
+                    "display_name": display_name,
+                    "name": display_name,
+                    "source_trade_date": "20260603",
+                    "for_trade_date": "20260604",
+                    "run_id": f"condition_layer_20260603_{asset_kind}_v1",
+                    "source_run_id": f"condition_layer_20260603_{asset_kind}_v1",
+                }
+            )
+            repo.app_filter_rows[asset_kind].append(historical_source)
+            for source_row in (current_source, historical_source):
+                repo.app_monitor_rows.append(
+                    repo._new_monitor_row(
+                        principal_id=1,
+                        principal_type="admin",
+                        asset_kind=asset_kind,
+                        identity_key=str(source_row["identity_key"]),
+                        direction="buy",
+                        source="single_row",
+                        source_row=source_row,
+                    )
+                )
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        reads_before = len(repo.app_monitor_reads)
+
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+        ):
+            for _, route_slug, _, _ in asset_specs:
+                historical_path = (
+                    f"/api/n6/app/v2/monitor/{route_slug}"
+                    "?monitor_status=all&for_trade_date=20260604"
+                )
+                historical_page_path = (
+                    f"/n6/app/my-monitor/{route_slug}"
+                    "?monitor_status=all&for_trade_date=20260604"
+                )
+                blocked_api = client.get(historical_path)
+                blocked_page = client.get(historical_page_path)
+                self.assertEqual(blocked_api.status_code, 409)
+                self.assertEqual(
+                    blocked_api.json()["error"],
+                    "historical_query_disabled_during_trading_session",
+                )
+                self.assertEqual(blocked_page.status_code, 409)
+        self.assertEqual(len(repo.app_monitor_reads), reads_before)
+
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 15, 1, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+        ):
+            for _, route_slug, _, _ in asset_specs:
+                historical_api = client.get(
+                    f"/api/n6/app/v2/monitor/{route_slug}"
+                    "?monitor_status=all&for_trade_date=20260604"
+                )
+                historical_page = client.get(
+                    f"/n6/app/my-monitor/{route_slug}"
+                    "?monitor_status=all&for_trade_date=20260604"
+                )
+                self.assertEqual(historical_api.status_code, 200)
+                historical_payload = historical_api.json()
+                self.assertTrue(historical_payload["readonly"])
+                self.assertFalse(historical_payload["controls"]["remove_monitor_enabled"])
+                self.assertFalse(historical_payload["controls"]["write_route_enabled"])
+                self.assertEqual(historical_payload["selected_for_trade_date"], "20260604")
+                self.assertEqual(historical_page.status_code, 200)
+                self.assertNotIn(
+                    '<button type="button" class="row-action" data-n6-remove-monitor',
+                    historical_page.text,
+                )
+                self.assertNotIn('class="monitor-delete-button"', historical_page.text)
+
+        with patch.object(
+            n6_user_app_module,
+            "n6_trading_session_now",
+            lambda: datetime(2026, 6, 5, 10, 0, tzinfo=n6_user_app_module.DISPLAY_TIMEZONE),
+        ):
+            current_api = client.get("/api/n6/app/v2/monitor/stocks?for_trade_date=20260605")
+            current_page = client.get("/n6/app/my-monitor/stocks?for_trade_date=20260605")
+        self.assertEqual(current_api.status_code, 200)
+        self.assertFalse(current_api.json()["readonly"])
+        self.assertTrue(current_api.json()["controls"]["remove_monitor_enabled"])
+        self.assertEqual(current_page.status_code, 200)
+        self.assertIn(
+            '<button type="button" class="row-action" data-n6-remove-monitor',
+            current_page.text,
+        )
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_my_monitor_current_trade_date_unavailable_fails_closed_before_reads(self) -> None:
+        client, repo, _, _ = build_client(scope_write_enabled=True, csrf_secret="scope-secret")
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        reads_before = len(repo.app_monitor_reads)
+
+        with patch.object(repo, "fetch_app_current_signal_trade_date", return_value=None):
+            api_response = client.get("/api/n6/app/v2/monitor/stocks?for_trade_date=20260604")
+            page_response = client.get("/n6/app/my-monitor/stocks?for_trade_date=20260604")
+
+        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(api_response.json()["error"], "signal_current_trade_date_unavailable")
+        self.assertEqual(page_response.status_code, 409)
+        self.assertEqual(len(repo.app_monitor_reads), reads_before)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
     def test_b_track_v2_my_stock_monitor_shows_source_parent_and_current_memberships(self) -> None:
         client, repo, _, _ = build_client()
         row = repo._new_monitor_row(
@@ -15128,8 +15388,14 @@ class N6UserAppTest(unittest.TestCase):
         page_response = client.get("/n6/app/messages?trade_date=20260603")
         api_response = client.get("/api/n6/app/v2/message-dashboard?trade_date=20260603")
 
-        self.assertEqual(page_response.status_code, 409)
-        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn('value="20260603" selected', page_response.text)
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(api_response.json()["scope_mode"], "historical_projection")
+        self.assertEqual(
+            [item["user_signal_card_id"] for item in api_response.json()["card_items"]],
+            ["201"],
+        )
 
     def test_b_track_v2_messages_trading_session_blocks_historical_api_and_page_falls_back_current(self) -> None:
         client, repo, _, _ = build_client()
@@ -15632,8 +15898,16 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("approved_display.run_id::text", monitor_source)
         self.assertIn("LIMIT 1", monitor_source)
 
-    def test_b_track_historical_signals_and_messages_are_rejected_before_scope_queries(self) -> None:
+    def test_b_track_historical_signals_and_messages_pages_are_available_off_session(self) -> None:
         client, repo, _, _ = build_client()
+        historical = copy.deepcopy(repo.ui_v1_signals[0])
+        seed_effective_monitor_for_signal(
+            repo,
+            historical,
+            for_trade_date="20260603",
+            source_trade_date="20260602",
+            source_run_id="condition_layer_20260602_to_20260603",
+        )
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
         metadata_reads = repo.app_signal_scope_metadata_reads
         signal_reads = len(repo.app_signal_reads)
@@ -15641,10 +15915,10 @@ class N6UserAppTest(unittest.TestCase):
         signals_response = client.get("/n6/app/signals?trade_date=20260603")
         messages_response = client.get("/n6/app/messages?trade_date=20260603")
 
-        self.assertEqual(signals_response.status_code, 409)
-        self.assertEqual(messages_response.status_code, 409)
-        self.assertEqual(repo.app_signal_scope_metadata_reads, metadata_reads)
-        self.assertEqual(len(repo.app_signal_reads), signal_reads)
+        self.assertEqual(signals_response.status_code, 200)
+        self.assertEqual(messages_response.status_code, 200)
+        self.assertGreater(repo.app_signal_scope_metadata_reads, metadata_reads)
+        self.assertGreater(len(repo.app_signal_reads), signal_reads)
 
     def test_b_track_v2_message_dashboard_routes_are_get_only_and_sources_are_allowlisted(self) -> None:
         client, _, _, _ = build_client()

@@ -9503,7 +9503,6 @@ def create_app(
         date_policy = n6_trade_date_access_policy(
             current_trade_date=current_trade_date,
             requested_trade_date=filters.get("trade_date"),
-            live_only=True,
         )
         if date_policy["blocked"]:
             return n6_trading_session_blocker_response(date_policy)
@@ -9779,7 +9778,6 @@ def create_app(
         date_policy = n6_trade_date_access_policy(
             current_trade_date=current_trade_date,
             requested_trade_date=filters.get("trade_date"),
-            live_only=True,
         )
         if date_policy["blocked"]:
             return n6_trading_session_blocker_response(date_policy)
@@ -11274,6 +11272,17 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        requested_trade_date = normalize_filter_value(request.query_params.get("for_trade_date"))
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
+        if not current_trade_date:
+            return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
+        date_policy = n6_trade_date_access_policy(
+            current_trade_date=current_trade_date,
+            requested_trade_date=requested_trade_date,
+        )
+        if date_policy["blocked"]:
+            return n6_trading_session_blocker_response(date_policy)
+        historical_readonly = bool(requested_trade_date and requested_trade_date != current_trade_date)
         result = repo.fetch_app_monitor_items(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
@@ -11281,7 +11290,7 @@ def create_app(
             asset_kind=asset_kind,
             limit=500,
             monitor_status=app_v2_monitor_status_from_request(request),
-            for_trade_date=str(request.query_params.get("for_trade_date") or "").strip(),
+            for_trade_date=requested_trade_date or "",
         )
         return JSONResponse(
             app_v2_monitor_model(
@@ -11289,7 +11298,7 @@ def create_app(
                 user=session_user_payload(session),
                 result=result,
                 selected_asset_kind=asset_kind,
-                write_enabled=scope_write_active,
+                write_enabled=scope_write_active and not historical_readonly,
             )
         )
 
@@ -11469,6 +11478,7 @@ def create_app(
         if page_key in APP_MONITOR_ASSET_BY_PAGE_KEY:
             asset_kind = APP_MONITOR_ASSET_BY_PAGE_KEY[page_key]
             monitor_status = app_v2_monitor_status_filter((app_filters or {}).get("monitor_status"))
+            historical_readonly = bool((app_filters or {}).get("historical_readonly"))
             result = repo.fetch_app_monitor_items(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
@@ -11483,7 +11493,7 @@ def create_app(
                 user=user,
                 result=result,
                 selected_asset_kind=asset_kind,
-                write_enabled=scope_write_active,
+                write_enabled=scope_write_active and not historical_readonly,
             )
         if page_key == "status-monitor":
             current_trade_date = repo.fetch_app_current_signal_trade_date()
@@ -11661,13 +11671,26 @@ def create_app(
                 date_policy = n6_trade_date_access_policy(
                     current_trade_date=current_trade_date,
                     requested_trade_date=(app_filters or {}).get("trade_date"),
-                    live_only=True,
                 )
                 if date_policy["blocked"]:
                     return HTMLResponse(N6_TRADING_SESSION_HISTORY_MESSAGE, status_code=409)
                 app_filters = dict(app_filters or {})
-                if current_trade_date:
-                    app_filters["trade_date"] = current_trade_date
+                app_filters["trade_date"] = date_policy["effective_trade_date"]
+            if is_monitor_page:
+                current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+                if not current_trade_date:
+                    return HTMLResponse("signal_current_trade_date_unavailable", status_code=409)
+                requested_trade_date = normalize_filter_value((app_filters or {}).get("for_trade_date"))
+                date_policy = n6_trade_date_access_policy(
+                    current_trade_date=current_trade_date,
+                    requested_trade_date=requested_trade_date,
+                )
+                if date_policy["blocked"]:
+                    return HTMLResponse(N6_TRADING_SESSION_HISTORY_MESSAGE, status_code=409)
+                app_filters = dict(app_filters or {})
+                app_filters["historical_readonly"] = bool(
+                    requested_trade_date and requested_trade_date != current_trade_date
+                )
             data = await asyncio.to_thread(
                 build_app_page_data,
                 page_key,
@@ -12592,7 +12615,6 @@ def app_signal_filters_with_trade_date_defaults(
             policy = n6_trade_date_access_policy(
                 current_trade_date=current_trade_date,
                 requested_trade_date=explicit_trade_date,
-                live_only=True,
             )
             if policy["blocked"]:
                 output["trade_date"] = policy["effective_trade_date"]
