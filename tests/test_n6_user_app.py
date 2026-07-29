@@ -15307,37 +15307,74 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(proposal["executed_virtual_trade_id"], 9002)
         self.assertEqual(len(repo.app_trade_proposals), 1)
 
-    def test_b_track_v3_card_voice_is_browser_only_and_sse_insert_only(self) -> None:
+    def test_b_track_v3_card_voice_is_browser_only_directional_and_foreground_poll_only(self) -> None:
         client, repo, _, _ = build_client()
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
         response = client.get("/n6/app/messages")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        voice_source = source.split("const n6Voice = (() => {", 1)[1].split(
+            "const n6AutoRefresh = (() => {", 1
+        )[0]
+        refresh_source = source.split("const n6AutoRefresh = (() => {", 1)[1].split(
+            "const n6ScopeWrite = (() => {", 1
+        )[0]
+        sse_apply_source = refresh_source.split("const applySignalEvent =", 1)[1].split(
+            "const refreshOnce =", 1
+        )[0]
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-n6-voice-toggle", response.text)
         self.assertIn("data-n6-voice-test", response.text)
-        self.assertIn("speechSynthesis", response.text)
-        self.assertIn('const storageKey = "n6.btrack.voice.enabled"', response.text)
-        self.assertIn('localStorage.getItem(storageKey) === "1"', response.text)
-        self.assertIn('localStorage.setItem(storageKey, enabled ? "1" : "0")', response.text)
-        self.assertIn("const queueLimit = 8", response.text)
-        self.assertIn("const projectionIds = new Set()", response.text)
-        self.assertIn("queue.shift()", response.text)
-        self.assertIn("已略过", response.text)
-        self.assertIn("window.speechSynthesis.cancel()", response.text)
+        self.assertIn('const storageKey = "n6.btrack.voice.enabled"', voice_source)
+        self.assertIn('localStorage.getItem(storageKey) === "1"', voice_source)
+        self.assertIn("let enabled = false", voice_source)
+        self.assertIn("页面刷新后请点击一次恢复语音", voice_source)
+        self.assertIn('localStorage.setItem(storageKey, "1")', voice_source)
+        self.assertIn('localStorage.setItem(storageKey, "0")', voice_source)
+        self.assertIn("const queueLimit = 8", voice_source)
+        self.assertIn("const projectionIds = new Set()", voice_source)
+        self.assertIn("queue.shift()", voice_source)
+        self.assertIn("已略过", voice_source)
+        self.assertIn("window.speechSynthesis.cancel()", voice_source)
+        self.assertIn("window.speechSynthesis.resume()", voice_source)
+        self.assertIn('"voiceschanged"', voice_source)
+        self.assertIn("window.speechSynthesis.getVoices()", voice_source)
+        self.assertIn("/^zh(?:-|_)/i", voice_source)
+        self.assertIn("utterance.voice = preferredVoice", voice_source)
+        self.assertIn('confirmSpeech("语音已恢复")', voice_source)
         self.assertIn('data-refresh-enabled="true"', response.text)
         self.assertIn(
             '\'[data-n6-auto-refresh="messages"][data-refresh-enabled="true"]\'',
-            response.text,
+            voice_source,
         )
-        self.assertIn("if (!currentDaySseEnabled) return", response.text)
-        self.assertIn("signal.display_code", response.text)
-        self.assertIn('String(signal.event_label || "").split(" (", 1)[0]', response.text)
-        self.assertIn("signal.action_state_label || eventStateLabel", response.text)
-        self.assertIn("const targetCandidates =", response.text)
-        self.assertIn("if (inserted)", response.text)
-        self.assertIn("n6Voice.speak(signal)", response.text)
+        self.assertIn("if (!currentDayVoiceEnabled) return", voice_source)
+        self.assertIn('const displayName = signal.display_name || signal.display_code || "暂无"', voice_source)
+        self.assertIn("target: display.buy_target_price", voice_source)
+        self.assertIn("expectedReturn: display.buy_expected_return_pct", voice_source)
+        self.assertIn("target: display.sell_target_price", voice_source)
+        self.assertIn("expectedReturn: display.sell_expected_return_pct", voice_source)
+        self.assertNotIn("targetCandidates", voice_source)
+        self.assertNotIn(
+            'target: display.buy_target_price,\n              fallback: display.sell_target_price',
+            voice_source,
+        )
+        self.assertNotIn(
+            'target: display.sell_target_price,\n              fallback: display.buy_target_price',
+            voice_source,
+        )
+        self.assertIn('value === 0\n        || value === "0"', voice_source)
+        self.assertIn('hasSpokenValue(value) ? String(value) : "暂无"', voice_source)
+        self.assertIn(r"(\d{2}:\d{2}:\d{2})", voice_source)
+        self.assertIn(
+            "`${eventTime}，${displayName}，目标价 ${target}，收益率 ${expectedReturnText}`",
+            voice_source,
+        )
+        self.assertNotIn("n6Voice.speak", sse_apply_source)
+        self.assertIn("speakNew", refresh_source)
+        self.assertIn(".forEach(({ item }) => n6Voice.speak(item))", refresh_source)
         self.assertNotIn("/api/n6/app/v3/voice", response.text)
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_v3_signal_fields_are_frozen_projection_mappings(self) -> None:
         repo = FakeN6UserRepository()
@@ -15465,8 +15502,13 @@ class N6UserAppTest(unittest.TestCase):
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
         page_response = client.get("/n6/app/messages")
+        api_response = client.get("/api/n6/app/v2/message-dashboard")
+        detail_response = client.get("/api/n6/app/v1/signals/101")
 
         self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(detail_response.json()["signal"]["user_signal_projection_id"], "101")
         self.assertIn("我的监控消息总览", page_response.text)
         self.assertIn("投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped", page_response.text)
         self.assertIn("消息数", page_response.text)
@@ -15486,15 +15528,17 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn('class="message-card-summary"', page_response.text)
         self.assertNotIn("审计信息请在详情查看", page_response.text)
         self.assertNotIn("消息 preview", page_response.text)
-        self.assertIn("查看详情", page_response.text)
         self.assertNotIn("/api/n6/ui/v1/message-dashboard", page_response.text)
         rendered = page_response.text.split("<script", 1)[0]
         card_dom = rendered.split('data-n6-message-cards', 1)[1]
-        self.assertEqual(card_dom.count('class="message-card-foot"'), 2)
-        self.assertEqual(card_dom.count(">查看详情</a>"), 2)
+        self.assertNotIn("查看详情", card_dom)
+        self.assertNotIn('class="message-card-foot"', card_dom)
         for projection_id in ("101", "102"):
             self.assertIn(f'data-n6-projection-id="{projection_id}"', card_dom)
-            self.assertIn(f'href="/api/n6/app/v1/signals/{projection_id}"', card_dom)
+        self.assertEqual(
+            {item["detail_href"] for item in api_response.json()["card_items"]},
+            {"/api/n6/app/v1/signals/101", "/api/n6/app/v1/signals/102"},
+        )
         for hidden_audit_text in (
             "condition=",
             "blocked_reason=",
@@ -15523,10 +15567,10 @@ class N6UserAppTest(unittest.TestCase):
             "item.authority_source",
         ):
             self.assertNotIn(hidden_field, dynamic_card)
-        self.assertEqual(dynamic_card.count('<div class="message-card-foot">'), 1)
-        self.assertEqual(dynamic_card.count(">查看详情</a>"), 1)
+        self.assertNotIn('<div class="message-card-foot">', dynamic_card)
+        self.assertNotIn("查看详情", dynamic_card)
         self.assertIn('data-n6-projection-id="${projectionId}"', dynamic_card)
-        self.assertIn('href="${escapeHtml(item.detail_href)}"', dynamic_card)
+        self.assertNotIn("item.detail_href", dynamic_card)
         for label in (
             "买入目标价",
             "卖出目标价",
@@ -15553,7 +15597,6 @@ class N6UserAppTest(unittest.TestCase):
         self.assertLess(rendered.index("data-n6-message-asset-kind"), rendered.index("data-n6-voice-toggle"))
         self.assertLess(rendered.index("data-n6-voice-toggle"), rendered.index("data-n6-refresh-status"))
         self.assertIn("grid-template-columns: minmax(0, 1fr)", source)
-        self.assertIn(".message-card-foot a {\n      min-height: 44px;\n    }", source)
         self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
@@ -15907,6 +15950,7 @@ class N6UserAppTest(unittest.TestCase):
             "const n6ScopeWrite", 1
         )[0]
         self.assertIn("refreshInFlight", auto_refresh_block)
+        self.assertIn("activeRequest", auto_refresh_block)
         self.assertIn("new EventSource", auto_refresh_block)
         self.assertIn("window.__n6ProjectionStore", auto_refresh_block)
         self.assertIn("AbortController", auto_refresh_block)
@@ -15919,6 +15963,32 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("performance.now", auto_refresh_block)
         self.assertIn("SSE 自动重连", auto_refresh_block)
         self.assertIn("payload.empty_state?.message", auto_refresh_block)
+        self.assertIn("const correctionIntervalMs = 15000", auto_refresh_block)
+        self.assertIn("window.setTimeout", auto_refresh_block)
+        self.assertIn("scheduleCorrection(root)", auto_refresh_block)
+        self.assertIn("let eventSource = null", auto_refresh_block)
+        self.assertEqual(auto_refresh_block.count("new EventSource("), 1)
+        self.assertIn("closeEventSource()", auto_refresh_block)
+        self.assertIn('window.addEventListener("online", recoverLive)', auto_refresh_block)
+        self.assertIn('window.addEventListener("offline", pauseLive)', auto_refresh_block)
+        self.assertIn('window.addEventListener("pageshow", recoverLive)', auto_refresh_block)
+        self.assertIn('document.addEventListener("visibilitychange"', auto_refresh_block)
+        self.assertIn(
+            "await withVoiceSuppressed(() => refreshOnce(",
+            auto_refresh_block,
+        )
+        self.assertIn("voiceSuppressionCount === 0", auto_refresh_block)
+        self.assertLess(
+            auto_refresh_block.index("await withVoiceSuppressed(() => refreshOnce("),
+            auto_refresh_block.index("rebuildEventSource(root)", auto_refresh_block.index("const recoverLive")),
+        )
+        self.assertIn(
+            "await refreshOnce(root, { append: false, silent: false, speakNew: true })",
+            auto_refresh_block,
+        )
+        self.assertIn('root?.dataset.refreshEnabled === "true"', auto_refresh_block)
+        self.assertIn("!document.hidden", auto_refresh_block)
+        self.assertIn("navigator.onLine !== false", auto_refresh_block)
         self.assertNotIn("refreshIntervalMs || 5000", auto_refresh_block)
         self.assertNotIn("setInterval", auto_refresh_block)
         self.assertNotIn("innerHTML = descendingProjectionItems", auto_refresh_block)
@@ -17361,7 +17431,7 @@ class N6UserAppTest(unittest.TestCase):
             "个股只提供买向观察",
             "指数和板块同时提供买向、卖向观察",
             "历史快照不接收实时 SSE",
-            "语音只播本页新收到的 SSE",
+            "语音只播正常前台纠偏发现的新消息",
             "不写服务器",
             "proposal 只是虚拟交易申请，不等于订单或成交",
             "proposal/确认不等于成交",
@@ -17402,7 +17472,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn(payload["message_summary"]["latest_event_time_display"], page.text)
         self.assertIn("交易时段仅限当前业务日", page.text)
         self.assertIn("历史快照不接收实时 SSE", page.text)
-        self.assertIn("语音只播本页新收到的 SSE", page.text)
+        self.assertIn("语音只播正常前台纠偏发现的新消息", page.text)
         self.assertIn("executor 本页未验证", page.text)
 
         disabled_client, _, _, _ = build_client(

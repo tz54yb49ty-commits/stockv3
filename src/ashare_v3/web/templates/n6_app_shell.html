@@ -472,17 +472,6 @@
     .message-controls .row-action {
       min-height: 44px;
     }
-    .message-card-foot {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 10px;
-      border-top: 1px solid var(--line);
-      padding-top: 10px;
-    }
-    .message-card-foot a {
-      min-height: 44px;
-    }
     .n6-skeleton {
       display: grid;
       gap: 8px;
@@ -1186,7 +1175,7 @@
         <details class="technical-details">
           <summary>安全与高级说明 <span class="subtle">默认折叠</span></summary>
           <div class="text-block">
-            <p>当前业务日新增消息可使用 SSE；历史快照不走 SSE。语音只播本页新收到的 SSE，由浏览器本地处理，不写服务器。</p>
+            <p>当前业务日以 SSE 实时更新，页面前台每 15 秒只读纠偏；历史快照不刷新。语音只播正常前台纠偏发现的新消息，由浏览器本地处理，不写服务器。</p>
             <p>工作台不展示 run、projection 或 raw blocked ID，也不验证 executor、scheduler、Release 或服务运行态。</p>
           </div>
         </details>
@@ -1204,7 +1193,10 @@
             <span class="guide-step-number">{{ step.number }}</span>
             <strong>{{ step.title }}</strong>
             <p>{{ step.summary }}</p>
-            <p>{{ step.description }}</p>
+            <p>{{ step.description|replace(
+              "当前业务日可用 SSE 接收新增消息；历史查询不走实时 SSE。语音只播本页新收到的 SSE，浏览器本地处理，不写服务器。",
+              "当前业务日以 SSE 实时更新，页面前台每 15 秒只读纠偏；历史快照不刷新。语音只播正常前台纠偏发现的新消息，由浏览器本地处理，不写服务器。"
+            ) }}</p>
             <a href="{{ step.href }}">前往该步骤</a>
           </article>
           {% endfor %}
@@ -1555,11 +1547,6 @@
               {% endif %}
             </div>
           </details>
-          <div class="message-card-foot">
-            {% if item.detail_href %}
-            <a href="{{ item.detail_href }}">{{ page.data.detail_entry.label }}</a>
-            {% endif %}
-          </div>
         </article>
         {% else %}
         {% if not page.data.empty_state.message %}
@@ -2671,19 +2658,43 @@
       const storageKey = "n6.btrack.voice.enabled";
       const queueLimit = 8;
       const supported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
-      let enabled = supported && window.localStorage.getItem(storageKey) === "1";
+      let savedPreference = supported && window.localStorage.getItem(storageKey) === "1";
+      let enabled = false;
+      let userUnlocked = false;
       let speaking = false;
       let skippedCount = 0;
+      let preferredVoice = null;
       const queue = [];
       const projectionIds = new Set();
       const projectionIdText = (value) => {
         const text = String(value ?? "");
         return /^[1-9]\d*$/.test(text) ? text : "";
       };
+      const hasSpokenValue = (value) => (
+        value === 0
+        || value === "0"
+        || (value !== null && value !== undefined && String(value).trim() !== "" && value !== "—")
+      );
+      const spokenValue = (value) => hasSpokenValue(value) ? String(value) : "暂无";
+      const spokenTime = (value) => {
+        const match = String(value ?? "").match(/(?:^|T|\s)(\d{2}:\d{2}:\d{2})(?:$|[.+Z-])/);
+        return match ? match[1] : "暂无";
+      };
+      const refreshPreferredVoice = () => {
+        if (!supported) return;
+        const voices = window.speechSynthesis.getVoices();
+        preferredVoice = voices.find((voice) => /^zh(?:-|_)/i.test(voice.lang || ""))
+          || voices.find((voice) => /中文|Chinese|普通话|Mandarin/i.test(voice.name || ""))
+          || null;
+      };
+      const configureUtterance = (utterance) => {
+        utterance.lang = preferredVoice?.lang || "zh-CN";
+        if (preferredVoice) utterance.voice = preferredVoice;
+      };
       const status = (text) => document.querySelectorAll("[data-n6-voice-status]").forEach((node) => { node.textContent = text; });
       const update = () => {
         document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => {
-          button.textContent = enabled ? "关闭语音" : "开启语音";
+          button.textContent = enabled ? "关闭语音" : (savedPreference ? "恢复语音" : "开启语音");
           button.setAttribute("aria-checked", enabled ? "true" : "false");
           button.disabled = !supported;
         });
@@ -2692,12 +2703,28 @@
         });
         if (!supported) {
           status("当前浏览器不支持语音");
+        } else if (savedPreference && !userUnlocked) {
+          status("已保存语音偏好，页面刷新后请点击一次恢复语音");
         } else if (!enabled) {
           status("语音已关闭");
         } else {
           const skipped = skippedCount ? ` · 已略过 ${skippedCount} 条` : "";
           status(`语音已开启 · 待播 ${queue.length} 条${skipped}`);
         }
+      };
+      const finishSpeaking = () => {
+        speaking = false;
+        speakNext();
+      };
+      const confirmSpeech = (text) => {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+        speaking = true;
+        const utterance = new SpeechSynthesisUtterance(text);
+        configureUtterance(utterance);
+        utterance.onend = finishSpeaking;
+        utterance.onerror = finishSpeaking;
+        window.speechSynthesis.speak(utterance);
       };
       const speakNext = () => {
         if (!supported || !enabled || speaking || !queue.length) {
@@ -2707,13 +2734,9 @@
         const next = queue.shift();
         speaking = true;
         const utterance = new SpeechSynthesisUtterance(next.text);
-        utterance.lang = "zh-CN";
-        const finish = () => {
-          speaking = false;
-          speakNext();
-        };
-        utterance.onend = finish;
-        utterance.onerror = finish;
+        configureUtterance(utterance);
+        utterance.onend = finishSpeaking;
+        utterance.onerror = finishSpeaking;
         window.speechSynthesis.speak(utterance);
         update();
       };
@@ -2735,41 +2758,61 @@
         skippedCount = 0;
       };
       const speak = (signal) => {
-        const currentDaySseEnabled = document.querySelector(
+        const currentDayVoiceEnabled = document.querySelector(
           '[data-n6-auto-refresh="messages"][data-refresh-enabled="true"]',
         );
-        if (!currentDaySseEnabled) return;
+        if (!currentDayVoiceEnabled) return;
         const projectionId = projectionIdText(signal.user_signal_projection_id);
         const display = signal.display_values || {};
-        const targetCandidates = signal.direction === "sell"
-          ? [["卖出目标价", display.sell_target_price], ["买入目标价", display.buy_target_price]]
-          : [["买入目标价", display.buy_target_price], ["卖出目标价", display.sell_target_price]];
-        const target = targetCandidates.find(([, value]) => value && value !== "—")
-          || ["目标价", "未就绪"];
-        const displayIdentity = [
-          signal.display_name || "",
-          signal.display_code || "",
-        ].filter((value) => value).join("，");
-        const eventStateLabel = String(signal.event_label || "").split(" (", 1)[0];
-        const stateLabel = signal.action_state_label || eventStateLabel || "状态更新";
+        const directionValues = signal.direction === "buy"
+          ? {
+            target: display.buy_target_price,
+            expectedReturn: display.buy_expected_return_pct,
+          }
+          : signal.direction === "sell"
+            ? {
+              target: display.sell_target_price,
+              expectedReturn: display.sell_expected_return_pct,
+            }
+            : null;
+        if (!directionValues) return;
+        const eventTime = spokenTime(display.event_time);
+        const displayName = signal.display_name || signal.display_code || "暂无";
+        const target = spokenValue(directionValues.target);
+        const expectedReturn = spokenValue(directionValues.expectedReturn);
+        const expectedReturnText = expectedReturn === "暂无" ? expectedReturn : `${expectedReturn}%`;
         enqueue(
           projectionId,
-          `${display.event_time || ""}，${signal.asset_kind_label || ""}，${displayIdentity}，${signal.direction_label || ""}，${stateLabel}，${target[0]}${target[1]}`,
+          `${eventTime}，${displayName}，目标价 ${target}，收益率 ${expectedReturnText}`,
         );
       };
       const init = () => {
+        refreshPreferredVoice();
+        window.speechSynthesis?.addEventListener?.("voiceschanged", refreshPreferredVoice);
         document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => button.addEventListener("click", () => {
           if (!supported) return update();
-          enabled = !enabled;
-          window.localStorage.setItem(storageKey, enabled ? "1" : "0");
-          if (!enabled) clear();
+          if (enabled) {
+            enabled = false;
+            savedPreference = false;
+            userUnlocked = true;
+            window.localStorage.setItem(storageKey, "0");
+            clear();
+            return update();
+          }
+          clear();
+          enabled = true;
+          savedPreference = true;
+          userUnlocked = true;
+          window.localStorage.setItem(storageKey, "1");
+          confirmSpeech("语音已恢复");
           update();
         }));
         document.querySelectorAll("[data-n6-voice-test]").forEach((button) => button.addEventListener("click", () => {
           if (!supported) return;
-          const utterance = new SpeechSynthesisUtterance("N6 卡片消息语音测试");
-          utterance.lang = "zh-CN";
-          window.speechSynthesis.speak(utterance);
+          clear();
+          userUnlocked = true;
+          confirmSpeech("N6 卡片消息语音测试");
+          update();
         }));
         update();
       };
@@ -2782,6 +2825,11 @@
         inFlight: new Map(),
       };
       window.__n6ProjectionStore = sharedStore;
+      const correctionIntervalMs = 15000;
+      let eventSource = null;
+      let correctionTimer = null;
+      let activeRoot = null;
+      let voiceSuppressionCount = 0;
 
       const scopeKey = (root) => {
         const url = new URL(root.dataset.refreshUrl || window.location.href, window.location.origin);
@@ -2801,6 +2849,7 @@
             watermark: root.dataset.watermark || "0",
             nextCursor: root.dataset.nextCursor || "",
             controllers: new Map(),
+            activeRequest: null,
           });
         }
         return sharedStore.scopes.get(key);
@@ -2988,9 +3037,6 @@
               ` : ""}
             </div>
           </details>
-          <div class="message-card-foot">
-            ${item.detail_href ? `<a href="${escapeHtml(item.detail_href)}">查看详情</a>` : ""}
-          </div>
         </article>
       `;
       };
@@ -3141,16 +3187,28 @@
         );
         if (inserted) {
           incrementMessageSummary(signal);
-          n6Voice.speak(signal);
         }
         return inserted ? 1 : 0;
       };
 
-      const refreshOnce = async (root, { append = false } = {}) => {
+      const refreshOnce = async (root, { append = false, silent = false, speakNew = false } = {}) => {
         const rawUrl = root.dataset.refreshUrl;
         if (!rawUrl) return;
         const state = scopeState(root);
         const kind = root.dataset.n6AutoRefresh;
+        if (state.activeRequest) {
+          try {
+            await state.activeRequest;
+          } catch (_error) {
+            // The primary caller owns status reporting.
+          }
+          return;
+        }
+        const knownProjectionIds = speakNew && kind === "messages"
+          ? new Set(Array.from(
+            projectionContainer(kind)?.querySelectorAll("[data-n6-projection-id]") || [],
+          ).map((node) => canonicalProjectionId(node.dataset.n6ProjectionId || "")).filter(Boolean))
+          : new Set();
         const url = new URL(rawUrl, window.location.origin);
         url.searchParams.set("limit", root.dataset.pageLimit || "50");
         if (append) {
@@ -3185,12 +3243,12 @@
             signal: controller.signal,
           });
           if (response.status === 304) {
-            statusText(root, `数据未变化 · watermark ${state.watermark || "0"}`);
+            if (!silent) statusText(root, `数据未变化 · watermark ${state.watermark || "0"}`);
             return;
           }
           const payload = await response.json();
           if (!response.ok || payload.ok === false) {
-            statusText(root, `按需校正失败：${payload.error || response.status} · SSE 自动重连中`);
+            if (!silent) statusText(root, `按需校正失败：${payload.error || response.status} · SSE 自动重连中`);
             return;
           }
           const etag = response.headers.get("ETag");
@@ -3206,20 +3264,36 @@
           const count = kind === "signals"
             ? renderSignals(root, payload, { append })
             : renderMessageCards(root, payload, { append });
+          if (
+            speakNew
+            && kind === "messages"
+            && root.dataset.refreshEnabled === "true"
+            && !document.hidden
+            && navigator.onLine !== false
+            && voiceSuppressionCount === 0
+          ) {
+            descendingProjectionItems(Array.isArray(payload.card_items) ? payload.card_items : [])
+              .filter(({ projectionId }) => !knownProjectionIds.has(projectionId))
+              .forEach(({ item }) => n6Voice.speak(item));
+          }
           const durationMs = Math.round(performance.now() - startedAt);
-          statusText(root, `按需校正 ${new Date().toLocaleTimeString()} · ${count} 条 · ${durationMs}ms`);
+          if (!silent) {
+            statusText(root, `按需校正 ${new Date().toLocaleTimeString()} · ${count} 条 · ${durationMs}ms`);
+          }
         })();
+        state.activeRequest = requestPromise;
         sharedStore.inFlight.set(requestKey, requestPromise);
         try {
           await requestPromise;
         } catch (error) {
-          if (error?.name !== "AbortError") {
+          if (!silent && error?.name !== "AbortError") {
             statusText(root, "按需校正失败 · SSE 自动重连中");
           }
         } finally {
           if (sharedStore.inFlight.get(requestKey) === requestPromise) {
             sharedStore.inFlight.delete(requestKey);
           }
+          if (state.activeRequest === requestPromise) state.activeRequest = null;
           root.dataset.refreshInFlight = "false";
           setLoading(root, false);
           if (button) button.disabled = false;
@@ -3227,42 +3301,114 @@
         }
       };
 
+      const foregroundCurrent = (root) => (
+        root?.dataset.refreshEnabled === "true"
+        && !document.hidden
+        && navigator.onLine !== false
+      );
+
+      const closeEventSource = () => {
+        if (eventSource) eventSource.close();
+        eventSource = null;
+      };
+
+      const withVoiceSuppressed = async (operation) => {
+        voiceSuppressionCount += 1;
+        try {
+          return await operation();
+        } finally {
+          voiceSuppressionCount -= 1;
+        }
+      };
+
+      const clearCorrectionTimer = () => {
+        if (correctionTimer !== null) window.clearTimeout(correctionTimer);
+        correctionTimer = null;
+      };
+
+      const rebuildEventSource = (root) => {
+        closeEventSource();
+        if (!foregroundCurrent(root) || !root.dataset.sseUrl) return;
+        const kind = root.dataset.n6AutoRefresh;
+        const streamUrl = new URL(root.dataset.sseUrl, window.location.origin);
+        streamUrl.searchParams.set("after_id", currentAfterId(kind));
+        eventSource = new EventSource(streamUrl.toString());
+        eventSource.addEventListener("signal", (event) => {
+          try {
+            const count = applySignalEvent(root, JSON.parse(event.data), event.lastEventId);
+            statusText(root, `实时增量已连接 · ${count ? "收到新消息" : "已幂等校正"}`);
+          } catch (_error) {
+            statusText(root, "实时消息格式无效 · 等待完整同步校正");
+          }
+        });
+        eventSource.onopen = () => statusText(root, "实时增量已连接");
+        eventSource.onerror = () => statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
+      };
+
+      const scheduleCorrection = (root) => {
+        clearCorrectionTimer();
+        if (!foregroundCurrent(root)) return;
+        correctionTimer = window.setTimeout(async () => {
+          correctionTimer = null;
+          if (!foregroundCurrent(root)) return;
+          await refreshOnce(root, { append: false, silent: false, speakNew: true });
+          scheduleCorrection(root);
+        }, correctionIntervalMs);
+      };
+
+      const pauseLive = () => {
+        clearCorrectionTimer();
+        closeEventSource();
+        if (activeRoot) {
+          const state = scopeState(activeRoot);
+          state.controllers.forEach((controller) => controller.abort());
+        }
+      };
+
+      const recoverLive = async () => {
+        const root = activeRoot;
+        if (!foregroundCurrent(root)) return;
+        clearCorrectionTimer();
+        closeEventSource();
+        await withVoiceSuppressed(() => refreshOnce(
+          root,
+          { append: false, silent: true, speakNew: false },
+        ));
+        if (!foregroundCurrent(root)) return;
+        rebuildEventSource(root);
+        scheduleCorrection(root);
+      };
+
       const init = () => {
-        const eventSources = [];
         document.querySelectorAll("[data-n6-auto-refresh]").forEach((root) => {
           const button = root.querySelector("[data-n6-refresh-now]");
           const loadMoreButton = root.querySelector("[data-n6-load-more]");
           root.dataset.refreshInFlight = "false";
           scopeState(root);
-          if (button) button.addEventListener("click", () => refreshOnce(root, { append: false }));
+          if (button) button.addEventListener("click", () => withVoiceSuppressed(() => refreshOnce(
+            root,
+            { append: false, silent: false, speakNew: false },
+          )));
           if (loadMoreButton) {
-            loadMoreButton.addEventListener("click", () => refreshOnce(root, { append: true }));
+            loadMoreButton.addEventListener("click", () => withVoiceSuppressed(() => refreshOnce(
+              root,
+              { append: true, silent: false, speakNew: false },
+            )));
           }
           if (root.dataset.refreshEnabled !== "true") return;
-          const kind = root.dataset.n6AutoRefresh;
-          const streamUrl = new URL(root.dataset.sseUrl, window.location.origin);
-          streamUrl.searchParams.set("after_id", currentAfterId(kind));
-          const eventSource = new EventSource(streamUrl.toString());
-          eventSources.push(eventSource);
-          eventSource.addEventListener("signal", (event) => {
-            try {
-              const count = applySignalEvent(root, JSON.parse(event.data), event.lastEventId);
-              statusText(root, `实时增量已连接 · ${count ? "收到新消息" : "已幂等校正"}`);
-            } catch (_error) {
-              statusText(root, "实时消息格式无效 · 等待完整同步校正");
-            }
-          });
-          eventSource.onopen = () => statusText(root, "实时增量已连接");
-          eventSource.onerror = () => statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
+          activeRoot = root;
+          rebuildEventSource(root);
+          scheduleCorrection(root);
         });
         document.addEventListener("visibilitychange", () => {
-          if (!document.hidden) {
-            document.querySelectorAll("[data-n6-auto-refresh][data-refresh-enabled='true']")
-              .forEach((root) => refreshOnce(root, { append: false }));
-          }
+          if (document.hidden) pauseLive();
+          else recoverLive();
         });
+        window.addEventListener("online", recoverLive);
+        window.addEventListener("offline", pauseLive);
+        window.addEventListener("pageshow", recoverLive);
         window.addEventListener("beforeunload", () => {
-          eventSources.forEach((source) => source.close());
+          pauseLive();
           sharedStore.scopes.forEach((state) => {
             state.controllers.forEach((controller) => controller.abort());
           });
