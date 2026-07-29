@@ -15487,12 +15487,20 @@ class N6UserAppTest(unittest.TestCase):
         self.assertNotIn("/api/n6/ui/v1/message-dashboard", page_response.text)
         rendered = page_response.text.split("<script", 1)[0]
         card_dom = rendered.split('data-n6-message-cards', 1)[1]
+        self.assertEqual(card_dom.count('class="message-card-foot"'), 2)
+        self.assertEqual(card_dom.count(">查看详情</a>"), 2)
+        for projection_id in ("101", "102"):
+            self.assertIn(f'data-n6-projection-id="{projection_id}"', card_dom)
+            self.assertIn(f'href="/api/n6/app/v1/signals/{projection_id}"', card_dom)
         for hidden_audit_text in (
             "condition=",
             "blocked_reason=",
             "trade_date=",
             "identity_key=",
+            "user_signal_projection_id=",
+            "projection_id=",
             "user_signal_card_id=",
+            "card_id=",
             "authority=",
             "ActionBlocked",
             "ActionExecuted",
@@ -15512,6 +15520,10 @@ class N6UserAppTest(unittest.TestCase):
             "item.authority_source",
         ):
             self.assertNotIn(hidden_field, dynamic_card)
+        self.assertEqual(dynamic_card.count('<div class="message-card-foot">'), 1)
+        self.assertEqual(dynamic_card.count(">查看详情</a>"), 1)
+        self.assertIn('data-n6-projection-id="${projectionId}"', dynamic_card)
+        self.assertIn('href="${escapeHtml(item.detail_href)}"', dynamic_card)
         for label in (
             "买入目标价",
             "卖出目标价",
@@ -15538,7 +15550,8 @@ class N6UserAppTest(unittest.TestCase):
         self.assertLess(rendered.index("data-n6-message-asset-kind"), rendered.index("data-n6-voice-toggle"))
         self.assertLess(rendered.index("data-n6-voice-toggle"), rendered.index("data-n6-refresh-status"))
         self.assertIn("grid-template-columns: minmax(0, 1fr)", source)
-        self.assertIn("min-height: 44px", source)
+        self.assertIn(".message-card-foot a {\n      min-height: 44px;\n    }", source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
         client, repo, _, _ = build_client()
