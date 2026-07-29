@@ -17364,6 +17364,10 @@ class N6UserAppTest(unittest.TestCase):
             "语音只播本页新收到的 SSE",
             "不写服务器",
             "proposal 只是虚拟交易申请，不等于订单或成交",
+            "proposal/确认不等于成交",
+            "成交由独立 N6 executor 处理",
+            "executor 状态本页不验证",
+            "全虚拟、不连接真实券商",
             "不连接真实券商",
             "空消息不等于上游故障",
             "独立共享的只读学习入口",
@@ -17379,6 +17383,7 @@ class N6UserAppTest(unittest.TestCase):
         with patch.object(n6_user_app_module, "n6_trading_session_now", return_value=current_time):
             client, _, _, _ = build_client(
                 scope_write_enabled=True,
+                scope_bulk_write_enabled=True,
                 proposal_write_enabled=True,
                 csrf_secret="cockpit-secret",
             )
@@ -17389,12 +17394,30 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(payload["dashboard_status"]["trading_session"], "trading")
         self.assertFalse(payload["dashboard_status"]["historical_query_allowed"])
         self.assertEqual(payload["dashboard_status"]["capabilities"]["monitor_management"], "已启用")
+        self.assertEqual(payload["dashboard_status"]["capabilities"]["bulk_add"], "已启用")
         self.assertEqual(payload["dashboard_status"]["capabilities"]["proposal"], "已启用")
         self.assertEqual(payload["dashboard_status"]["capabilities"]["executor"], "本页未验证")
+        self.assertIn("<span>批量加入</span><strong>已启用</strong>", page.text)
+        self.assertIn("<span>最后消息时间</span><strong>", page.text)
+        self.assertIn(payload["message_summary"]["latest_event_time_display"], page.text)
         self.assertIn("交易时段仅限当前业务日", page.text)
         self.assertIn("历史快照不接收实时 SSE", page.text)
         self.assertIn("语音只播本页新收到的 SSE", page.text)
         self.assertIn("executor 本页未验证", page.text)
+
+        disabled_client, _, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=False,
+            csrf_secret="cockpit-bulk-disabled-secret",
+        )
+        disabled_client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        disabled_payload = disabled_client.get("/api/n6/app/v1/dashboard").json()
+        disabled_page = disabled_client.get("/n6/app/dashboard")
+        self.assertEqual(disabled_payload["dashboard_status"]["capabilities"]["bulk_add"], "未启用")
+        self.assertIn("<span>批量加入</span><strong>未启用</strong>", disabled_page.text)
 
     def test_b_track_daily_cockpit_mobile_and_folded_details_contract(self) -> None:
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")

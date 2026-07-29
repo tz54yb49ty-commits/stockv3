@@ -11202,6 +11202,7 @@ def create_app(
             proposal_result=proposal_result,
             trade_result=trade_result,
             scope_write_enabled=scope_write_active,
+            scope_bulk_write_enabled=scope_bulk_write_active,
             proposal_write_enabled=proposal_write_active,
         )
 

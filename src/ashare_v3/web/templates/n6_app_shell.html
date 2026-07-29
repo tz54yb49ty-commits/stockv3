@@ -1140,6 +1140,7 @@
             <h3>消息摘要</h3>
             <div class="summary-pairs">
               <div><span>当前消息</span><strong>{{ message_summary.total_count_display|default("暂不可确认") }}</strong></div>
+              <div><span>最后消息时间</span><strong>{{ message_summary.latest_event_time_display|default("暂不可确认") }}</strong></div>
               {% for event_type, label in [("ActionEligible", "待确认"), ("ActionExecuted", "动作成立"), ("ActionBlocked", "动作未确认")] %}
               <div><span>{{ label }}</span><strong>{% if message_summary.by_event_type is mapping %}{{ message_summary.by_event_type.get(event_type, 0) }}{% else %}暂不可确认{% endif %}</strong></div>
               {% endfor %}
@@ -1161,6 +1162,7 @@
               <div><span>待确认申请</span><strong>{{ virtual_summary.pending_proposal_count_display|default("暂不可确认") }}</strong></div>
               <div><span>虚拟成交</span><strong>{{ virtual_summary.trade_count_display|default("暂不可确认") }}</strong></div>
               <div><span>监控管理</span><strong>{{ capabilities.monitor_management|default("暂不可确认") }}</strong></div>
+              <div><span>批量加入</span><strong>{{ capabilities.bulk_add|default("未启用") }}</strong></div>
               <div><span>交易申请</span><strong>{{ capabilities.proposal|default("暂不可确认") }}</strong></div>
             </div>
             <p class="subtle">proposal ≠ 成交；全部为虚拟数据，不连接真实券商。</p>

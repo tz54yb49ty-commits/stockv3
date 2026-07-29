@@ -869,6 +869,7 @@ def app_dashboard_model(
     proposal_result: dict[str, Any] | None = None,
     trade_result: dict[str, Any] | None = None,
     scope_write_enabled: bool = False,
+    scope_bulk_write_enabled: bool = False,
     proposal_write_enabled: bool = False,
 ) -> dict[str, Any]:
     signal_items = [app_signal_item(row) for row in signal_rows]
@@ -919,6 +920,7 @@ def app_dashboard_model(
             current_trade_date=current_trade_date,
             trading_session_active=trading_session_active,
             scope_write_enabled=scope_write_enabled,
+            scope_bulk_write_enabled=scope_bulk_write_enabled,
             proposal_write_enabled=proposal_write_enabled,
         ),
         "scope_summary": scope_summary,
@@ -1002,7 +1004,8 @@ def app_dashboard_user_operation_guide() -> dict[str, Any]:
         ],
         "safety_boundaries": [
             "proposal 不等于订单或成交，必须由真人执行两阶段确认。",
-            "全部账户、资金、持仓和成交均为虚拟数据，不连接真实券商，不执行真实下单。",
+            "proposal/确认不等于成交；成交由独立 N6 executor 处理；executor 状态本页不验证。",
+            "全部账户、资金、持仓和成交均为虚拟数据；全虚拟、不连接真实券商；不执行真实下单。",
             "空消息可能来自当前无匹配监控、无实时范围或当前没有新投影，不等于上游故障。",
         ],
         "advanced_notes": [
@@ -1042,6 +1045,7 @@ def app_dashboard_status(
     current_trade_date: str,
     trading_session_active: bool,
     scope_write_enabled: bool,
+    scope_bulk_write_enabled: bool,
     proposal_write_enabled: bool,
 ) -> dict[str, Any]:
     business_date_ready = bool(str(current_trade_date or "").strip())
@@ -1055,6 +1059,7 @@ def app_dashboard_status(
         "historical_query_display": "可查询只读历史快照" if historical_allowed else "交易时段仅限当前业务日" if trading_session_active else "暂不可确认",
         "capabilities": {
             "monitor_management": "已启用" if scope_write_enabled else "只读查看",
+            "bulk_add": "已启用" if scope_bulk_write_enabled else "未启用",
             "proposal": "已启用" if proposal_write_enabled else "未启用",
             "sse": "当前业务日新增消息" if business_date_ready else "暂不可确认",
             "executor": "本页未验证",
@@ -1121,6 +1126,12 @@ def app_dashboard_message_summary(
     current_trade_date: str,
 ) -> dict[str, Any]:
     ready = bool(str(current_trade_date or "").strip())
+    event_times = [
+        str(item.get("event_time") or "").strip()
+        for item in signal_items
+        if str(item.get("event_time") or "").strip()
+    ]
+    latest_event_time = max(event_times, default="") if ready else ""
     by_event = {
         event_type: _count_action(signal_items, state, event_type)
         for event_type, state in (
@@ -1135,6 +1146,8 @@ def app_dashboard_message_summary(
         "ready": ready,
         "total_count": total_count,
         "total_count_display": str(total_count) if total_count is not None else "暂不可确认",
+        "latest_event_time": latest_event_time or None,
+        "latest_event_time_display": latest_event_time or ("暂无消息" if ready else "暂不可确认"),
         "by_event_type": by_event if ready else None,
         "by_asset_kind": _count_by(signal_items, "asset_kind") if ready else None,
         "empty_is_upstream_failure": False,
