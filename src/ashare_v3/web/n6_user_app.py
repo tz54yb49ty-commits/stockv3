@@ -82,6 +82,7 @@ from ashare_v3.web.n6_app_v1 import (
     app_signals_model,
     app_status_monitor_model,
     app_trade_proposals_model,
+    app_user_guide_model,
     app_virtual_trades_model,
     app_watchlist_model,
     canonical_bigint_id,
@@ -11145,20 +11146,63 @@ def create_app(
 
     def build_app_dashboard_data(session: AuthSession, principal: dict[str, Any]) -> dict[str, Any]:
         user = session_user_payload(session)
+        principal_id = int(principal["principal_id"])
+        principal_type = str(principal["principal_type"])
         current_trade_date = repo.fetch_app_current_signal_trade_date()
         signals = repo.fetch_app_signals(
-            principal_id=int(principal["principal_id"]),
-            principal_type=str(principal["principal_type"]),
+            principal_id=principal_id,
+            principal_type=principal_type,
             user_id=session.user_id,
             filters={"trade_date": current_trade_date},
             limit=web_config.ui_signal_limit,
         ) if current_trade_date else []
+        account = repo.fetch_app_virtual_account(principal_id, principal_type)
+        cash_snapshot = (
+            repo.fetch_app_cash_snapshot(int(account["virtual_account_id"]))
+            if account and account.get("virtual_account_id")
+            else None
+        )
+        monitor_result = repo.fetch_app_monitor_items(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=session.user_id,
+            limit=500,
+            monitor_status="all",
+            for_trade_date=current_trade_date or "",
+        )
+        realtime_scope_result = repo.fetch_app_realtime_scope(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=session.user_id,
+        )
+        positions = repo.fetch_app_positions(principal_id, principal_type)
+        proposal_result = repo.fetch_app_trade_proposals(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=session.user_id,
+            limit=100,
+        )
+        trade_result = repo.fetch_app_virtual_trades(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            user_id=session.user_id,
+            limit=200,
+        )
         return app_dashboard_model(
             principal,
             user=user,
-            account=None,
-            cash_snapshot=None,
+            account=account,
+            cash_snapshot=cash_snapshot,
             signal_rows=signals,
+            current_trade_date=current_trade_date or "",
+            trading_session_active=n6_is_trading_session_for_trade_date(current_trade_date),
+            monitor_result=monitor_result,
+            realtime_scope_result=realtime_scope_result,
+            positions=positions,
+            proposal_result=proposal_result,
+            trade_result=trade_result,
+            scope_write_enabled=scope_write_active,
+            proposal_write_enabled=proposal_write_active,
         )
 
     def app_v2_filter_response(request: Request, asset_kind: str) -> JSONResponse:
@@ -11360,6 +11404,8 @@ def create_app(
         user = session_user_payload(session)
         if page_key in {"home", "dashboard"}:
             return build_app_dashboard_data(session, principal)
+        if page_key == "guide":
+            return app_user_guide_model(principal, user=user)
         if page_key == "account":
             account = repo.fetch_app_virtual_account(
                 int(principal["principal_id"]),
@@ -11631,6 +11677,7 @@ def create_app(
             return RedirectResponse("/n6/app/signals", status_code=307)
         if page_key not in {
             "dashboard",
+            "guide",
             "account",
             "signals",
             "messages",
@@ -11779,6 +11826,11 @@ def create_app(
             )
             + "；不连接真实券商；不执行真实下单"
         )
+        if display_page_key in {"home", "dashboard", "guide"}:
+            page_model["ux_safety_status"] = (
+                "投影只读模式工作台；交易申请状态按页面能力显示；"
+                "executor 本页未验证；不连接真实券商；不执行真实下单"
+            )
         return templates.TemplateResponse(
             request,
             "n6_app_shell.html",

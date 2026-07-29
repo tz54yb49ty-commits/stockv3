@@ -171,6 +171,102 @@
       gap: 14px;
     }
     .guide-hero h3 { color: var(--ink); font-size: 18px; }
+    .cockpit-shell {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+    .cockpit-lead {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .cockpit-lead p { margin: 6px 0 0; }
+    .cockpit-status-grid,
+    .cockpit-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .cockpit-summary-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .cockpit-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--soft);
+      padding: 12px;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+    }
+    .cockpit-card h3 { font-size: 15px; }
+    .cockpit-card p { margin: 0; }
+    .cockpit-card strong { overflow-wrap: anywhere; }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: #87959a;
+    }
+    .status-dot.ready { background: #16866f; }
+    .status-dot.warn { background: #c17b00; }
+    .status-dot.unknown { background: #69777c; }
+    .summary-pairs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+    .summary-pairs > div {
+      min-width: 0;
+      border-radius: 7px;
+      background: var(--panel);
+      padding: 8px;
+    }
+    .summary-pairs span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .next-action-card {
+      border: 1px solid #9bcac2;
+      border-radius: 10px;
+      background: var(--accent-soft);
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .next-action-card p { margin: 4px 0 0; }
+    .next-action-card a,
+    .guide-summary-card a,
+    .guide-step a {
+      min-height: 44px;
+    }
+    .guide-summary-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .guide-summary-card p { margin: 4px 0 0; }
     .guide-quick-links {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -884,7 +980,7 @@
         padding: 2px 2px 8px;
       }
       nav a, nav button { flex: 0 0 auto; }
-      .metric-grid:not(.message-summary-grid), .split, .field-grid, .guide-flow-grid, .guide-quick-links { grid-template-columns: 1fr; }
+      .metric-grid:not(.message-summary-grid), .split, .field-grid, .guide-flow-grid, .guide-quick-links, .cockpit-status-grid { grid-template-columns: 1fr; }
       .guide-flow-node::after { display: none; }
     }
     @media (max-width: 800px) {
@@ -910,6 +1006,44 @@
       }
       .message-controls .monitor-actions > * {
         max-width: 100%;
+      }
+    }
+    @media (max-width: 430px) {
+      .wrap,
+      main.n6-signals-workspace,
+      .n6-data-workspace {
+        width: calc(100vw - 16px);
+      }
+      .topbar { gap: 10px; }
+      nav a,
+      nav button,
+      .next-action-card a,
+      .guide-summary-card a,
+      .guide-step a,
+      .technical-details > summary {
+        min-height: 44px;
+      }
+      .banner {
+        padding: 9px 10px;
+        font-size: 13px;
+      }
+      .cockpit-shell { padding: 10px; }
+      .cockpit-lead,
+      .next-action-card,
+      .guide-summary-card {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .cockpit-status-grid,
+      .cockpit-summary-grid,
+      .summary-pairs,
+      .guide-step-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .status-line,
+      .guide-summary-card p,
+      .next-action-card p {
+        overflow-wrap: anywhere;
       }
     }
   </style>
@@ -946,57 +1080,160 @@
         <h2>{{ page.page_title }}</h2>
       </div>
       {% if page.page_key in ["home", "dashboard"] %}
-      {% set user_guide = page.data.user_operation_guide|default({}) %}
+      {% set dashboard_status = page.data.dashboard_status|default({}) %}
+      {% set capabilities = dashboard_status.capabilities|default({}) %}
+      {% set scope_summary = page.data.scope_summary|default({}) %}
+      {% set message_summary = page.data.message_summary|default({}) %}
+      {% set virtual_summary = page.data.virtual_summary|default({}) %}
+      {% set next_action = page.data.next_action|default({"label": "查看卡片消息", "href": "/n6/app/messages"}) %}
+      {% set guide_summary = page.data.guide_summary|default({"title": "B轨新用户操作说明书", "summary": "查看六步使用说明。", "href": "/n6/app/guide", "cta_label": "打开说明书"}) %}
+      <div class="cockpit-shell" aria-label="B轨任务入口">
+        <div class="cockpit-lead">
+          <div>
+            <h3>日常工作台</h3>
+            <p class="subtle">先看状态与唯一下一步，再按需进入明细页面。</p>
+          </div>
+          <span class="chip">principal scoped · 只读汇总</span>
+        </div>
+        <div class="cockpit-status-grid" aria-label="工作台状态">
+          <article class="cockpit-card">
+            <span class="subtle">当前业务日</span>
+            <strong>{{ dashboard_status.business_date_display|default("暂不可确认") }}</strong>
+            <div class="status-line"><span class="status-dot {{ 'ready' if dashboard_status.business_date else 'unknown' }}"></span>{{ "已确认" if dashboard_status.business_date else "暂不可确认" }}</div>
+          </article>
+          <article class="cockpit-card">
+            <span class="subtle">交易时段</span>
+            <strong>{{ dashboard_status.trading_session_display|default("暂不可确认") }}</strong>
+            <div class="status-line"><span class="status-dot {{ 'ready' if dashboard_status.trading_session == 'trading' else 'unknown' }}"></span>状态文字与颜色同时呈现</div>
+          </article>
+          <article class="cockpit-card">
+            <span class="subtle">历史查询</span>
+            <strong>{{ dashboard_status.historical_query_display|default("暂不可确认") }}</strong>
+            <div class="status-line"><span class="status-dot {{ 'ready' if dashboard_status.historical_query_allowed else 'warn' if dashboard_status.historical_query_allowed is sameas false else 'unknown' }}"></span>历史快照不接收实时 SSE</div>
+          </article>
+          <article class="cockpit-card">
+            <span class="subtle">executor</span>
+            <strong>{{ capabilities.executor|default("本页未验证") }}</strong>
+            <div class="status-line"><span class="status-dot unknown"></span>不根据申请开关推断运行态</div>
+          </article>
+        </div>
+        <div class="cockpit-summary-grid">
+          <article class="cockpit-card">
+            <h3>监控对象与实时范围</h3>
+            <div class="summary-pairs">
+              <div><span>有效监控对象</span><strong>{{ scope_summary.monitor_count_display|default("暂不可确认") }}</strong></div>
+              <div><span>实时范围</span><strong>{{ scope_summary.realtime_count_display|default("暂不可确认") }}</strong></div>
+              {% for asset_kind, asset_label in [("stock", "个股"), ("index", "指数"), ("board", "板块")] %}
+              <div>
+                <span>{{ asset_label }} · 监控 / 实时</span>
+                <strong>
+                  {% if scope_summary.monitor_by_asset_kind is mapping %}{{ scope_summary.monitor_by_asset_kind.get(asset_kind, 0) }}{% else %}暂不可确认{% endif %}
+                  /
+                  {% if scope_summary.realtime_by_asset_kind is mapping %}{{ scope_summary.realtime_by_asset_kind.get(asset_kind, 0) }}{% else %}暂不可确认{% endif %}
+                </strong>
+              </div>
+              {% endfor %}
+            </div>
+            <p class="subtle">监控对象决定本人可见范围；实时范围只面向当前交易日，两者不同。</p>
+          </article>
+          <article class="cockpit-card">
+            <h3>消息摘要</h3>
+            <div class="summary-pairs">
+              <div><span>当前消息</span><strong>{{ message_summary.total_count_display|default("暂不可确认") }}</strong></div>
+              {% for event_type, label in [("ActionEligible", "待确认"), ("ActionExecuted", "动作成立"), ("ActionBlocked", "动作未确认")] %}
+              <div><span>{{ label }}</span><strong>{% if message_summary.by_event_type is mapping %}{{ message_summary.by_event_type.get(event_type, 0) }}{% else %}暂不可确认{% endif %}</strong></div>
+              {% endfor %}
+            </div>
+            <p class="subtle">{{ message_summary.empty_explanation|default("空消息不等于上游故障。") }}</p>
+          </article>
+          <article class="cockpit-card">
+            <h3>虚拟账户与持仓</h3>
+            <div class="summary-pairs">
+              <div><span>账户</span><strong>{{ virtual_summary.account_status_display|default("暂不可确认") }}</strong></div>
+              <div><span>可用资金</span><strong>{{ virtual_summary.available_cash_display|default("暂不可确认") }}</strong></div>
+              <div><span>持仓数</span><strong>{{ virtual_summary.position_count_display|default("暂不可确认") }}</strong></div>
+              <div><span>可卖 / T+1 锁定</span><strong>{{ virtual_summary.sellable_quantity_display|default("暂不可确认") }} / {{ virtual_summary.t1_locked_quantity_display|default("暂不可确认") }}</strong></div>
+            </div>
+          </article>
+          <article class="cockpit-card">
+            <h3>申请、成交与能力</h3>
+            <div class="summary-pairs">
+              <div><span>待确认申请</span><strong>{{ virtual_summary.pending_proposal_count_display|default("暂不可确认") }}</strong></div>
+              <div><span>虚拟成交</span><strong>{{ virtual_summary.trade_count_display|default("暂不可确认") }}</strong></div>
+              <div><span>监控管理</span><strong>{{ capabilities.monitor_management|default("暂不可确认") }}</strong></div>
+              <div><span>交易申请</span><strong>{{ capabilities.proposal|default("暂不可确认") }}</strong></div>
+            </div>
+            <p class="subtle">proposal ≠ 成交；全部为虚拟数据，不连接真实券商。</p>
+            <p class="subtle">{% if page.proposal_write_enabled %}申请由受限 Web 创建，成交由独立 N6 executor 处理；不代表 executor 正在运行，executor 本页未验证。{% else %}交易申请未启用；executor 本页未验证。{% endif %}</p>
+          </article>
+        </div>
+        <section class="next-action-card" aria-label="唯一下一步操作">
+          <div>
+            <h3>唯一下一步</h3>
+            <p class="subtle">按固定优先级根据当前只读摘要生成。</p>
+          </div>
+          <a href="{{ next_action.href }}">{{ next_action.label }}</a>
+        </section>
+        <section class="guide-summary-card" aria-label="新用户说明书摘要">
+          <div>
+            <h3>{{ guide_summary.title }}</h3>
+            <p class="subtle">{{ guide_summary.summary }}</p>
+          </div>
+          <a href="{{ guide_summary.href }}">{{ guide_summary.cta_label }}</a>
+        </section>
+        <details class="technical-details">
+          <summary>安全与高级说明 <span class="subtle">默认折叠</span></summary>
+          <div class="text-block">
+            <p>当前业务日新增消息可使用 SSE；历史快照不走 SSE。语音只播本页新收到的 SSE，由浏览器本地处理，不写服务器。</p>
+            <p>工作台不展示 run、projection 或 raw blocked ID，也不验证 executor、scheduler、Release 或服务运行态。</p>
+          </div>
+        </details>
+      </div>
+      {% elif page.page_key == "guide" %}
+      {% set user_guide = page.data.guide|default({}) %}
       <div class="guide-hero">
         <div>
           <h3>{{ user_guide.title|default("B轨新用户操作说明书") }}</h3>
-          <p class="subtle">{{ user_guide.subtitle|default("B轨用于多用户筛选、保存个人监控范围、查看与自己范围匹配的实时/历史消息。") }}</p>
+          <p class="subtle">{{ user_guide.subtitle|default("多用户、全虚拟、只读观察。") }}</p>
         </div>
-        {% set quick_links = user_guide.quick_links|default([]) %}
-        <div class="guide-quick-links" aria-label="B轨任务入口">
-          <div class="guide-link-group">
-            <strong>筛选</strong>
-            {% for link in quick_links[0:1] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>范围</strong>
-            {% for link in quick_links[1:3] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>消息</strong>
-            {% for link in quick_links[3:5] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>账户 / 日志</strong>
-            {% for link in quick_links[5:8] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-        </div>
-        <div class="guide-step-grid">
+        <div class="guide-step-grid" aria-label="六步使用流程">
           {% for step in user_guide.steps|default([]) %}
           <article class="guide-step">
             <span class="guide-step-number">{{ step.number }}</span>
             <strong>{{ step.title }}</strong>
             <p>{{ step.summary }}</p>
             <p>{{ step.description }}</p>
+            <a href="{{ step.href }}">前往该步骤</a>
           </article>
           {% endfor %}
         </div>
-        <div class="guide-boundary" aria-label="B轨多用户边界">
-          {% for note in user_guide.boundary_notes|default([]) %}
-          <span class="chip">{{ note }}</span>
-          {% endfor %}
-        </div>
-      </div>
-      <div class="guide-flow" aria-label="B轨多用户流程图">
-        <h3>多用户流程图</h3>
-        <div class="guide-flow-grid">
-          {% for node in user_guide.workflow_nodes|default([]) %}
-          <div class="guide-flow-node">
-            <strong>{{ node.label }}</strong>
-            <span>{{ node.description }}</span>
+        <div class="guide-summary-card">
+          <div>
+            <h3>{{ user_guide.ai_agent.title|default("AI投资员") }}</h3>
+            <p class="subtle">{{ user_guide.ai_agent.description|default("独立共享只读学习入口。") }}</p>
           </div>
-          {% endfor %}
+          <a href="{{ user_guide.ai_agent.href|default('/n6/app/ai-agent') }}">进入只读学习入口</a>
         </div>
+        <details class="technical-details">
+          <summary>概念说明 <span class="subtle">默认折叠</span></summary>
+          <div class="guide-step-grid text-block">
+            {% for item in user_guide.concepts|default([]) %}
+            <article class="guide-step"><strong>{{ item.title }}</strong><p>{{ item.description }}</p></article>
+            {% endfor %}
+          </div>
+        </details>
+        <details class="technical-details">
+          <summary>安全边界 <span class="subtle">默认折叠</span></summary>
+          <div class="text-block">
+            {% for item in user_guide.safety_boundaries|default([]) %}<p>{{ item }}</p>{% endfor %}
+          </div>
+        </details>
+        <details class="technical-details">
+          <summary>高级说明 <span class="subtle">默认折叠</span></summary>
+          <div class="text-block">
+            {% for item in user_guide.advanced_notes|default([]) %}<p>{{ item }}</p>{% endfor %}
+          </div>
+        </details>
       </div>
       {% elif page.page_key == "account" %}
       <div class="text-block">
@@ -2150,7 +2387,7 @@
       {% endif %}
     </section>
 
-    {% if page.page_key not in ["home", "dashboard"] %}
+    {% if page.page_key not in ["home", "dashboard", "guide"] %}
     <details class="technical-details">
       <summary>技术说明与数据边界 <span class="subtle">默认折叠</span></summary>
       <div class="split">

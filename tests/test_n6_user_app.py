@@ -8360,7 +8360,10 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(account_response.json()["status"], "ready")
         self.assertEqual(account_response.json()["virtual_account"]["virtual_account_id"], "11000")
         self.assertEqual(account_response.json()["cash_summary"]["total_cash"], 100000000)
-        self.assertEqual(repo.app_virtual_account_reads, [(1000, "human_user")])
+        self.assertEqual(
+            repo.app_virtual_account_reads,
+            [(1000, "human_user"), (1000, "human_user")],
+        )
         for key in (
             "n6_virtual_trade_proposal",
             "n6_virtual_order",
@@ -16893,19 +16896,10 @@ class N6UserAppTest(unittest.TestCase):
         dashboard = client.get("/n6/app/dashboard")
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn('aria-label="B轨任务入口"', dashboard.text)
-        for label in (
-            "进入筛选中心",
-            "查看监控对象",
-            "管理实时范围",
-            "查看消息列表",
-            "查看卡片消息",
-            "查看虚拟账户",
-            "查看持仓组合",
-            "查看买卖日志",
-        ):
-            self.assertIn(f">{label}<", dashboard.text)
-        for group in ("筛选", "范围", "消息", "账户 / 日志"):
-            self.assertIn(f"<strong>{group}</strong>", dashboard.text)
+        self.assertIn("日常工作台", dashboard.text)
+        self.assertIn("唯一下一步", dashboard.text)
+        self.assertIn("打开六步新用户说明书", dashboard.text)
+        self.assertNotIn(">进入筛选中心<", dashboard.text)
         self.assertNotIn("principal_id=", dashboard.text)
 
         account = client.get("/n6/app/account")
@@ -17077,6 +17071,342 @@ class N6UserAppTest(unittest.TestCase):
         template_source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
         self.assertIn("不连接真实券商；不执行真实下单", template_source)
         self.assertNotIn("虚拟交易尚未启用（不下单）", template_source)
+
+    def test_b_track_daily_cockpit_uses_real_principal_scoped_read_models(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            proposal_write_enabled=True,
+            csrf_secret="cockpit-read-models-secret",
+        )
+        eligible = copy.deepcopy(repo.ui_v1_signals[0])
+        eligible.update(
+            {
+                "event_type": "ActionEligible",
+                "source_action_event_type": "ActionEligible",
+                "action_state": "eligible",
+                "asset_kind": "stock",
+                "direction": "buy",
+                "identity_key": "stock:SH:600000",
+                "source_run_id": "raw-run-must-not-render",
+                "user_projection_run_id": "projection-run-must-not-render",
+            }
+        )
+        repo.ui_v1_signals = [eligible]
+        seed_effective_monitor_for_signal(repo, eligible)
+        repo.app_positions = [
+            {
+                "principal_id": 1,
+                "principal_type": "admin",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "quantity": "300",
+                "sellable_quantity": "200",
+                "t1_locked_quantity": "100",
+            }
+        ]
+        repo.app_trade_proposals = [
+            {
+                "proposal_id": 91,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "user_id": 1,
+                "proposal_status": "pending",
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            }
+        ]
+        repo.app_virtual_trades = [
+            {
+                "virtual_trade_id": 81,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "user_id": 1,
+            }
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api = client.get("/api/n6/app/v1/dashboard")
+        page = client.get("/n6/app/dashboard")
+
+        self.assertEqual(api.status_code, 200)
+        payload = api.json()
+        for field in (
+            "account_summary",
+            "watchlist_summary",
+            "future_modules_locked",
+            "dashboard_status",
+            "scope_summary",
+            "message_summary",
+            "virtual_summary",
+            "next_action",
+        ):
+            self.assertIn(field, payload)
+        self.assertEqual(payload["account_summary"]["account_name"], "Admin Virtual Account")
+        self.assertEqual(payload["account_summary"]["available_cash"], "1,000,000.00")
+        self.assertEqual(payload["watchlist_summary"]["tracked_count"], 1)
+        self.assertEqual(payload["scope_summary"]["monitor_by_asset_kind"]["stock"], 1)
+        self.assertEqual(payload["scope_summary"]["realtime_by_asset_kind"]["index"], 9)
+        self.assertEqual(payload["message_summary"]["by_event_type"]["ActionEligible"], 1)
+        self.assertEqual(payload["virtual_summary"]["position_count"], 1)
+        self.assertEqual(payload["virtual_summary"]["sellable_quantity_display"], "200")
+        self.assertEqual(payload["virtual_summary"]["t1_locked_quantity_display"], "100")
+        self.assertEqual(payload["virtual_summary"]["pending_proposal_count"], 1)
+        self.assertEqual(payload["virtual_summary"]["trade_count"], 1)
+        self.assertEqual(payload["virtual_summary"]["executor_status"], "本页未验证")
+        self.assertEqual(payload["next_action"]["key"], "pending_proposal")
+        self.assertNotIn("proposals", {item["key"] for item in payload["future_modules_locked"]})
+        self.assertNotIn("portfolio", {item["key"] for item in payload["future_modules_locked"]})
+        self.assertEqual(repo.app_virtual_account_reads, [(1, "admin"), (1, "admin")])
+        self.assertTrue(all(read[:3] == (1, "admin", 1) for read in repo.app_monitor_reads))
+        self.assertTrue(all(read == (1, "admin", 1) for read in repo.app_realtime_scope_reads))
+        self.assertEqual(repo.app_position_reads, [(1, "admin"), (1, "admin")])
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn("raw-run-must-not-render", page.text)
+        self.assertNotIn("projection-run-must-not-render", page.text)
+        self.assertNotIn("principal_id=", page.text)
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+    def test_b_track_daily_cockpit_unready_sources_are_not_rendered_as_zero(self) -> None:
+        class UnreadyDashboardRepository(FakeN6UserRepository):
+            def fetch_app_current_signal_trade_date(self) -> str | None:
+                self.app_current_signal_trade_date_reads += 1
+                return None
+
+            def fetch_app_monitor_items(self, **kwargs: Any) -> dict[str, Any]:
+                self.app_monitor_reads.append(
+                    (
+                        kwargs["principal_id"],
+                        kwargs["principal_type"],
+                        kwargs["user_id"],
+                        kwargs.get("asset_kind"),
+                        kwargs.get("for_trade_date", ""),
+                    )
+                )
+                return {"tables_ready": False, "items": []}
+
+            def fetch_app_realtime_scope(self, **kwargs: Any) -> dict[str, Any]:
+                self.app_realtime_scope_reads.append(
+                    (kwargs["principal_id"], kwargs["principal_type"], kwargs["user_id"])
+                )
+                return {"tables_ready": False, "items": []}
+
+            def fetch_app_trade_proposals(self, **kwargs: Any) -> dict[str, Any]:
+                return {"tables_ready": False, "items": []}
+
+            def fetch_app_virtual_trades(self, **kwargs: Any) -> dict[str, Any]:
+                return {"tables_ready": False, "items": []}
+
+        repo = UnreadyDashboardRepository()
+        repo.virtual_account = {}
+        client, repo, _, _ = build_client(repository=repo)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/api/n6/app/v1/dashboard")
+        page = client.get("/n6/app/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["dashboard_status"]["business_date_display"], "暂不可确认")
+        self.assertIsNone(payload["scope_summary"]["monitor_count"])
+        self.assertEqual(payload["scope_summary"]["monitor_count_display"], "暂不可确认")
+        self.assertIsNone(payload["scope_summary"]["realtime_count"])
+        self.assertEqual(payload["message_summary"]["total_count_display"], "暂不可确认")
+        self.assertEqual(payload["virtual_summary"]["available_cash_display"], "暂不可确认")
+        self.assertEqual(payload["virtual_summary"]["pending_proposal_count_display"], "暂不可确认")
+        self.assertEqual(payload["virtual_summary"]["trade_count_display"], "暂不可确认")
+        self.assertGreaterEqual(page.text.count("暂不可确认"), 6)
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+    def test_b_track_daily_cockpit_next_action_priority_is_fixed(self) -> None:
+        choose = n6_app_v1_module.app_dashboard_next_action
+        base_scope = {"monitor_count": 1, "realtime_count": 1}
+        base_messages = {"total_count": 1, "by_event_type": {"ActionEligible": 0}}
+        base_virtual = {
+            "pending_proposal_count": 0,
+            "position_count": 0,
+            "account_ready": True,
+        }
+        cases = [
+            (
+                {"scope_summary": base_scope, "message_summary": base_messages, "virtual_summary": {**base_virtual, "pending_proposal_count": 1}},
+                "pending_proposal",
+            ),
+            (
+                {"scope_summary": base_scope, "message_summary": {**base_messages, "by_event_type": {"ActionEligible": 1}}, "virtual_summary": base_virtual},
+                "action_eligible_stock_message",
+            ),
+            (
+                {"scope_summary": base_scope, "message_summary": base_messages, "virtual_summary": {**base_virtual, "position_count": 1}},
+                "portfolio",
+            ),
+            (
+                {"scope_summary": {**base_scope, "monitor_count": 0}, "message_summary": base_messages, "virtual_summary": {**base_virtual, "account_ready": False}},
+                "filter_center",
+            ),
+            (
+                {"scope_summary": base_scope, "message_summary": base_messages, "virtual_summary": {**base_virtual, "account_ready": False}},
+                "account_initialization",
+            ),
+            (
+                {"scope_summary": {**base_scope, "realtime_count": 0}, "message_summary": base_messages, "virtual_summary": base_virtual},
+                "realtime_scope",
+            ),
+            (
+                {"scope_summary": base_scope, "message_summary": {**base_messages, "total_count": 0}, "virtual_summary": base_virtual},
+                "monitor_without_message",
+            ),
+            (
+                {"scope_summary": base_scope, "message_summary": base_messages, "virtual_summary": base_virtual},
+                "card_messages",
+            ),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    choose(
+                        **kwargs,
+                        scope_write_enabled=True,
+                        proposal_write_enabled=True,
+                    )["key"],
+                    expected,
+                )
+
+    def test_b_track_daily_cockpit_next_action_respects_write_flags(self) -> None:
+        choose = n6_app_v1_module.app_dashboard_next_action
+        base_scope = {"monitor_count": 1, "realtime_count": 1}
+        base_messages = {"total_count": 1, "by_event_type": {"ActionEligible": 0}}
+        base_virtual = {
+            "pending_proposal_count": 0,
+            "position_count": 0,
+            "account_ready": True,
+        }
+        cases = [
+            (
+                "proposal_disabled",
+                {
+                    "scope_summary": base_scope,
+                    "message_summary": {
+                        **base_messages,
+                        "by_event_type": {"ActionEligible": 1},
+                    },
+                    "virtual_summary": {
+                        **base_virtual,
+                        "pending_proposal_count": 1,
+                    },
+                    "scope_write_enabled": True,
+                    "proposal_write_enabled": False,
+                },
+                "action_eligible_stock_message",
+                {"pending_proposal"},
+            ),
+            (
+                "scope_disabled",
+                {
+                    "scope_summary": {
+                        **base_scope,
+                        "monitor_count": 0,
+                        "realtime_count": 0,
+                    },
+                    "message_summary": {**base_messages, "total_count": 0},
+                    "virtual_summary": base_virtual,
+                    "scope_write_enabled": False,
+                    "proposal_write_enabled": True,
+                },
+                "card_messages",
+                {"filter_center", "realtime_scope"},
+            ),
+            (
+                "proposal_and_scope_disabled",
+                {
+                    "scope_summary": {
+                        **base_scope,
+                        "monitor_count": 0,
+                        "realtime_count": 0,
+                    },
+                    "message_summary": {**base_messages, "total_count": 0},
+                    "virtual_summary": {
+                        **base_virtual,
+                        "pending_proposal_count": 1,
+                    },
+                    "scope_write_enabled": False,
+                    "proposal_write_enabled": False,
+                },
+                "card_messages",
+                {"pending_proposal", "filter_center", "realtime_scope"},
+            ),
+        ]
+        for name, kwargs, expected, forbidden_keys in cases:
+            with self.subTest(name=name):
+                next_action = choose(**kwargs)
+                self.assertEqual(next_action["key"], expected)
+                self.assertNotIn(next_action["key"], forbidden_keys)
+                self.assertEqual(set(next_action), {"key", "label", "href"})
+
+    def test_b_track_guide_is_get_only_and_covers_six_steps_and_safety_boundaries(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/guide")
+
+        self.assertEqual(response.status_code, 200)
+        for step in (
+            "筛选三类资产",
+            "加入监控对象",
+            "按需加入实时范围",
+            "查看消息与移动卡片",
+            "合格个股两阶段虚拟申请",
+            "核对账户、组合与日志",
+        ):
+            self.assertIn(step, response.text)
+        for boundary in (
+            "个股只提供买向观察",
+            "指数和板块同时提供买向、卖向观察",
+            "历史快照不接收实时 SSE",
+            "语音只播本页新收到的 SSE",
+            "不写服务器",
+            "proposal 只是虚拟交易申请，不等于订单或成交",
+            "不连接真实券商",
+            "空消息不等于上游故障",
+            "独立共享的只读学习入口",
+        ):
+            self.assertIn(boundary, response.text)
+        for method in ("post", "put", "patch", "delete"):
+            self.assertIn(getattr(client, method)("/n6/app/guide").status_code, {404, 405})
+        self.assertNotIn("principal_id=", response.text)
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+    def test_b_track_daily_cockpit_feature_flags_session_history_and_sse_copy_do_not_drift(self) -> None:
+        current_time = datetime(2026, 6, 5, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+        with patch.object(n6_user_app_module, "n6_trading_session_now", return_value=current_time):
+            client, _, _, _ = build_client(
+                scope_write_enabled=True,
+                proposal_write_enabled=True,
+                csrf_secret="cockpit-secret",
+            )
+            client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+            payload = client.get("/api/n6/app/v1/dashboard").json()
+            page = client.get("/n6/app/dashboard")
+
+        self.assertEqual(payload["dashboard_status"]["trading_session"], "trading")
+        self.assertFalse(payload["dashboard_status"]["historical_query_allowed"])
+        self.assertEqual(payload["dashboard_status"]["capabilities"]["monitor_management"], "已启用")
+        self.assertEqual(payload["dashboard_status"]["capabilities"]["proposal"], "已启用")
+        self.assertEqual(payload["dashboard_status"]["capabilities"]["executor"], "本页未验证")
+        self.assertIn("交易时段仅限当前业务日", page.text)
+        self.assertIn("历史快照不接收实时 SSE", page.text)
+        self.assertIn("语音只播本页新收到的 SSE", page.text)
+        self.assertIn("executor 本页未验证", page.text)
+
+    def test_b_track_daily_cockpit_mobile_and_folded_details_contract(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+
+        self.assertIn("@media (max-width: 430px)", source)
+        self.assertIn(".cockpit-summary-grid", source)
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", source)
+        self.assertIn("nav a,", source)
+        self.assertIn("min-height: 44px", source)
+        for label in ("安全与高级说明", "概念说明", "安全边界", "高级说明"):
+            self.assertIn(f"<summary>{label}", source)
+        self.assertNotIn('<details class="technical-details" open', source)
 
     def test_b_track_v2_signal_page_copy_uses_message_terms_but_keeps_internal_fields(self) -> None:
         client, repo, _, _ = build_client()

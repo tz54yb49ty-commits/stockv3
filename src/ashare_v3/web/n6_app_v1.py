@@ -264,7 +264,8 @@ APP_SIDE_EFFECTS = {
 
 APP_PAGE_LABELS = {
     "home": "B轨首页",
-    "dashboard": "B轨首页",
+    "dashboard": "日常工作台",
+    "guide": "新用户说明书",
     "account": "我的账户",
     "realtime-scope": "实时监控范围",
     "strategy-center": "策略中心",
@@ -860,9 +861,40 @@ def app_dashboard_model(
     account: dict[str, Any] | None,
     cash_snapshot: dict[str, Any] | None,
     signal_rows: list[dict[str, Any]],
+    current_trade_date: str = "",
+    trading_session_active: bool = False,
+    monitor_result: dict[str, Any] | None = None,
+    realtime_scope_result: dict[str, Any] | None = None,
+    positions: list[dict[str, Any]] | None = None,
+    proposal_result: dict[str, Any] | None = None,
+    trade_result: dict[str, Any] | None = None,
+    scope_write_enabled: bool = False,
+    proposal_write_enabled: bool = False,
 ) -> dict[str, Any]:
     signal_items = [app_signal_item(row) for row in signal_rows]
     account_payload = app_account_model(principal, user=user, account=account, cash_snapshot=cash_snapshot)
+    guide = app_dashboard_user_operation_guide()
+    scope_summary = app_dashboard_scope_summary(
+        monitor_result or {},
+        realtime_scope_result or {},
+    )
+    message_summary = app_dashboard_message_summary(
+        signal_items,
+        current_trade_date=current_trade_date,
+    )
+    virtual_summary = app_dashboard_virtual_summary(
+        account_payload,
+        positions=positions or [],
+        proposal_result=proposal_result or {},
+        trade_result=trade_result or {},
+    )
+    next_action = app_dashboard_next_action(
+        scope_summary=scope_summary,
+        message_summary=message_summary,
+        virtual_summary=virtual_summary,
+        scope_write_enabled=scope_write_enabled,
+        proposal_write_enabled=proposal_write_enabled,
+    )
     component = "B Track Dashboard"
     return {
         "ok": True,
@@ -872,11 +904,27 @@ def app_dashboard_model(
         "today_overview": app_dashboard_today_overview(signal_items, cash_snapshot=cash_snapshot),
         "account_summary": app_dashboard_account_summary(account_payload),
         "signals_summary": app_dashboard_signals_summary(signal_items),
-        "user_operation_guide": app_dashboard_user_operation_guide(),
-        "watchlist_summary": app_dashboard_watchlist_summary(signal_items),
+        "user_operation_guide": guide,
+        "guide_summary": {
+            "title": guide["title"],
+            "summary": guide["summary"],
+            "href": "/n6/app/guide",
+            "cta_label": "打开六步新用户说明书",
+        },
+        "watchlist_summary": app_dashboard_watchlist_summary(monitor_result or {}),
         "ai_users_summary": app_dashboard_ai_users_summary(),
         "status_monitor_snapshot": app_dashboard_status_snapshot(signal_items),
         "future_modules_locked": app_dashboard_future_modules_locked(),
+        "dashboard_status": app_dashboard_status(
+            current_trade_date=current_trade_date,
+            trading_session_active=trading_session_active,
+            scope_write_enabled=scope_write_enabled,
+            proposal_write_enabled=proposal_write_enabled,
+        ),
+        "scope_summary": scope_summary,
+        "message_summary": message_summary,
+        "virtual_summary": virtual_summary,
+        "next_action": next_action,
         "readonly": True,
         "safety_banner": list(APP_SAFETY_LABELS),
         "source_policy": app_signal_source_policy(),
@@ -885,66 +933,303 @@ def app_dashboard_model(
 
 
 def app_dashboard_user_operation_guide() -> dict[str, Any]:
-    quick_links = [
-        {"label": "进入筛选中心", "href": "/n6/app/filter-center"},
-        {"label": "查看监控对象", "href": "/n6/app/my-monitor"},
-        {"label": "管理实时范围", "href": "/n6/app/realtime-scope"},
-        {"label": "查看消息列表", "href": "/n6/app/signals"},
-        {"label": "查看卡片消息", "href": "/n6/app/messages"},
-        {"label": "查看虚拟账户", "href": "/n6/app/account"},
-        {"label": "查看持仓组合", "href": "/n6/app/portfolio"},
-        {"label": "查看买卖日志", "href": "/n6/app/trade-log"},
-    ]
     steps = [
         {
             "number": "01",
-            "title": "筛选中心",
-            "summary": "筛选中心=共享只读候选池",
-            "description": "所有用户共用指数、板块、个股候选数据；这里只做筛选和选择，不代表交易建议。",
+            "title": "筛选三类资产",
+            "summary": "先在筛选中心查看指数、板块和个股。",
+            "description": "个股只提供买向观察；指数和板块同时提供买向、卖向观察。筛选结果是只读候选，不构成投资建议。",
             "href": "/n6/app/filter-center",
         },
         {
             "number": "02",
-            "title": "监控对象",
-            "summary": "监控对象=当前用户自己的历史/日内监控范围",
-            "description": "从筛选中心加入后，只保存到当前用户账号范围；不同用户互不影响。",
+            "title": "加入监控对象",
+            "summary": "把想持续观察的对象加入本人监控。",
+            "description": "监控对象按当前用户隔离，用于决定哪些对象的 N6 消息对你可见；不同用户互不影响。",
             "href": "/n6/app/my-monitor",
         },
         {
             "number": "03",
-            "title": "消息列表",
-            "summary": "消息列表=N6 projection/card 按当前用户范围过滤后的表格消息",
-            "description": "只读取已冻结的 N6 投影字段，并匹配当前用户的有效监控对象。",
-            "href": "/n6/app/signals",
+            "title": "按需加入实时范围",
+            "summary": "实时范围只决定当前交易日的增量消息可见性。",
+            "description": "监控对象可保留历史查询；实时范围面向当前交易日，两者不是同一概念，也不会触发下单。",
+            "href": "/n6/app/realtime-scope",
         },
         {
             "number": "04",
-            "title": "卡片消息",
-            "summary": "卡片消息=共享卡片池按当前用户范围过滤后的卡片展示",
-            "description": "卡片消息和消息列表使用同一套用户可见性规则，只是展示形式不同。",
+            "title": "查看消息与移动卡片",
+            "summary": "消息列表与卡片消息使用同一用户可见性边界。",
+            "description": "当前业务日可用 SSE 接收新增消息；历史查询不走实时 SSE。语音只播本页新收到的 SSE，浏览器本地处理，不写服务器。",
             "href": "/n6/app/messages",
         },
-    ]
-    workflow_nodes = [
-        {"label": "共享筛选中心", "description": "所有用户共用候选池"},
-        {"label": "我的监控对象", "description": "当前用户保存的历史/日内范围"},
-        {"label": "我的实时监控范围", "description": "当前用户当前交易日范围"},
-        {"label": "共享 N5/N6 消息池", "description": "N6 投影和卡片来源"},
-        {"label": "当前用户范围过滤", "description": "按用户、日期、类型、identity_key 匹配"},
-        {"label": "消息列表 / 卡片消息", "description": "只显示当前用户可见消息"},
+        {
+            "number": "05",
+            "title": "合格个股两阶段虚拟申请",
+            "summary": "先准备申请，再由本人第二次确认。",
+            "description": "proposal 只是虚拟交易申请，不等于订单或成交；是否可用取决于页面能力状态，且全程不连接真实券商。",
+            "href": "/n6/app/signals",
+        },
+        {
+            "number": "06",
+            "title": "核对账户、组合与日志",
+            "summary": "最后核对资金、持仓、T+1、申请与虚拟成交。",
+            "description": "账户、持仓和买卖日志只展示当前 principal 的虚拟数据；空消息不等于上游故障，应结合业务日、监控与实时范围判断。",
+            "href": "/n6/app/account",
+        },
     ]
     return {
         "title": "B轨新用户操作说明书",
-        "subtitle": "B轨用于多用户筛选、保存个人监控范围、查看与自己范围匹配的实时/历史消息。",
-        "quick_links": quick_links,
+        "summary": "六步完成筛选、个人监控、实时范围、消息、虚拟申请和账户核对。",
+        "subtitle": "B轨是多用户、全虚拟的只读观察与受控申请界面，不连接真实券商。",
         "steps": steps,
-        "workflow_nodes": workflow_nodes,
-        "boundary_notes": [
-            "筛选中心共享，监控对象和实时监控范围按当前用户隔离。",
-            "消息池和卡片池共享，但展示前按当前用户范围过滤。",
-            "监控投影只读；本人监控范围可管理；交易申请状态以当前 feature flag 为准。",
+        "concepts": [
+            {
+                "title": "监控对象与实时范围",
+                "description": "监控对象决定本人可见对象及历史查询范围；实时范围只补充当前交易日的增量消息范围。",
+            },
+            {
+                "title": "资产方向",
+                "description": "个股只按买向观察；指数、板块按买向和卖向双向观察。",
+            },
+            {
+                "title": "历史查询与 SSE",
+                "description": "交易时段历史查询受限；历史快照不接收实时 SSE。当前业务日 SSE 只传新增 N6 投影。",
+            },
+            {
+                "title": "语音边界",
+                "description": "语音只播当前页面新收到的 SSE，由浏览器本地完成，不写服务器，也不代表通知已送达。",
+            },
         ],
+        "safety_boundaries": [
+            "proposal 不等于订单或成交，必须由真人执行两阶段确认。",
+            "全部账户、资金、持仓和成交均为虚拟数据，不连接真实券商，不执行真实下单。",
+            "空消息可能来自当前无匹配监控、无实时范围或当前没有新投影，不等于上游故障。",
+        ],
+        "advanced_notes": [
+            "页面只读取现有 principal-scoped N6 repository，不回查 N1-N5 裸表。",
+            "executor 运行状态不由本页验证；工作台固定显示“本页未验证”。",
+        ],
+        "ai_agent": {
+            "title": "AI投资员",
+            "description": "独立共享的只读学习入口，不替用户创建申请，不连接真实券商。",
+            "href": "/n6/app/ai-agent",
+        },
+        "readonly": True,
     }
+
+
+def app_user_guide_model(
+    principal: dict[str, Any],
+    *,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    guide = app_dashboard_user_operation_guide()
+    return {
+        "ok": True,
+        "component": "B Track User Guide",
+        "component_label": "新用户说明书",
+        "principal": app_principal_model(principal, user=user),
+        "guide": guide,
+        "readonly": True,
+        "safety_banner": list(APP_SAFETY_LABELS),
+        "source_policy": app_signal_source_policy(),
+        "side_effects": dict(APP_SIDE_EFFECTS),
+    }
+
+
+def app_dashboard_status(
+    *,
+    current_trade_date: str,
+    trading_session_active: bool,
+    scope_write_enabled: bool,
+    proposal_write_enabled: bool,
+) -> dict[str, Any]:
+    business_date_ready = bool(str(current_trade_date or "").strip())
+    historical_allowed = bool(business_date_ready and not trading_session_active)
+    return {
+        "business_date": current_trade_date or None,
+        "business_date_display": current_trade_date or "暂不可确认",
+        "trading_session": "trading" if trading_session_active else "off_session" if business_date_ready else "unknown",
+        "trading_session_display": "交易时段" if trading_session_active else "非交易时段" if business_date_ready else "暂不可确认",
+        "historical_query_allowed": historical_allowed if business_date_ready else None,
+        "historical_query_display": "可查询只读历史快照" if historical_allowed else "交易时段仅限当前业务日" if trading_session_active else "暂不可确认",
+        "capabilities": {
+            "monitor_management": "已启用" if scope_write_enabled else "只读查看",
+            "proposal": "已启用" if proposal_write_enabled else "未启用",
+            "sse": "当前业务日新增消息" if business_date_ready else "暂不可确认",
+            "executor": "本页未验证",
+        },
+    }
+
+
+def _dashboard_asset_counts(
+    rows: list[dict[str, Any]],
+    *,
+    status_field: str = "",
+    status_value: str = "",
+) -> dict[str, int]:
+    identities = {
+        (str(row.get("asset_kind") or ""), str(row.get("identity_key") or ""))
+        for row in rows
+        if str(row.get("asset_kind") or "") in APP_ASSET_KIND_LABELS
+        and str(row.get("identity_key") or "")
+        and (not status_field or str(row.get(status_field) or "") == status_value)
+    }
+    return {
+        asset_kind: sum(1 for kind, _ in identities if kind == asset_kind)
+        for asset_kind in ("stock", "index", "board")
+    }
+
+
+def app_dashboard_scope_summary(
+    monitor_result: dict[str, Any],
+    realtime_scope_result: dict[str, Any],
+) -> dict[str, Any]:
+    monitor_ready = bool(monitor_result.get("tables_ready"))
+    realtime_ready = bool(realtime_scope_result.get("tables_ready"))
+    monitor_rows = list(monitor_result.get("items") or [])
+    active_rows = [
+        row
+        for row in monitor_rows
+        if str(row.get("effective_status") or row.get("status") or "") == "active"
+    ]
+    realtime_rows = [
+        row
+        for row in realtime_scope_result.get("items") or []
+        if str(row.get("status") or "active") == "active"
+    ]
+    monitor_counts = _dashboard_asset_counts(active_rows) if monitor_ready else {}
+    realtime_counts = _dashboard_asset_counts(realtime_rows) if realtime_ready else {}
+    monitor_count = sum(monitor_counts.values()) if monitor_ready else None
+    realtime_count = sum(realtime_counts.values()) if realtime_ready else None
+    return {
+        "monitor_ready": monitor_ready,
+        "monitor_count": monitor_count,
+        "monitor_count_display": str(monitor_count) if monitor_count is not None else "暂不可确认",
+        "monitor_by_asset_kind": monitor_counts if monitor_ready else None,
+        "realtime_ready": realtime_ready,
+        "realtime_count": realtime_count,
+        "realtime_count_display": str(realtime_count) if realtime_count is not None else "暂不可确认",
+        "realtime_by_asset_kind": realtime_counts if realtime_ready else None,
+        "readonly": True,
+    }
+
+
+def app_dashboard_message_summary(
+    signal_items: list[dict[str, Any]],
+    *,
+    current_trade_date: str,
+) -> dict[str, Any]:
+    ready = bool(str(current_trade_date or "").strip())
+    by_event = {
+        event_type: _count_action(signal_items, state, event_type)
+        for event_type, state in (
+            ("ActionEligible", "eligible"),
+            ("ActionExecuted", "executed"),
+            ("ActionBlocked", "blocked"),
+            ("ActionSkipped", "skipped"),
+        )
+    }
+    total_count = len(signal_items) if ready else None
+    return {
+        "ready": ready,
+        "total_count": total_count,
+        "total_count_display": str(total_count) if total_count is not None else "暂不可确认",
+        "by_event_type": by_event if ready else None,
+        "by_asset_kind": _count_by(signal_items, "asset_kind") if ready else None,
+        "empty_is_upstream_failure": False,
+        "empty_explanation": "空消息不等于上游故障，请核对业务日、监控对象与实时范围。",
+        "readonly": True,
+    }
+
+
+def _dashboard_number(value: Any) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def app_dashboard_virtual_summary(
+    account_payload: dict[str, Any],
+    *,
+    positions: list[dict[str, Any]],
+    proposal_result: dict[str, Any],
+    trade_result: dict[str, Any],
+) -> dict[str, Any]:
+    account_ready = bool(account_payload.get("virtual_account"))
+    cash = account_payload.get("cash_summary") or {}
+    proposal_ready = bool(proposal_result.get("tables_ready"))
+    trade_ready = bool(trade_result.get("tables_ready"))
+    proposals = list(proposal_result.get("items") or [])
+    trades = list(trade_result.get("items") or [])
+    position_count = len(positions) if account_ready else None
+    sellable = sum(
+        (_dashboard_number(row.get("sellable_quantity")) or Decimal("0"))
+        for row in positions
+    ) if account_ready else None
+    t1_locked = sum(
+        (_dashboard_number(row.get("t1_locked_quantity")) or Decimal("0"))
+        for row in positions
+    ) if account_ready else None
+    pending_proposal_count = (
+        sum(1 for row in proposals if str(row.get("proposal_status") or "") == "pending")
+        if proposal_ready
+        else None
+    )
+    trade_count = len(trades) if trade_ready else None
+    return {
+        "account_ready": account_ready,
+        "account_status_display": "已初始化" if account_ready else "未初始化",
+        "cash_ready": bool(cash),
+        "available_cash_display": cash.get("available_cash_display") if cash else "暂不可确认",
+        "total_cash_display": cash.get("total_cash_display") if cash else "暂不可确认",
+        "position_count": position_count,
+        "position_count_display": str(position_count) if position_count is not None else "暂不可确认",
+        "sellable_quantity_display": _portfolio_decimal_text(sellable) if sellable is not None else "暂不可确认",
+        "t1_locked_quantity_display": _portfolio_decimal_text(t1_locked) if t1_locked is not None else "暂不可确认",
+        "proposal_ready": proposal_ready,
+        "pending_proposal_count": pending_proposal_count,
+        "pending_proposal_count_display": str(pending_proposal_count) if pending_proposal_count is not None else "暂不可确认",
+        "trade_ready": trade_ready,
+        "trade_count": trade_count,
+        "trade_count_display": str(trade_count) if trade_count is not None else "暂不可确认",
+        "executor_status": "本页未验证",
+        "real_broker_connected": False,
+        "readonly": True,
+    }
+
+
+def app_dashboard_next_action(
+    *,
+    scope_summary: dict[str, Any],
+    message_summary: dict[str, Any],
+    virtual_summary: dict[str, Any],
+    scope_write_enabled: bool,
+    proposal_write_enabled: bool,
+) -> dict[str, str]:
+    pending = virtual_summary.get("pending_proposal_count")
+    eligible = (message_summary.get("by_event_type") or {}).get("ActionEligible")
+    positions = virtual_summary.get("position_count")
+    monitor_count = scope_summary.get("monitor_count")
+    realtime_count = scope_summary.get("realtime_count")
+    message_count = message_summary.get("total_count")
+    if proposal_write_enabled and isinstance(pending, int) and pending > 0:
+        return {"key": "pending_proposal", "label": "继续待确认虚拟申请", "href": "/n6/app/proposals"}
+    if isinstance(eligible, int) and eligible > 0:
+        return {"key": "action_eligible_stock_message", "label": "查看待确认个股消息", "href": "/n6/app/signals?asset_kind=stock&action_state=eligible"}
+    if isinstance(positions, int) and positions > 0:
+        return {"key": "portfolio", "label": "核对虚拟持仓与 T+1", "href": "/n6/app/portfolio"}
+    if scope_write_enabled and monitor_count == 0:
+        return {"key": "filter_center", "label": "去筛选中心选择监控对象", "href": "/n6/app/filter-center"}
+    if not virtual_summary.get("account_ready"):
+        return {"key": "account_initialization", "label": "查看虚拟账户初始化状态", "href": "/n6/app/account"}
+    if scope_write_enabled and realtime_count == 0:
+        return {"key": "realtime_scope", "label": "按需设置实时监控范围", "href": "/n6/app/realtime-scope"}
+    if isinstance(monitor_count, int) and monitor_count > 0 and message_count == 0:
+        return {"key": "monitor_without_message", "label": "查看监控对象与消息边界", "href": "/n6/app/my-monitor"}
+    return {"key": "card_messages", "label": "查看卡片消息", "href": "/n6/app/messages"}
 
 
 def app_dashboard_today_overview(
@@ -988,9 +1273,14 @@ def app_dashboard_account_summary(account_payload: dict[str, Any]) -> dict[str, 
     cash = account_payload.get("cash_summary") or {}
     return {
         "account_name": _first_text(virtual_account, "account_name"),
-        "status": _first_text(virtual_account, "status", "virtual_account_status"),
+        "status": _first_text(virtual_account, "account_status", "status", "virtual_account_status"),
         "quality_status": _first_text(virtual_account, "quality_status"),
-        "base_currency": _first_text(virtual_account, "base_currency", default=_first_text(cash, "currency")),
+        "base_currency": _first_text(
+            virtual_account,
+            "currency",
+            "base_currency",
+            default=_first_text(cash, "currency"),
+        ),
         "initial_cash": _money_text(virtual_account.get("initial_cash")),
         "available_cash": _money_text(cash.get("available_cash")),
         "frozen_cash": _money_text(cash.get("frozen_cash")),
@@ -1015,17 +1305,22 @@ def app_dashboard_signals_summary(signal_items: list[dict[str, Any]]) -> dict[st
     }
 
 
-def app_dashboard_watchlist_summary(signal_items: list[dict[str, Any]]) -> dict[str, Any]:
-    identities = {
-        str(item.get("identity_key") or "").strip()
-        for item in signal_items
-        if str(item.get("identity_key") or "").strip()
-    }
+def app_dashboard_watchlist_summary(monitor_result: dict[str, Any]) -> dict[str, Any]:
+    ready = bool(monitor_result.get("tables_ready"))
+    rows = list(monitor_result.get("items") or [])
+    active_rows = [
+        row
+        for row in rows
+        if str(row.get("effective_status") or row.get("status") or "") == "active"
+    ]
+    counts = _dashboard_asset_counts(active_rows) if ready else {}
     return {
-        "status": "readonly_shell",
-        "status_label": _state_label("readonly_shell"),
-        "tracked_count": len(identities),
-        "source": "已审核 N6 信号/卡片标识",
+        "status": "ready" if ready else "data_not_ready",
+        "status_label": _state_label("ready" if ready else "data_not_ready"),
+        "tracked_count": sum(counts.values()) if ready else None,
+        "tracked_count_display": str(sum(counts.values())) if ready else "暂不可确认",
+        "by_asset_kind": counts if ready else None,
+        "source": "当前用户监控对象",
         "mutation_enabled": False,
         "add_enabled": False,
         "delete_enabled": False,
@@ -1060,24 +1355,6 @@ def app_dashboard_status_snapshot(signal_items: list[dict[str, Any]]) -> dict[st
 
 def app_dashboard_future_modules_locked() -> list[dict[str, Any]]:
     return [
-        {
-            "key": "proposals",
-            "label": "方案",
-            "status": "locked_planned",
-            "status_label": _state_label("locked_planned"),
-            "locked": True,
-            "reason": APP_FUTURE_MODULE_NOTICE,
-            "entry_enabled": False,
-        },
-        {
-            "key": "portfolio",
-            "label": "组合",
-            "status": "locked_empty",
-            "status_label": _state_label("locked_empty"),
-            "locked": True,
-            "reason": APP_FUTURE_MODULE_NOTICE,
-            "entry_enabled": False,
-        },
         {
             "key": "pnl",
             "label": "收益",
@@ -1126,6 +1403,9 @@ def app_account_model(
             "account_type": _first_text(account, "account_type", default="virtual_t1"),
             "settlement_rule": _first_text(account, "settlement_rule", default="T+1"),
             "currency": _first_text(account, "currency", default="CNY"),
+            "initial_cash": number_or_none(account.get("initial_cash")),
+            "quality_status": _first_text(account, "quality_status"),
+            "updated_at": display_datetime(account.get("updated_at")),
         }
     cash_summary = None
     if cash_snapshot:
