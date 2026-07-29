@@ -257,7 +257,7 @@
     .message-card-grid {
       padding: 14px;
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 12px;
     }
     .message-card {
@@ -273,12 +273,14 @@
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 10px;
     }
     .message-card-title {
       color: var(--ink);
       font-size: 15px;
       font-weight: 760;
+      overflow-wrap: anywhere;
     }
     .message-card-summary {
       color: var(--ink);
@@ -290,10 +292,94 @@
       flex-wrap: wrap;
       gap: 6px;
     }
+    .message-card-primary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .message-card-primary > div {
+      min-width: 0;
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 10px;
+    }
+    .message-card-primary span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .message-card-primary strong {
+      display: block;
+      color: var(--ink);
+      font-size: 17px;
+      overflow-wrap: anywhere;
+    }
+    .message-card-details {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .message-card-details > summary {
+      min-height: 44px;
+      padding: 0 12px;
+      cursor: pointer;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 720;
+      display: flex;
+      align-items: center;
+    }
+    .message-card-details .message-card-meta {
+      border-top: 1px solid var(--line);
+      padding: 10px;
+    }
+    .message-filter-form {
+      display: grid;
+      gap: 10px;
+    }
+    .message-asset-options {
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .message-asset-option {
+      min-width: 0;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
+    .message-asset-option:has(input:checked) {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .message-asset-option input {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+    }
+    .message-controls a,
+    .message-controls button,
+    .message-controls select,
+    .message-controls .row-action {
+      min-height: 44px;
+    }
     .message-card-foot {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 10px;
       border-top: 1px solid var(--line);
       padding-top: 10px;
@@ -804,6 +890,24 @@
       .banner { line-height: 1.5; }
       .task-empty { padding: 22px 14px; }
       .table-wrap { max-width: 100%; }
+      .message-card-grid {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 10px;
+      }
+      .message-card {
+        width: 100%;
+        padding: 12px;
+      }
+      .message-card-primary,
+      .message-asset-options {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .message-controls .monitor-actions {
+        align-items: stretch;
+      }
+      .message-controls .monitor-actions > * {
+        max-width: 100%;
+      }
     }
   </style>
 </head>
@@ -1115,26 +1219,37 @@
         {% if page.data.date_policy_message %}
         <div class="monitor-message">{{ page.data.date_policy_message }}</div>
         {% endif %}
-        <div class="monitor-actions" aria-label="卡片资产类型">
-          {% for tab in page.data.asset_kind_tabs %}
-          <a class="{% if tab.active %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
-          {% endfor %}
-        </div>
-        <div class="monitor-actions" aria-label="卡片语音播报">
-          <button type="button" class="row-action" data-n6-voice-toggle>开启语音</button>
-          <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
-          <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报新 SSE 消息</span>
-        </div>
-        <form method="get" action="/n6/app/messages" class="monitor-actions">
-          <label for="messages-trade-date">交易日</label>
-          <input type="hidden" name="asset_kind" value="{{ page.data.selected_asset_kind }}">
-          <select id="messages-trade-date" name="trade_date">
-            {% for trade_date in page.data.available_trade_dates %}
-            <option value="{{ trade_date }}"{% if trade_date == page.data.selected_trade_date %} selected{% endif %}>{{ trade_date }}</option>
-            {% endfor %}
-          </select>
-          <button type="submit">查看消息</button>
-        </form>
+        <div class="message-controls">
+          <form method="get" action="/n6/app/messages" class="message-filter-form" data-n6-message-filter>
+            <div class="monitor-actions">
+              <label for="messages-trade-date">交易日</label>
+              <select id="messages-trade-date" name="trade_date">
+                {% for trade_date in page.data.available_trade_dates %}
+                <option value="{{ trade_date }}"{% if trade_date == page.data.selected_trade_date %} selected{% endif %}>{{ trade_date }}</option>
+                {% endfor %}
+              </select>
+              <button type="submit">查看消息</button>
+            </div>
+            <fieldset class="message-asset-options" aria-label="资产类型，可多选">
+              {% for option in page.data.asset_kind_options %}
+              <label class="message-asset-option">
+                <input
+                  type="checkbox"
+                  name="asset_kind"
+                  value="{{ option.asset_kind }}"
+                  {% if option.selected %}checked{% endif %}
+                  data-n6-message-asset-kind
+                >
+                <span>{{ option.asset_kind_label }}</span>
+              </label>
+              {% endfor %}
+            </fieldset>
+          </form>
+          <div class="monitor-actions" aria-label="卡片语音播报">
+            <button type="button" class="row-action" role="switch" aria-checked="false" data-n6-voice-toggle>开启语音</button>
+            <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
+            <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报当前交易日新消息</span>
+          </div>
         <div
           class="monitor-message"
           data-n6-auto-refresh="messages"
@@ -1150,37 +1265,13 @@
           <button type="button" class="row-action" data-n6-load-more{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
           <div class="n6-skeleton" data-n6-skeleton hidden aria-label="卡片加载中"><span></span><span></span><span></span></div>
         </div>
+        </div>
       </div>
       <div class="metric-grid message-summary-grid">
-        <div class="metric"><span>当前有效监控交易日</span><strong>{{ page.data.current_filter_batch.for_trade_date }}</strong></div>
-        <div class="metric"><span>条件来源日</span><strong>{{ page.data.current_filter_batch.source_trade_date }}</strong></div>
-        <div class="metric"><span>有效监控对象数量</span><strong data-summary-key="effective_monitor_count">{{ page.data.summary.effective_monitor_count }}</strong></div>
-        <div class="metric"><span>已失效对象数量</span><strong data-summary-key="expired_monitor_count">{{ page.data.summary.expired_monitor_count }}</strong></div>
-        <div class="metric"><span>今日消息数量</span><strong data-summary-key="today_message_count">{{ page.data.summary.today_message_count }}</strong></div>
+        <div class="metric"><span>消息数</span><strong data-summary-key="today_message_count">{{ page.data.summary.today_message_count }}</strong></div>
         <div class="metric"><span>已确认</span><strong data-summary-key="action_executed_count">{{ page.data.summary.action_executed_count }}</strong></div>
         <div class="metric"><span>未确认</span><strong data-summary-key="action_blocked_count">{{ page.data.summary.action_blocked_count }}</strong></div>
         <div class="metric"><span>待确认</span><strong data-summary-key="action_eligible_count">{{ page.data.summary.action_eligible_count }}</strong></div>
-        <div class="metric"><span>等待行情证据</span><strong data-summary-key="pending_market_data_count">{{ page.data.summary.pending_market_data_count }}</strong></div>
-        <div class="metric"><span>状态变化</span><strong data-summary-key="state_changed_count">{{ page.data.summary.state_changed_count }}</strong></div>
-        <div class="metric"><span>被排除消息</span><strong data-summary-key="excluded_message_count">{{ page.data.summary.excluded_message_count }}</strong></div>
-      </div>
-      <div class="split">
-        <div class="text-block">
-          <h3>projection 状态</h3>
-          <p>状态: {{ page.data.projection_status.latest_status }} · {{ page.data.projection_status.status_reason }}</p>
-          <p>projection_run_id: {{ page.data.projection_status.latest_projection_run_id }}</p>
-          <span class="chip">projection: {{ page.data.projection_status.projection_count }}</span>
-          <span class="chip">card: {{ page.data.projection_status.card_count }}</span>
-          <span class="chip">notification_queue: {{ page.data.projection_status.notification_queue_count }}</span>
-        </div>
-        <div class="text-block">
-          <h3>消息分组</h3>
-          {% for group in page.data.groups %}
-          <span class="chip">{{ group.asset_kind_label }} · {{ group.direction_label }} · {{ group.event_label }}: {{ group.message_count }}</span>
-          {% else %}
-          <span class="chip">暂无消息分组</span>
-          {% endfor %}
-        </div>
       </div>
       <div class="text-block">
         <h3>消息卡片</h3>
@@ -1193,34 +1284,36 @@
         <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}">
           <div class="message-card-head">
             <div>
-              <div class="message-card-title">{{ item.title }}</div>
-              <div class="subtle">{{ item.event_label }} · {{ item.event_time }}</div>
+              <div class="message-card-title">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
+              <div class="subtle">{{ item.asset_kind_label }} · {{ item.direction_label }} · {{ item.display_values.event_time }}</div>
             </div>
             <span class="chip">{{ item.action_state_label }}</span>
           </div>
-          <div class="message-card-summary">{{ item.summary }}</div>
-          <div class="message-card-meta">
-            <span class="chip">{{ item.asset_kind_label }}</span>
-            <span class="chip">{{ item.display_name }} {{ item.display_code }}</span>
-            <span class="chip">{{ item.direction_label }}</span>
-            <span class="chip">触发周期 {{ item.triggered_periods }}</span>
-            <span class="chip">主周期 {{ item.primary_trigger_period }}</span>
-            <span class="chip">action_mark {{ item.action_mark }}</span>
-            <span class="chip">buy_target {{ item.buy_target or item.target_price or "—" }}</span>
-            <span class="chip">buy_return {{ item.buy_return if item.buy_return is not none else "—" }}%</span>
-            <span class="chip">secondary_return {{ item.secondary_return if item.secondary_return is not none else "—" }}%</span>
-            <span class="chip">sell_return {{ item.sell_return if item.sell_return is not none else "—" }}%</span>
-            <span class="chip">up_ref {{ item.up_ref or "—" }}</span>
-            <span class="chip">down_ref {{ item.down_ref or "—" }}</span>
-            {% if item.asset_kind == "stock" %}<span class="chip">score {{ item.score or "—" }} / pe_core {{ item.pe_core or "—" }}</span>{% endif %}
-            <span class="chip">trigger {{ item.trigger_price or "—" }} ({{ item.trigger_pct or "—" }}%)</span>
-            <span class="chip">action {{ item.action_price or "—" }} ({{ item.action_pct or "—" }}%)</span>
-            <span class="chip">projection {{ item.projection_message_status or "not_ready" }}</span>
+          <div class="message-card-primary">
+            <div><span>买入目标价</span><strong>{{ item.display_values.buy_target_price }}</strong></div>
+            <div><span>卖出目标价</span><strong>{{ item.display_values.sell_target_price }}</strong></div>
+            <div><span>触发价</span><strong>{{ item.display_values.trigger_price }}</strong></div>
+            <div><span>动作价</span><strong>{{ item.display_values.action_price }}</strong></div>
+            <div><span>买入收益率</span><strong>{{ item.display_values.buy_expected_return_pct }}{% if item.display_values.buy_expected_return_pct != "—" %}%{% endif %}</strong></div>
+            <div><span>次级收益率</span><strong>{{ item.display_values.up_secondary_expected_return_pct }}{% if item.display_values.up_secondary_expected_return_pct != "—" %}%{% endif %}</strong></div>
+            <div><span>卖出收益率</span><strong>{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</strong></div>
+            <div><span>触发涨跌幅</span><strong>{{ item.display_values.trigger_pct }}{% if item.display_values.trigger_pct != "—" %}%{% endif %}</strong></div>
           </div>
-          <p class="subtle">condition={{ item.condition_key }} · blocked_reason={{ item.blocked_reason_label }}</p>
-          <p class="subtle">trade_date={{ item.trade_date }} · identity_key={{ item.identity_key }}</p>
+          <details class="message-card-details">
+            <summary>更多指标</summary>
+            <div class="message-card-meta">
+              <span class="chip">触发周期 {{ item.triggered_periods_label }}</span>
+              <span class="chip">主周期 {{ item.primary_trigger_period_label }}</span>
+              <span class="chip">上参考周期 {{ item.up_ref_label }}</span>
+              <span class="chip">下参考周期 {{ item.down_ref_label }}</span>
+              <span class="chip">确认类型 {{ item.action_mark_label }}</span>
+              {% if item.asset_kind == "stock" %}
+              <span class="chip">行业 {{ item.industry_name }}{% if item.industry_code and item.industry_code != "—" %} · {{ item.industry_code }}{% endif %}</span>
+              <span class="chip">评分 {{ item.display_values.score }} · 核心市盈率 {{ item.display_values.pe_core }}</span>
+              {% endif %}
+            </div>
+          </details>
           <div class="message-card-foot">
-            <span class="subtle">user_signal_card_id={{ item.user_signal_card_id }} · authority={{ item.authority_source }}</span>
             {% if item.detail_href %}
             <a href="{{ item.detail_href }}">{{ page.data.detail_entry.label }}</a>
             {% endif %}
@@ -2311,35 +2404,131 @@
       return { init };
     })();
 
+    const n6MessageAssetSelection = (() => {
+      const update = (form) => {
+        const inputs = Array.from(form.querySelectorAll("[data-n6-message-asset-kind]"));
+        const selected = inputs.filter((input) => input.checked);
+        inputs.forEach((input) => {
+          input.disabled = selected.length === 1 && input.checked;
+        });
+      };
+      const init = () => {
+        document.querySelectorAll("[data-n6-message-filter]").forEach((form) => {
+          const inputs = form.querySelectorAll("[data-n6-message-asset-kind]");
+          inputs.forEach((input) => input.addEventListener("change", () => update(form)));
+          form.addEventListener("submit", () => {
+            inputs.forEach((input) => { input.disabled = false; });
+          });
+          update(form);
+        });
+      };
+      return { init };
+    })();
+
     const n6Voice = (() => {
       const storageKey = "n6.btrack.voice.enabled";
+      const queueLimit = 8;
       const supported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
       let enabled = supported && window.localStorage.getItem(storageKey) === "1";
+      let speaking = false;
+      let skippedCount = 0;
+      const queue = [];
+      const projectionIds = new Set();
+      const projectionIdText = (value) => {
+        const text = String(value ?? "");
+        return /^[1-9]\d*$/.test(text) ? text : "";
+      };
       const status = (text) => document.querySelectorAll("[data-n6-voice-status]").forEach((node) => { node.textContent = text; });
       const update = () => {
-        document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => { button.textContent = enabled ? "关闭语音" : "开启语音"; });
-        status(supported ? (enabled ? "语音已开启，仅播报新 SSE 消息" : "语音已关闭") : "当前浏览器不支持语音");
+        document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => {
+          button.textContent = enabled ? "关闭语音" : "开启语音";
+          button.setAttribute("aria-checked", enabled ? "true" : "false");
+          button.disabled = !supported;
+        });
+        document.querySelectorAll("[data-n6-voice-test]").forEach((button) => {
+          button.disabled = !supported;
+        });
+        if (!supported) {
+          status("当前浏览器不支持语音");
+        } else if (!enabled) {
+          status("语音已关闭");
+        } else {
+          const skipped = skippedCount ? ` · 已略过 ${skippedCount} 条` : "";
+          status(`语音已开启 · 待播 ${queue.length} 条${skipped}`);
+        }
       };
-      const speakText = (text) => {
-        if (!supported) return;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
+      const speakNext = () => {
+        if (!supported || !enabled || speaking || !queue.length) {
+          update();
+          return;
+        }
+        const next = queue.shift();
+        speaking = true;
+        const utterance = new SpeechSynthesisUtterance(next.text);
         utterance.lang = "zh-CN";
+        const finish = () => {
+          speaking = false;
+          speakNext();
+        };
+        utterance.onend = finish;
+        utterance.onerror = finish;
         window.speechSynthesis.speak(utterance);
+        update();
+      };
+      const enqueue = (projectionId, text) => {
+        if (!supported || !enabled || !projectionId || projectionIds.has(projectionId)) return;
+        projectionIds.add(projectionId);
+        if (queue.length >= queueLimit) {
+          queue.shift();
+          skippedCount += 1;
+        }
+        queue.push({ projectionId, text });
+        speakNext();
+      };
+      const clear = () => {
+        if (supported) window.speechSynthesis.cancel();
+        queue.splice(0, queue.length);
+        projectionIds.clear();
+        speaking = false;
+        skippedCount = 0;
       };
       const speak = (signal) => {
-        if (!enabled) return;
-        const returnValue = signal.direction === "sell" ? signal.sell_return : signal.buy_return;
-        speakText(`${signal.event_time || ""}，${signal.display_name || signal.identity_key || ""}，${signal.direction_label || signal.direction || ""}，收益率${returnValue ?? "未就绪"}`);
+        const currentDaySseEnabled = document.querySelector(
+          '[data-n6-auto-refresh="messages"][data-refresh-enabled="true"]',
+        );
+        if (!currentDaySseEnabled) return;
+        const projectionId = projectionIdText(signal.user_signal_projection_id);
+        const display = signal.display_values || {};
+        const targetCandidates = signal.direction === "sell"
+          ? [["卖出目标价", display.sell_target_price], ["买入目标价", display.buy_target_price]]
+          : [["买入目标价", display.buy_target_price], ["卖出目标价", display.sell_target_price]];
+        const target = targetCandidates.find(([, value]) => value && value !== "—")
+          || ["目标价", "未就绪"];
+        const displayIdentity = [
+          signal.display_name || "",
+          signal.display_code || "",
+        ].filter((value) => value).join("，");
+        const eventStateLabel = String(signal.event_label || "").split(" (", 1)[0];
+        const stateLabel = signal.action_state_label || eventStateLabel || "状态更新";
+        enqueue(
+          projectionId,
+          `${display.event_time || ""}，${signal.asset_kind_label || ""}，${displayIdentity}，${signal.direction_label || ""}，${stateLabel}，${target[0]}${target[1]}`,
+        );
       };
       const init = () => {
         document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => button.addEventListener("click", () => {
           if (!supported) return update();
           enabled = !enabled;
           window.localStorage.setItem(storageKey, enabled ? "1" : "0");
+          if (!enabled) clear();
           update();
         }));
-        document.querySelectorAll("[data-n6-voice-test]").forEach((button) => button.addEventListener("click", () => speakText("N6 卡片消息语音测试")));
+        document.querySelectorAll("[data-n6-voice-test]").forEach((button) => button.addEventListener("click", () => {
+          if (!supported) return;
+          const utterance = new SpeechSynthesisUtterance("N6 卡片消息语音测试");
+          utterance.lang = "zh-CN";
+          window.speechSynthesis.speak(utterance);
+        }));
         update();
       };
       return { init, speak };
@@ -2356,7 +2545,7 @@
         const url = new URL(root.dataset.refreshUrl || window.location.href, window.location.origin);
         return [
           url.searchParams.get("trade_date") || "",
-          url.searchParams.get("asset_kind") || "stock",
+          url.searchParams.getAll("asset_kind").join(",") || "stock",
         ].join("|");
       };
 
@@ -2519,37 +2708,45 @@
       const messageCardMarkup = (item) => {
         const projectionId = canonicalProjectionId(item.user_signal_projection_id);
         if (!projectionId) return "";
+        const display = item.display_values || {};
+        const displayPercent = (value) => {
+          const text = value || "—";
+          return text === "—" ? text : `${text}%`;
+        };
         return `
         <article class="message-card" data-n6-projection-id="${projectionId}">
           <div class="message-card-head">
             <div>
-              <div class="message-card-title">${escapeHtml(item.title)}</div>
-              <div class="subtle">${escapeHtml(item.event_label)} · ${escapeHtml(item.event_time)}</div>
+              <div class="message-card-title">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
+              <div class="subtle">${escapeHtml(item.asset_kind_label)} · ${escapeHtml(item.direction_label)} · ${escapeHtml(display.event_time || "—")}</div>
             </div>
             <span class="chip">${escapeHtml(item.action_state_label)}</span>
           </div>
-          <div class="message-card-summary">${escapeHtml(item.summary)}</div>
-          <div class="message-card-meta">
-            <span class="chip">${escapeHtml(item.asset_kind_label)}</span>
-            <span class="chip">${escapeHtml(item.display_name)} ${escapeHtml(item.display_code)}</span>
-            <span class="chip">${escapeHtml(item.direction_label)}</span>
-            <span class="chip">触发周期 ${escapeHtml(formatList(item.triggered_periods))}</span>
-            <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period || "—")}</span>
-            <span class="chip">action_mark ${escapeHtml(item.action_mark || "—")}</span>
-            <span class="chip">buy_target ${escapeHtml(item.buy_target ?? item.target_price ?? "—")}</span>
-            <span class="chip">buy_return ${escapeHtml(item.buy_return ?? "—")}%</span>
-            <span class="chip">secondary_return ${escapeHtml(item.secondary_return ?? "—")}%</span>
-            <span class="chip">sell_return ${escapeHtml(item.sell_return ?? "—")}%</span>
-            <span class="chip">trigger_pct ${escapeHtml(item.trigger_pct ?? "—")}%</span>
-            <span class="chip">up_ref ${escapeHtml(item.up_ref ?? "—")}</span>
-            <span class="chip">down_ref ${escapeHtml(item.down_ref ?? "—")}</span>
-            ${item.asset_kind === "stock" ? `<span class="chip">score ${escapeHtml(item.score ?? "—")} / pe_core ${escapeHtml(item.pe_core ?? "—")}</span>` : ""}
-            <span class="chip">projection ${escapeHtml(item.projection_message_status || "not_ready")}</span>
+          <div class="message-card-primary">
+            <div><span>买入目标价</span><strong>${escapeHtml(display.buy_target_price || "—")}</strong></div>
+            <div><span>卖出目标价</span><strong>${escapeHtml(display.sell_target_price || "—")}</strong></div>
+            <div><span>触发价</span><strong>${escapeHtml(display.trigger_price || "—")}</strong></div>
+            <div><span>动作价</span><strong>${escapeHtml(display.action_price || "—")}</strong></div>
+            <div><span>买入收益率</span><strong>${escapeHtml(displayPercent(display.buy_expected_return_pct))}</strong></div>
+            <div><span>次级收益率</span><strong>${escapeHtml(displayPercent(display.up_secondary_expected_return_pct))}</strong></div>
+            <div><span>卖出收益率</span><strong>${escapeHtml(displayPercent(display.sell_expected_return_pct))}</strong></div>
+            <div><span>触发涨跌幅</span><strong>${escapeHtml(displayPercent(display.trigger_pct))}</strong></div>
           </div>
-          <p class="subtle">condition=${escapeHtml(item.condition_key)} · blocked_reason=${escapeHtml(item.blocked_reason_label)}</p>
-          <p class="subtle">trade_date=${escapeHtml(item.trade_date)} · identity_key=${escapeHtml(item.identity_key)}</p>
+          <details class="message-card-details">
+            <summary>更多指标</summary>
+            <div class="message-card-meta">
+              <span class="chip">触发周期 ${escapeHtml(item.triggered_periods_label || "—")}</span>
+              <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period_label || "—")}</span>
+              <span class="chip">上参考周期 ${escapeHtml(item.up_ref_label || "—")}</span>
+              <span class="chip">下参考周期 ${escapeHtml(item.down_ref_label || "—")}</span>
+              <span class="chip">确认类型 ${escapeHtml(item.action_mark_label || "—")}</span>
+              ${item.asset_kind === "stock" ? `
+                <span class="chip">行业 ${escapeHtml(item.industry_name || "—")}${item.industry_code && item.industry_code !== "—" ? ` · ${escapeHtml(item.industry_code)}` : ""}</span>
+                <span class="chip">评分 ${escapeHtml(display.score || "—")} · 核心市盈率 ${escapeHtml(display.pe_core || "—")}</span>
+              ` : ""}
+            </div>
+          </details>
           <div class="message-card-foot">
-            <span class="subtle">user_signal_card_id=${escapeHtml(item.user_signal_card_id)} · authority=${escapeHtml(item.authority_source)}</span>
             ${item.detail_href ? `<a href="${escapeHtml(item.detail_href)}">查看详情</a>` : ""}
           </div>
         </article>
@@ -2834,6 +3031,7 @@
     })();
 
     n6FilterColumnOrder.init();
+    n6MessageAssetSelection.init();
     n6Voice.init();
     n6AutoRefresh.init();
 

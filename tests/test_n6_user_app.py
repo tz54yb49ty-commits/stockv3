@@ -3005,6 +3005,17 @@ class FakeN6UserRepository:
             scoped_row["valid_source_trade_date"] = scope_row.get("valid_source_trade_date")
             scoped_row["valid_source_run_id"] = scope_row.get("valid_source_run_id")
             rows.append(scoped_row)
+        selected_asset_kinds = (
+            n6_app_v1_module.app_message_asset_kinds(filters.get("asset_kinds"))
+            if "asset_kinds" in filters
+            else []
+        )
+        if selected_asset_kinds:
+            rows = [
+                row
+                for row in rows
+                if row.get("asset_kind") in selected_asset_kinds
+            ]
         for key in ("trade_date", "asset_kind", "signal_type", "action_state", "blocked_reason"):
             value = filters.get(key)
             if value:
@@ -15303,7 +15314,24 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("data-n6-voice-toggle", response.text)
         self.assertIn("data-n6-voice-test", response.text)
         self.assertIn("speechSynthesis", response.text)
+        self.assertIn('const storageKey = "n6.btrack.voice.enabled"', response.text)
         self.assertIn('localStorage.getItem(storageKey) === "1"', response.text)
+        self.assertIn('localStorage.setItem(storageKey, enabled ? "1" : "0")', response.text)
+        self.assertIn("const queueLimit = 8", response.text)
+        self.assertIn("const projectionIds = new Set()", response.text)
+        self.assertIn("queue.shift()", response.text)
+        self.assertIn("已略过", response.text)
+        self.assertIn("window.speechSynthesis.cancel()", response.text)
+        self.assertIn('data-refresh-enabled="true"', response.text)
+        self.assertIn(
+            '\'[data-n6-auto-refresh="messages"][data-refresh-enabled="true"]\'',
+            response.text,
+        )
+        self.assertIn("if (!currentDaySseEnabled) return", response.text)
+        self.assertIn("signal.display_code", response.text)
+        self.assertIn('String(signal.event_label || "").split(" (", 1)[0]', response.text)
+        self.assertIn("signal.action_state_label || eventStateLabel", response.text)
+        self.assertIn("const targetCandidates =", response.text)
         self.assertIn("if (inserted)", response.text)
         self.assertIn("n6Voice.speak(signal)", response.text)
         self.assertNotIn("/api/n6/app/v3/voice", response.text)
@@ -15438,20 +15466,79 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(page_response.status_code, 200)
         self.assertIn("我的监控消息总览", page_response.text)
         self.assertIn("投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped", page_response.text)
-        self.assertIn("当前有效监控交易日", page_response.text)
-        self.assertIn("条件来源日", page_response.text)
-        self.assertIn("projection 状态", page_response.text)
-        self.assertIn("消息分组", page_response.text)
+        self.assertIn("消息数", page_response.text)
+        self.assertIn("已确认", page_response.text)
+        self.assertIn("未确认", page_response.text)
+        self.assertIn("待确认", page_response.text)
+        self.assertNotIn("当前有效监控交易日", page_response.text)
+        self.assertNotIn("条件来源日", page_response.text)
+        self.assertNotIn("projection 状态", page_response.text)
+        self.assertNotIn("消息分组", page_response.text)
         self.assertIn("消息卡片", page_response.text)
         self.assertIn('class="message-card-grid"', page_response.text)
         self.assertIn('class="message-card"', page_response.text)
-        self.assertIn("user_signal_card_id=201", page_response.text)
-        self.assertIn("user_signal_card_id=202", page_response.text)
+        self.assertIn("更多指标", page_response.text)
+        self.assertNotIn("user_signal_card_id=201", page_response.text)
+        self.assertNotIn("user_signal_card_id=202", page_response.text)
+        self.assertNotIn('class="message-card-summary"', page_response.text)
+        self.assertNotIn("审计信息请在详情查看", page_response.text)
         self.assertNotIn("消息 preview", page_response.text)
         self.assertIn("查看详情", page_response.text)
-        self.assertIn("市场动作未确认 (ActionBlocked)", page_response.text)
-        self.assertIn("市场动作确认成立 (ActionExecuted)", page_response.text)
         self.assertNotIn("/api/n6/ui/v1/message-dashboard", page_response.text)
+        rendered = page_response.text.split("<script", 1)[0]
+        card_dom = rendered.split('data-n6-message-cards', 1)[1]
+        for hidden_audit_text in (
+            "condition=",
+            "blocked_reason=",
+            "trade_date=",
+            "identity_key=",
+            "user_signal_card_id=",
+            "authority=",
+            "ActionBlocked",
+            "ActionExecuted",
+        ):
+            self.assertNotIn(hidden_audit_text, card_dom)
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        dynamic_card = source.split("const messageCardMarkup = (item) => {", 1)[1].split(
+            "const renderMessageCards =", 1
+        )[0]
+        for hidden_field in (
+            "item.summary",
+            "item.condition_key",
+            "item.blocked_reason",
+            "item.trade_date",
+            "item.identity_key",
+            "item.user_signal_card_id",
+            "item.authority_source",
+        ):
+            self.assertNotIn(hidden_field, dynamic_card)
+        for label in (
+            "买入目标价",
+            "卖出目标价",
+            "触发价",
+            "动作价",
+            "买入收益率",
+            "次级收益率",
+            "卖出收益率",
+            "触发涨跌幅",
+            "触发周期",
+            "主周期",
+            "上参考周期",
+            "下参考周期",
+            "确认类型",
+            "行业",
+            "评分",
+            "核心市盈率",
+        ):
+            self.assertIn(label, rendered)
+            self.assertIn(label, dynamic_card)
+        self.assertNotIn("—%</strong>", rendered)
+        self.assertIn('return text === "—" ? text : `${text}%`', dynamic_card)
+        self.assertLess(rendered.index("messages-trade-date"), rendered.index("data-n6-message-asset-kind"))
+        self.assertLess(rendered.index("data-n6-message-asset-kind"), rendered.index("data-n6-voice-toggle"))
+        self.assertLess(rendered.index("data-n6-voice-toggle"), rendered.index("data-n6-refresh-status"))
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", source)
+        self.assertIn("min-height: 44px", source)
 
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
         client, repo, _, _ = build_client()
@@ -15470,6 +15557,7 @@ class N6UserAppTest(unittest.TestCase):
 
         self.assertEqual(page_response.status_code, 200)
         self.assertIn('value="20260603" selected', page_response.text)
+        self.assertIn('data-refresh-enabled="false"', page_response.text)
         self.assertEqual(api_response.status_code, 200)
         self.assertEqual(api_response.json()["scope_mode"], "historical_projection")
         self.assertEqual(
@@ -15497,7 +15585,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
         self.assertEqual(page_response.status_code, 409)
 
-    def test_b_track_signals_and_messages_default_to_stock_asset_kind_tabs(self) -> None:
+    def test_b_track_signals_default_stock_and_messages_default_all_asset_kinds(self) -> None:
         client, repo, _, _ = build_client()
         stock_signal = copy.deepcopy(repo.ui_v1_signals[1])
         stock_signal["user_signal_projection_id"] = 9411
@@ -15551,17 +15639,104 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(repo.app_signal_filter_reads[-2]["asset_kind"], "stock")
 
         self.assertEqual(messages_response.status_code, 200)
-        self.assertIn("指数卡片", messages_response.text)
-        self.assertIn("板块卡片", messages_response.text)
-        self.assertIn("个股卡片", messages_response.text)
-        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=index", messages_response.text)
-        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=board", messages_response.text)
-        self.assertIn("/n6/app/messages?trade_date=20260605&amp;asset_kind=stock", messages_response.text)
-        self.assertIn('name="asset_kind" value="stock"', messages_response.text)
-        self.assertIn("user_signal_card_id=9511", messages_response.text)
-        self.assertNotIn("user_signal_card_id=9512", messages_response.text)
-        self.assertNotIn("user_signal_card_id=9513", messages_response.text)
-        self.assertEqual(repo.app_signal_filter_reads[-1]["asset_kind"], "stock")
+        for asset_kind, label in (("index", "指数"), ("board", "板块"), ("stock", "个股")):
+            self.assertIn(f'value="{asset_kind}"', messages_response.text)
+            self.assertIn(label, messages_response.text)
+        rendered_messages = messages_response.text.split("<script", 1)[0]
+        self.assertEqual(rendered_messages.count("data-n6-message-asset-kind"), 3)
+        self.assertIn("浦发银行", messages_response.text)
+        self.assertIn("上证指数", messages_response.text)
+        self.assertIn("煤炭开采", messages_response.text)
+        self.assertEqual(
+            repo.app_signal_filter_reads[-1]["asset_kinds"],
+            ["index", "board", "stock"],
+        )
+        self.assertIsNone(repo.app_signal_filter_reads[-1]["asset_kind"])
+
+    def test_b_track_messages_repeated_asset_kind_is_canonical_and_single_compatible(self) -> None:
+        client, repo, _, _ = build_client()
+        stock_signal = copy.deepcopy(repo.ui_v1_signals[1])
+        stock_signal.update(
+            {
+                "user_signal_projection_id": 9431,
+                "user_signal_card_id": 9531,
+            }
+        )
+        index_signal = copy.deepcopy(stock_signal)
+        index_signal.update(
+            {
+                "user_signal_projection_id": 9432,
+                "user_signal_card_id": 9532,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+            }
+        )
+        board_signal = copy.deepcopy(stock_signal)
+        board_signal.update(
+            {
+                "user_signal_projection_id": 9433,
+                "user_signal_card_id": 9533,
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881001",
+                "code": "881001",
+                "name": "煤炭开采",
+            }
+        )
+        for signal in (stock_signal, index_signal, board_signal):
+            seed_effective_monitor_for_signal(repo, signal)
+        repo.ui_v1_signals = [stock_signal, index_signal, board_signal]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        repeated = client.get(
+            "/api/n6/app/v2/message-dashboard"
+            "?asset_kind=stock&asset_kind=index&asset_kind=stock"
+        )
+        single = client.get("/api/n6/app/v2/message-dashboard?asset_kind=board")
+
+        self.assertEqual(repeated.status_code, 200)
+        repeated_payload = repeated.json()
+        self.assertEqual(repeated_payload["selected_asset_kinds"], ["index", "stock"])
+        self.assertIsNone(repeated_payload["selected_asset_kind"])
+        self.assertEqual(
+            [option["asset_kind"] for option in repeated_payload["asset_kind_options"]],
+            ["index", "board", "stock"],
+        )
+        self.assertEqual(
+            [
+                option["asset_kind"]
+                for option in repeated_payload["asset_kind_options"]
+                if option["selected"]
+            ],
+            ["index", "stock"],
+        )
+        self.assertEqual(
+            {item["asset_kind"] for item in repeated_payload["card_items"]},
+            {"index", "stock"},
+        )
+        self.assertIn(
+            "asset_kind=index&asset_kind=stock",
+            repeated_payload["api_refresh_href"],
+        )
+        self.assertEqual(
+            repo.app_signal_filter_reads[-2]["asset_kinds"],
+            ["index", "stock"],
+        )
+        self.assertIsNone(repo.app_signal_filter_reads[-2]["asset_kind"])
+
+        self.assertEqual(single.status_code, 200)
+        single_payload = single.json()
+        self.assertEqual(single_payload["selected_asset_kinds"], ["board"])
+        self.assertEqual(single_payload["selected_asset_kind"], "board")
+        self.assertEqual(
+            {item["asset_kind"] for item in single_payload["card_items"]},
+            {"board"},
+        )
+        where_source = inspect.getsource(
+            PostgresN6UserRepository._app_v1_signal_where
+        )
+        self.assertIn("p.asset_kind = ANY(%(asset_kinds)s)", where_source)
 
     def test_b_track_signals_asset_kind_specific_name_columns(self) -> None:
         client, repo, _, _ = build_client()
@@ -15699,8 +15874,17 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn('data-watermark="', messages_response.text)
         self.assertIn("data-n6-skeleton", messages_response.text)
         self.assertIn("data-n6-load-more", messages_response.text)
-        self.assertIn('/api/n6/app/v1/signals/stream?trade_date=20260605&amp;asset_kind=stock', messages_response.text)
-        self.assertIn('/api/n6/app/v2/message-dashboard?trade_date=20260605&amp;asset_kind=stock', messages_response.text)
+        selected_asset_query = (
+            "asset_kind=index&amp;asset_kind=board&amp;asset_kind=stock"
+        )
+        self.assertIn(
+            f"/api/n6/app/v1/signals/stream?trade_date=20260605&amp;{selected_asset_query}",
+            messages_response.text,
+        )
+        self.assertIn(
+            f"/api/n6/app/v2/message-dashboard?trade_date=20260605&amp;{selected_asset_query}",
+            messages_response.text,
+        )
         self.assertIn('data-n6-message-cards', messages_response.text)
         self.assertIn('data-summary-key="today_message_count"', messages_response.text)
         auto_refresh_block = signals_response.text.split("const n6AutoRefresh", 1)[1].split(
@@ -16114,6 +16298,19 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(card["action_pct"], "8.654321")
         self.assertEqual(card["industry_name"], "银行")
         self.assertEqual(card["projection_message_status"], "ready")
+        self.assertEqual(card["asset_kind"], item["asset_kind"])
+        self.assertEqual(card["direction"], item["direction"])
+        self.assertEqual(card["buy_target_price"], item["buy_target_price"])
+        self.assertEqual(card["sell_target_price"], item["sell_target_price"])
+        self.assertEqual(card["display_values"], item["display_values"])
+        self.assertEqual(card["triggered_periods_label"], "30分钟、5分钟")
+        self.assertEqual(card["primary_trigger_period_label"], "30分钟")
+        self.assertEqual(card["up_ref_label"], "月")
+        self.assertEqual(card["down_ref_label"], "周")
+        self.assertEqual(
+            n6_app_v1_module.app_signal_sse_data_model(row)["card"],
+            card,
+        )
 
     def test_signals_compact_display_values_are_directional_precise_and_sse_aligned(self) -> None:
         base = {
@@ -18910,9 +19107,13 @@ class N6SignalSSEContractTest(unittest.TestCase):
                 "identity_key": "stock:SH:600000",
                 "code": "600000",
                 "name": "浦发银行",
+                "industry_code": "880001",
+                "industry_name": "银行",
                 "direction": "buy",
                 "action_state": "blocked",
                 "blocked_reason": "provider_error",
+                "primary_trigger_period": "30m",
+                "triggered_periods": ["30m", "5m"],
                 "title": "只读消息",
                 "message": "消息摘要",
                 "raw_url": "https://attacker.invalid/execute",
@@ -18928,7 +19129,17 @@ class N6SignalSSEContractTest(unittest.TestCase):
         self.assertEqual(payload["card"]["detail_href"], "/api/n6/app/v1/signals/23")
         self.assertEqual(payload["signal"]["user_signal_projection_id"], "23")
         self.assertEqual(payload["signal"]["user_signal_card_id"], "31")
+        self.assertEqual(payload["signal"]["event_label"], "市场动作未确认 (ActionBlocked)")
         self.assertEqual(payload["card"]["user_signal_card_id"], "31")
+        self.assertEqual(payload["card"]["industry_code"], "880001")
+        self.assertEqual(payload["card"]["industry_name"], "银行")
+        self.assertEqual(payload["card"]["triggered_periods"], ["30m", "5m"])
+        self.assertEqual(payload["card"]["triggered_periods_label"], "30分钟、5分钟")
+        self.assertEqual(payload["card"]["primary_trigger_period_label"], "30分钟")
+        self.assertEqual(
+            payload["card"]["display_values"],
+            payload["signal"]["display_values"],
+        )
         serialized = json.dumps(payload, ensure_ascii=False)
         for forbidden in (
             "principal_id",

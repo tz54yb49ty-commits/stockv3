@@ -700,11 +700,65 @@ def _asset_kind_label(value: Any) -> str:
     return APP_ASSET_KIND_LABELS.get(text, text or "—")
 
 
+def _period_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return {
+        "Y": "年",
+        "Q": "季",
+        "M": "月",
+        "W": "周",
+        "D": "日",
+        "120m": "120分钟",
+        "30m": "30分钟",
+        "5m": "5分钟",
+        "1m": "1分钟",
+    }.get(text, text or "—")
+
+
+def _periods_label(values: Any) -> str:
+    if isinstance(values, (list, tuple)):
+        return "、".join(_period_label(value) for value in values) or "—"
+    return _period_label(values)
+
+
 def app_message_asset_kind(value: Any) -> str:
     text = str(value or "").strip()
     if text in APP_MESSAGE_ASSET_KIND_ORDER:
         return text
     return APP_DEFAULT_MESSAGE_ASSET_KIND
+
+
+def app_message_asset_kinds(values: Any = None) -> list[str]:
+    if isinstance(values, str) or values is None:
+        candidates = [values]
+    else:
+        try:
+            candidates = list(values)
+        except TypeError:
+            candidates = [values]
+    selected = {
+        str(value or "").strip()
+        for value in candidates
+        if str(value or "").strip() in APP_MESSAGE_ASSET_KIND_ORDER
+    }
+    return [
+        asset_kind
+        for asset_kind in APP_MESSAGE_ASSET_KIND_ORDER
+        if asset_kind in selected
+    ] or list(APP_MESSAGE_ASSET_KIND_ORDER)
+
+
+def _asset_kind_options(selected_asset_kinds: list[str]) -> list[dict[str, Any]]:
+    selected = set(selected_asset_kinds)
+    return [
+        {
+            "asset_kind": asset_kind,
+            "label": APP_CARD_ASSET_TAB_LABELS[asset_kind],
+            "asset_kind_label": _asset_kind_label(asset_kind),
+            "selected": asset_kind in selected,
+        }
+        for asset_kind in APP_MESSAGE_ASSET_KIND_ORDER
+    ]
 
 
 def _asset_kind_tabs(
@@ -732,12 +786,23 @@ def _asset_kind_tabs(
     return tabs
 
 
-def _message_api_href(base_href: str, *, selected_trade_date: str, selected_asset_kind: str) -> str:
+def _message_api_href(
+    base_href: str,
+    *,
+    selected_trade_date: str,
+    selected_asset_kind: str | None = None,
+    selected_asset_kinds: list[str] | None = None,
+) -> str:
+    asset_kinds = (
+        app_message_asset_kinds(selected_asset_kinds)
+        if selected_asset_kinds is not None
+        else [app_message_asset_kind(selected_asset_kind)]
+    )
     return _filter_href(
         base_href,
         [
             ("trade_date", selected_trade_date),
-            ("asset_kind", selected_asset_kind),
+            *((("asset_kind", asset_kind) for asset_kind in asset_kinds)),
         ],
     )
 
@@ -1347,7 +1412,16 @@ def app_v2_message_dashboard_model(
         if key not in {"historical_projection_mode", "date_policy_blocker", "date_policy_message"} and value not in (None, "")
     }
     selected_trade_date = str(normalized_filters.get("trade_date") or metadata.get("selected_trade_date") or "")
-    selected_asset_kind = app_message_asset_kind(normalized_filters.get("asset_kind"))
+    selected_asset_kinds = app_message_asset_kinds(
+        normalized_filters.get("asset_kinds")
+        or normalized_filters.get("asset_kind")
+    )
+    selected_asset_kind = selected_asset_kinds[0] if len(selected_asset_kinds) == 1 else None
+    normalized_filters["asset_kinds"] = selected_asset_kinds
+    if selected_asset_kind:
+        normalized_filters["asset_kind"] = selected_asset_kind
+    else:
+        normalized_filters.pop("asset_kind", None)
     groups_payload = app_v2_message_groups_model(
         principal,
         user=user,
@@ -1379,22 +1453,28 @@ def app_v2_message_dashboard_model(
         "scope_mode": metadata["scope_mode"],
         "selected_trade_date": selected_trade_date,
         "selected_asset_kind": selected_asset_kind,
-        "selected_asset_kind_label": _asset_kind_label(selected_asset_kind),
+        "selected_asset_kinds": selected_asset_kinds,
+        "selected_asset_kind_label": (
+            _asset_kind_label(selected_asset_kind)
+            if selected_asset_kind
+            else "三类资产"
+        ),
+        "asset_kind_options": _asset_kind_options(selected_asset_kinds),
         "asset_kind_tabs": _asset_kind_tabs(
             base_href="/n6/app/messages",
             selected_trade_date=selected_trade_date,
-            selected_asset_kind=selected_asset_kind,
+            selected_asset_kind=selected_asset_kind or "",
             labels=APP_CARD_ASSET_TAB_LABELS,
         ),
         "api_refresh_href": _message_api_href(
             "/api/n6/app/v2/message-dashboard",
             selected_trade_date=selected_trade_date,
-            selected_asset_kind=selected_asset_kind,
+            selected_asset_kinds=selected_asset_kinds,
         ),
         "api_stream_href": _message_api_href(
             "/api/n6/app/v1/signals/stream",
             selected_trade_date=selected_trade_date,
-            selected_asset_kind=selected_asset_kind,
+            selected_asset_kinds=selected_asset_kinds,
         ),
         "available_trade_dates": list(metadata["available_trade_dates"]),
         "date_policy_blocker": str(metadata.get("date_policy_blocker") or ""),
@@ -1439,15 +1519,22 @@ def app_v2_message_card_item(row: dict[str, Any]) -> dict[str, Any]:
         "event_label": item.get("event_label"),
         "event_time": item.get("event_time"),
         "trade_date": item.get("trade_date"),
+        "asset_kind": item.get("asset_kind"),
         "asset_kind_label": item.get("asset_kind_label"),
         "identity_key": item.get("identity_key"),
         "display_code": item.get("display_code"),
         "display_name": item.get("display_name"),
+        "direction": item.get("direction"),
         "direction_label": item.get("direction_label"),
         "condition_key": item.get("condition_key"),
-        "triggered_periods": item.get("triggered_periods"),
+        "triggered_periods": item.get("trigger_periods"),
+        "triggered_periods_label": _periods_label(item.get("trigger_periods")),
         "primary_trigger_period": item.get("primary_trigger_period"),
+        "primary_trigger_period_label": _period_label(item.get("primary_trigger_period")),
         "target_price": item.get("target_price"),
+        "buy_target_price": item.get("buy_target_price"),
+        "sell_target_price": item.get("sell_target_price"),
+        "display_values": item.get("display_values"),
         "current_price": item.get("current_price"),
         "expected_return_pct": item.get("expected_return_pct"),
         "buy_return": item.get("buy_return"),
@@ -1463,10 +1550,17 @@ def app_v2_message_card_item(row: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score"),
         "pe_core": item.get("pe_core"),
         "up_ref": item.get("up_ref"),
+        "up_ref_label": _period_label(item.get("up_ref")),
         "down_ref": item.get("down_ref"),
+        "down_ref_label": _period_label(item.get("down_ref")),
         "projection_message_status": item.get("projection_message_status"),
         "action_state_label": item.get("action_state_label"),
         "action_mark": item.get("action_mark"),
+        "action_mark_label": {
+            "normal": "普通确认",
+            "30m_volume": "30分钟放量确认",
+            "30m_shrink": "30分钟缩量确认",
+        }.get(str(item.get("action_mark") or ""), "—"),
         "blocked_reason_label": item.get("blocked_reason_label"),
         "quality_status": item.get("quality_status"),
         "source_run_id": item.get("source_run_id"),
@@ -2813,10 +2907,12 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     industry_provenance = _json_object(item.get("industry_provenance"))
     item["industry_code"] = _first_available_text(
         row.get("board_code"),
+        row.get("industry_code"),
         industry_provenance.get("board_code"),
     ) or "—"
     item["industry_name"] = _first_available_text(
         row.get("board_name"),
+        row.get("industry_name"),
         industry_provenance.get("board_name"),
     ) or "—"
     item["source_run_id"] = _first_text(row, "source_run_id", "source_action_run_id")
@@ -2827,7 +2923,11 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item["sell_return"] = number_or_none(item.get("sell_expected_return_pct"))
     item["up_ref"] = _first_text(item, "up_reference_period")
     item["down_ref"] = _first_text(item, "down_reference_period")
-    item["trigger_periods"] = item.get("all_trigger_periods")
+    item["trigger_periods"] = (
+        item.get("all_trigger_periods")
+        if item.get("all_trigger_periods") is not None
+        else row.get("triggered_periods")
+    )
     item["buy_target"] = number_or_none(item.get("target_price"))
     buy_target_price, sell_target_price = _signal_target_prices(
         item,
@@ -2896,6 +2996,7 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
         "trade_date": _first_text(row, "trade_date"),
         "event_time": display_datetime(row.get("event_time") or row.get("created_at")),
         "event_type": event_type,
+        "event_label": _event_label(event_type),
         "asset_kind": _first_text(row, "asset_kind"),
         "asset_kind_label": _asset_kind_label(row.get("asset_kind")),
         "identity_key": _first_text(row, "identity_key"),
@@ -2937,16 +3038,7 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
         "source_run_id": _first_text(row, "source_run_id", "source_action_run_id"),
         "projection_run_id": _first_text(row, "projection_run_id", "user_projection_run_id"),
     }
-    card = None
-    if card_id is not None:
-        card = {
-            "user_signal_card_id": card_id,
-            "title": _first_text(row, "title", default=_event_label(event_type)),
-            "summary": _first_text(row, "message", default=signal["display_name"] or signal["identity_key"]),
-            "event_label": _event_label(event_type),
-            "authority_source": "user_signal_projection",
-            "detail_href": f"/api/n6/app/v1/signals/{projection_id}",
-        }
+    card = app_v2_message_card_item(row) if card_id is not None else None
     return {
         "contract_version": SIGNAL_SSE_CONTRACT_VERSION,
         "signal": signal,

@@ -57,6 +57,7 @@ from ashare_v3.web.n6_app_v1 import (
     app_locked_future_module_model,
     app_me_model,
     app_message_asset_kind,
+    app_message_asset_kinds,
     app_page_model,
     app_pnl_model,
     app_portfolio_model,
@@ -4980,12 +4981,24 @@ class PostgresN6UserRepository:
             where_clauses.append(self._app_v1_effective_monitor_scope_clause())
         filter_specs = (
             ("event_type", self._app_v1_event_type_expr()),
-            ("asset_kind", "p.asset_kind"),
             ("direction", "p.direction"),
             ("signal_type", "p.signal_type"),
             ("action_state", self._app_v1_action_state_expr()),
             ("blocked_reason", self._app_v1_blocked_reason_expr()),
         )
+        asset_kinds = (
+            app_message_asset_kinds(filters.get("asset_kinds"))
+            if "asset_kinds" in filters
+            else []
+        )
+        if asset_kinds:
+            params["asset_kinds"] = asset_kinds
+            where_clauses.append("p.asset_kind = ANY(%(asset_kinds)s)")
+        else:
+            asset_kind = normalize_filter_value(filters.get("asset_kind"))
+            if asset_kind:
+                params["asset_kind"] = asset_kind
+                where_clauses.append("p.asset_kind = %(asset_kind)s")
         trade_date = normalize_filter_value(filters.get("trade_date"))
         if trade_date:
             params["trade_date"] = trade_date
@@ -9578,6 +9591,16 @@ def create_app(
         last_event_id = request.headers.get("last-event-id")
         requested_after_id = request.query_params.get("after_id")
         filters = ui_v1_filters_from_request(request)
+        if len(request.query_params.getlist("asset_kind")) > 1:
+            selected_asset_kinds = app_message_asset_kinds(
+                request.query_params.getlist("asset_kind")
+            )
+            filters["asset_kinds"] = selected_asset_kinds
+            filters["asset_kind"] = (
+                selected_asset_kinds[0]
+                if len(selected_asset_kinds) == 1
+                else None
+            )
         if forbidden_scope_params.intersection(query_param_names):
             return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
         session = await asyncio.to_thread(current_session_from_token, raw_session_token, repo)
@@ -9780,7 +9803,7 @@ def create_app(
         | JSONResponse
     ):
         raw_session_token = request.cookies.get(COOKIE_NAME)
-        filters = ui_v1_filters_from_request(request)
+        filters = app_v2_message_filters_from_request(request)
         page_limit = ui_v1_limit_from_request(
             request,
             N6_SIGNAL_PAGE_DEFAULT_LIMIT,
@@ -11639,8 +11662,10 @@ def create_app(
             if is_filter_center_page
             else app_v2_monitor_filters_from_request(request)
             if is_monitor_page
+            else app_v2_message_filters_from_request(request)
+            if page_key == "messages"
             else ui_v1_filters_from_request(request)
-            if page_key in {"signals", "messages"}
+            if page_key == "signals"
             else None
         )
         if page_key in {"signals", "messages"}:
@@ -12616,6 +12641,18 @@ def ui_v1_filters_from_request(request: Request) -> dict[str, str | None]:
     }
 
 
+def app_v2_message_filters_from_request(request: Request) -> dict[str, Any]:
+    filters: dict[str, Any] = dict(ui_v1_filters_from_request(request))
+    selected_asset_kinds = app_message_asset_kinds(
+        request.query_params.getlist("asset_kind")
+    )
+    filters["asset_kinds"] = selected_asset_kinds
+    filters["asset_kind"] = (
+        selected_asset_kinds[0] if len(selected_asset_kinds) == 1 else None
+    )
+    return filters
+
+
 def n6_signal_filters_with_cursor(filters: Mapping[str, Any]) -> dict[str, Any]:
     output = dict(filters)
     parsed_cursor = parse_n6_signal_page_cursor(output.pop("cursor", None))
@@ -12631,7 +12668,14 @@ def app_signal_filters_with_trade_date_defaults(
     enforce_trading_session: bool = False,
 ) -> dict[str, Any]:
     output = dict(filters)
-    output["asset_kind"] = app_message_asset_kind(output.get("asset_kind"))
+    if "asset_kinds" in output:
+        selected_asset_kinds = app_message_asset_kinds(output.get("asset_kinds"))
+        output["asset_kinds"] = selected_asset_kinds
+        output["asset_kind"] = (
+            selected_asset_kinds[0] if len(selected_asset_kinds) == 1 else None
+        )
+    else:
+        output["asset_kind"] = app_message_asset_kind(output.get("asset_kind"))
     current_trade_date = current_app_signal_trade_date(scope_metadata)
     explicit_trade_date = normalize_filter_value(output.get("trade_date"))
     if explicit_trade_date:
