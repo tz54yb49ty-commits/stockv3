@@ -2664,6 +2664,7 @@
       let speaking = false;
       let skippedCount = 0;
       let preferredVoice = null;
+      let activeUtterance = null;
       const queue = [];
       const projectionIds = new Set();
       const projectionIdText = (value) => {
@@ -2712,18 +2713,27 @@
           status(`语音已开启 · 待播 ${queue.length} 条${skipped}`);
         }
       };
-      const finishSpeaking = () => {
+      const finishSpeaking = (utterance) => {
+        if (activeUtterance !== utterance) return;
+        activeUtterance = null;
         speaking = false;
         speakNext();
       };
+      const failSpeaking = (utterance, event) => {
+        if (activeUtterance !== utterance) return;
+        activeUtterance = null;
+        speaking = false;
+        const errorCode = String(event?.error || "").trim();
+        status(errorCode ? `语音播放失败：${errorCode}` : "语音播放失败，请再次测试");
+      };
       const confirmSpeech = (text) => {
-        window.speechSynthesis.cancel();
         window.speechSynthesis.resume();
         speaking = true;
         const utterance = new SpeechSynthesisUtterance(text);
+        activeUtterance = utterance;
         configureUtterance(utterance);
-        utterance.onend = finishSpeaking;
-        utterance.onerror = finishSpeaking;
+        utterance.onend = () => finishSpeaking(utterance);
+        utterance.onerror = (event) => failSpeaking(utterance, event);
         window.speechSynthesis.speak(utterance);
       };
       const speakNext = () => {
@@ -2734,9 +2744,10 @@
         const next = queue.shift();
         speaking = true;
         const utterance = new SpeechSynthesisUtterance(next.text);
+        activeUtterance = utterance;
         configureUtterance(utterance);
-        utterance.onend = finishSpeaking;
-        utterance.onerror = finishSpeaking;
+        utterance.onend = () => finishSpeaking(utterance);
+        utterance.onerror = (event) => failSpeaking(utterance, event);
         window.speechSynthesis.speak(utterance);
         update();
       };
@@ -2750,12 +2761,16 @@
         queue.push({ projectionId, text });
         speakNext();
       };
-      const clear = () => {
-        if (supported) window.speechSynthesis.cancel();
+      const clearPending = () => {
         queue.splice(0, queue.length);
         projectionIds.clear();
-        speaking = false;
         skippedCount = 0;
+      };
+      const stopSpeech = () => {
+        activeUtterance = null;
+        if (supported) window.speechSynthesis.cancel();
+        speaking = false;
+        clearPending();
       };
       const speak = (signal) => {
         const currentDayVoiceEnabled = document.querySelector(
@@ -2796,10 +2811,10 @@
             savedPreference = false;
             userUnlocked = true;
             window.localStorage.setItem(storageKey, "0");
-            clear();
+            stopSpeech();
             return update();
           }
-          clear();
+          clearPending();
           enabled = true;
           savedPreference = true;
           userUnlocked = true;
@@ -2809,7 +2824,7 @@
         }));
         document.querySelectorAll("[data-n6-voice-test]").forEach((button) => button.addEventListener("click", () => {
           if (!supported) return;
-          clear();
+          clearPending();
           userUnlocked = true;
           confirmSpeech("N6 卡片消息语音测试");
           update();

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import inspect
 import os
+import subprocess
 from typing import Any
 from urllib.parse import quote
 from unittest.mock import call, patch
@@ -15336,8 +15337,23 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("const projectionIds = new Set()", voice_source)
         self.assertIn("queue.shift()", voice_source)
         self.assertIn("已略过", voice_source)
-        self.assertIn("window.speechSynthesis.cancel()", voice_source)
-        self.assertIn("window.speechSynthesis.resume()", voice_source)
+        confirm_source = voice_source.split("const confirmSpeech =", 1)[1].split(
+            "const speakNext =", 1
+        )[0]
+        clear_pending_source = voice_source.split("const clearPending =", 1)[1].split(
+            "const stopSpeech =", 1
+        )[0]
+        stop_source = voice_source.split("const stopSpeech =", 1)[1].split(
+            "const speak =", 1
+        )[0]
+        self.assertNotIn("speechSynthesis.cancel()", confirm_source)
+        self.assertNotIn("speechSynthesis.cancel()", clear_pending_source)
+        self.assertIn("window.speechSynthesis.resume()", confirm_source)
+        self.assertIn("window.speechSynthesis.speak(utterance)", confirm_source)
+        self.assertIn("window.speechSynthesis.cancel()", stop_source)
+        self.assertIn("clearPending()", stop_source)
+        self.assertIn("utterance.onerror = (event) => failSpeaking(utterance, event)", voice_source)
+        self.assertIn("语音播放失败", voice_source)
         self.assertIn('"voiceschanged"', voice_source)
         self.assertIn("window.speechSynthesis.getVoices()", voice_source)
         self.assertIn("/^zh(?:-|_)/i", voice_source)
@@ -15382,6 +15398,131 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn(".forEach(({ item }) => n6Voice.speak(item))", refresh_source)
         self.assertNotIn("/api/n6/app/v3/voice", response.text)
         self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_v3_voice_state_machine_preserves_safari_user_gesture(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        voice_block = "const n6Voice = (() => {" + source.split(
+            "const n6Voice = (() => {", 1
+        )[1].split("const n6AutoRefresh = (() => {", 1)[0]
+        harness = (
+            """
+const assert = require("assert");
+const calls = [];
+const utterances = [];
+const statusNode = { textContent: "" };
+const makeButton = () => ({
+  textContent: "",
+  disabled: false,
+  attributes: {},
+  handlers: {},
+  setAttribute(name, value) { this.attributes[name] = value; },
+  addEventListener(name, handler) { this.handlers[name] = handler; },
+  click() { this.handlers.click(); },
+});
+const toggleButton = makeButton();
+const testButton = makeButton();
+class MockUtterance {
+  constructor(text) {
+    this.text = text;
+    this.lang = "";
+    this.voice = null;
+    this.onend = null;
+    this.onerror = null;
+  }
+}
+const storage = new Map();
+global.document = {
+  querySelectorAll(selector) {
+    if (selector === "[data-n6-voice-toggle]") return [toggleButton];
+    if (selector === "[data-n6-voice-test]") return [testButton];
+    if (selector === "[data-n6-voice-status]") return [statusNode];
+    return [];
+  },
+  querySelector(selector) {
+    return selector.includes('data-n6-auto-refresh="messages"') ? {} : null;
+  },
+};
+global.window = {
+  localStorage: {
+    getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+    setItem(key, value) { storage.set(key, value); },
+  },
+  SpeechSynthesisUtterance: MockUtterance,
+  speechSynthesis: {
+    getVoices() { return [{ lang: "zh-CN", name: "中文" }]; },
+    addEventListener() {},
+    cancel() { calls.push("cancel"); },
+    resume() { calls.push("resume"); },
+    speak(utterance) {
+      calls.push(`speak:${utterance.text}`);
+      utterances.push(utterance);
+    },
+  },
+};
+global.SpeechSynthesisUtterance = MockUtterance;
+"""
+            + voice_block
+            + """
+n6Voice.init();
+calls.length = 0;
+toggleButton.click();
+assert.deepStrictEqual(calls, ["resume", "speak:语音已恢复"]);
+assert.strictEqual(calls.includes("cancel"), false);
+
+n6Voice.speak({
+  user_signal_projection_id: "101",
+  direction: "buy",
+  display_name: "浦发银行",
+  display_values: {
+    event_time: "2026-07-30T10:05:06+08:00",
+    buy_target_price: 0,
+    buy_expected_return_pct: "0",
+  },
+});
+assert.strictEqual(utterances.length, 1);
+utterances[0].onend();
+assert.strictEqual(utterances.length, 2);
+assert.match(utterances[1].text, /10:05:06，浦发银行，目标价 0，收益率 0%/);
+utterances[1].onend();
+
+calls.length = 0;
+testButton.click();
+assert.deepStrictEqual(calls, ["resume", "speak:N6 卡片消息语音测试"]);
+assert.strictEqual(calls.includes("cancel"), false);
+const failedUtterance = utterances[utterances.length - 1];
+failedUtterance.onerror({ error: "not-allowed" });
+assert.match(statusNode.textContent, /语音播放失败：not-allowed/);
+
+const countAfterError = utterances.length;
+n6Voice.speak({
+  user_signal_projection_id: "102",
+  direction: "sell",
+  display_name: "上证指数",
+  display_values: {
+    event_time: "2026-07-30T10:06:07+08:00",
+    sell_target_price: "暂无",
+    sell_expected_return_pct: null,
+  },
+});
+assert.strictEqual(utterances.length, countAfterError + 1);
+utterances[utterances.length - 1].onend();
+
+calls.length = 0;
+toggleButton.click();
+assert.deepStrictEqual(calls, ["cancel"]);
+assert.strictEqual(toggleButton.attributes["aria-checked"], "false");
+assert.strictEqual(statusNode.textContent, "语音已关闭");
+"""
+        )
+        result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_b_track_v3_signal_fields_are_frozen_projection_mappings(self) -> None:
         repo = FakeN6UserRepository()
