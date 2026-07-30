@@ -16,6 +16,7 @@ import hmac
 import ipaddress
 from io import BytesIO
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -269,6 +270,9 @@ N6_SIGNAL_SSE_HEARTBEAT_SECONDS = 15.0
 N6_SIGNAL_SSE_RETRY_MILLISECONDS = 5000
 N6_SIGNAL_SSE_MAX_CURSOR = POSTGRES_SIGNED_BIGINT_MAX
 N6_SIGNAL_SSE_MAX_CURSOR_TEXT = str(POSTGRES_SIGNED_BIGINT_MAX)
+N6_WEB_OBSERVABILITY_LOGGER = logging.getLogger("ashare_v3.n6.web.observability")
+_N6_SIGNAL_SSE_GAUGE_LOCK = threading.Lock()
+_N6_SIGNAL_SSE_ACTIVE_CONNECTIONS = 0
 N6_SIGNAL_COMPACT_FIELDS = (
     "user_signal_projection_id",
     "user_signal_card_id",
@@ -318,6 +322,55 @@ N6_SIGNAL_COMPACT_FIELDS = (
     "source_run_id",
     "projection_run_id",
 )
+
+
+def log_n6_web_observability(event: str, **fields: Any) -> None:
+    N6_WEB_OBSERVABILITY_LOGGER.info(
+        json.dumps(
+            {"event": event, **fields},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
+def n6_signal_sse_active_connections() -> int:
+    with _N6_SIGNAL_SSE_GAUGE_LOCK:
+        return _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS
+
+
+def _open_n6_signal_sse_connection() -> int:
+    global _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS
+    with _N6_SIGNAL_SSE_GAUGE_LOCK:
+        _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS += 1
+        active_connections = _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS
+    log_n6_web_observability(
+        "n6_sse_connection",
+        state="open",
+        stream_family="signal_projection",
+        active_connections=active_connections,
+    )
+    return active_connections
+
+
+def _close_n6_signal_sse_connection(reason: str) -> None:
+    global _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS
+    with _N6_SIGNAL_SSE_GAUGE_LOCK:
+        _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS = max(
+            0,
+            _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS - 1,
+        )
+        active_connections = _N6_SIGNAL_SSE_ACTIVE_CONNECTIONS
+    log_n6_web_observability(
+        "n6_sse_connection",
+        state="close",
+        stream_family="signal_projection",
+        close_reason=reason,
+        active_connections=active_connections,
+    )
+
+
 def encode_n6_signal_page_cursor(row: Mapping[str, Any]) -> str:
     projection_id = canonical_bigint_id(
         row.get("user_signal_projection_id"),
@@ -448,6 +501,7 @@ def n6_signal_json_response(
     request: Request,
     payload: dict[str, Any],
     *,
+    cache_family: str,
     etag: str,
     watermark: str,
 ) -> Response:
@@ -456,7 +510,13 @@ def n6_signal_json_response(
         "X-N6-Watermark": watermark,
         "Cache-Control": "private, no-cache",
     }
-    if request.headers.get("if-none-match") == etag:
+    cache_status = "hit" if request.headers.get("if-none-match") == etag else "miss"
+    log_n6_web_observability(
+        "n6_cache_lookup",
+        cache_family=cache_family,
+        cache_status=cache_status,
+    )
+    if cache_status == "hit":
         return Response(status_code=304, headers=headers)
     return JSONResponse(payload, headers=headers)
 
@@ -507,30 +567,76 @@ async def iter_n6_signal_sse(
     current_time = now or (lambda: datetime.now(timezone.utc))
     cursor = int(after_id)
     heartbeat_at = monotonic() + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
-    yield f"retry: {N6_SIGNAL_SSE_RETRY_MILLISECONDS}\n\n"
-    while True:
-        if await is_disconnected():
-            return
-        try:
-            rows = await read_batch(cursor, N6_SIGNAL_SSE_BATCH_LIMIT)
-        except Exception:
-            return
-        for row in rows:
-            projection_id = row.get("user_signal_projection_id")
-            if isinstance(projection_id, bool) or not isinstance(projection_id, int):
+    close_reason = "completed"
+    _open_n6_signal_sse_connection()
+    try:
+        yield f"retry: {N6_SIGNAL_SSE_RETRY_MILLISECONDS}\n\n"
+        while True:
+            if await is_disconnected():
+                close_reason = "client_disconnect"
                 return
-            if projection_id <= cursor or projection_id > N6_SIGNAL_SSE_MAX_CURSOR:
+            try:
+                rows = await read_batch(cursor, N6_SIGNAL_SSE_BATCH_LIMIT)
+            except asyncio.CancelledError:
+                close_reason = "cancelled"
+                raise
+            except Exception:
+                close_reason = "read_error"
+                log_n6_web_observability(
+                    "n6_sse_connection",
+                    state="error",
+                    stream_family="signal_projection",
+                    error_family="read_batch",
+                    active_connections=n6_signal_sse_active_connections(),
+                )
                 return
-            payload = app_signal_sse_data_model(row)
-            yield encode_n6_signal_sse_event(payload)
-            cursor = projection_id
-        if len(rows) >= N6_SIGNAL_SSE_BATCH_LIMIT:
-            continue
-        current_tick = monotonic()
-        if current_tick >= heartbeat_at:
-            yield encode_n6_signal_sse_heartbeat(current_time())
-            heartbeat_at = current_tick + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
-        await sleep(N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS)
+            for row in rows:
+                projection_id = row.get("user_signal_projection_id")
+                if isinstance(projection_id, bool) or not isinstance(projection_id, int):
+                    close_reason = "invalid_event"
+                    log_n6_web_observability(
+                        "n6_sse_connection",
+                        state="error",
+                        stream_family="signal_projection",
+                        error_family="invalid_event",
+                        active_connections=n6_signal_sse_active_connections(),
+                    )
+                    return
+                if projection_id <= cursor or projection_id > N6_SIGNAL_SSE_MAX_CURSOR:
+                    close_reason = "invalid_event"
+                    log_n6_web_observability(
+                        "n6_sse_connection",
+                        state="error",
+                        stream_family="signal_projection",
+                        error_family="invalid_event",
+                        active_connections=n6_signal_sse_active_connections(),
+                    )
+                    return
+                payload = app_signal_sse_data_model(row)
+                yield encode_n6_signal_sse_event(payload)
+                cursor = projection_id
+            if len(rows) >= N6_SIGNAL_SSE_BATCH_LIMIT:
+                continue
+            current_tick = monotonic()
+            if current_tick >= heartbeat_at:
+                yield encode_n6_signal_sse_heartbeat(current_time())
+                heartbeat_at = current_tick + N6_SIGNAL_SSE_HEARTBEAT_SECONDS
+            await sleep(N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        close_reason = "cancelled"
+        raise
+    except Exception:
+        close_reason = "stream_error"
+        log_n6_web_observability(
+            "n6_sse_connection",
+            state="error",
+            stream_family="signal_projection",
+            error_family="stream",
+            active_connections=n6_signal_sse_active_connections(),
+        )
+        raise
+    finally:
+        _close_n6_signal_sse_connection(close_reason)
 
 
 def _sql_text_literal(value: object) -> str:
@@ -9518,9 +9624,38 @@ def create_app(
 
     @app.middleware("http")
     async def add_security_response_headers(request: Request, call_next: Callable[..., Any]) -> Response:
-        response = await call_next(request)
+        started_at = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception:
+            route = request.scope.get("route")
+            route_family = str(getattr(route, "path", "") or "unmatched")
+            log_n6_web_observability(
+                "n6_http_request",
+                route_family=route_family,
+                method=request.method,
+                status=status_code,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 3),
+            )
+            raise
         for name, value in N6_SECURITY_RESPONSE_HEADERS.items():
             response.headers[name] = value
+        route = request.scope.get("route")
+        route_family = str(getattr(route, "path", "") or "unmatched")
+        if route_family not in {
+            "/n6/favicon.svg",
+            "/n6/apple-touch-icon.svg",
+            "/health",
+        }:
+            log_n6_web_observability(
+                "n6_http_request",
+                route_family=route_family,
+                method=request.method,
+                status=status_code,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 3),
+            )
         return response
 
     @app.get("/n6/favicon.svg", response_class=Response)
@@ -9744,6 +9879,7 @@ def create_app(
         return n6_signal_json_response(
             request,
             payload,
+            cache_family="signal_list",
             etag=etag,
             watermark=str(pagination["watermark"]),
         )
@@ -10066,6 +10202,7 @@ def create_app(
         return n6_signal_json_response(
             request,
             payload,
+            cache_family="message_dashboard",
             etag=etag,
             watermark=str(pagination["watermark"]),
         )

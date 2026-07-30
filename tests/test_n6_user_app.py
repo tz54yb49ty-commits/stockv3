@@ -6150,6 +6150,167 @@ class RecordingConnection:
 
 
 class N6UserAppTest(unittest.TestCase):
+    def test_web_observability_logs_low_cardinality_routes_status_and_elapsed_without_secrets(
+        self,
+    ) -> None:
+        client, repo, _, _ = build_client(raise_server_exceptions=False)
+
+        async def observed_route(opaque: str) -> dict[str, bool]:
+            del opaque
+            return {"ok": True}
+
+        async def failing_route() -> None:
+            raise RuntimeError("fixture failure")
+
+        client.app.add_api_route(
+            "/n6/observability/{opaque}",
+            observed_route,
+            methods=["GET"],
+        )
+        client.app.add_api_route(
+            "/n6/observability-error",
+            failing_route,
+            methods=["GET"],
+        )
+        secret_values = (
+            "query-secret-91",
+            "password-secret-92",
+            "cookie-secret-93",
+            "authorization-secret-94",
+            "session-token-secret-95",
+            "postgresql://secret-dsn-96",
+            "SELECT-secret-sql-97",
+            "principal-user-secret-98",
+            "identity-source-projection-secret-99",
+        )
+
+        with self.assertLogs(
+            n6_user_app_module.N6_WEB_OBSERVABILITY_LOGGER,
+            level="INFO",
+        ) as captured:
+            unauthorized = client.get("/api/n6/me")
+            redirect = client.post(
+                "/api/n6/auth/login",
+                json={
+                    "login_name": "admin",
+                    "password": secret_values[1],
+                },
+            )
+            observed = client.get(
+                f"/n6/observability/{secret_values[0]}",
+                params={"password": secret_values[0], "dsn": secret_values[5]},
+                headers={
+                    "Authorization": f"Bearer {secret_values[3]}",
+                    "Cookie": f"unsafe={secret_values[2]}",
+                },
+            )
+            repo.app_principals = []
+            forbidden = client.get("/api/n6/app/v1/me")
+            missing = client.get("/n6/does-not-exist")
+            failed = client.get("/n6/observability-error")
+
+        self.assertEqual(
+            [
+                unauthorized.status_code,
+                redirect.status_code,
+                observed.status_code,
+                forbidden.status_code,
+                missing.status_code,
+                failed.status_code,
+            ],
+            [401, 302, 200, 403, 404, 500],
+        )
+        events = [
+            json.loads(record.getMessage())
+            for record in captured.records
+            if json.loads(record.getMessage()).get("event") == "n6_http_request"
+        ]
+        self.assertEqual(
+            {event["status"] for event in events},
+            {200, 302, 401, 403, 404, 500},
+        )
+        observed_events = [
+            event
+            for event in events
+            if event["route_family"] == "/n6/observability/{opaque}"
+        ]
+        self.assertEqual(len(observed_events), 1)
+        self.assertEqual(observed_events[0]["method"], "GET")
+        self.assertGreaterEqual(observed_events[0]["elapsed_ms"], 0)
+        self.assertTrue(
+            any(
+                event["route_family"] == "/n6/observability-error"
+                and event["status"] == 500
+                for event in events
+            )
+        )
+        self.assertTrue(
+            any(
+                event["route_family"] == "unmatched" and event["status"] == 404
+                for event in events
+            )
+        )
+        serialized = "\n".join(record.getMessage() for record in captured.records)
+        for secret in secret_values:
+            self.assertNotIn(secret, serialized)
+        for forbidden_field in (
+            "query_string",
+            "cookie",
+            "authorization",
+            "token",
+            "dsn",
+            "sql",
+            "principal_id",
+            "user_id",
+            "identity_key",
+            "source_id",
+            "projection_id",
+            "request_body",
+            "response_body",
+        ):
+            self.assertNotIn(forbidden_field, serialized.lower())
+
+    def test_etag_observability_records_only_cache_family_and_hit_or_miss(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        with self.assertLogs(
+            n6_user_app_module.N6_WEB_OBSERVABILITY_LOGGER,
+            level="INFO",
+        ) as captured:
+            initial = client.get("/api/n6/app/v1/signals")
+            unchanged = client.get(
+                "/api/n6/app/v1/signals",
+                headers={"If-None-Match": initial.headers["etag"]},
+            )
+
+        self.assertEqual(initial.status_code, 200)
+        self.assertEqual(unchanged.status_code, 304)
+        cache_events = [
+            json.loads(record.getMessage())
+            for record in captured.records
+            if json.loads(record.getMessage()).get("event") == "n6_cache_lookup"
+        ]
+        self.assertEqual(
+            cache_events,
+            [
+                {
+                    "cache_family": "signal_list",
+                    "cache_status": "miss",
+                    "event": "n6_cache_lookup",
+                },
+                {
+                    "cache_family": "signal_list",
+                    "cache_status": "hit",
+                    "event": "n6_cache_lookup",
+                },
+            ],
+        )
+
     def test_dashboard_uses_one_request_scoped_readonly_repository_context(self) -> None:
         class DashboardRepository(FakeN6UserRepository):
             def __init__(self) -> None:
@@ -20742,6 +20903,108 @@ class N6AuthenticatedSignalAsyncBoundaryTest(unittest.IsolatedAsyncioTestCase):
 
 
 class N6SignalSSEAsyncContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sse_observability_gauge_counts_concurrent_clients_and_returns_to_zero(
+        self,
+    ) -> None:
+        async def no_rows(_after_id: int, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def connected() -> bool:
+            return False
+
+        first = n6_user_app_module.iter_n6_signal_sse(
+            after_id=0,
+            read_batch=no_rows,
+            is_disconnected=connected,
+        )
+        second = n6_user_app_module.iter_n6_signal_sse(
+            after_id=0,
+            read_batch=no_rows,
+            is_disconnected=connected,
+        )
+        self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 0)
+
+        with self.assertLogs(
+            n6_user_app_module.N6_WEB_OBSERVABILITY_LOGGER,
+            level="INFO",
+        ) as captured:
+            self.assertEqual(await anext(first), "retry: 5000\n\n")
+            self.assertEqual(await anext(second), "retry: 5000\n\n")
+            self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 2)
+            await first.aclose()
+            self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 1)
+            await second.aclose()
+
+        self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 0)
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        self.assertEqual(
+            [(event["state"], event["active_connections"]) for event in events],
+            [("open", 1), ("open", 2), ("close", 1), ("close", 0)],
+        )
+
+    async def test_sse_observability_error_and_cancellation_always_release_gauge(
+        self,
+    ) -> None:
+        async def connected() -> bool:
+            return False
+
+        async def failing_read(_after_id: int, _limit: int) -> list[dict[str, Any]]:
+            raise RuntimeError("sensitive database failure text")
+
+        error_stream = n6_user_app_module.iter_n6_signal_sse(
+            after_id=0,
+            read_batch=failing_read,
+            is_disconnected=connected,
+        )
+        with self.assertLogs(
+            n6_user_app_module.N6_WEB_OBSERVABILITY_LOGGER,
+            level="INFO",
+        ) as error_logs:
+            self.assertEqual(await anext(error_stream), "retry: 5000\n\n")
+            with self.assertRaises(StopAsyncIteration):
+                await anext(error_stream)
+
+        self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 0)
+        error_events = [json.loads(record.getMessage()) for record in error_logs.records]
+        self.assertEqual([event["state"] for event in error_events], ["open", "error", "close"])
+        self.assertEqual(error_events[1]["error_family"], "read_batch")
+        self.assertEqual(error_events[-1]["close_reason"], "read_error")
+        self.assertNotIn(
+            "sensitive database failure text",
+            "\n".join(record.getMessage() for record in error_logs.records),
+        )
+
+        sleeping = asyncio.Event()
+
+        async def wait_forever(_seconds: float) -> None:
+            sleeping.set()
+            await asyncio.Event().wait()
+
+        async def no_rows(_after_id: int, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        cancelled_stream = n6_user_app_module.iter_n6_signal_sse(
+            after_id=0,
+            read_batch=no_rows,
+            is_disconnected=connected,
+            sleep=wait_forever,
+        )
+        with self.assertLogs(
+            n6_user_app_module.N6_WEB_OBSERVABILITY_LOGGER,
+            level="INFO",
+        ) as cancel_logs:
+            self.assertEqual(await anext(cancelled_stream), "retry: 5000\n\n")
+            next_chunk = asyncio.create_task(anext(cancelled_stream))
+            await sleeping.wait()
+            next_chunk.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await next_chunk
+
+        self.assertEqual(n6_user_app_module.n6_signal_sse_active_connections(), 0)
+        cancel_events = [json.loads(record.getMessage()) for record in cancel_logs.records]
+        self.assertEqual([event["state"] for event in cancel_events], ["open", "close"])
+        self.assertEqual(cancel_events[-1]["close_reason"], "cancelled")
+
     async def test_one_hundred_signal_burst_serializes_under_300ms(self) -> None:
         async def read_batch(after_id: int, _limit: int) -> list[dict[str, Any]]:
             if after_id:
