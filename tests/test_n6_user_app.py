@@ -15307,7 +15307,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(proposal["executed_virtual_trade_id"], 9002)
         self.assertEqual(len(repo.app_trade_proposals), 1)
 
-    def test_b_track_v3_card_voice_is_browser_only_directional_and_foreground_poll_only(self) -> None:
+    def test_b_track_v3_card_voice_is_browser_only_directional_and_foreground_live_only(self) -> None:
         client, repo, _, _ = build_client()
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
@@ -15370,7 +15370,14 @@ class N6UserAppTest(unittest.TestCase):
             "`${eventTime}，${displayName}，目标价 ${target}，收益率 ${expectedReturnText}`",
             voice_source,
         )
-        self.assertNotIn("n6Voice.speak", sse_apply_source)
+        self.assertIn(
+            "if (inserted) {\n"
+            "          incrementMessageSummary(signal);\n"
+            "          n6Voice.speak(cardItem);\n"
+            "        }",
+            sse_apply_source,
+        )
+        self.assertEqual(sse_apply_source.count("n6Voice.speak(cardItem)"), 1)
         self.assertIn("speakNew", refresh_source)
         self.assertIn(".forEach(({ item }) => n6Voice.speak(item))", refresh_source)
         self.assertNotIn("/api/n6/app/v3/voice", response.text)
@@ -19312,6 +19319,47 @@ class N6UserAppTest(unittest.TestCase):
 
 
 class N6SignalSSEContractTest(unittest.TestCase):
+    def test_sse_message_voice_only_runs_for_new_insertions_without_recovery_or_history_drift(
+        self,
+    ) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        refresh_source = source.split("const n6AutoRefresh = (() => {", 1)[1].split(
+            "const n6ScopeWrite = (() => {", 1
+        )[0]
+        sse_apply_source = refresh_source.split("const applySignalEvent =", 1)[1].split(
+            "const refreshOnce =", 1
+        )[0]
+        inserted_branch = (
+            "if (inserted) {\n"
+            "          incrementMessageSummary(signal);\n"
+            "          n6Voice.speak(cardItem);\n"
+            "        }\n"
+            "        return inserted ? 1 : 0;"
+        )
+
+        self.assertIn(inserted_branch, sse_apply_source)
+        self.assertEqual(sse_apply_source.count("n6Voice.speak(cardItem)"), 1)
+        before_inserted, inserted_and_after = sse_apply_source.split("if (inserted) {", 1)
+        _, after_inserted = inserted_and_after.split("}", 1)
+        self.assertNotIn("n6Voice.speak", before_inserted)
+        self.assertNotIn("n6Voice.speak", after_inserted)
+
+        recover_source = refresh_source.split("const recoverLive =", 1)[1].split(
+            "const init =", 1
+        )[0]
+        self.assertIn("await withVoiceSuppressed(() => refreshOnce(", recover_source)
+        self.assertIn(
+            "{ append: false, silent: true, speakNew: false }",
+            recover_source,
+        )
+        init_source = refresh_source.split("const init =", 1)[1]
+        self.assertIn(
+            "{ append: false, silent: false, speakNew: false }",
+            init_source,
+        )
+        self.assertIn('if (root.dataset.refreshEnabled !== "true") return;', init_source)
+        self.assertEqual(refresh_source.count("new EventSource("), 1)
+
     def test_bigint_dto_normalizer_is_exact_and_field_allowlisted(self) -> None:
         normalize = n6_app_v1_module.canonical_bigint_id
 

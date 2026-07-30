@@ -3187,6 +3187,7 @@
         );
         if (inserted) {
           incrementMessageSummary(signal);
+          n6Voice.speak(cardItem);
         }
         return inserted ? 1 : 0;
       };
