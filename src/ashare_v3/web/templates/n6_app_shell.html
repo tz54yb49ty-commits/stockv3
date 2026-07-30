@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page.app_title }}</title>
+  <link rel="icon" href="/n6/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/n6/apple-touch-icon.svg">
   <style>
     :root {
       color-scheme: light;
@@ -58,6 +60,7 @@
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+      scroll-padding-inline: 8px;
     }
     nav:focus-within { outline: none; }
     a, button {
@@ -393,11 +396,23 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
+    .message-card-secondary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+    }
     .message-card-primary > div {
       min-width: 0;
       border-radius: 8px;
       background: var(--soft);
       padding: 10px;
+    }
+    .message-card-secondary > div {
+      min-width: 0;
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 8px 10px;
     }
     .message-card-primary span {
       display: block;
@@ -405,10 +420,22 @@
       font-size: 12px;
       margin-bottom: 4px;
     }
+    .message-card-secondary span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
     .message-card-primary strong {
       display: block;
       color: var(--ink);
       font-size: 17px;
+      overflow-wrap: anywhere;
+    }
+    .message-card-secondary strong {
+      display: block;
+      color: var(--ink);
+      font-size: 14px;
       overflow-wrap: anywhere;
     }
     .message-card-details {
@@ -431,6 +458,7 @@
       border-top: 1px solid var(--line);
       padding: 10px;
     }
+    .message-card[data-n6-mobile-hidden="true"] { display: none; }
     .message-filter-form {
       display: grid;
       gap: 10px;
@@ -966,6 +994,7 @@
         flex-wrap: nowrap;
         overflow-x: auto;
         overscroll-behavior-inline: contain;
+        scrollbar-width: thin;
         padding: 2px 2px 8px;
       }
       nav a, nav button { flex: 0 0 auto; }
@@ -1003,19 +1032,84 @@
       .n6-data-workspace {
         width: calc(100vw - 16px);
       }
-      .topbar { gap: 10px; }
+      .topbar {
+        min-height: 0;
+        gap: 8px;
+        padding: 9px 0;
+      }
+      .topbar h1 { font-size: 18px; }
+      .topbar .subtle { font-size: 12px; }
+      nav {
+        gap: 6px;
+        padding-bottom: 4px;
+      }
       nav a,
       nav button,
       .next-action-card a,
       .guide-summary-card a,
       .guide-step a,
       .technical-details > summary {
-        min-height: 44px;
+        min-height: 45px;
       }
       .banner {
-        padding: 9px 10px;
-        font-size: 13px;
+        min-width: 0;
+        padding: 7px 9px;
+        font-size: 12px;
+        line-height: 1.4;
       }
+      main { padding-top: 8px; gap: 8px; }
+      .surface { min-width: 0; }
+      .surface-head { min-height: 44px; padding: 8px 10px; }
+      .text-block { padding: 9px 10px; font-size: 13px; }
+      .message-filter-form { gap: 7px; }
+      .message-controls .monitor-actions {
+        margin-top: 6px;
+        gap: 6px;
+      }
+      .message-controls button,
+      .message-controls .row-action,
+      .message-controls .monitor-actions select,
+      .message-asset-option,
+      .message-card-details > summary {
+        min-height: 45px;
+      }
+      .message-controls .monitor-actions:first-child {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+      .message-controls .monitor-actions:first-child button {
+        grid-column: 1 / -1;
+      }
+      .message-asset-options {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .message-asset-option {
+        min-height: 45px;
+        padding: 0 7px;
+        justify-content: center;
+      }
+      .message-asset-option input {
+        width: 16px;
+        height: 16px;
+      }
+      .message-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        padding: 8px 10px;
+        gap: 6px;
+      }
+      .message-summary-grid .metric { padding: 7px 8px; }
+      .message-summary-grid .metric span { margin-bottom: 3px; }
+      .message-card-grid { padding: 8px; gap: 8px; }
+      .message-card { padding: 10px; gap: 8px; }
+      .message-card-primary,
+      .message-card-secondary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .message-card-primary > div { padding: 8px; }
+      .message-card-primary strong { font-size: 15px; }
+      .message-card-details > summary { min-height: 45px; }
       .cockpit-shell { padding: 10px; }
       .cockpit-lead,
       .next-action-card,
@@ -1341,6 +1435,7 @@
           data-page-limit="{{ page.data.pagination.limit }}"
           data-next-cursor="{{ page.data.pagination.next_cursor }}"
           data-watermark="{{ page.data.pagination.watermark }}"
+          data-has-more="{% if page.data.pagination.has_more %}true{% else %}false{% endif %}"
         >
           <span data-n6-refresh-status>{% if signals_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
           <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
@@ -1515,26 +1610,38 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}">
+        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
               <div class="subtle">{{ item.asset_kind_label }} · {{ item.direction_label }} · {{ item.display_values.event_time }}</div>
             </div>
-            <span class="chip">{{ item.action_state_label }}</span>
           </div>
           <div class="message-card-primary">
+            {% if item.direction == "buy" %}
             <div><span>买入目标价</span><strong>{{ item.display_values.buy_target_price }}</strong></div>
-            <div><span>卖出目标价</span><strong>{{ item.display_values.sell_target_price }}</strong></div>
-            <div><span>触发价</span><strong>{{ item.display_values.trigger_price }}</strong></div>
-            <div><span>动作价</span><strong>{{ item.display_values.action_price }}</strong></div>
             <div><span>买入收益率</span><strong>{{ item.display_values.buy_expected_return_pct }}{% if item.display_values.buy_expected_return_pct != "—" %}%{% endif %}</strong></div>
-            <div><span>次级收益率</span><strong>{{ item.display_values.up_secondary_expected_return_pct }}{% if item.display_values.up_secondary_expected_return_pct != "—" %}%{% endif %}</strong></div>
+            {% elif item.direction == "sell" %}
+            <div><span>卖出目标价</span><strong>{{ item.display_values.sell_target_price }}</strong></div>
             <div><span>卖出收益率</span><strong>{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</strong></div>
-            <div><span>触发涨跌幅</span><strong>{{ item.display_values.trigger_pct }}{% if item.display_values.trigger_pct != "—" %}%{% endif %}</strong></div>
+            {% endif %}
+            <div><span>触发价</span><strong>{{ item.display_values.trigger_price }}</strong></div>
+            <div><span>动作状态</span><strong>{{ item.action_state_label }}</strong></div>
           </div>
           <details class="message-card-details">
             <summary>更多指标</summary>
+            <div class="message-card-secondary">
+              {% if item.direction == "buy" %}
+              <div><span>卖出目标价</span><strong>{{ item.display_values.sell_target_price }}</strong></div>
+              <div><span>卖出收益率</span><strong>{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</strong></div>
+              {% elif item.direction == "sell" %}
+              <div><span>买入目标价</span><strong>{{ item.display_values.buy_target_price }}</strong></div>
+              <div><span>买入收益率</span><strong>{{ item.display_values.buy_expected_return_pct }}{% if item.display_values.buy_expected_return_pct != "—" %}%{% endif %}</strong></div>
+              {% endif %}
+              <div><span>次级收益率</span><strong>{{ item.display_values.up_secondary_expected_return_pct }}{% if item.display_values.up_secondary_expected_return_pct != "—" %}%{% endif %}</strong></div>
+              <div><span>动作价</span><strong>{{ item.display_values.action_price }}</strong></div>
+              <div><span>触发涨跌幅</span><strong>{{ item.display_values.trigger_pct }}{% if item.display_values.trigger_pct != "—" %}%{% endif %}</strong></div>
+            </div>
             <div class="message-card-meta">
               <span class="chip">触发周期 {{ item.triggered_periods_label }}</span>
               <span class="chip">主周期 {{ item.primary_trigger_period_label }}</span>
@@ -2843,6 +2950,8 @@
       };
       window.__n6ProjectionStore = sharedStore;
       const correctionIntervalMs = 15000;
+      const mobileCardsPageSize = 20;
+      const mobileCardsQuery = window.matchMedia?.("(max-width: 430px)") || { matches: false };
       let eventSource = null;
       let correctionTimer = null;
       let activeRoot = null;
@@ -2867,6 +2976,8 @@
             etagByUrl: new Map(),
             watermark: root.dataset.watermark || "0",
             nextCursor: root.dataset.nextCursor || "",
+            serverHasMore: root.dataset.hasMore === "true",
+            mobileVisibleCount: mobileCardsPageSize,
             controllers: new Map(),
             activeRequest: null,
           });
@@ -3019,31 +3130,62 @@
         const projectionId = canonicalProjectionId(item.user_signal_projection_id);
         if (!projectionId) return "";
         const display = item.display_values || {};
+        const displayValue = (value) => (
+          value === 0 || value === "0" ? "0" : value || "—"
+        );
         const displayPercent = (value) => {
-          const text = value || "—";
+          const text = displayValue(value);
           return text === "—" ? text : `${text}%`;
         };
+        const metricMarkup = (label, value) => (
+          `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
+        );
+        const primaryMetrics = [];
+        const secondaryMetrics = [];
+        if (item.direction === "buy") {
+          primaryMetrics.push(
+            ["买入目标价", displayValue(display.buy_target_price)],
+            ["买入收益率", displayPercent(display.buy_expected_return_pct)],
+          );
+          secondaryMetrics.push(
+            ["卖出目标价", displayValue(display.sell_target_price)],
+            ["卖出收益率", displayPercent(display.sell_expected_return_pct)],
+          );
+        } else if (item.direction === "sell") {
+          primaryMetrics.push(
+            ["卖出目标价", displayValue(display.sell_target_price)],
+            ["卖出收益率", displayPercent(display.sell_expected_return_pct)],
+          );
+          secondaryMetrics.push(
+            ["买入目标价", displayValue(display.buy_target_price)],
+            ["买入收益率", displayPercent(display.buy_expected_return_pct)],
+          );
+        }
+        primaryMetrics.push(
+          ["触发价", displayValue(display.trigger_price)],
+          ["动作状态", displayValue(item.action_state_label)],
+        );
+        secondaryMetrics.push(
+          ["次级收益率", displayPercent(display.up_secondary_expected_return_pct)],
+          ["动作价", displayValue(display.action_price)],
+          ["触发涨跌幅", displayPercent(display.trigger_pct)],
+        );
         return `
-        <article class="message-card" data-n6-projection-id="${projectionId}">
+        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
               <div class="subtle">${escapeHtml(item.asset_kind_label)} · ${escapeHtml(item.direction_label)} · ${escapeHtml(display.event_time || "—")}</div>
             </div>
-            <span class="chip">${escapeHtml(item.action_state_label)}</span>
           </div>
           <div class="message-card-primary">
-            <div><span>买入目标价</span><strong>${escapeHtml(display.buy_target_price || "—")}</strong></div>
-            <div><span>卖出目标价</span><strong>${escapeHtml(display.sell_target_price || "—")}</strong></div>
-            <div><span>触发价</span><strong>${escapeHtml(display.trigger_price || "—")}</strong></div>
-            <div><span>动作价</span><strong>${escapeHtml(display.action_price || "—")}</strong></div>
-            <div><span>买入收益率</span><strong>${escapeHtml(displayPercent(display.buy_expected_return_pct))}</strong></div>
-            <div><span>次级收益率</span><strong>${escapeHtml(displayPercent(display.up_secondary_expected_return_pct))}</strong></div>
-            <div><span>卖出收益率</span><strong>${escapeHtml(displayPercent(display.sell_expected_return_pct))}</strong></div>
-            <div><span>触发涨跌幅</span><strong>${escapeHtml(displayPercent(display.trigger_pct))}</strong></div>
+            ${primaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
           </div>
           <details class="message-card-details">
             <summary>更多指标</summary>
+            <div class="message-card-secondary">
+              ${secondaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
+            </div>
             <div class="message-card-meta">
               <span class="chip">触发周期 ${escapeHtml(item.triggered_periods_label || "—")}</span>
               <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period_label || "—")}</span>
@@ -3108,6 +3250,38 @@
       const projectionContainer = (kind) => kind === "signals"
         ? document.querySelector("[data-n6-signals-body]")
         : document.querySelector("[data-n6-message-cards]");
+
+      const applyMobileCardWindow = (root, { reset = false } = {}) => {
+        if (root?.dataset.n6AutoRefresh !== "messages") return;
+        const state = scopeState(root);
+        const cards = Array.from(
+          projectionContainer("messages")?.querySelectorAll("article[data-n6-projection-id]") || [],
+        );
+        const loadMoreButton = root.querySelector("[data-n6-load-more]");
+        if (!mobileCardsQuery.matches) {
+          cards.forEach((card) => card.removeAttribute("data-n6-mobile-hidden"));
+          if (loadMoreButton) loadMoreButton.hidden = !state.serverHasMore;
+          return;
+        }
+        if (reset) state.mobileVisibleCount = mobileCardsPageSize;
+        cards.forEach((card, index) => {
+          if (index < state.mobileVisibleCount) card.removeAttribute("data-n6-mobile-hidden");
+          else card.dataset.n6MobileHidden = "true";
+        });
+        const hasLocalMore = cards.length > state.mobileVisibleCount;
+        if (loadMoreButton) loadMoreButton.hidden = !(hasLocalMore || state.serverHasMore);
+      };
+
+      const revealMobileCardBatch = (root) => {
+        if (!mobileCardsQuery.matches || root?.dataset.n6AutoRefresh !== "messages") return false;
+        const state = scopeState(root);
+        const cardCount = projectionContainer("messages")
+          ?.querySelectorAll("article[data-n6-projection-id]").length || 0;
+        if (cardCount <= state.mobileVisibleCount) return false;
+        state.mobileVisibleCount += mobileCardsPageSize;
+        applyMobileCardWindow(root);
+        return true;
+      };
 
       const setSignalsViewState = (hasItems, emptyMessage = "") => {
         const table = document.querySelector("[data-n6-signals-table]");
@@ -3204,6 +3378,7 @@
           messageCardMarkup(cardItem),
           "article[data-n6-projection-id]",
         );
+        applyMobileCardWindow(root);
         if (inserted) {
           incrementMessageSummary(signal);
           n6Voice.speak(cardItem);
@@ -3222,7 +3397,7 @@
           } catch (_error) {
             // The primary caller owns status reporting.
           }
-          return;
+          if (!append) return;
         }
         const knownProjectionIds = speakNew && kind === "messages"
           ? new Set(Array.from(
@@ -3279,15 +3454,27 @@
           if (etag) state.etagByUrl.set(requestKey, etag);
           const pagination = payload.pagination || {};
           state.nextCursor = pagination.next_cursor || "";
-          state.watermark = response.headers.get("X-N6-Watermark")
-            || pagination.watermark
-            || state.watermark;
+          state.serverHasMore = pagination.has_more === true;
+          const responseWatermark = canonicalProjectionId(
+            response.headers.get("X-N6-Watermark") || pagination.watermark || "",
+          );
+          if (
+            responseWatermark
+            && (
+              !canonicalProjectionId(state.watermark || "")
+              || compareProjectionIds(responseWatermark, state.watermark) > 0
+            )
+          ) {
+            state.watermark = responseWatermark;
+          }
           root.dataset.nextCursor = state.nextCursor;
           root.dataset.watermark = state.watermark;
+          root.dataset.hasMore = state.serverHasMore ? "true" : "false";
           if (loadMoreButton) loadMoreButton.hidden = !pagination.has_more;
           const count = kind === "signals"
             ? renderSignals(root, payload, { append })
             : renderMessageCards(root, payload, { append });
+          if (kind === "messages") applyMobileCardWindow(root);
           if (
             speakNew
             && kind === "messages"
@@ -3457,15 +3644,26 @@
           const loadMoreButton = root.querySelector("[data-n6-load-more]");
           root.dataset.refreshInFlight = "false";
           scopeState(root);
+          if (root.dataset.n6AutoRefresh === "messages") {
+            applyMobileCardWindow(root, { reset: true });
+          }
           if (button) button.addEventListener("click", () => withVoiceSuppressed(() => refreshOnce(
             root,
             { append: false, silent: false, speakNew: false },
           )));
           if (loadMoreButton) {
-            loadMoreButton.addEventListener("click", () => withVoiceSuppressed(() => refreshOnce(
-              root,
-              { append: true, silent: false, speakNew: false },
-            )));
+            loadMoreButton.addEventListener("click", () => {
+              if (revealMobileCardBatch(root)) return;
+              if (mobileCardsQuery.matches && root.dataset.n6AutoRefresh === "messages") {
+                const existingCardCount = projectionContainer("messages")
+                  ?.querySelectorAll("article[data-n6-projection-id]").length || 0;
+                scopeState(root).mobileVisibleCount = existingCardCount + mobileCardsPageSize;
+              }
+              void withVoiceSuppressed(() => refreshOnce(
+                root,
+                { append: true, silent: false, speakNew: false },
+              ));
+            });
           }
           if (root.dataset.refreshEnabled !== "true") return;
           activeRoot = root;
@@ -3479,6 +3677,15 @@
         window.addEventListener("online", recoverLive);
         window.addEventListener("offline", pauseLive);
         window.addEventListener("pageshow", recoverLive);
+        mobileCardsQuery.addEventListener?.("change", () => {
+          document.querySelectorAll('[data-n6-auto-refresh="messages"]').forEach((root) => {
+            applyMobileCardWindow(root, { reset: mobileCardsQuery.matches });
+          });
+        });
+        const activeNavItem = document.querySelector('nav[aria-label="B轨导航"] a.active');
+        if (activeNavItem && window.matchMedia?.("(max-width: 980px)").matches) {
+          activeNavItem.scrollIntoView({ block: "nearest", inline: "center" });
+        }
         window.addEventListener("beforeunload", () => {
           pauseLive();
           sharedStore.scopes.forEach((state) => {

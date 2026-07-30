@@ -16043,6 +16043,191 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         self.assertIn("grid-template-columns: minmax(0, 1fr)", source)
         self.assertFalse(any(repo.forbidden_writes.values()))
 
+    def test_b_track_message_cards_use_directional_first_screen_for_ssr_get_and_sse(self) -> None:
+        client, repo, _, _ = build_client()
+        base = copy.deepcopy(repo.ui_v1_signals[0])
+        rows = []
+        for index, direction in enumerate(("buy", "sell", "unknown"), start=1):
+            row = copy.deepcopy(base)
+            row.update(
+                {
+                    "user_signal_projection_id": 9800 + index,
+                    "user_signal_card_id": 9900 + index,
+                    "identity_key": f"stock:SH:60{index:04d}",
+                    "code": f"60{index:04d}",
+                    "name": f"方向测试{index}",
+                    "direction": direction,
+                    "target_price": "12.345",
+                    "trigger_price": "0",
+                    "action_price": "10.500",
+                    "buy_expected_return_pct": "1.25",
+                    "up_secondary_expected_return_pct": "0",
+                    "sell_expected_return_pct": "-2.50",
+                    "trigger_pct": "0",
+                    "condition_projection_context": {
+                        "fields": {
+                            "buy_target_price": "11.200",
+                            "sell_target_price": "9.800",
+                        }
+                    },
+                }
+            )
+            rows.append(row)
+            seed_effective_monitor_for_signal(repo, row)
+        repo.ui_v1_signals = rows
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/messages")
+        api_response = client.get("/api/n6/app/v2/message-dashboard")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        rendered = page_response.text.split("<script", 1)[0]
+        cards = {
+            direction: re.search(
+                rf'<article class="message-card"[^>]+data-n6-direction="{direction}"[^>]*>(.*?)</article>',
+                rendered,
+                re.S,
+            ).group(1)
+            for direction in ("buy", "sell", "unknown")
+        }
+        primary = {
+            direction: card.split('<div class="message-card-primary">', 1)[1].split(
+                '<details class="message-card-details">',
+                1,
+            )[0]
+            for direction, card in cards.items()
+        }
+        self.assertEqual(
+            re.findall(r"<span>([^<]+)</span>", primary["buy"]),
+            ["买入目标价", "买入收益率", "触发价", "动作状态"],
+        )
+        self.assertEqual(
+            re.findall(r"<span>([^<]+)</span>", primary["sell"]),
+            ["卖出目标价", "卖出收益率", "触发价", "动作状态"],
+        )
+        self.assertEqual(
+            re.findall(r"<span>([^<]+)</span>", primary["unknown"]),
+            ["触发价", "动作状态"],
+        )
+        self.assertNotIn("卖出目标价", primary["buy"])
+        self.assertNotIn("买入目标价", primary["sell"])
+        self.assertNotIn("买入目标价", primary["unknown"])
+        self.assertNotIn("卖出目标价", primary["unknown"])
+        for item in api_response.json()["card_items"]:
+            self.assertIn("buy_target_price", item)
+            self.assertIn("sell_target_price", item)
+            self.assertIn("display_values", item)
+
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        dynamic_card = "const messageCardMarkup = (item) => {" + source.split(
+            "const messageCardMarkup = (item) => {",
+            1,
+        )[1].split("const renderMessageCards =", 1)[0]
+        harness = (
+            """
+const canonicalProjectionId = (value) => String(value || "");
+const escapeHtml = (value) => String(value ?? "");
+"""
+            + dynamic_card
+            + """
+const base = {
+  user_signal_projection_id: "1",
+  display_name: "测试",
+  display_code: "000001",
+  asset_kind: "stock",
+  asset_kind_label: "个股",
+  direction_label: "方向",
+  action_state_label: "已确认",
+  display_values: {
+    event_time: "10:00:00",
+    buy_target_price: 0,
+    sell_target_price: "9.8",
+    trigger_price: 0,
+    action_price: "10.5",
+    buy_expected_return_pct: 0,
+    up_secondary_expected_return_pct: 0,
+    sell_expected_return_pct: "-2.5",
+    trigger_pct: 0,
+  },
+};
+const labels = (direction) => {
+  const markup = messageCardMarkup({ ...base, direction });
+  const primary = markup.match(/message-card-primary">([\\s\\S]*?)<\\/div>\\s*<details/)[1];
+  const secondary = markup.match(/message-card-secondary">([\\s\\S]*?)<\\/div>\\s*<div class="message-card-meta"/)[1];
+  const extract = (value) => [...value.matchAll(/<span>([^<]+)<\\/span>/g)].map((match) => match[1]);
+  return { primary: extract(primary), secondary: extract(secondary), markup };
+};
+const result = { buy: labels("buy"), sell: labels("sell"), unknown: labels("unknown") };
+process.stdout.write(JSON.stringify(result));
+"""
+        )
+        node_result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        dynamic = json.loads(node_result.stdout)
+        self.assertEqual(dynamic["buy"]["primary"], ["买入目标价", "买入收益率", "触发价", "动作状态"])
+        self.assertEqual(dynamic["sell"]["primary"], ["卖出目标价", "卖出收益率", "触发价", "动作状态"])
+        self.assertEqual(dynamic["unknown"]["primary"], ["触发价", "动作状态"])
+        self.assertIn("<strong>0</strong>", dynamic["buy"]["markup"])
+        auto_refresh = source.split("const n6AutoRefresh = (() => {", 1)[1].split(
+            "const n6ScopeWrite = (() => {",
+            1,
+        )[0]
+        self.assertIn("messageCardMarkup(item)", auto_refresh)
+        self.assertIn("messageCardMarkup(cardItem)", auto_refresh)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_messages_mobile_progressive_cards_nav_and_icons_contract(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/messages")
+        favicon_response = client.get("/n6/favicon.svg")
+        touch_icon_response = client.get("/n6/apple-touch-icon.svg")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(favicon_response.status_code, 200)
+        self.assertEqual(touch_icon_response.status_code, 200)
+        self.assertTrue(favicon_response.headers["content-type"].startswith("image/svg+xml"))
+        self.assertTrue(touch_icon_response.headers["content-type"].startswith("image/svg+xml"))
+        self.assertIn('rel="icon" href="/n6/favicon.svg"', page_response.text)
+        self.assertIn('rel="apple-touch-icon" href="/n6/apple-touch-icon.svg"', page_response.text)
+        self.assertIn('<nav aria-label="B轨导航">', page_response.text)
+        self.assertIn('const mobileCardsPageSize = 20', source)
+        self.assertIn('window.matchMedia?.("(max-width: 430px)")', source)
+        self.assertIn("data-n6-mobile-hidden", source)
+        self.assertIn("revealMobileCardBatch(root)", source)
+        self.assertIn("state.serverHasMore", source)
+        self.assertIn("state.nextCursor", source)
+        self.assertIn("state.watermark", source)
+        self.assertIn("if (!append) return", source)
+        self.assertIn("const responseWatermark = canonicalProjectionId(", source)
+        self.assertIn("compareProjectionIds(responseWatermark, state.watermark) > 0", source)
+        self.assertIn("Array.from(nodes).slice(100)", source)
+        self.assertIn('scrollIntoView({ block: "nearest", inline: "center" })', source)
+        self.assertIn('nav[aria-label="B轨导航"] a.active', source)
+        self.assertIn("@media (max-width: 430px)", source)
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr))", source)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", source)
+        self.assertIn("min-height: 44px", source)
+        self.assertEqual(n6_user_app_module.N6_SIGNAL_PAGE_DEFAULT_LIMIT, 50)
+        self.assertEqual(n6_user_app_module.N6_SIGNAL_PAGE_MAX_LIMIT, 100)
+        route_methods = {
+            getattr(route, "path", ""): getattr(route, "methods", set())
+            for route in client.app.routes
+        }
+        self.assertEqual(route_methods["/n6/favicon.svg"], {"GET"})
+        self.assertEqual(route_methods["/n6/apple-touch-icon.svg"], {"GET"})
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
         client, repo, _, _ = build_client()
         historical = next(row for row in repo.ui_v1_signals if int(row["user_signal_card_id"]) == 201)

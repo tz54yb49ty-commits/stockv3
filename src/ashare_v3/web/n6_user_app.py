@@ -137,6 +137,15 @@ N6_SECURITY_RESPONSE_HEADERS = {
     "Referrer-Policy": "same-origin",
 }
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+N6_APP_ICON_SVG = """\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-label="N6">
+  <rect width="180" height="180" rx="36" fill="#0f766e"/>
+  <path d="M42 126V54h18l42 46V54h18v72h-18L60 80v46z" fill="#fff"/>
+  <circle cx="139" cy="111" r="21" fill="#e6f3f1"/>
+  <path d="M149 99h-11c-9 0-15 6-15 15s6 15 15 15c8 0 14-5 14-13 0-7-5-12-13-12h-7"
+        fill="none" stroke="#0f766e" stroke-width="8" stroke-linecap="round"/>
+</svg>
+"""
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DSN = "postgresql://ashare_v3_user@127.0.0.1:5432/ashare_v3"
 N6_BTRACK_WEB_DB_SERVICE = "n6_btrack_web"
@@ -9513,6 +9522,22 @@ def create_app(
         for name, value in N6_SECURITY_RESPONSE_HEADERS.items():
             response.headers[name] = value
         return response
+
+    @app.get("/n6/favicon.svg", response_class=Response)
+    async def n6_favicon() -> Response:
+        return Response(
+            N6_APP_ICON_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @app.get("/n6/apple-touch-icon.svg", response_class=Response)
+    async def n6_apple_touch_icon() -> Response:
+        return Response(
+            N6_APP_ICON_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @app.get("/n6/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
