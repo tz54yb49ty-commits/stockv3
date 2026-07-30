@@ -1,6 +1,7 @@
 import asyncio
 import json
 import copy
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 import re
@@ -6149,6 +6150,115 @@ class RecordingConnection:
 
 
 class N6UserAppTest(unittest.TestCase):
+    def test_dashboard_uses_one_request_scoped_readonly_repository_context(self) -> None:
+        class DashboardRepository(FakeN6UserRepository):
+            def __init__(self) -> None:
+                super().__init__()
+                self.readonly_request_enters = 0
+                self.readonly_request_exits = 0
+
+            @contextmanager
+            def readonly_request(self) -> Any:
+                self.readonly_request_enters += 1
+                try:
+                    yield
+                finally:
+                    self.readonly_request_exits += 1
+
+        repo = DashboardRepository()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client, _, _, _ = build_client(repository=repo)
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        response = client.get("/api/n6/app/v1/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(repo.readonly_request_enters, 1)
+        self.assertEqual(repo.readonly_request_exits, 1)
+        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_virtual_account_reads, [(1, "admin")])
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_postgres_readonly_request_reuses_and_releases_connection_on_success_and_error(
+        self,
+    ) -> None:
+        cursor = RecordingCursor()
+        counts = {"opened": 0, "exited": 0, "error_exits": 0}
+
+        class TrackingConnection(RecordingConnection):
+            def __exit__(self, exc_type: object, *_: object) -> None:
+                counts["exited"] += 1
+                if exc_type is not None:
+                    counts["error_exits"] += 1
+                return None
+
+        repo = PostgresN6UserRepository("postgresql://unused")
+
+        def readonly_connection(*_: Any, **__: Any) -> RecordingConnection:
+            counts["opened"] += 1
+            return TrackingConnection(cursor)
+
+        with patch.object(
+            n6_user_app_module.psycopg,
+            "connect",
+            side_effect=readonly_connection,
+        ):
+            for _ in range(5):
+                self.assertIsNone(repo.fetch_top_index_strategy())
+                self.assertEqual(repo.fetch_strong_boards(3), [])
+            self.assertEqual(counts, {"opened": 10, "exited": 10, "error_exits": 0})
+
+            counts.update(opened=0, exited=0, error_exits=0)
+            with repo.readonly_request():
+                for _ in range(5):
+                    self.assertIsNone(repo.fetch_top_index_strategy())
+                    self.assertEqual(repo.fetch_strong_boards(3), [])
+
+            self.assertEqual(counts, {"opened": 1, "exited": 1, "error_exits": 0})
+
+            with self.assertRaisesRegex(RuntimeError, "fixture failure"):
+                with repo.readonly_request():
+                    raise RuntimeError("fixture failure")
+
+            self.assertEqual(counts, {"opened": 2, "exited": 2, "error_exits": 1})
+            self.assertIsNone(repo.fetch_top_index_strategy())
+            self.assertEqual(counts, {"opened": 3, "exited": 3, "error_exits": 1})
+
+    def test_proposal_restore_get_requires_actual_page_controls(self) -> None:
+        client, _, _, _ = build_client(
+            proposal_write_enabled=True,
+            csrf_secret="proposal-secret",
+        )
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        guide = client.get("/n6/app/guide")
+        self.assertEqual(guide.status_code, 200)
+        self.assertNotIn(
+            "data-n6-create-proposal",
+            guide.text.split("<script>", 1)[0],
+        )
+
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        scope_write_source = source.split("const n6ScopeWrite = (() => {", 1)[1]
+        init_source = scope_write_source.split("const init = () => {", 1)[1].split(
+            "return { init };",
+            1,
+        )[0]
+
+        self.assertIn(
+            'const proposalButtons = document.querySelectorAll("[data-n6-create-proposal]");',
+            init_source,
+        )
+        self.assertIn(
+            "if (proposalWriteEnabled && proposalButtons.length) restoreProposalButtons()",
+            init_source,
+        )
+
     def test_login_success_writes_session_hash_and_cookie_raw_token(self) -> None:
         client, repo, verifier, _ = build_client()
 

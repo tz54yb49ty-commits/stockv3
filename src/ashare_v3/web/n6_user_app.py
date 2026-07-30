@@ -6,7 +6,8 @@ import asyncio
 import base64
 import binascii
 import copy
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -22,7 +23,7 @@ import secrets
 import stat
 import threading
 import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -1577,6 +1578,9 @@ class PostgresN6UserRepository:
         self._app_filter_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._app_membership_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._app_shared_cache_lock = threading.Lock()
+        self._readonly_request_connection: ContextVar[psycopg.Connection[Any] | None] = (
+            ContextVar("n6_readonly_request_connection", default=None)
+        )
 
     def _app_shared_cache_get(
         self,
@@ -9310,7 +9314,23 @@ class PostgresN6UserRepository:
                 output[asset_kind] = [dict(row) for row in cur.fetchall()]
         return output
 
-    def _readonly_connection(self) -> psycopg.Connection[Any]:
+    @contextmanager
+    def readonly_request(self) -> Iterator[psycopg.Connection[Any]]:
+        active_connection = self._readonly_request_connection.get()
+        if active_connection is not None:
+            yield active_connection
+            return
+        with self._readonly_connection() as connection:
+            token = self._readonly_request_connection.set(connection)
+            try:
+                yield connection
+            finally:
+                self._readonly_request_connection.reset(token)
+
+    def _readonly_connection(self) -> Any:
+        active_connection = self._readonly_request_connection.get()
+        if active_connection is not None:
+            return nullcontext(active_connection)
         return psycopg.connect(
             self.dsn,
             connect_timeout=10,
@@ -11263,7 +11283,7 @@ def create_app(
             return JSONResponse({"ok": False, "error": code, "blockers": [code]}, status_code=404)
         return JSONResponse({"ok": True, "user": user_view(user_row), "soft_deleted": True, "sessions_revoked": True})
 
-    def build_app_dashboard_data(session: AuthSession, principal: dict[str, Any]) -> dict[str, Any]:
+    def _build_app_dashboard_data(session: AuthSession, principal: dict[str, Any]) -> dict[str, Any]:
         user = session_user_payload(session)
         principal_id = int(principal["principal_id"])
         principal_type = str(principal["principal_type"])
@@ -11324,6 +11344,11 @@ def create_app(
             scope_bulk_write_enabled=scope_bulk_write_active,
             proposal_write_enabled=proposal_write_active,
         )
+
+    def build_app_dashboard_data(session: AuthSession, principal: dict[str, Any]) -> dict[str, Any]:
+        readonly_request = getattr(repo, "readonly_request", nullcontext)
+        with readonly_request():
+            return _build_app_dashboard_data(session, principal)
 
     def app_v2_filter_response(request: Request, asset_kind: str) -> JSONResponse:
         session = current_session(request, repo)

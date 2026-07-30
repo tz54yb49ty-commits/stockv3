@@ -3633,7 +3633,8 @@
         });
       };
       const init = () => {
-        if (proposalWriteEnabled) document.querySelectorAll("[data-n6-create-proposal]").forEach((button) => {
+        const proposalButtons = document.querySelectorAll("[data-n6-create-proposal]");
+        if (proposalWriteEnabled) proposalButtons.forEach((button) => {
           button.dataset.proposalActionLabel = button.textContent.trim();
         });
         if (scopeWriteEnabled) document.querySelectorAll("[data-n6-add-monitor], [data-n6-add-realtime]").forEach((button) => {
@@ -3823,7 +3824,7 @@
             button.disabled = false;
           }
         });
-        if (proposalWriteEnabled) restoreProposalButtons().catch((error) => {
+        if (proposalWriteEnabled && proposalButtons.length) restoreProposalButtons().catch((error) => {
           proposalMessage(`申请状态暂不可用：${proposalErrorLabel(error.message)}`);
         });
       };
