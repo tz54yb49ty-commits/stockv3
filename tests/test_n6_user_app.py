@@ -5434,6 +5434,11 @@ def build_client(
     scope_write_enabled: bool = False,
     scope_bulk_write_enabled: bool = False,
     proposal_write_enabled: bool = False,
+    cookie_secure: bool = False,
+    trusted_proxy_ips: tuple[str, ...] = (),
+    login_rate_limit_attempts: int = n6_user_app_module.N6_LOGIN_RATE_LIMIT_ATTEMPTS,
+    login_rate_limit_window_seconds: int = n6_user_app_module.N6_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+    client_host: str = "testclient",
     csrf_secret: str = "",
     btrack_authority_repository: FakeBTrackAuthorityRepository | None = None,
     raise_server_exceptions: bool = True,
@@ -5457,7 +5462,10 @@ def build_client(
         repository=repo,
         btrack_authority_repository=authority_repository,
         config=N6UserWebConfig(
-            cookie_secure=False,
+            cookie_secure=cookie_secure,
+            trusted_proxy_ips=trusted_proxy_ips,
+            login_rate_limit_attempts=login_rate_limit_attempts,
+            login_rate_limit_window_seconds=login_rate_limit_window_seconds,
             session_ttl_seconds=3600,
             post_close_fastlane_docs_root=post_close_fastlane_docs_root or "docs/post_close_fastlane",
             rag_docs_root=rag_docs_root or "docs",
@@ -5475,6 +5483,7 @@ def build_client(
         app,
         follow_redirects=False,
         raise_server_exceptions=raise_server_exceptions,
+        client=(client_host, 50000),
     )
     client.app.state.test_btrack_authority_repository = authority_repository
     secret_directory.cleanup()
@@ -6163,6 +6172,158 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=lax", set_cookie)
         self.assertIn("Path=/", set_cookie)
+        self.assertNotIn("Secure", set_cookie)
+
+    def test_https_reverse_proxy_mode_explicitly_enables_secure_cookie(self) -> None:
+        client, _, _, _ = build_client(cookie_secure=True)
+
+        response = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("Secure", response.headers["set-cookie"])
+
+    def test_security_headers_are_minimal_and_do_not_break_http_or_inline_assets(self) -> None:
+        client, _, _, _ = build_client()
+
+        login_page = client.get("/n6/login")
+        unauthorized = client.get("/api/n6/me")
+
+        for response in (login_page, unauthorized):
+            self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            self.assertEqual(response.headers["x-frame-options"], "DENY")
+            self.assertEqual(response.headers["referrer-policy"], "same-origin")
+            self.assertNotIn("strict-transport-security", response.headers)
+            self.assertNotIn("content-security-policy", response.headers)
+
+    def test_deployment_env_contract_separates_http_and_https_proxy_modes(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            local_config = n6_user_app_module.config_from_env()
+        with patch.dict(
+            os.environ,
+            {
+                "ASHARE_V3_N6_COOKIE_SECURE": "1",
+                "ASHARE_V3_N6_TRUSTED_PROXY_IPS": "127.0.0.1, ::1",
+            },
+            clear=True,
+        ):
+            proxy_config = n6_user_app_module.config_from_env()
+
+        self.assertFalse(local_config.cookie_secure)
+        self.assertEqual(local_config.trusted_proxy_ips, ())
+        self.assertTrue(proxy_config.cookie_secure)
+        self.assertEqual(proxy_config.trusted_proxy_ips, ("127.0.0.1", "::1"))
+
+    def test_login_rate_limit_is_generic_normalized_and_success_clears_window(self) -> None:
+        verifier = FixedPasswordVerifier(False)
+        client, repo, _, _ = build_client(
+            verifier=verifier,
+            login_rate_limit_attempts=3,
+        )
+
+        for login_name in (" Admin ", "ADMIN"):
+            response = client.post(
+                "/api/n6/auth/login",
+                json={"login_name": login_name, "password": "wrong-password"},
+            )
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json(), {"ok": False, "error": "invalid_login"})
+
+        verifier.result = True
+        success = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+            follow_redirects=False,
+        )
+        self.assertEqual(success.status_code, 302)
+        self.assertEqual(len(repo.created_sessions), 1)
+
+        verifier.result = False
+        for _ in range(3):
+            self.assertEqual(
+                client.post(
+                    "/api/n6/auth/login",
+                    json={"login_name": "admin", "password": "wrong-password"},
+                ).status_code,
+                401,
+            )
+        limited = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "wrong-password"},
+        )
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.json(), {"ok": False, "error": "invalid_login"})
+        self.assertEqual(limited.headers["retry-after"], "60")
+        self.assertEqual(len(repo.created_sessions), 1)
+
+    def test_login_rate_limit_uses_forwarded_client_only_from_exact_trusted_proxy(self) -> None:
+        untrusted_client, _, _, _ = build_client(
+            verifier=FixedPasswordVerifier(False),
+            login_rate_limit_attempts=1,
+            client_host="127.0.0.1",
+        )
+        first = untrusted_client.post(
+            "/api/n6/auth/login",
+            headers={"X-Forwarded-For": "203.0.113.1"},
+            json={"login_name": "missing", "password": "wrong"},
+        )
+        spoofed = untrusted_client.post(
+            "/api/n6/auth/login",
+            headers={"X-Forwarded-For": "203.0.113.2"},
+            json={"login_name": "missing", "password": "wrong"},
+        )
+
+        trusted_client, _, _, _ = build_client(
+            verifier=FixedPasswordVerifier(False),
+            login_rate_limit_attempts=1,
+            client_host="127.0.0.1",
+            trusted_proxy_ips=("127.0.0.1",),
+        )
+        trusted_first = trusted_client.post(
+            "/api/n6/auth/login",
+            headers={"X-Forwarded-For": "198.51.100.1"},
+            json={"login_name": "missing", "password": "wrong"},
+        )
+        trusted_second = trusted_client.post(
+            "/api/n6/auth/login",
+            headers={"X-Forwarded-For": "198.51.100.2"},
+            json={"login_name": "missing", "password": "wrong"},
+        )
+
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(spoofed.status_code, 429)
+        self.assertEqual(spoofed.json(), {"ok": False, "error": "invalid_login"})
+        self.assertEqual(trusted_first.status_code, 401)
+        self.assertEqual(trusted_second.status_code, 401)
+
+    def test_login_failure_does_not_disclose_account_existence(self) -> None:
+        verifier = FixedPasswordVerifier(False)
+        client, _, _, _ = build_client(verifier=verifier)
+
+        known = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "wrong-password"},
+        )
+        missing = client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "missing", "password": "wrong-password"},
+        )
+
+        self.assertEqual(
+            (known.status_code, known.json()),
+            (401, {"ok": False, "error": "invalid_login"}),
+        )
+        self.assertEqual(
+            (missing.status_code, missing.json()),
+            (401, {"ok": False, "error": "invalid_login"}),
+        )
+        self.assertEqual(len(verifier.calls), 2)
+        self.assertEqual(verifier.calls[0][2], "argon2id")
+        self.assertEqual(verifier.calls[1][2], "argon2id")
+        self.assertNotEqual(verifier.calls[1][1], "")
 
     def test_login_lookup_operational_error_returns_fixed_503_then_recovers(self) -> None:
         client, repo, verifier, _ = build_client(raise_server_exceptions=False)
@@ -19485,6 +19646,38 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
 
 
 class N6SignalSSEContractTest(unittest.TestCase):
+    def test_auth_expiry_stops_sse_correction_and_voice_without_retrying(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        refresh_source = source.split("const n6AutoRefresh = (() => {", 1)[1].split(
+            "const n6ScopeWrite = (() => {", 1
+        )[0]
+        expire_source = refresh_source.split("const expireSession =", 1)[1].split(
+            "const probeAuthAfterSseError =", 1
+        )[0]
+        refresh_once_source = refresh_source.split("const refreshOnce =", 1)[1].split(
+            "const foregroundCurrent =", 1
+        )[0]
+        sse_probe_source = refresh_source.split("const probeAuthAfterSseError =", 1)[1].split(
+            "const rebuildEventSource =", 1
+        )[0]
+
+        self.assertIn("clearCorrectionTimer();", expire_source)
+        self.assertIn("closeEventSource();", expire_source)
+        self.assertIn('root.dataset.refreshEnabled = "false";', expire_source)
+        self.assertIn("state.controllers.forEach((controller) => controller.abort());", expire_source)
+        self.assertIn("n6Voice.stop();", expire_source)
+        self.assertIn('link.textContent = "会话已过期，请重新登录";', refresh_source)
+        self.assertIn("response.status === 401 || response.status === 403", refresh_once_source)
+        self.assertIn("response.status === 401 || response.status === 403", sse_probe_source)
+        self.assertIn("expireSession();", refresh_once_source)
+        self.assertIn("expireSession();", sse_probe_source)
+        self.assertIn(
+            "eventSource.onerror = () => { void probeAuthAfterSseError(root); };",
+            refresh_source,
+        )
+        self.assertIn("if (sessionExpired || !foregroundCurrent(root)", refresh_source)
+        self.assertEqual(refresh_source.count("new EventSource("), 1)
+
     def test_sse_message_voice_only_runs_for_new_insertions_without_recovery_or_history_drift(
         self,
     ) -> None:

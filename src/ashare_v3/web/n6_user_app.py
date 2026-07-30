@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import hmac
+import ipaddress
 from io import BytesIO
 import json
 import os
@@ -122,6 +123,18 @@ from ashare_v3.web.runtime_archive_status import read_runtime_archive_status
 
 COOKIE_NAME = "ashare_v3_n6_session"
 SESSION_HASH_ALGO = "sha256"
+N6_LOGIN_RATE_LIMIT_ATTEMPTS = 5
+N6_LOGIN_RATE_LIMIT_WINDOW_SECONDS = 60
+N6_LOGIN_RATE_LIMIT_MAX_KEYS = 4096
+N6_LOGIN_DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$6faXoYXfO+HJubWVJJGoAw$"
+    "vYO2wi0ThZ9hkSE90yw9LipPkO+yD5lmOZnKLZCLZog"
+)
+N6_SECURITY_RESPONSE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+}
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DSN = "postgresql://ashare_v3_user@127.0.0.1:5432/ashare_v3"
@@ -841,8 +854,19 @@ def app_v2_filter_default_limit(asset_kind: str) -> int:
 
 @dataclass(frozen=True)
 class N6UserWebConfig:
+    """N6 Web deployment boundary.
+
+    Local/LAN HTTP keeps ``cookie_secure`` false and ``trusted_proxy_ips`` empty.
+    An HTTPS reverse proxy must explicitly enable the secure cookie and list only
+    its immediate proxy IPs; that proxy must replace, not pass through, inbound
+    ``X-Forwarded-For`` values.
+    """
+
     dsn: str = DEFAULT_DSN
     cookie_secure: bool = False
+    trusted_proxy_ips: tuple[str, ...] = ()
+    login_rate_limit_attempts: int = N6_LOGIN_RATE_LIMIT_ATTEMPTS
+    login_rate_limit_window_seconds: int = N6_LOGIN_RATE_LIMIT_WINDOW_SECONDS
     session_ttl_seconds: int = 8 * 60 * 60
     card_limit: int = 500
     notification_limit: int = 500
@@ -859,6 +883,53 @@ class N6UserWebConfig:
     scope_bulk_write_enabled: bool = False
     proposal_write_enabled: bool = False
     csrf_secret_file: str = ""
+
+
+class LoginRateLimiter:
+    """Small process-local fixed-window limiter for authentication attempts."""
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        window_seconds: int,
+        max_keys: int = N6_LOGIN_RATE_LIMIT_MAX_KEYS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.attempts = max(1, int(attempts))
+        self.window_seconds = max(1, int(window_seconds))
+        self.max_keys = max(1, int(max_keys))
+        self.monotonic = monotonic
+        self._lock = threading.Lock()
+        self._windows: dict[tuple[str, str], tuple[float, int]] = {}
+
+    def claim(self, key: tuple[str, str]) -> bool:
+        now = self.monotonic()
+        with self._lock:
+            self._prune(now)
+            started_at, count = self._windows.get(key, (now, 0))
+            if now - started_at >= self.window_seconds:
+                started_at, count = now, 0
+            if count >= self.attempts:
+                return False
+            if key not in self._windows and len(self._windows) >= self.max_keys:
+                oldest_key = min(self._windows, key=lambda item: self._windows[item][0])
+                self._windows.pop(oldest_key, None)
+            self._windows[key] = (started_at, count + 1)
+            return True
+
+    def clear(self, key: tuple[str, str]) -> None:
+        with self._lock:
+            self._windows.pop(key, None)
+
+    def _prune(self, now: float) -> None:
+        expired = [
+            key
+            for key, (started_at, _count) in self._windows.items()
+            if now - started_at >= self.window_seconds
+        ]
+        for key in expired:
+            self._windows.pop(key, None)
 
 
 def build_app_v2_message_dashboard(
@@ -9257,6 +9328,23 @@ def config_from_env() -> N6UserWebConfig:
     return N6UserWebConfig(
         dsn=os.environ.get("ASHARE_V3_POSTGRES_DSN", DEFAULT_DSN),
         cookie_secure=os.environ.get("ASHARE_V3_N6_COOKIE_SECURE", "0") == "1",
+        trusted_proxy_ips=tuple(
+            value.strip()
+            for value in os.environ.get("ASHARE_V3_N6_TRUSTED_PROXY_IPS", "").split(",")
+            if value.strip()
+        ),
+        login_rate_limit_attempts=int(
+            os.environ.get(
+                "ASHARE_V3_N6_LOGIN_RATE_LIMIT_ATTEMPTS",
+                str(N6_LOGIN_RATE_LIMIT_ATTEMPTS),
+            )
+        ),
+        login_rate_limit_window_seconds=int(
+            os.environ.get(
+                "ASHARE_V3_N6_LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+                str(N6_LOGIN_RATE_LIMIT_WINDOW_SECONDS),
+            )
+        ),
         session_ttl_seconds=int(os.environ.get("ASHARE_V3_N6_SESSION_TTL_SECONDS", str(8 * 60 * 60))),
         card_limit=int(os.environ.get("ASHARE_V3_N6_CARD_LIMIT", "500")),
         notification_limit=int(os.environ.get("ASHARE_V3_N6_NOTIFICATION_LIMIT", "500")),
@@ -9376,10 +9464,15 @@ def create_app(
     verifier = password_verifier or verify_password
     hasher = password_hasher or hash_password
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+    login_rate_limiter = LoginRateLimiter(
+        attempts=web_config.login_rate_limit_attempts,
+        window_seconds=web_config.login_rate_limit_window_seconds,
+    )
     app = FastAPI(
         title="Ashare v3 N6 User MVP",
         description="N6 login and read-only user projection pages.",
     )
+    app.state.login_rate_limiter = login_rate_limiter
     scope_write_active = bool(
         web_config.scope_write_enabled
         and csrf_secret
@@ -9394,6 +9487,13 @@ def create_app(
         and btrack_authority_repository is not None
     )
 
+    @app.middleware("http")
+    async def add_security_response_headers(request: Request, call_next: Callable[..., Any]) -> Response:
+        response = await call_next(request)
+        for name, value in N6_SECURITY_RESPONSE_HEADERS.items():
+            response.headers[name] = value
+        return response
+
     @app.get("/n6/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
         next_target = safe_b_track_next(request.query_params.get("next"))
@@ -9405,15 +9505,32 @@ def create_app(
         login_name = str(payload.get("login_name") or "").strip()
         password = str(payload.get("password") or "")
         requested_next = payload.get("next") or request.query_params.get("next")
+        rate_limit_key = (
+            normalize_login_name(login_name),
+            trusted_client_key(request, web_config.trusted_proxy_ips),
+        )
+        if not login_rate_limiter.claim(rate_limit_key):
+            return JSONResponse(
+                {"ok": False, "error": "invalid_login"},
+                status_code=429,
+                headers={"Retry-After": str(web_config.login_rate_limit_window_seconds)},
+            )
         try:
             user = repo.fetch_user_for_login(login_name) if login_name else None
         except psycopg.OperationalError:
+            login_rate_limiter.clear(rate_limit_key)
             return JSONResponse(
                 {"ok": False, "error": "authentication_service_unavailable"},
                 status_code=503,
                 headers={"Retry-After": "5"},
             )
-        if user is None or user.status != "active" or not verifier(password, user.password_hash, user.password_hash_algo):
+        active_user = user is not None and user.status == "active"
+        password_valid = verifier(
+            password,
+            user.password_hash if active_user else N6_LOGIN_DUMMY_PASSWORD_HASH,
+            user.password_hash_algo if active_user else "argon2id",
+        )
+        if not active_user or not password_valid:
             return JSONResponse({"ok": False, "error": "invalid_login"}, status_code=401)
 
         raw_token = generate_session_token()
@@ -9427,11 +9544,13 @@ def create_app(
                 client_info=client_info_from_request(request),
             )
         except psycopg.OperationalError:
+            login_rate_limiter.clear(rate_limit_key)
             return JSONResponse(
                 {"ok": False, "error": "authentication_service_unavailable"},
                 status_code=503,
                 headers={"Retry-After": "5"},
             )
+        login_rate_limiter.clear(rate_limit_key)
         next_target = login_success_location(user, requested_next)
         response = RedirectResponse(next_target, status_code=302)
         response.set_cookie(
@@ -12573,6 +12692,39 @@ def resolve_app_principal(session: AuthSession, repository: N6UserRepository) ->
 
 def normalize_login_name(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _canonical_ip_address(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return ipaddress.ip_address(text).compressed
+    except ValueError:
+        return ""
+
+
+def trusted_client_key(request: Request, trusted_proxy_ips: tuple[str, ...]) -> str:
+    peer = _canonical_ip_address(request.client.host if request.client else "")
+    if not peer:
+        peer = str(request.client.host if request.client else "unknown").strip().lower() or "unknown"
+    trusted = {
+        normalized
+        for value in trusted_proxy_ips
+        if (normalized := _canonical_ip_address(value))
+    }
+    if peer not in trusted:
+        return f"peer:{peer}"
+    forwarded_values = [
+        _canonical_ip_address(value)
+        for value in request.headers.get("x-forwarded-for", "").split(",")
+    ]
+    if not forwarded_values or any(not value for value in forwarded_values):
+        return f"peer:{peer}"
+    for forwarded in reversed(forwarded_values):
+        if forwarded not in trusted:
+            return f"proxy-client:{forwarded}"
+    return f"peer:{peer}"
 
 
 def normalize_optional_text(value: Any) -> str | None:

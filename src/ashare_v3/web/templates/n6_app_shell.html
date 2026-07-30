@@ -2833,7 +2833,7 @@
         }));
         update();
       };
-      return { init, speak };
+      return { init, speak, stop: stopSpeech };
     })();
 
     const n6AutoRefresh = (() => {
@@ -2847,6 +2847,8 @@
       let correctionTimer = null;
       let activeRoot = null;
       let voiceSuppressionCount = 0;
+      let sessionExpired = false;
+      let authProbeInFlight = null;
 
       const scopeKey = (root) => {
         const url = new URL(root.dataset.refreshUrl || window.location.href, window.location.origin);
@@ -3260,6 +3262,10 @@
             headers,
             signal: controller.signal,
           });
+          if (response.status === 401 || response.status === 403) {
+            expireSession();
+            return;
+          }
           if (response.status === 304) {
             if (!silent) statusText(root, `数据未变化 · watermark ${state.watermark || "0"}`);
             return;
@@ -3344,9 +3350,57 @@
         correctionTimer = null;
       };
 
+      const showSessionExpired = (root) => {
+        const target = root?.querySelector("[data-n6-refresh-status]");
+        if (!target) return;
+        const link = document.createElement("a");
+        const next = `${window.location.pathname}${window.location.search}`;
+        link.href = `/n6/login?next=${encodeURIComponent(next)}`;
+        link.textContent = "会话已过期，请重新登录";
+        target.replaceChildren(link);
+      };
+
+      const expireSession = () => {
+        if (sessionExpired) return;
+        sessionExpired = true;
+        clearCorrectionTimer();
+        closeEventSource();
+        document.querySelectorAll("[data-n6-auto-refresh]").forEach((root) => {
+          root.dataset.refreshEnabled = "false";
+          showSessionExpired(root);
+        });
+        sharedStore.scopes.forEach((state) => {
+          state.controllers.forEach((controller) => controller.abort());
+          state.controllers.clear();
+        });
+        n6Voice.stop();
+      };
+
+      const probeAuthAfterSseError = (root) => {
+        if (sessionExpired || authProbeInFlight || !root?.dataset.refreshUrl) return authProbeInFlight;
+        const url = new URL(root.dataset.refreshUrl, window.location.origin);
+        url.searchParams.set("limit", "1");
+        url.searchParams.delete("cursor");
+        authProbeInFlight = fetch(url, {
+          method: "GET",
+          headers: { "Accept": "application/json" },
+        }).then((response) => {
+          if (response.status === 401 || response.status === 403) {
+            expireSession();
+            return;
+          }
+          statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
+        }).catch(() => {
+          statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
+        }).finally(() => {
+          authProbeInFlight = null;
+        });
+        return authProbeInFlight;
+      };
+
       const rebuildEventSource = (root) => {
         closeEventSource();
-        if (!foregroundCurrent(root) || !root.dataset.sseUrl) return;
+        if (sessionExpired || !foregroundCurrent(root) || !root.dataset.sseUrl) return;
         const kind = root.dataset.n6AutoRefresh;
         const streamUrl = new URL(root.dataset.sseUrl, window.location.origin);
         streamUrl.searchParams.set("after_id", currentAfterId(kind));
@@ -3360,7 +3414,7 @@
           }
         });
         eventSource.onopen = () => statusText(root, "实时增量已连接");
-        eventSource.onerror = () => statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
+        eventSource.onerror = () => { void probeAuthAfterSseError(root); };
       };
 
       const scheduleCorrection = (root) => {
