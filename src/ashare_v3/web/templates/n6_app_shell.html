@@ -1139,7 +1139,7 @@
   data-n6-proposal-write-enabled="{{ 'true' if page.proposal_write_enabled else 'false' }}"
 >
   <header>
-    <div class="wrap topbar{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
+    <div class="wrap topbar">
       <div>
         <h1>{{ page.app_title }}</h1>
         <div class="subtle">{{ user.login_name }} · {{ "管理员" if page.principal.principal_type == "admin" else "用户" }}</div>

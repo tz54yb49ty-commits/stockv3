@@ -12852,23 +12852,40 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn('border-collapse: separate;', response.text)
         self.assertNotIn('border-collapse: collapse;', response.text)
 
-    def test_b_track_v2_filter_center_uses_dense_data_workspace_layout(self) -> None:
+    def test_b_track_v2_filter_center_aligns_topbar_and_preserves_dense_data_workspace_layout(self) -> None:
         client, repo, _, _ = build_client()
         repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
-        response = client.get("/n6/app/filter-center/stocks")
+        for path in (
+            "/n6/app/filter-center/indexes",
+            "/n6/app/filter-center/boards",
+            "/n6/app/filter-center/stocks",
+        ):
+            with self.subTest(path=path):
+                response = client.get(path)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('class="wrap n6-data-workspace"', response.text)
-        self.assertIn('class="wrap topbar n6-data-workspace"', response.text)
-        self.assertIn(".n6-data-workspace {", response.text)
-        self.assertIn("width: calc(100vw - 16px);", response.text)
-        self.assertIn(".n6-data-workspace .table-wrap {", response.text)
-        self.assertIn("max-height: calc(100vh - 260px);", response.text)
-        self.assertIn(".n6-data-workspace .filter-table th,", response.text)
-        self.assertIn("padding: 6px 8px;", response.text)
-        self.assertIn("font-size: 12px;", response.text)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('class="wrap topbar"', response.text)
+                self.assertNotIn('class="wrap topbar n6-data-workspace"', response.text)
+                self.assertIn('class="wrap n6-data-workspace"', response.text)
+                self.assertIn(".n6-data-workspace {", response.text)
+                self.assertIn("width: calc(100vw - 16px);", response.text)
+                self.assertIn(".n6-data-workspace .table-wrap {", response.text)
+                self.assertIn("max-height: calc(100vh - 260px);", response.text)
+                self.assertIn(".n6-data-workspace .filter-table th,", response.text)
+                self.assertIn("padding: 6px 8px;", response.text)
+                self.assertIn("font-size: 12px;", response.text)
+
+        for path in ("/n6/app/dashboard", "/n6/app/account"):
+            with self.subTest(path=path):
+                response = client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('class="wrap topbar"', response.text)
+                self.assertNotIn('class="wrap topbar n6-data-workspace"', response.text)
+
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_v2_filter_center_supports_local_column_reorder_for_all_assets(self) -> None:
         client, repo, _, _ = build_client()
