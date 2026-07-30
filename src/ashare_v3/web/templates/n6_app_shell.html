@@ -2781,11 +2781,13 @@
         const display = signal.display_values || {};
         const directionValues = signal.direction === "buy"
           ? {
+            label: "买入",
             target: display.buy_target_price,
             expectedReturn: display.buy_expected_return_pct,
           }
           : signal.direction === "sell"
             ? {
+              label: "卖出",
               target: display.sell_target_price,
               expectedReturn: display.sell_expected_return_pct,
             }
@@ -2798,7 +2800,7 @@
         const expectedReturnText = expectedReturn === "暂无" ? expectedReturn : `${expectedReturn}%`;
         enqueue(
           projectionId,
-          `${eventTime}，${displayName}，目标价 ${target}，收益率 ${expectedReturnText}`,
+          `${eventTime}，${displayName}，${directionValues.label}，目标价 ${target}，收益率 ${expectedReturnText}`,
         );
       };
       const init = () => {

@@ -15366,8 +15366,10 @@ class N6UserAppTest(unittest.TestCase):
         )
         self.assertIn("if (!currentDayVoiceEnabled) return", voice_source)
         self.assertIn('const displayName = signal.display_name || signal.display_code || "暂无"', voice_source)
+        self.assertIn('label: "买入"', voice_source)
         self.assertIn("target: display.buy_target_price", voice_source)
         self.assertIn("expectedReturn: display.buy_expected_return_pct", voice_source)
+        self.assertIn('label: "卖出"', voice_source)
         self.assertIn("target: display.sell_target_price", voice_source)
         self.assertIn("expectedReturn: display.sell_expected_return_pct", voice_source)
         self.assertNotIn("targetCandidates", voice_source)
@@ -15383,7 +15385,7 @@ class N6UserAppTest(unittest.TestCase):
         self.assertIn('hasSpokenValue(value) ? String(value) : "暂无"', voice_source)
         self.assertIn(r"(\d{2}:\d{2}:\d{2})", voice_source)
         self.assertIn(
-            "`${eventTime}，${displayName}，目标价 ${target}，收益率 ${expectedReturnText}`",
+            "`${eventTime}，${displayName}，${directionValues.label}，目标价 ${target}，收益率 ${expectedReturnText}`",
             voice_source,
         )
         self.assertIn(
@@ -15477,12 +15479,14 @@ n6Voice.speak({
     event_time: "2026-07-30T10:05:06+08:00",
     buy_target_price: 0,
     buy_expected_return_pct: "0",
+    sell_target_price: 999,
+    sell_expected_return_pct: "999",
   },
 });
 assert.strictEqual(utterances.length, 1);
 utterances[0].onend();
 assert.strictEqual(utterances.length, 2);
-assert.match(utterances[1].text, /10:05:06，浦发银行，目标价 0，收益率 0%/);
+assert.strictEqual(utterances[1].text, "10:05:06，浦发银行，买入，目标价 0，收益率 0%");
 utterances[1].onend();
 
 calls.length = 0;
@@ -15500,12 +15504,33 @@ n6Voice.speak({
   display_name: "上证指数",
   display_values: {
     event_time: "2026-07-30T10:06:07+08:00",
+    buy_target_price: 888,
+    buy_expected_return_pct: "888",
     sell_target_price: "暂无",
     sell_expected_return_pct: null,
   },
 });
 assert.strictEqual(utterances.length, countAfterError + 1);
+assert.strictEqual(
+  utterances[utterances.length - 1].text,
+  "10:06:07，上证指数，卖出，目标价 暂无，收益率 暂无",
+);
 utterances[utterances.length - 1].onend();
+
+const countBeforeUnknown = utterances.length;
+n6Voice.speak({
+  user_signal_projection_id: "103",
+  direction: "unknown",
+  display_name: "未知方向",
+  display_values: {
+    event_time: "2026-07-30T10:07:08+08:00",
+    buy_target_price: 1,
+    buy_expected_return_pct: 2,
+    sell_target_price: 3,
+    sell_expected_return_pct: 4,
+  },
+});
+assert.strictEqual(utterances.length, countBeforeUnknown);
 
 calls.length = 0;
 toggleButton.click();
