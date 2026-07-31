@@ -16412,6 +16412,115 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(route_methods["/n6/apple-touch-icon.svg"], {"GET"})
         self.assertFalse(any(repo.forbidden_writes.values()))
 
+    def test_b_track_mobile_interaction_accessibility_contract(self) -> None:
+        client, repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        messages_response = client.get("/n6/app/messages")
+        signals_response = client.get("/n6/app/signals")
+        filter_response = client.get("/n6/app/filter-center")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+
+        self.assertEqual(messages_response.status_code, 200)
+        self.assertEqual(signals_response.status_code, 200)
+        self.assertEqual(filter_response.status_code, 200)
+        self.assertIn('<a class="active" aria-current="page"', signals_response.text)
+        self.assertIn('id="filter-for-trade-date" name="for_trade_date"', source)
+        self.assertNotIn('onchange="this.form.submit()"', source)
+        self.assertIn('<button type="submit">切换日期</button>', source)
+
+        ssr_cards = re.findall(
+            r'<article class="message-card"[^>]+data-n6-projection-id="([0-9]+)"[^>]+'
+            r'aria-labelledby="n6-message-title-\1"[^>]*>[\s\S]*?'
+            r'<div class="message-card-title" id="n6-message-title-\1">',
+            messages_response.text,
+        )
+        self.assertTrue(ssr_cards)
+
+        style_source = source.split("<style>", 1)[1].split("</style>", 1)[0]
+        mobile_source = style_source.split("@media (max-width: 430px)", 1)[1]
+        self.assertIn(".filter-token.is-selected {\n      background: var(--accent);\n      color: #fff;", style_source)
+        self.assertNotIn("#f15b57", style_source)
+        self.assertIn(".n6-data-workspace .row-action {\n        min-height: 45px;", mobile_source)
+        self.assertIn(".filter-row-reset,\n      .filter-row-toggle {\n        width: 45px;", mobile_source)
+        self.assertIn(".filter-row-reset { right: 53px; }", mobile_source)
+        self.assertIn(".filter-row-toggle { right: 4px; }", mobile_source)
+        self.assertIn("padding-right: 102px;", mobile_source)
+        self.assertIn("flex-wrap: wrap;\n        white-space: normal;", mobile_source)
+        self.assertIn(".n6-data-workspace .row-action {\n      min-height: 24px;", style_source)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", style_source)
+        self.assertIn(".n6-skeleton span { animation: none; }", style_source)
+
+        def relative_luminance(hex_color: str) -> float:
+            channels = [int(hex_color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        accent_luminance = relative_luminance("#0f766e")
+        white_luminance = relative_luminance("#ffffff")
+        self.assertGreaterEqual((white_luminance + 0.05) / (accent_luminance + 0.05), 4.5)
+
+        wrappers = re.findall(r'<div\s+class="[^"]*\btable-wrap\b[^"]*"(?P<attrs>[^>]*)>', source, re.S)
+        self.assertEqual(len(wrappers), 11)
+        for attrs in wrappers:
+            self.assertIn('role="region"', attrs)
+            self.assertIn('tabindex="0"', attrs)
+            self.assertRegex(attrs, r'aria-label="[^"]*[\u4e00-\u9fff][^"]*"')
+        self.assertIn('container.setAttribute("role", "region")', source)
+        self.assertIn('container.setAttribute("tabindex", "0")', source)
+        self.assertIn('container.setAttribute("aria-label", "成分股表格，可横向滚动")', source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_dynamic_signal_and_message_markup_keeps_accessibility_parity(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        proposal_markup = "const signalProposalCells = (item, assetKind) => {" + source.split(
+            "const signalProposalCells = (item, assetKind) => {",
+            1,
+        )[1].split("const signalRowMarkup =", 1)[0]
+        message_markup = "const messageCardMarkup = (item) => {" + source.split(
+            "const messageCardMarkup = (item) => {",
+            1,
+        )[1].split("const renderMessageCards =", 1)[0]
+        harness = (
+            """
+const document = { body: { dataset: { n6ProposalWriteEnabled: "true" } } };
+const escapeHtml = (value) => String(value ?? "");
+const canonicalProjectionId = (value) => String(value || "");
+"""
+            + proposal_markup
+            + message_markup
+            + """
+const actionable = signalProposalCells({ action_state: "eligible", direction: "buy", user_signal_projection_id: "101" }, "stock");
+const disabled = signalProposalCells({ action_state: "blocked", direction: "buy", user_signal_projection_id: "102" }, "stock");
+const card = messageCardMarkup({
+  user_signal_projection_id: "103",
+  display_name: "测试消息",
+  display_code: "600000",
+  asset_kind: "stock",
+  asset_kind_label: "个股",
+  direction: "buy",
+  direction_label: "买入",
+  action_state_label: "待确认",
+  display_values: {},
+});
+process.stdout.write(JSON.stringify({ actionable, disabled, card }));
+"""
+        )
+        node_result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        rendered = json.loads(node_result.stdout)
+        self.assertTrue(rendered["actionable"].startswith('<td class="sticky-action">'))
+        self.assertTrue(rendered["disabled"].startswith('<td class="sticky-action">'))
+        self.assertIn('aria-labelledby="n6-message-title-103"', rendered["card"])
+        self.assertIn('class="message-card-title" id="n6-message-title-103"', rendered["card"])
+
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
         client, repo, _, _ = build_client()
         historical = next(row for row in repo.ui_v1_signals if int(row["user_signal_card_id"]) == 201)
@@ -17855,7 +17964,10 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn("max-width: none", source)
         self.assertIn("white-space: nowrap", source)
         self.assertIn("flex-wrap: nowrap", source)
-        self.assertIn('aria-label="筛选结果表格，可横向滚动，操作列固定在左侧"', source)
+        self.assertIn(
+            'aria-label="{{ section.component_label }}表格，可横向滚动，操作列固定在左侧"',
+            source,
+        )
         self.assertIn("对象 / 操作", source)
         self.assertIn('<nav aria-label="B轨导航">', source)
         self.assertNotIn("window.resizeTo", source)

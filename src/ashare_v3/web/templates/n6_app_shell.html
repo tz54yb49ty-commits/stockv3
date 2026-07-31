@@ -520,6 +520,9 @@
       from { background-position: 200% 0; }
       to { background-position: -200% 0; }
     }
+    @media (prefers-reduced-motion: reduce) {
+      .n6-skeleton span { animation: none; }
+    }
     .grade-filter-panel {
       margin: 0 14px 16px;
       border: 1px solid var(--line);
@@ -578,7 +581,7 @@
       gap: 6px;
     }
     .filter-token.is-selected {
-      background: #f15b57;
+      background: var(--accent);
       color: #fff;
     }
     .token-remove {
@@ -1110,6 +1113,30 @@
       .message-card-primary > div { padding: 8px; }
       .message-card-primary strong { font-size: 15px; }
       .message-card-details > summary { min-height: 45px; }
+      .filter-token,
+      .row-action,
+      .filter-row-reset,
+      .filter-row-toggle {
+        min-height: 45px;
+      }
+      .filter-row-reset,
+      .filter-row-toggle {
+        width: 45px;
+      }
+      .filter-row-reset { right: 53px; }
+      .filter-row-toggle { right: 4px; }
+      .n6-data-workspace .grade-filter-control {
+        min-height: 45px;
+        padding-right: 102px;
+      }
+      .n6-data-workspace .filter-token,
+      .n6-data-workspace .row-action {
+        min-height: 45px;
+      }
+      .n6-data-workspace .row-action-line {
+        flex-wrap: wrap;
+        white-space: normal;
+      }
       .cockpit-shell { padding: 10px; }
       .cockpit-lead,
       .next-action-card,
@@ -1146,7 +1173,7 @@
       </div>
       <nav aria-label="B轨导航">
         {% for item in page.nav.links %}
-        <a class="{% if page.nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        <a class="{% if page.nav.active == item.key %}active{% endif %}"{% if page.nav.active == item.key %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
         {% endfor %}
         <button id="logout-button" type="button">退出登录</button>
       </nav>
@@ -1360,7 +1387,7 @@
         <span class="chip">删除: {{ page.data.controls.delete_enabled }}</span>
         <span class="chip">排序持久化: {{ page.data.controls.sort_persist_enabled }}</span>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" tabindex="0" aria-label="关注池表格，可横向滚动">
         <table>
           <thead>
             <tr>
@@ -1443,7 +1470,7 @@
           <div class="n6-skeleton" data-n6-skeleton hidden aria-label="消息加载中"><span></span><span></span><span></span></div>
         </div>
       </div>
-      <div class="table-wrap signals-table-wrap" data-n6-signals-table{% if not page.data['items'] %} hidden{% endif %}>
+      <div class="table-wrap signals-table-wrap" role="region" tabindex="0" aria-label="消息表格，可横向滚动，操作列固定在右侧" data-n6-signals-table{% if not page.data['items'] %} hidden{% endif %}>
         <table class="signals-table">
           <thead>
             <tr>
@@ -1610,10 +1637,10 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}">
+        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}" aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
           <div class="message-card-head">
             <div>
-              <div class="message-card-title">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
+              <div class="message-card-title" id="n6-message-title-{{ item.user_signal_projection_id }}">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
               <div class="subtle">{{ item.asset_kind_label }} · {{ item.direction_label }} · {{ item.display_values.event_time }}</div>
             </div>
           </div>
@@ -1712,7 +1739,7 @@
           {% for hidden in date_selector.hidden_fields %}
           <input type="hidden" name="{{ hidden.name }}" value="{{ hidden.value }}">
           {% endfor %}
-          <select id="filter-for-trade-date" name="for_trade_date" onchange="this.form.submit()">
+          <select id="filter-for-trade-date" name="for_trade_date">
             {% for option in date_selector.options %}
             <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
             {% endfor %}
@@ -1916,7 +1943,7 @@
       <div
         class="table-wrap"
         role="region"
-        aria-label="筛选结果表格，可横向滚动，操作列固定在左侧"
+        aria-label="{{ section.component_label }}表格，可横向滚动，操作列固定在左侧"
         tabindex="0"
       >
         <table
@@ -2029,7 +2056,7 @@
 	        {% endfor %}
 	      </div>
       {% if selected_section['items'] %}
-	      <div class="table-wrap">
+	      <div class="table-wrap" role="region" tabindex="0" aria-label="{{ selected_section.title }}表格，可横向滚动">
 	        <table>
 	          <thead>
 	            <tr>
@@ -2082,7 +2109,7 @@
         <div class="metric"><span>系统默认对象</span><strong>{{ page.data.summary.default_seed_count }}</strong></div>
         <div class="metric"><span>范围管理</span><strong>{{ "已启用" if page.data.controls.write_route_enabled else "未启用" }}</strong></div>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" tabindex="0" aria-label="实时监控范围表格，可横向滚动">
         <table>
           <thead><tr><th>类型</th><th>对象</th><th>名称</th><th>来源</th><th>状态</th><th class="sticky-action">操作</th></tr></thead>
           <tbody>
@@ -2112,7 +2139,7 @@
         <p>仅用于虚拟账户审计，不连接券商；{% if page.proposal_write_enabled %}交易申请由受限 Web 创建，成交由独立 N6 executor 处理，本页不证明 executor 或 scheduler 正在运行。{% else %}交易申请未启用。{% endif %}</p>
       </div>
       {% if page.data['items'] %}
-      <div class="table-wrap"><table>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="虚拟买卖日志表格，可横向滚动"><table>
         <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>数量</th><th>成交价</th><th>参考价</th><th>金额</th><th>状态</th></tr></thead>
         <tbody>
           {% for item in page.data['items'] %}
@@ -2159,7 +2186,7 @@
         <span class="chip">outbox 消费: {{ page.data.write_controls.outbox_consume_enabled }}</span>
         <span class="chip">worker: {{ page.data.write_controls.worker_enabled }}</span>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" tabindex="0" aria-label="状态监控表格，可横向滚动">
         <table>
           <thead>
             <tr>
@@ -2207,7 +2234,7 @@
         <span class="chip">止损状态: not_ready / provisional_first_day / frozen / disabled</span>
         <p>缺失或过期报价不会回查其他行情源，也不会使用昨收价补算估值。</p>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" tabindex="0" aria-label="虚拟持仓与实时估值表格，可横向滚动">
         <table>
           <thead>
             <tr>
@@ -2341,7 +2368,7 @@
 
       <div class="text-block"><h3>当前模拟持仓</h3><p>报价异常或过期时只展示质量状态，不使用替代价格补算。</p></div>
       {% if page.data.positions %}
-      <div class="table-wrap"><table>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="AI模拟持仓表格，可横向滚动"><table>
         <thead><tr><th>股票</th><th>数量</th><th>可卖 / T+1锁定</th><th>成本 / 当前价</th><th>市值</th><th>浮盈</th><th>收益率</th><th>报价</th><th>目标 / 止损</th></tr></thead>
         <tbody>
           {% for item in page.data.positions %}
@@ -2387,7 +2414,7 @@
 
       <div class="text-block"><h3>模拟成交</h3></div>
       {% if page.data.trades %}
-      <div class="table-wrap"><table>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="AI模拟成交表格，可横向滚动"><table>
         <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>数量</th><th>成交价</th><th>净额</th><th>状态</th><th>关联理由</th></tr></thead>
         <tbody>
           {% for item in page.data.trades %}
@@ -2430,7 +2457,7 @@
         <div class="metric"><span>订单生成</span><strong>订单生成: {{ page.data.observer_policy.order_enabled }}</strong></div>
         <div class="metric"><span>实盘提交</span><strong>实盘提交: {{ page.data.observer_policy.real_trade_enabled }}</strong></div>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" tabindex="0" aria-label="AI用户表格，可横向滚动">
         <table>
           <thead>
             <tr>
@@ -2553,6 +2580,9 @@
         return;
       }
       linkedMessage(panel, `成分股: ${members.length}`);
+      container.setAttribute("role", "region");
+      container.setAttribute("tabindex", "0");
+      container.setAttribute("aria-label", "成分股表格，可横向滚动");
       const rows = members.map((item) => `
         <tr>
           <td>${escapeHtml(item.display_name)}</td>
@@ -3045,11 +3075,11 @@
         const actionable = ["eligible", "executed"].includes(item.action_state);
         const enabled = document.body.dataset.n6ProposalWriteEnabled === "true";
         if (!actionable || !enabled) {
-          return `<td><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
+          return `<td class="sticky-action"><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
         }
         const side = item.direction === "buy" ? "买入" : "卖出";
         const stage = item.action_state === "executed" ? "确认" : "准备";
-        return `<td><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
+        return `<td class="sticky-action"><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
       };
 
       const signalRowMarkup = (item, assetKind) => {
@@ -3171,10 +3201,10 @@
           ["触发涨跌幅", displayPercent(display.trigger_pct)],
         );
         return `
-        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}">
+        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}" aria-labelledby="n6-message-title-${projectionId}">
           <div class="message-card-head">
             <div>
-              <div class="message-card-title">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
+              <div class="message-card-title" id="n6-message-title-${projectionId}">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
               <div class="subtle">${escapeHtml(item.asset_kind_label)} · ${escapeHtml(item.direction_label)} · ${escapeHtml(display.event_time || "—")}</div>
             </div>
           </div>
