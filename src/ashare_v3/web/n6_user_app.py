@@ -938,6 +938,11 @@ APP_V2_MONITOR_TABLE_BY_ASSET = {
     "index": "user_monitor_index",
 }
 APP_REALTIME_SCOPE_TABLE = "user_realtime_monitor_scope"
+APP_REALTIME_SCOPE_DISPLAY_VIEW_BY_ASSET = {
+    "stock": "v_n6_stock_condition_display_basis",
+    "index": "v_n6_index_condition_display_basis",
+    "board": "v_n6_board_condition_display_basis",
+}
 APP_V2_FILTER_DISPLAY_TABLE_BY_ASSET = {
     "stock": "v_n6_stock_condition_display_basis",
     "board": "v_n6_board_condition_display_basis",
@@ -1429,6 +1434,12 @@ class N6UserRepository(Protocol):
         principal_id: int,
         principal_type: str,
         user_id: int,
+    ) -> dict[str, Any]:
+        ...
+
+    def enrich_app_realtime_scope_display_names(
+        self,
+        result: dict[str, Any],
     ) -> dict[str, Any]:
         ...
 
@@ -4980,15 +4991,81 @@ class PostgresN6UserRepository:
                 },
             )
             rows = [dict(row) for row in cur.fetchall()]
-        return {
-            "tables_ready": True,
-            "items": self._app_v2_merge_realtime_scope_defaults(
-                rows,
-                principal_id=principal_id,
-                principal_type=principal_type,
-                user_id=user_id,
-            ),
-        }
+        return self.enrich_app_realtime_scope_display_names(
+            {
+                "tables_ready": True,
+                "items": self._app_v2_merge_realtime_scope_defaults(
+                    rows,
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    user_id=user_id,
+                ),
+            }
+        )
+
+    def enrich_app_realtime_scope_display_names(
+        self,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        enriched = dict(result)
+        items = [dict(row) for row in result.get("items") or []]
+        enriched["items"] = items
+        missing_by_asset: dict[str, set[str]] = {}
+        for row in items:
+            identity_key = str(row.get("identity_key") or "").strip()
+            display_name = str(row.get("display_name") or "")
+            if not identity_key or (display_name.strip() and display_name.strip() != identity_key):
+                continue
+            asset_kind = str(row.get("asset_kind") or "").strip()
+            if asset_kind not in APP_REALTIME_SCOPE_DISPLAY_VIEW_BY_ASSET:
+                row["display_name"] = "—"
+                continue
+            missing_by_asset.setdefault(asset_kind, set()).add(identity_key)
+        if not missing_by_asset:
+            return enriched
+
+        resolved_names: dict[tuple[str, str], str] = {}
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            for asset_kind, identity_keys in missing_by_asset.items():
+                source_view = APP_REALTIME_SCOPE_DISPLAY_VIEW_BY_ASSET[asset_kind]
+                cur.execute(
+                    f"""
+                    WITH latest_dates AS (
+                      SELECT basis.identity_key,
+                             max(basis.for_trade_date) AS for_trade_date
+                      FROM {source_view} basis
+                      WHERE basis.identity_key = ANY(%(identity_keys)s)
+                      GROUP BY basis.identity_key
+                    )
+                    SELECT basis.identity_key,
+                           CASE
+                             WHEN count(DISTINCT btrim(basis.display_name::text)) = 1
+                             THEN max(btrim(basis.display_name::text))
+                           END AS display_name
+                    FROM {source_view} basis
+                    JOIN latest_dates latest
+                      ON latest.identity_key = basis.identity_key
+                     AND latest.for_trade_date = basis.for_trade_date
+                    WHERE basis.identity_key = ANY(%(identity_keys)s)
+                      AND NULLIF(btrim(basis.display_name::text), '') IS NOT NULL
+                    GROUP BY basis.identity_key
+                    """,
+                    {"identity_keys": sorted(identity_keys)},
+                )
+                for name_row in cur.fetchall():
+                    identity_key = str(name_row.get("identity_key") or "").strip()
+                    display_name = str(name_row.get("display_name") or "").strip()
+                    if identity_key and display_name:
+                        resolved_names[(asset_kind, identity_key)] = display_name
+
+        for row in items:
+            identity_key = str(row.get("identity_key") or "").strip()
+            display_name = str(row.get("display_name") or "")
+            if not identity_key or (display_name.strip() and display_name.strip() != identity_key):
+                continue
+            asset_kind = str(row.get("asset_kind") or "").strip()
+            row["display_name"] = resolved_names.get((asset_kind, identity_key), "—")
+        return enriched
 
     def _app_v1_signal_select_list(self) -> str:
         actual_trigger_period_expr = self._app_v1_actual_trigger_period_expr()
@@ -10746,6 +10823,10 @@ def create_app(
                 btrack_authority_repository.list_realtime_scope_items,
                 session_token_hash,
                 limit=500,
+            )
+            result = await asyncio.to_thread(
+                repo.enrich_app_realtime_scope_display_names,
+                result,
             )
         else:
             result = await asyncio.to_thread(

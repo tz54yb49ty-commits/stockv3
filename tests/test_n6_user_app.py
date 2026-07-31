@@ -3184,6 +3184,12 @@ class FakeN6UserRepository:
             "items": self._effective_realtime_scope_rows(principal_id, principal_type, user_id),
         }
 
+    def enrich_app_realtime_scope_display_names(
+        self,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        return copy.deepcopy(result)
+
     def add_app_realtime_scope_item(
         self,
         *,
@@ -19398,6 +19404,268 @@ process.stdout.write(JSON.stringify(result));
         for forbidden in ("买入", "卖出", "确认", "删除", "修改"):
             self.assertNotIn(f">{forbidden}<", page_response.text)
         self.assertEqual(repo.app_position_reads, [(1, "admin"), (1, "admin")])
+
+    def test_realtime_scope_display_name_enrichment_is_batched_readonly_and_unambiguous(self) -> None:
+        rows_by_view = {
+            "v_n6_stock_condition_display_basis": [
+                {"identity_key": "stock:SH:600000", "display_name": "浦发银行"},
+                {"identity_key": "stock:SH:600002", "display_name": None},
+            ],
+            "v_n6_board_condition_display_basis": [
+                {"identity_key": "board:TDX:881001", "display_name": "银行"},
+                {"identity_key": "board:TDX:881003", "display_name": None},
+            ],
+            "v_n6_index_condition_display_basis": [
+                {"identity_key": "index:SH:000300", "display_name": "沪深300"},
+            ],
+        }
+
+        class DisplayNameCursor:
+            def __init__(self) -> None:
+                self.executions: list[tuple[str, dict[str, Any]]] = []
+                self.current_view = ""
+
+            def __enter__(self) -> "DisplayNameCursor":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def execute(self, sql: str, params: dict[str, Any]) -> None:
+                matches = [
+                    view_name
+                    for view_name in rows_by_view
+                    if f"FROM {view_name} basis" in sql
+                ]
+                self.assert_single_view(matches)
+                self.current_view = matches[0]
+                self.executions.append((sql, dict(params)))
+
+            @staticmethod
+            def assert_single_view(matches: list[str]) -> None:
+                if len(matches) != 1:
+                    raise AssertionError(f"expected one reviewed view, got {matches}")
+
+            def fetchall(self) -> list[dict[str, Any]]:
+                return [
+                    dict(row)
+                    for row in rows_by_view[self.current_view]
+                    if row["identity_key"] in self.executions[-1][1]["identity_keys"]
+                ]
+
+        class DisplayNameConnection:
+            def __init__(self, cursor: DisplayNameCursor) -> None:
+                self.cursor_value = cursor
+                self.enter_count = 0
+
+            def __enter__(self) -> "DisplayNameConnection":
+                self.enter_count += 1
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def cursor(self) -> DisplayNameCursor:
+                return self.cursor_value
+
+        cursor = DisplayNameCursor()
+        connection = DisplayNameConnection(cursor)
+        repo = PostgresN6UserRepository("postgresql://unused")
+        repo._readonly_connection = lambda: connection  # type: ignore[method-assign]
+        source_items = [
+            {"asset_kind": "stock", "identity_key": "stock:SH:600000", "display_name": None},
+            {"asset_kind": "stock", "identity_key": "stock:SH:600001", "display_name": "  "},
+            {
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600002",
+                "display_name": "stock:SH:600002",
+            },
+            {"asset_kind": "stock", "identity_key": "stock:SH:600003", "display_name": "  已有名称  "},
+            {"asset_kind": "board", "identity_key": "board:TDX:881001", "display_name": None},
+            {"asset_kind": "board", "identity_key": "board:TDX:881002", "display_name": ""},
+            {
+                "asset_kind": "board",
+                "identity_key": "board:TDX:881003",
+                "display_name": "board:TDX:881003",
+            },
+            {
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "display_name": "index:SH:000300",
+            },
+        ]
+
+        batch = repo.enrich_app_realtime_scope_display_names(
+            {"tables_ready": True, "items": source_items}
+        )
+        names = {
+            item["identity_key"]: item["display_name"]
+            for item in batch["items"]
+        }
+
+        self.assertEqual(names["stock:SH:600000"], "浦发银行")
+        self.assertEqual(names["stock:SH:600001"], "—")
+        self.assertEqual(names["stock:SH:600002"], "—")
+        self.assertEqual(names["stock:SH:600003"], "  已有名称  ")
+        self.assertEqual(names["board:TDX:881001"], "银行")
+        self.assertEqual(names["board:TDX:881002"], "—")
+        self.assertEqual(names["board:TDX:881003"], "—")
+        self.assertEqual(names["index:SH:000300"], "沪深300")
+        self.assertEqual(source_items[0]["display_name"], None)
+        self.assertEqual(connection.enter_count, 1)
+        self.assertEqual(len(cursor.executions), 3)
+
+        approved_views = set(rows_by_view)
+        queried_views: list[str] = []
+        for sql, params in cursor.executions:
+            normalized = " ".join(sql.split()).lower()
+            queried_views.extend(
+                view_name
+                for view_name in approved_views
+                if view_name in normalized
+            )
+            self.assertEqual(set(params), {"identity_keys"})
+            self.assertIsInstance(params["identity_keys"], list)
+            self.assertIn("max(basis.for_trade_date)", normalized)
+            self.assertIn("latest.for_trade_date = basis.for_trade_date", normalized)
+            self.assertIn("count(distinct btrim(basis.display_name::text)) = 1", normalized)
+            self.assertNotRegex(normalized, r"\b(insert|update|delete|merge|alter|drop|create|truncate)\b")
+            for forbidden in (
+                "condition_pool",
+                "common_trigger",
+                "common_action",
+                "minute_bar_1m",
+                "realtime_daily_snapshot",
+                "raw_",
+            ):
+                self.assertNotIn(forbidden, normalized)
+            for identity_key in params["identity_keys"]:
+                self.assertNotIn(identity_key.lower(), normalized)
+        self.assertEqual(set(queried_views), approved_views)
+        self.assertEqual(
+            {view_name: queried_views.count(view_name) for view_name in approved_views},
+            {view_name: 1 for view_name in approved_views},
+        )
+
+        single = repo.enrich_app_realtime_scope_display_names(
+            {
+                "tables_ready": True,
+                "items": [
+                    {
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SH:600000",
+                        "display_name": "",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(single["items"][0]["display_name"], names["stock:SH:600000"])
+
+    def test_realtime_scope_ssr_and_authority_api_share_enrichment_without_cross_user_leak(self) -> None:
+        class EnrichingRepository(FakeN6UserRepository):
+            def __init__(self) -> None:
+                super().__init__()
+                self.enrichment_inputs: list[list[tuple[int, str]]] = []
+
+            def enrich_app_realtime_scope_display_names(
+                self,
+                result: dict[str, Any],
+            ) -> dict[str, Any]:
+                enriched = copy.deepcopy(result)
+                items = list(enriched.get("items") or [])
+                self.enrichment_inputs.append(
+                    [
+                        (int(item.get("user_id") or 0), str(item.get("identity_key") or ""))
+                        for item in items
+                    ]
+                )
+                for item in items:
+                    identity_key = str(item.get("identity_key") or "")
+                    display_name = str(item.get("display_name") or "")
+                    if identity_key == "stock:SH:600000" and (
+                        not display_name.strip() or display_name.strip() == identity_key
+                    ):
+                        item["display_name"] = "浦发银行"
+                return enriched
+
+            def fetch_app_realtime_scope(
+                self,
+                *,
+                principal_id: int,
+                principal_type: str,
+                user_id: int,
+            ) -> dict[str, Any]:
+                return self.enrich_app_realtime_scope_display_names(
+                    super().fetch_app_realtime_scope(
+                        principal_id=principal_id,
+                        principal_type=principal_type,
+                        user_id=user_id,
+                    )
+                )
+
+        repo = EnrichingRepository()
+        repo.app_realtime_scope_rows = [
+            {
+                "realtime_scope_id": 1,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "user_id": 1,
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "display_name": "stock:SH:600000",
+                "source_type": "single_row",
+                "source_snapshot_json": {},
+                "is_default_seed": False,
+                "status": "active",
+            },
+            {
+                "realtime_scope_id": 2,
+                "principal_id": 2,
+                "principal_type": "human_user",
+                "user_id": 2,
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600999",
+                "display_name": "其他用户名称",
+                "source_type": "single_row",
+                "source_snapshot_json": {},
+                "is_default_seed": False,
+                "status": "active",
+            },
+        ]
+        authority = FakeBTrackAuthorityRepository(repo)
+        client, _, _, _ = build_client(
+            repository=repo,
+            btrack_authority_repository=authority,
+        )
+        client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+
+        page = client.get("/n6/app/realtime-scope")
+        api = client.get("/api/n6/app/v3/realtime-scope-items")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(api.status_code, 200)
+        self.assertIn("浦发银行", page.text)
+        self.assertNotIn("其他用户名称", page.text)
+        api_items = api.json()["items"]
+        current_item = next(
+            item
+            for item in api_items
+            if item["identity_key"] == "stock:SH:600000"
+        )
+        self.assertEqual(current_item["display_name"], "浦发银行")
+        self.assertNotIn("stock:SH:600999", {item["identity_key"] for item in api_items})
+        self.assertTrue(repo.enrichment_inputs)
+        self.assertTrue(
+            all(
+                user_id == 1
+                for call in repo.enrichment_inputs
+                for user_id, _ in call
+            )
+        )
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_portfolio_postgres_query_uses_only_n6_owned_allowlist(self) -> None:
         cursor = RecordingCursor()
