@@ -10313,6 +10313,121 @@ class N6UserAppTest(unittest.TestCase):
         self.assertEqual(repo.forbidden_writes["n6_virtual_trade"], 0)
         self.assertEqual(repo.forbidden_writes["n6_virtual_position"], 0)
 
+    def test_b_track_account_cash_freshness_fails_closed_and_preserves_zero_cash(self) -> None:
+        principal = {"principal_id": 1, "principal_type": "admin"}
+        user = {"login_name": "admin", "role": "admin"}
+        account = {"virtual_account_id": 1, "account_name": "Test"}
+        cases = (
+            ("20260728", "20260728", "current", "当前交易日数据", False),
+            ("20260727", "20260728", "stale", "数据时间较早", True),
+            (None, "20260728", "unknown", "暂不可确认", True),
+            ("20260230", "20260728", "unknown", "暂不可确认", True),
+            ("20260729", "20260728", "unknown", "暂不可确认", True),
+        )
+        for snapshot_date, current_date, freshness, display, warning in cases:
+            with self.subTest(snapshot_date=snapshot_date):
+                model = n6_app_v1_module.app_account_model(
+                    principal,
+                    user=user,
+                    account=account,
+                    cash_snapshot={
+                        "trade_date": snapshot_date,
+                        "available_cash": 0,
+                        "frozen_cash": 0,
+                        "total_cash": 0,
+                    },
+                    current_trade_date=current_date,
+                )
+                cash = model["cash_summary"]
+                self.assertEqual(cash["freshness"], freshness)
+                self.assertEqual(cash["freshness_display"], display)
+                self.assertEqual(cash["freshness_warning"], warning)
+                self.assertEqual(cash["available_cash"], 0)
+                self.assertEqual(cash["available_cash_display"], "0.00")
+
+    def test_b_track_account_api_and_ssr_show_freshness_with_one_date_read_each(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.cash_snapshot["trade_date"] = 20260604
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api = client.get("/api/n6/app/v1/account")
+        page = client.get("/n6/app/account")
+
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(api.json()["cash_summary"]["freshness"], "stale")
+        self.assertEqual(api.json()["cash_summary"]["freshness_display"], "数据时间较早")
+        self.assertIn("数据时间较早", page.text)
+        self.assertEqual(repo.app_current_signal_trade_date_reads, 2)
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+        repo.cash_snapshot["trade_date"] = "invalid"
+        repo.app_current_signal_trade_date_reads = 0
+        unknown_api = client.get("/api/n6/app/v1/account")
+        unknown_page = client.get("/n6/app/account")
+        self.assertEqual(unknown_api.json()["cash_summary"]["freshness"], "unknown")
+        self.assertIn("暂不可确认", unknown_page.text)
+        self.assertEqual(repo.app_current_signal_trade_date_reads, 2)
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+    def test_b_track_dashboard_reuses_current_date_for_account_freshness(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.cash_snapshot["trade_date"] = 20260604
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api = client.get("/api/n6/app/v1/dashboard")
+        page = client.get("/n6/app/dashboard")
+
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(api.json()["virtual_summary"]["freshness_display"], "数据时间较早")
+        self.assertIn("资金时效", page.text)
+        self.assertEqual(repo.app_current_signal_trade_date_reads, 2)
+        self.assertEqual(api.json()["next_action"], n6_app_v1_module.app_dashboard_next_action(
+            scope_summary=api.json()["scope_summary"],
+            message_summary=api.json()["message_summary"],
+            virtual_summary=api.json()["virtual_summary"],
+            scope_write_enabled=False,
+            proposal_write_enabled=False,
+        ))
+        self.assertTrue(all(value == 0 for value in repo.forbidden_writes.values()))
+
+    def test_b_track_grade_filter_selected_count_uses_only_valid_period_tokens(self) -> None:
+        principal = {"principal_id": 1, "principal_type": "admin"}
+        user = {"login_name": "admin", "role": "admin"}
+        result = {"cache_ready": False, "items": []}
+        cases = (
+            ({}, 0),
+            ({"year_overheat_level": "volume_up"}, 1),
+            (
+                {
+                    "year_overheat_level": ["volume_up", "flat"],
+                    "quarter_overheat_level": "volume_down",
+                    "day_overheat_level": ["low_volume_up", "low_volume_down"],
+                },
+                5,
+            ),
+            (
+                {
+                    "year_overheat_level": ["invalid", "volume_up"],
+                    "month_overheat_level": ["", "unknown"],
+                },
+                1,
+            ),
+        )
+        for filters, expected in cases:
+            with self.subTest(filters=filters):
+                model = n6_app_v1_module.app_v2_filter_model(
+                    principal,
+                    user=user,
+                    asset_kind="stock",
+                    result=result,
+                    filters=filters,
+                    base_href="/n6/app/filter-center/stocks",
+                )
+                self.assertEqual(model["selected_grade_filter_count"], expected)
+                self.assertEqual(len(model["grade_filter_rows"]), 5)
+
     def test_b_track_empty_planned_apis_and_disclaimers_are_get_only_read_only(self) -> None:
         client, repo, _, _ = build_client()
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
@@ -16410,6 +16525,114 @@ process.stdout.write(JSON.stringify(result));
         }
         self.assertEqual(route_methods["/n6/favicon.svg"], {"GET"})
         self.assertEqual(route_methods["/n6/apple-touch-icon.svg"], {"GET"})
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_shared_header_mobile_nav_hint_and_single_safety_source(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/dashboard")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        full_status = (
+            "投影只读模式工作台；交易申请状态按页面能力显示；"
+            "executor 本页未验证；不连接真实券商；不执行真实下单"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="nav-scroll-shell"', response.text)
+        self.assertIn('<nav aria-label="B轨导航">', response.text)
+        self.assertIn("左右滑动查看更多", response.text)
+        self.assertIn("虚拟系统 · 不连接券商 · 不执行真实下单", response.text)
+        self.assertEqual(response.text.count(full_status), 1)
+        self.assertEqual(source.count("{{ ux_safety_status }}"), 1)
+        self.assertIn(".nav-scroll-shell::after", source)
+        self.assertIn(".nav-overflow-hint { display: none; }", source)
+        self.assertIn("min-height: 45px", source)
+        self.assertIn('nav[aria-label="B轨导航"] a.active', source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_grade_filter_panel_responsive_initial_state_and_manual_toggle(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        helper = "const n6GradeFilterPanel = (() => {" + source.split(
+            "const n6GradeFilterPanel = (() => {", 1
+        )[1].split("const n6AutoRefresh = (() => {", 1)[0]
+        harness = helper + r"""
+class Panel {
+  constructor() { this.open = false; this.listeners = {}; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  userToggle() { this.open = !this.open; this.listeners.toggle(); }
+}
+class MediaQuery {
+  constructor(matches) { this.matches = matches; this.listeners = []; }
+  addEventListener(name, callback) { if (name === "change") this.listeners.push(callback); }
+  change(matches) { this.matches = matches; this.listeners.forEach((callback) => callback()); }
+}
+const desktopPanel = new Panel();
+const desktopQuery = new MediaQuery(false);
+n6GradeFilterPanel.createController(desktopPanel, desktopQuery);
+const desktopInitial = desktopPanel.open;
+const mobilePanel = new Panel();
+const mobileQuery = new MediaQuery(true);
+const mobileController = n6GradeFilterPanel.createController(mobilePanel, mobileQuery);
+const mobileInitial = mobilePanel.open;
+mobilePanel.userToggle();
+const manualOpen = mobilePanel.open;
+mobileQuery.change(false);
+mobileQuery.change(true);
+process.stdout.write(JSON.stringify({
+  desktopInitial,
+  mobileInitial,
+  manualOpen,
+  afterMediaChanges: mobilePanel.open,
+  manuallyToggled: mobileController.manuallyToggled(),
+}));
+"""
+        node_result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        state = json.loads(node_result.stdout)
+        self.assertTrue(state["desktopInitial"])
+        self.assertFalse(state["mobileInitial"])
+        self.assertTrue(state["manualOpen"])
+        self.assertTrue(state["afterMediaChanges"])
+        self.assertTrue(state["manuallyToggled"])
+
+    def test_b_track_filter_density_dom_order_preserves_bulk_contract(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["stock"][0]["period_transition_y"] = "volume_up"
+        repo.app_filter_rows["stock"][0]["period_transition_q"] = "flat"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get(
+            "/n6/app/filter-center/stocks"
+            "?year_overheat_level=volume_up&quarter_overheat_level=flat"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        panel = response.text.index('<details class="grade-filter-panel"')
+        results = response.text.index("data-filter-results-summary", panel)
+        bulk = response.text.index("data-n6-bulk-scope", results)
+        technical = response.text.index('<details class="technical-details">', bulk)
+        result_area = response.text.index('class="table-wrap"', technical)
+        self.assertLess(panel, results)
+        self.assertLess(results, bulk)
+        self.assertLess(bulk, technical)
+        self.assertLess(technical, result_area)
+        self.assertIn("分级筛选 · 已选 2 项", response.text)
+        self.assertIn('data-n6-asset-kind="stock"', response.text)
+        self.assertIn('data-n6-filtered-count="', response.text)
+        self.assertIn("data-n6-bulk-monitor", response.text)
+        self.assertIn('data-n6-bulk-status role="status" aria-live="polite" hidden', response.text)
         self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_mobile_interaction_accessibility_contract(self) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 from typing import Any
@@ -873,7 +873,13 @@ def app_dashboard_model(
     proposal_write_enabled: bool = False,
 ) -> dict[str, Any]:
     signal_items = [app_signal_item(row) for row in signal_rows]
-    account_payload = app_account_model(principal, user=user, account=account, cash_snapshot=cash_snapshot)
+    account_payload = app_account_model(
+        principal,
+        user=user,
+        account=account,
+        cash_snapshot=cash_snapshot,
+        current_trade_date=current_trade_date,
+    )
     guide = app_dashboard_user_operation_guide()
     scope_summary = app_dashboard_scope_summary(
         monitor_result or {},
@@ -1198,6 +1204,7 @@ def app_dashboard_virtual_summary(
         "cash_ready": bool(cash),
         "available_cash_display": cash.get("available_cash_display") if cash else "暂不可确认",
         "total_cash_display": cash.get("total_cash_display") if cash else "暂不可确认",
+        "freshness_display": cash.get("freshness_display") if cash else "暂不可确认",
         "position_count": position_count,
         "position_count_display": str(position_count) if position_count is not None else "暂不可确认",
         "sellable_quantity_display": _portfolio_decimal_text(sellable) if sellable is not None else "暂不可确认",
@@ -1404,6 +1411,7 @@ def app_account_model(
     user: dict[str, Any],
     account: dict[str, Any] | None,
     cash_snapshot: dict[str, Any] | None,
+    current_trade_date: Any = None,
 ) -> dict[str, Any]:
     component = "B Track Account"
     account_ready = bool(account)
@@ -1422,6 +1430,20 @@ def app_account_model(
         }
     cash_summary = None
     if cash_snapshot:
+        snapshot_trade_date = _app_account_trade_date(cash_snapshot.get("trade_date"))
+        current_date = _app_account_trade_date(current_trade_date)
+        freshness = (
+            "current"
+            if snapshot_trade_date is not None and snapshot_trade_date == current_date
+            else "stale"
+            if snapshot_trade_date is not None and current_date is not None and snapshot_trade_date < current_date
+            else "unknown"
+        )
+        freshness_display = {
+            "current": "当前交易日数据",
+            "stale": "数据时间较早",
+            "unknown": "暂不可确认",
+        }[freshness]
         cash_summary = {
             "available_cash": number_or_none(cash_snapshot.get("available_cash")),
             "frozen_cash": number_or_none(cash_snapshot.get("frozen_cash")),
@@ -1430,6 +1452,10 @@ def app_account_model(
             "frozen_cash_display": _money_text(cash_snapshot.get("frozen_cash")),
             "total_cash_display": _money_text(cash_snapshot.get("total_cash")),
             "snapshot_time": display_datetime(cash_snapshot.get("snapshot_time") or cash_snapshot.get("updated_at")),
+            "trade_date": snapshot_trade_date.isoformat() if snapshot_trade_date is not None else None,
+            "freshness": freshness,
+            "freshness_display": freshness_display,
+            "freshness_warning": freshness != "current",
         }
     return {
         "ok": True,
@@ -1446,6 +1472,22 @@ def app_account_model(
         "safety_banner": list(APP_SAFETY_LABELS),
         "side_effects": dict(APP_SIDE_EFFECTS),
     }
+
+
+def _app_account_trade_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if re.fullmatch(r"[0-9]{8}", text):
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def app_trade_proposals_model(
@@ -3580,6 +3622,7 @@ def app_v2_filter_model(
         filters=filters,
         selected_for_trade_date=selected_for_trade_date,
     )
+    grade_filter_rows = app_v2_period_grade_filter_rows(filters, base_href=base_href)
     return {
         "ok": True,
         "component": component,
@@ -3661,7 +3704,10 @@ def app_v2_filter_model(
         "filters_json": json.dumps(clean_filters, ensure_ascii=False, sort_keys=True),
         "default_monitor_direction": monitor_direction,
         "default_monitor_direction_label": _direction_label(monitor_direction),
-        "grade_filter_rows": app_v2_period_grade_filter_rows(filters, base_href=base_href),
+        "grade_filter_rows": grade_filter_rows,
+        "selected_grade_filter_count": sum(
+            len(row.get("selected_values") or []) for row in grade_filter_rows
+        ),
         "schema": schema,
         "columns": columns,
         "sort": {

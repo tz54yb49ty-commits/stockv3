@@ -9855,12 +9855,14 @@ def create_app(
             if account and account.get("virtual_account_id")
             else None
         )
+        current_trade_date = repo.fetch_app_current_signal_trade_date()
         return JSONResponse(
             app_account_model(
                 principal,
                 user=session_user_payload(session),
                 account=account,
                 cash_snapshot=cash_snapshot,
+                current_trade_date=current_trade_date,
             )
         )
 
@@ -11804,7 +11806,14 @@ def create_app(
                 if account and account.get("virtual_account_id")
                 else None
             )
-            return app_account_model(principal, user=user, account=account, cash_snapshot=cash_snapshot)
+            current_trade_date = repo.fetch_app_current_signal_trade_date()
+            return app_account_model(
+                principal,
+                user=user,
+                account=account,
+                cash_snapshot=cash_snapshot,
+                current_trade_date=current_trade_date,
+            )
         if page_key == "realtime-scope":
             result = repo.fetch_app_realtime_scope(
                 principal_id=int(principal["principal_id"]),

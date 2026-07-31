@@ -63,6 +63,8 @@
       scroll-padding-inline: 8px;
     }
     nav:focus-within { outline: none; }
+    .nav-scroll-shell { min-width: 0; }
+    .nav-overflow-hint { display: none; }
     a, button {
       min-height: 34px;
       border: 1px solid var(--line);
@@ -108,6 +110,9 @@
       background: #eef7f5;
       border-color: #b7d9d3;
     }
+    .mobile-safety-details { width: 100%; }
+    .mobile-safety-details > summary { display: none; }
+    .mobile-safety-details > .safety-full-text { display: inline; }
     .surface-head {
       min-height: 52px;
       display: flex;
@@ -992,6 +997,26 @@
     .empty { padding: 24px; color: var(--muted); font-size: 14px; }
     @media (max-width: 980px) {
       .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+      .nav-scroll-shell {
+        position: relative;
+        width: 100%;
+      }
+      .nav-scroll-shell::after {
+        position: absolute;
+        top: 2px;
+        right: 0;
+        width: 34px;
+        height: 45px;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0), var(--panel));
+        content: "";
+        pointer-events: none;
+      }
+      .nav-overflow-hint {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+      }
       nav {
         width: 100%;
         flex-wrap: nowrap;
@@ -1059,6 +1084,19 @@
         padding: 7px 9px;
         font-size: 12px;
         line-height: 1.4;
+      }
+      .mobile-safety-details > summary {
+        min-height: 45px;
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+        font-weight: 720;
+        list-style: none;
+      }
+      .mobile-safety-details > summary::-webkit-details-marker { display: none; }
+      .mobile-safety-details > .safety-full-text {
+        display: block;
+        padding: 2px 0 7px;
       }
       main { padding-top: 8px; gap: 8px; }
       .surface { min-width: 0; }
@@ -1171,17 +1209,24 @@
         <h1>{{ page.app_title }}</h1>
         <div class="subtle">{{ user.login_name }} · {{ "管理员" if page.principal.principal_type == "admin" else "用户" }}</div>
       </div>
-      <nav aria-label="B轨导航">
-        {% for item in page.nav.links %}
-        <a class="{% if page.nav.active == item.key %}active{% endif %}"{% if page.nav.active == item.key %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
-        {% endfor %}
-        <button id="logout-button" type="button">退出登录</button>
-      </nav>
+      <div class="nav-scroll-shell">
+        <nav aria-label="B轨导航">
+          {% for item in page.nav.links %}
+          <a class="{% if page.nav.active == item.key %}active{% endif %}"{% if page.nav.active == item.key %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
+          {% endfor %}
+          <button id="logout-button" type="button">退出登录</button>
+        </nav>
+        <span class="nav-overflow-hint">左右滑动查看更多</span>
+      </div>
     </div>
   </header>
   <main class="wrap{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}{% if page.page_key == 'signals' %} n6-signals-workspace{% endif %}">
+    {% set ux_safety_status = page.ux_safety_status|default("投影只读模式；本人监控范围管理未启用；交易申请未启用；不连接真实券商；不执行真实下单") %}
     <section class="banner" aria-label="安全提示">
-      <span>{{ page.ux_safety_status|default("投影只读模式；本人监控范围管理未启用；交易申请未启用；不连接真实券商；不执行真实下单") }}</span>
+      <details class="mobile-safety-details">
+        <summary>虚拟系统 · 不连接券商 · 不执行真实下单</summary>
+        <span class="safety-full-text">{{ ux_safety_status }}</span>
+      </details>
     </section>
     <p class="subtle" data-n6-proposal-status role="status" aria-live="polite" hidden></p>
 
@@ -1262,6 +1307,7 @@
             <div class="summary-pairs">
               <div><span>账户</span><strong>{{ virtual_summary.account_status_display|default("暂不可确认") }}</strong></div>
               <div><span>可用资金</span><strong>{{ virtual_summary.available_cash_display|default("暂不可确认") }}</strong></div>
+              <div><span>资金时效</span><strong>{{ virtual_summary.freshness_display|default("暂不可确认") }}</strong></div>
               <div><span>持仓数</span><strong>{{ virtual_summary.position_count_display|default("暂不可确认") }}</strong></div>
               <div><span>可卖 / T+1 锁定</span><strong>{{ virtual_summary.sellable_quantity_display|default("暂不可确认") }} / {{ virtual_summary.t1_locked_quantity_display|default("暂不可确认") }}</strong></div>
             </div>
@@ -1363,6 +1409,7 @@
           <div class="metric"><span>冻结资金（人民币）</span><strong>{{ page.data.cash_summary.frozen_cash_display }}</strong></div>
           <div class="metric"><span>总现金（人民币）</span><strong>{{ page.data.cash_summary.total_cash_display }}</strong></div>
           <div class="metric"><span>资金快照时间</span><strong>{{ page.data.cash_summary.snapshot_time or "—" }}</strong></div>
+          <div class="metric"><span>资金快照时效</span><strong{% if page.data.cash_summary.freshness_warning %} class="warn"{% endif %}>{{ page.data.cash_summary.freshness_display }}</strong></div>
         </div>
         {% endif %}
         <div class="task-empty">
@@ -1819,7 +1866,7 @@
       {% endif %}
       {% for section_key, section in page.data.sections.items() %}
       <details class="grade-filter-panel" data-filter-panel="period-grade" open>
-        <summary><span aria-hidden="true">⌄</span><span>分级筛选</span></summary>
+        <summary><span aria-hidden="true">⌄</span><span>分级筛选 · 已选 {{ section.selected_grade_filter_count }} 项</span></summary>
         <div class="grade-filter-body">
           {% for row in section.grade_filter_rows %}
           <div class="grade-filter-row" data-filter-row data-filter-field="{{ row.field }}">
@@ -1858,7 +1905,7 @@
       </details>
       {% endfor %}
       {% for section_key, section in page.data.sections.items() %}
-      <div class="text-block" id="{{ section.anchor_id }}">
+      <div class="text-block" id="{{ section.anchor_id }}" data-filter-results-summary>
         <h3>{{ section.component_label }}</h3>
         <span
           class="chip{% if section.score_comparison.regime == 'bear' %} warn{% endif %}"
@@ -1872,6 +1919,19 @@
         <span class="chip">{{ section.date_policy_message }}</span>
         {% endif %}
         <div class="monitor-actions"><span class="chip">筛选结果只读；可按授权保存到本人范围</span></div>
+        {% if section.controls.bulk_add_enabled and section.filtered_count %}
+        <div
+          class="monitor-actions"
+          data-n6-bulk-scope
+          data-n6-asset-kind="{{ section.asset_kind }}"
+          data-n6-filtered-count="{{ section.filtered_count }}"
+        >
+          <button type="button" class="row-action" data-n6-bulk-monitor>
+            将筛选结果全部加入监控对象（{{ section.filtered_count }}）
+          </button>
+          <span class="chip" data-n6-bulk-status role="status" aria-live="polite" hidden></span>
+        </div>
+        {% endif %}
         <details class="technical-details">
           <summary>技术来源</summary>
           <div class="monitor-actions">
@@ -1886,19 +1946,6 @@
             <span class="chip">比较样本: {{ section.score_comparison.sample_count }}</span>
           </div>
         </details>
-        {% if section.controls.bulk_add_enabled and section.filtered_count %}
-        <div
-          class="monitor-actions"
-          data-n6-bulk-scope
-          data-n6-asset-kind="{{ section.asset_kind }}"
-          data-n6-filtered-count="{{ section.filtered_count }}"
-        >
-          <button type="button" class="row-action" data-n6-bulk-monitor>
-            将筛选结果全部加入监控对象（{{ section.filtered_count }}）
-          </button>
-          <span class="chip" data-n6-bulk-status role="status" aria-live="polite" hidden></span>
-        </div>
-        {% endif %}
         {% if section.linked_stock_filter %}
         <div class="monitor-actions" data-linked-stock-filter>
           <a href="{{ section.linked_stock_filter.href }}">{{ section.linked_stock_filter.label }}</a>
@@ -2973,6 +3020,31 @@
       return { init, speak, stop: stopSpeech };
     })();
 
+    const n6GradeFilterPanel = (() => {
+      const createController = (panel, mobileQuery) => {
+        let manuallyToggled = false;
+        let managedOpen = !mobileQuery.matches;
+        panel.open = managedOpen;
+        panel.addEventListener("toggle", () => {
+          if (panel.open !== managedOpen) manuallyToggled = true;
+        });
+        const sync = () => {
+          if (manuallyToggled) return;
+          managedOpen = !mobileQuery.matches;
+          panel.open = managedOpen;
+        };
+        mobileQuery.addEventListener?.("change", sync);
+        return { sync, manuallyToggled: () => manuallyToggled };
+      };
+      const init = () => {
+        const mobileQuery = window.matchMedia?.("(max-width: 430px)") || { matches: false };
+        document.querySelectorAll('[data-filter-panel="period-grade"]').forEach((panel) => {
+          createController(panel, mobileQuery);
+        });
+      };
+      return { createController, init };
+    })();
+
     const n6AutoRefresh = (() => {
       const sharedStore = window.__n6ProjectionStore || {
         scopes: new Map(),
@@ -3729,6 +3801,7 @@
 
     n6FilterColumnOrder.init();
     n6MessageAssetSelection.init();
+    n6GradeFilterPanel.init();
     n6Voice.init();
     n6AutoRefresh.init();
 
