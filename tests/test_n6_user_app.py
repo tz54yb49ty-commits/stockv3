@@ -16602,6 +16602,298 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(state["afterMediaChanges"])
         self.assertTrue(state["manuallyToggled"])
 
+    def test_b_track_filter_columns_use_chinese_labels_without_changing_raw_contract(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
+            with self.subTest(asset_kind=asset_kind):
+                payload = client.get(
+                    f"/api/n6/app/v2/filter/{page}?sort=identity_key&sort_dir=desc"
+                ).json()
+                columns = payload["columns"]
+                expected_keys = [
+                    field
+                    for field in n6_app_v1_module.V2_FILTER_VISIBLE_FIELDS_BY_ASSET[asset_kind]
+                    if field in payload["schema"]
+                    and field not in n6_app_v1_module.V2_FILTER_TABLE_HIDDEN_FIELDS_BY_ASSET.get(
+                        asset_kind,
+                        frozenset(),
+                    )
+                ]
+                self.assertEqual([column["key"] for column in columns], expected_keys)
+                identity_column = next(column for column in columns if column["key"] == "identity_key")
+                self.assertTrue(identity_column["sort_active"])
+                self.assertEqual(identity_column["sort_direction"], "desc")
+                for column in columns:
+                    self.assertEqual(
+                        column["label"],
+                        n6_app_v1_module.V2_FILTER_FIELD_LABELS.get(column["key"], column["key"]),
+                    )
+                cells = payload["grid_rows"][0]["cells"]
+                self.assertEqual([cell["key"] for cell in cells], expected_keys)
+                self.assertEqual(
+                    [cell["label"] for cell in cells],
+                    [column["label"] for column in columns],
+                )
+                self.assertEqual(list(payload["rows"][0]), payload["schema"])
+
+                page_response = client.get(f"/n6/app/filter-center/{page}?sort=identity_key&sort_dir=desc")
+                self.assertIn("对象标识", page_response.text)
+                self.assertIn('data-sort-key="identity_key"', page_response.text)
+                self.assertIn('title="对象标识（identity_key）"', page_response.text)
+
+        unknown_columns = n6_app_v1_module._app_v2_filter_columns(
+            [{"unknown_raw_field": "value"}],
+            asset_kind="unknown",
+            schema=["unknown_raw_field"],
+            base_href="/n6/app/filter-center",
+            filters={},
+            show_all=False,
+        )
+        self.assertEqual(unknown_columns[0]["key"], "unknown_raw_field")
+        self.assertEqual(unknown_columns[0]["label"], "unknown_raw_field")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_filter_mobile_cards_share_grid_rows_and_fixed_mobile_fields(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        for asset_kind, row in repo.app_filter_rows.items():
+            row[0].update(
+                {
+                    "display_name": f"{asset_kind}-名称",
+                    "display_code": "" if asset_kind == "index" else f"{asset_kind}-代码",
+                    "buy_expected_return_pct": "12.345",
+                    "buy_target_price": "23.456",
+                    "up_sell_reference_period": "月线",
+                    "period_transition_y": "volume_up",
+                    "period_transition_q": "volume_down",
+                    "period_transition_m": "low_volume_up",
+                    "period_transition_w": "low_volume_down",
+                    "period_transition_d": "flat",
+                }
+            )
+        repo.app_filter_rows["board"][0].update(
+            {
+                "period_transition_y": None,
+                "period_transition_q": None,
+                "period_transition_m": None,
+                "period_transition_w": None,
+                "period_transition_d": None,
+            }
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        for asset_kind, page in (("stock", "stocks"), ("index", "indexes"), ("board", "boards")):
+            with self.subTest(asset_kind=asset_kind):
+                payload = client.get(f"/api/n6/app/v2/filter/{page}").json()
+                grid_row = payload["grid_rows"][0]
+                self.assertEqual(
+                    [field["key"] for field in grid_row["mobile_fields"]],
+                    [
+                        "buy_expected_return_pct",
+                        "buy_target_price",
+                        "up_sell_reference_period",
+                        "period_transition_summary",
+                    ],
+                )
+                self.assertEqual(
+                    [field["label"] for field in grid_row["mobile_fields"]],
+                    ["买入预期收益率", "买入目标价", "参考周期", "周期状态"],
+                )
+                self.assertEqual(
+                    [field["value"] for field in grid_row["mobile_fields"][:3]],
+                    ["12.35", "23.46", "月线"],
+                )
+                if asset_kind == "board":
+                    self.assertEqual(grid_row["mobile_fields"][3]["value"], "—")
+                else:
+                    self.assertEqual(
+                        grid_row["mobile_fields"][3]["value"],
+                        "年：放量上涨 / 季：放量下跌 / 月：缩量上涨 / 周：缩量下跌 / 日：震荡",
+                    )
+                if asset_kind == "index":
+                    self.assertEqual(grid_row["mobile_display_code"], "000300")
+
+                page_response = client.get(f"/n6/app/filter-center/{page}")
+                card = re.search(
+                    r'<article\s+class="filter-result-card"[\s\S]*?</article>',
+                    page_response.text,
+                )
+                self.assertIsNotNone(card)
+                card_html = card.group(0)
+                self.assertIn(grid_row["display_name"], card_html)
+                self.assertIn(grid_row["mobile_display_code"], card_html)
+                positions = [
+                    card_html.index(f'data-mobile-field-key="{field["key"]}"')
+                    for field in grid_row["mobile_fields"]
+                ]
+                self.assertEqual(positions, sorted(positions))
+                for field in grid_row["mobile_fields"]:
+                    self.assertIn(field["value"], card_html)
+
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_filter_mobile_card_actions_reuse_permissions_endpoints_and_payload(self) -> None:
+        disabled_client, disabled_repo, _, _ = build_client()
+        disabled_repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        disabled_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        disabled_page = disabled_client.get("/n6/app/filter-center/stocks")
+        disabled_card = re.search(
+            r'<article\s+class="filter-result-card"[\s\S]*?</article>',
+            disabled_page.text,
+        ).group(0)
+        self.assertNotIn("data-n6-add-monitor", disabled_card)
+        self.assertNotIn("data-n6-add-realtime", disabled_card)
+
+        enabled_client, enabled_repo, _, _ = build_client(
+            scope_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        enabled_repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        enabled_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        enabled_page = enabled_client.get("/n6/app/filter-center/stocks")
+        enabled_card = re.search(
+            r'<article\s+class="filter-result-card"[\s\S]*?</article>',
+            enabled_page.text,
+        ).group(0)
+        self.assertIn('data-n6-identity-key="stock:SH:600000"', enabled_card)
+        self.assertIn('data-n6-asset-kind="stock"', enabled_card)
+        self.assertIn('data-n6-for-trade-date="20260605"', enabled_card)
+        self.assertIn("data-n6-add-monitor", enabled_card)
+        self.assertIn("data-n6-add-realtime", enabled_card)
+
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        self.assertIn(
+            'const body = { asset_kind: row.dataset.n6AssetKind, identity_key: row.dataset.n6IdentityKey };',
+            source,
+        )
+        self.assertIn('if (!realtime) body.for_trade_date = row.dataset.n6ForTradeDate;', source)
+        self.assertIn('realtime ? "/api/n6/app/v3/realtime-scope-items" : "/api/n6/app/v3/monitor-items"', source)
+        self.assertFalse(any(disabled_repo.forbidden_writes.values()))
+        self.assertFalse(any(enabled_repo.forbidden_writes.values()))
+
+    def test_b_track_filter_advanced_table_is_single_responsive_grid(self) -> None:
+        client, repo, _, _ = build_client()
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        page = client.get("/n6/app/filter-center/stocks")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+
+        self.assertEqual(page.text.count('class="filter-table"'), 1)
+        self.assertEqual(page.text.count('<details class="filter-advanced-table" data-filter-panel="advanced-table" open>'), 1)
+        advanced_start = page.text.index('<details class="filter-advanced-table"')
+        controls = page.text.index("data-column-order-controls", advanced_start)
+        table_wrap = page.text.index('class="table-wrap"', controls)
+        advanced_end = page.text.index("</details>", table_wrap)
+        self.assertLess(advanced_start, controls)
+        self.assertLess(controls, table_wrap)
+        self.assertLess(table_wrap, advanced_end)
+        self.assertIn("高级表格（完整字段）", page.text)
+        self.assertIn(
+            "'[data-filter-panel=\"period-grade\"], [data-filter-panel=\"advanced-table\"]'",
+            source,
+        )
+        wrappers = re.findall(r'<div\s+class="[^"]*\btable-wrap\b[^"]*"(?P<attrs>[^>]*)>', source, re.S)
+        self.assertEqual(len(wrappers), 11)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_filter_long_values_only_create_native_buttons_on_real_overflow(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        helper = "const n6FilterOverflow = (() => {" + source.split(
+            "const n6FilterOverflow = (() => {",
+            1,
+        )[1].split("const n6FilterColumnOrder = (() => {", 1)[0]
+        harness = helper + r"""
+class Node {
+  constructor(tagName, text = "") {
+    this.tagName = tagName;
+    this.textContent = text;
+    this.dataset = {};
+    this.attributes = {};
+    this.listeners = {};
+    this.className = "";
+    this.type = "";
+    this.parent = null;
+    this.child = null;
+    this.scrollWidth = 0;
+    this.clientWidth = 0;
+  }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] || null; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  closest(selector) { return selector === "[data-filter-overflow-cell]" ? this.parent : null; }
+  replaceWith(node) { this.parent.child = node; node.parent = this.parent; }
+}
+class Cell extends Node {
+  constructor(text, scrollWidth, clientWidth) {
+    super("td", text);
+    this.child = new Node("span", text);
+    this.child.parent = this;
+    this.child.dataset.filterCellValue = "";
+    this.child.scrollWidth = scrollWidth;
+    this.child.clientWidth = clientWidth;
+  }
+  querySelector(selector) {
+    if (selector === "button.filter-overflow-toggle") {
+      return this.child.tagName === "button" ? this.child : null;
+    }
+    if (selector === "[data-filter-cell-value]") {
+      return this.child.tagName === "span" ? this.child : null;
+    }
+    return null;
+  }
+  replaceChildren(node) { this.child = node; node.parent = this; }
+}
+const document = {
+  createElement(tagName) { return new Node(tagName); },
+  querySelectorAll() { return []; },
+};
+const window = { requestAnimationFrame: (callback) => { callback(); return 1; }, addEventListener() {} };
+const overflow = new Cell("完整原始长值", 160, 60);
+const fitting = new Cell("短值", 40, 60);
+n6FilterOverflow.measureCell(overflow);
+n6FilterOverflow.measureCell(fitting);
+const button = overflow.child;
+button.listeners.click();
+const afterClick = button.getAttribute("aria-expanded");
+button.listeners.keydown({ key: "Enter", preventDefault() {} });
+const afterEnter = button.getAttribute("aria-expanded");
+button.listeners.keydown({ key: " ", preventDefault() {} });
+const afterSpace = button.getAttribute("aria-expanded");
+process.stdout.write(JSON.stringify({
+  overflowTag: button.tagName,
+  overflowType: button.type,
+  fullValue: button.textContent,
+  fittingTag: fitting.child.tagName,
+  afterClick,
+  afterEnter,
+  afterSpace,
+  cellRole: overflow.attributes.role || null,
+}));
+"""
+        node_result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        state = json.loads(node_result.stdout)
+        self.assertEqual(state["overflowTag"], "button")
+        self.assertEqual(state["overflowType"], "button")
+        self.assertEqual(state["fullValue"], "完整原始长值")
+        self.assertEqual(state["fittingTag"], "span")
+        self.assertEqual(state["afterClick"], "true")
+        self.assertEqual(state["afterEnter"], "false")
+        self.assertEqual(state["afterSpace"], "true")
+        self.assertIsNone(state["cellRole"])
+        self.assertIn('window.addEventListener("resize", schedule);', source)
+        self.assertIn('if (panel.open) schedule();', source)
+        self.assertIn("n6FilterOverflow.schedule();", source)
+
     def test_b_track_filter_density_dom_order_preserves_bulk_contract(self) -> None:
         client, repo, _, _ = build_client(
             scope_write_enabled=True,

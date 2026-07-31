@@ -930,6 +930,28 @@
       max-height: calc(100vh - 260px);
       overflow: auto;
     }
+    .filter-result-cards { display: none; }
+    .filter-advanced-table {
+      border-top: 1px solid var(--line);
+    }
+    .filter-advanced-table > summary {
+      min-height: 40px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      font-weight: 720;
+      list-style: none;
+    }
+    .filter-advanced-table > summary::-webkit-details-marker { display: none; }
+    .filter-advanced-table > summary::before {
+      margin-right: 7px;
+      content: "▸";
+    }
+    .filter-advanced-table[open] > summary::before { content: "▾"; }
+    .filter-advanced-table [data-column-order-controls] {
+      padding: 0 12px 8px;
+    }
     .filter-table {
       width: max-content;
       min-width: 100%;
@@ -983,6 +1005,36 @@
     }
     .filter-table th[data-column-key].is-drop-target {
       box-shadow: inset 3px 0 0 var(--accent);
+    }
+    .filter-cell-value {
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .filter-overflow-toggle {
+      width: 100%;
+      max-width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+      text-align: inherit;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .filter-overflow-toggle[aria-expanded="true"] {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+    .filter-table td[data-overflow-expanded="true"] {
+      overflow: visible;
+      white-space: normal;
     }
     .n6-data-workspace .row-action {
       min-height: 24px;
@@ -1175,6 +1227,56 @@
         flex-wrap: wrap;
         white-space: normal;
       }
+      .filter-result-cards {
+        padding: 8px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 8px;
+      }
+      .filter-result-card {
+        padding: 10px;
+        display: grid;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+      .filter-result-card h4 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .filter-result-card-meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .filter-result-card dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 6px;
+      }
+      .filter-result-card dl > div {
+        min-width: 0;
+        padding: 7px;
+        border-radius: 8px;
+        background: var(--soft);
+      }
+      .filter-result-card dt {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .filter-result-card dd {
+        margin: 3px 0 0;
+        overflow-wrap: anywhere;
+        font-size: 13px;
+      }
+      .filter-result-card dl > div:last-child { grid-column: 1 / -1; }
+      .filter-result-card-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 6px;
+      }
+      .filter-advanced-table > summary { min-height: 45px; }
       .cockpit-shell { padding: 10px; }
       .cockpit-lead,
       .next-action-card,
@@ -1974,6 +2076,40 @@
         {% elif section.show_all %}
         <a href="{{ section.default_rows_href }}">收起到默认{{ section.default_limit }}条</a>
         {% endif %}
+        {% if section.status == "data_not_ready" %}
+        <p>{{ section.empty_state }}</p>
+        {% endif %}
+      </div>
+      <div class="filter-result-cards" data-filter-mobile-cards data-asset-kind="{{ section.asset_kind }}">
+        {% for item in section.grid_rows %}
+        <article
+          class="filter-result-card"
+          data-n6-identity-key="{{ item.identity_key }}"
+          data-n6-asset-kind="{{ section.asset_kind }}"
+          data-n6-for-trade-date="{{ item.for_trade_date }}"
+          data-n6-direction-policy="{{ item.monitor_direction_policy }}"
+        >
+          <h4>{{ item.display_name }}{% if item.mobile_display_code and item.mobile_display_code != "—" %} · {{ item.mobile_display_code }}{% endif %}</h4>
+          <div class="filter-result-card-meta">{{ item.asset_kind_label }} · {{ item.for_trade_date or "—" }}</div>
+          <dl>
+            {% for field in item.mobile_fields %}
+            <div data-mobile-field-key="{{ field.key }}">
+              <dt>{{ field.label }}</dt>
+              <dd>{{ field.value }}</dd>
+            </div>
+            {% endfor %}
+          </dl>
+          {% if section.controls.add_monitor_enabled %}
+          <div class="filter-result-card-actions">
+            <button type="button" class="row-action" data-n6-add-monitor>加入监控对象</button>
+            <button type="button" class="row-action" data-n6-add-realtime>加入实时监控范围</button>
+          </div>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+      <details class="filter-advanced-table" data-filter-panel="advanced-table" open>
+        <summary>高级表格（完整字段）</summary>
         <div class="monitor-actions" data-column-order-controls>
           <span class="chip">拖动表头可调整列顺序</span>
           <button
@@ -1983,81 +2119,80 @@
             data-target-asset-kind="{{ section.asset_kind }}"
           >重置列顺序</button>
         </div>
-        {% if section.status == "data_not_ready" %}
-        <p>{{ section.empty_state }}</p>
-        {% endif %}
-      </div>
-      <div
-        class="table-wrap"
-        role="region"
-        aria-label="{{ section.component_label }}表格，可横向滚动，操作列固定在左侧"
-        tabindex="0"
-      >
-        <table
-          class="filter-table"
-          data-filter-table
-          data-asset-kind="{{ section.asset_kind }}"
-          data-column-order-storage-key="n6.filterCenter.{{ section.asset_kind }}.columnOrder"
-          data-schema-count="{{ section.schema|length }}"
-          data-column-count="{{ section.columns|length }}"
-          data-row-count="{{ section.grid_rows|length }}"
+        <div
+          class="table-wrap"
+          role="region"
+          aria-label="{{ section.component_label }}表格，可横向滚动，操作列固定在左侧"
+          tabindex="0"
         >
-          <thead>
-            <tr>
-              <th scope="col" class="filter-action-cell" data-column-fixed="true">对象 / 操作</th>
-              {% for column in section.columns %}
-              <th
-                scope="col"
-                class="{% if column.align == 'numeric' %}numeric{% endif %}"
-                data-column-key="{{ column.key }}"
-                draggable="true"
-                title="{{ column.label }}"
-                aria-sort="{% if column.sort_active and column.sort_direction == 'asc' %}ascending{% elif column.sort_active and column.sort_direction == 'desc' %}descending{% else %}none{% endif %}"
-              >
-                <a
-                  href="{{ column.sort_href }}"
-                  class="{% if column.sort_active %}is-active{% endif %}"
-                  data-sort-key="{{ column.key }}"
-                  data-sort-type="{{ column.sort_type }}"
-                  data-sort-dir="{{ column.sort_direction }}"
-                  aria-label="按 {{ column.label }} 排序"
-                >{{ column.label }}{% if column.sort_active %} {{ "↓" if column.sort_direction == "desc" else "↑" }}{% endif %}</a>
-              </th>
+          <table
+            class="filter-table"
+            data-filter-table
+            data-asset-kind="{{ section.asset_kind }}"
+            data-column-order-storage-key="n6.filterCenter.{{ section.asset_kind }}.columnOrder"
+            data-schema-count="{{ section.schema|length }}"
+            data-column-count="{{ section.columns|length }}"
+            data-row-count="{{ section.grid_rows|length }}"
+          >
+            <thead>
+              <tr>
+                <th scope="col" class="filter-action-cell" data-column-fixed="true">对象 / 操作</th>
+                {% for column in section.columns %}
+                <th
+                  scope="col"
+                  class="{% if column.align == 'numeric' %}numeric{% endif %}"
+                  data-column-key="{{ column.key }}"
+                  draggable="true"
+                  title="{{ column.label }}（{{ column.key }}）"
+                  aria-sort="{% if column.sort_active and column.sort_direction == 'asc' %}ascending{% elif column.sort_active and column.sort_direction == 'desc' %}descending{% else %}none{% endif %}"
+                >
+                  <a
+                    href="{{ column.sort_href }}"
+                    class="{% if column.sort_active %}is-active{% endif %}"
+                    data-sort-key="{{ column.key }}"
+                    data-sort-type="{{ column.sort_type }}"
+                    data-sort-dir="{{ column.sort_direction }}"
+                    aria-label="按 {{ column.label }} 排序"
+                  >{{ column.label }}{% if column.sort_active %} {{ "↓" if column.sort_direction == "desc" else "↑" }}{% endif %}</a>
+                </th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in section.grid_rows %}
+              <tr data-cell-count="{{ item.cells|length }}" data-n6-identity-key="{{ item.identity_key }}" data-n6-asset-kind="{{ section.asset_kind }}" data-n6-for-trade-date="{{ item.for_trade_date }}" data-n6-direction-policy="{{ item.monitor_direction_policy }}">
+                <td class="filter-action-cell">
+                  <div class="row-action-line">
+                    <span>{{ item.asset_kind_label }}</span>
+                    {% if item.display_code and item.display_code != "—" %}
+                    <span class="subtle">{{ item.display_code }}</span>
+                    {% endif %}
+                    {% if section.controls.add_monitor_enabled %}
+                    <button type="button" class="row-action" data-n6-add-monitor>加入监控对象</button>
+                    <button type="button" class="row-action" data-n6-add-realtime>加入实时监控范围</button>
+                    {% endif %}
+                  </div>
+                </td>
+                {% for cell in item.cells %}
+                <td
+                  class="{% if cell.align == 'numeric' %}numeric{% endif %}"
+                  data-field-key="{{ cell.key }}"
+                  data-field-label="{{ cell.label }}"
+                  data-sort-type="{{ cell.sort_type }}"
+                  data-empty="{% if cell.value == '—' %}true{% else %}false{% endif %}"
+                  data-filter-overflow-cell
+                  title="{{ cell.value }}"
+                ><span class="filter-cell-value" data-filter-cell-value>{{ cell.value }}</span></td>
+                {% endfor %}
+              </tr>
               {% endfor %}
-            </tr>
-          </thead>
-          <tbody>
-            {% for item in section.grid_rows %}
-            <tr data-cell-count="{{ item.cells|length }}" data-n6-identity-key="{{ item.identity_key }}" data-n6-asset-kind="{{ section.asset_kind }}" data-n6-for-trade-date="{{ item.for_trade_date }}" data-n6-direction-policy="{{ item.monitor_direction_policy }}">
-              <td class="filter-action-cell">
-                <div class="row-action-line">
-                  <span>{{ item.asset_kind_label }}</span>
-                  {% if item.display_code and item.display_code != "—" %}
-                  <span class="subtle">{{ item.display_code }}</span>
-                  {% endif %}
-                  {% if section.controls.add_monitor_enabled %}
-                  <button type="button" class="row-action" data-n6-add-monitor>加入监控对象</button>
-                  <button type="button" class="row-action" data-n6-add-realtime>加入实时监控范围</button>
-                  {% endif %}
-                </div>
-              </td>
-              {% for cell in item.cells %}
-              <td
-                class="{% if cell.align == 'numeric' %}numeric{% endif %}"
-                data-field-key="{{ cell.key }}"
-                data-sort-type="{{ cell.sort_type }}"
-                data-empty="{% if cell.value == '—' %}true{% else %}false{% endif %}"
-                title="{{ cell.value }}"
-              >{{ cell.value }}</td>
-              {% endfor %}
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% if not section['items'] %}
-        <div class="empty">{{ section.empty_state }}</div>
-        {% endif %}
-      </div>
+            </tbody>
+          </table>
+          {% if not section['items'] %}
+          <div class="empty">{{ section.empty_state }}</div>
+          {% endif %}
+        </div>
+      </details>
       {% endfor %}
       {% elif page.page_key == "my-monitor" %}
       <div class="text-block">
@@ -2684,6 +2819,81 @@
       });
     });
 
+    const n6FilterOverflow = (() => {
+      let scheduled = false;
+
+      const setExpanded = (button, expanded) => {
+        const cell = button.closest("[data-filter-overflow-cell]");
+        button.setAttribute("aria-expanded", expanded ? "true" : "false");
+        if (cell) cell.dataset.overflowExpanded = expanded ? "true" : "false";
+      };
+
+      const toggle = (button) => {
+        setExpanded(button, button.getAttribute("aria-expanded") !== "true");
+      };
+
+      const attachButton = (cell, valueNode, fullValue) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "filter-overflow-toggle";
+        button.dataset.fullValue = fullValue;
+        button.textContent = fullValue;
+        button.setAttribute("aria-expanded", "false");
+        button.addEventListener("click", () => toggle(button));
+        button.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          toggle(button);
+        });
+        valueNode.replaceWith(button);
+        cell.dataset.overflowExpanded = "false";
+      };
+
+      const measureCell = (cell) => {
+        const currentButton = cell.querySelector("button.filter-overflow-toggle");
+        if (currentButton?.getAttribute("aria-expanded") === "true") return;
+        const fullValue = currentButton?.dataset.fullValue
+          ?? cell.querySelector("[data-filter-cell-value]")?.textContent
+          ?? cell.textContent
+          ?? "";
+        const valueNode = document.createElement("span");
+        valueNode.className = "filter-cell-value";
+        valueNode.dataset.filterCellValue = "";
+        valueNode.textContent = fullValue;
+        if (currentButton) currentButton.replaceWith(valueNode);
+        else if (!cell.querySelector("[data-filter-cell-value]")) cell.replaceChildren(valueNode);
+        const measuredNode = cell.querySelector("[data-filter-cell-value]");
+        if (!measuredNode) return;
+        cell.dataset.overflowExpanded = "false";
+        if (measuredNode.scrollWidth > measuredNode.clientWidth) {
+          attachButton(cell, measuredNode, fullValue);
+        }
+      };
+
+      const measureAll = () => {
+        scheduled = false;
+        document.querySelectorAll("[data-filter-overflow-cell]").forEach(measureCell);
+      };
+
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        window.requestAnimationFrame?.(measureAll) || measureAll();
+      };
+
+      const init = () => {
+        schedule();
+        window.addEventListener("resize", schedule);
+        document.querySelectorAll('[data-filter-panel="advanced-table"]').forEach((panel) => {
+          panel.addEventListener("toggle", () => {
+            if (panel.open) schedule();
+          });
+        });
+      };
+
+      return { init, measureCell, schedule, toggle };
+    })();
+
     const n6FilterColumnOrder = (() => {
       const cssEscape = (value) => {
         if (window.CSS && typeof window.CSS.escape === "function") {
@@ -2728,6 +2938,7 @@
             if (cell) row.appendChild(cell);
           });
         });
+        n6FilterOverflow.schedule();
         return normalized;
       };
 
@@ -3038,7 +3249,9 @@
       };
       const init = () => {
         const mobileQuery = window.matchMedia?.("(max-width: 430px)") || { matches: false };
-        document.querySelectorAll('[data-filter-panel="period-grade"]').forEach((panel) => {
+        document.querySelectorAll(
+          '[data-filter-panel="period-grade"], [data-filter-panel="advanced-table"]',
+        ).forEach((panel) => {
           createController(panel, mobileQuery);
         });
       };
@@ -3800,6 +4013,7 @@
     })();
 
     n6FilterColumnOrder.init();
+    n6FilterOverflow.init();
     n6MessageAssetSelection.init();
     n6GradeFilterPanel.init();
     n6Voice.init();

@@ -566,6 +566,66 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
 V2_FILTER_TABLE_HIDDEN_FIELDS_BY_ASSET = {
     "stock": frozenset({"forecast_type", "forecast_score"}),
 }
+V2_FILTER_FIELD_LABELS = {
+    "for_trade_date": "生效交易日",
+    "source_trade_date": "来源交易日",
+    "asset_kind": "资产类型",
+    "identity_key": "对象标识",
+    "exchange": "交易所",
+    "display_code": "代码",
+    "display_name": "名称",
+    "industry_code": "行业代码",
+    "industry_name": "行业名称",
+    "buy_expected_return_pct": "买入预期收益率",
+    "up_secondary_expected_return_pct": "买入次级预期收益率",
+    "buy_target_price": "买入目标价",
+    "up_secondary_target_price": "买入次级目标价",
+    "up_sell_reference_period": "参考周期",
+    "down_buy_reference_period": "下行参考周期",
+    "score": "综合评分",
+    "pe_core": "核心市盈率",
+    "prev_up_str": "前次上涨说明",
+    "prev_dn_str": "前次下跌说明",
+    "level_up_score": "上行评分",
+    "level_down_score": "下行评分",
+    "period_transition_y": "年周期状态",
+    "period_transition_q": "季周期状态",
+    "period_transition_m": "月周期状态",
+    "period_transition_w": "周周期状态",
+    "period_transition_d": "日周期状态",
+    "cash_realization_rate": "现金实现率",
+    "revenue_yoy_pct": "营收同比",
+    "core_profit_yoy_pct": "核心利润同比",
+    "report_core_revenue": "报告核心营收",
+    "report_core_profit": "报告核心利润",
+    "core_profit_ttm": "核心利润TTM",
+    "core_gt_revenue_yoy": "核心利润增速高于营收",
+    "revenue_growth_streak_q": "营收连续增长季度数",
+    "core_growth_streak_q": "核心利润连续增长季度数",
+    "core_gt_revenue_streak_q": "核心利润增速高于营收连续季度数",
+    "forecast_type": "业绩预告类型",
+    "forecast_score": "业绩预告评分",
+}
+V2_FILTER_MOBILE_FIELDS = (
+    ("buy_expected_return_pct", "买入预期收益率"),
+    ("buy_target_price", "买入目标价"),
+    ("up_sell_reference_period", "参考周期"),
+)
+V2_FILTER_PERIOD_TRANSITION_FIELDS = (
+    ("年", "period_transition_y"),
+    ("季", "period_transition_q"),
+    ("月", "period_transition_m"),
+    ("周", "period_transition_w"),
+    ("日", "period_transition_d"),
+)
+V2_FILTER_PERIOD_TRANSITION_LABELS = {
+    "volume_up": "放量上涨",
+    "volume_down": "放量下跌",
+    "low_volume_up": "缩量上涨",
+    "low_volume_down": "缩量下跌",
+    "flat": "震荡",
+    "unknown": "未知",
+}
 V2_FILTER_PAGE_BY_ASSET = {
     "index": "indexes",
     "board": "boards",
@@ -4152,7 +4212,7 @@ def _app_v2_filter_columns(
         columns.append(
             {
                 "key": field,
-                "label": field,
+                "label": V2_FILTER_FIELD_LABELS.get(field, field),
                 "sort_type": sort_type,
                 "sortable": True,
                 "sort_active": field == current_sort,
@@ -4228,6 +4288,7 @@ def _app_v2_filter_display_cells(row: dict[str, Any], columns: list[dict[str, An
         cells.append(
             {
                 "key": field,
+                "label": str(column.get("label") or field),
                 "value": _app_v2_filter_display_value(
                     row.get(field),
                     field=field,
@@ -4238,6 +4299,53 @@ def _app_v2_filter_display_cells(row: dict[str, Any], columns: list[dict[str, An
             }
         )
     return cells
+
+
+def _app_v2_filter_mobile_code(row: dict[str, Any], *, identity_key: str) -> str:
+    display_code = _first_text(row, "display_code")
+    if display_code and display_code != "—":
+        return display_code
+    identity_part = identity_key.rsplit(":", 1)[-1].strip() if identity_key else ""
+    return identity_part or "—"
+
+
+def _app_v2_filter_period_transition_summary(row: dict[str, Any]) -> str:
+    values = [
+        (period_label, _first_text(row, field))
+        for period_label, field in V2_FILTER_PERIOD_TRANSITION_FIELDS
+    ]
+    if all(not value or value == "—" for _, value in values):
+        return "—"
+    return " / ".join(
+        f"{period_label}：{V2_FILTER_PERIOD_TRANSITION_LABELS.get(value, value or '—')}"
+        for period_label, value in values
+    )
+
+
+def _app_v2_filter_mobile_fields(row: dict[str, Any], columns: list[dict[str, Any]]) -> list[dict[str, str]]:
+    columns_by_key = {str(column["key"]): column for column in columns}
+    fields: list[dict[str, str]] = []
+    for field, label in V2_FILTER_MOBILE_FIELDS:
+        column = columns_by_key.get(field) or {}
+        fields.append(
+            {
+                "key": field,
+                "label": label,
+                "value": _app_v2_filter_display_value(
+                    row.get(field),
+                    field=field,
+                    sort_type=str(column.get("sort_type") or "text"),
+                ),
+            }
+        )
+    fields.append(
+        {
+            "key": "period_transition_summary",
+            "label": "周期状态",
+            "value": _app_v2_filter_period_transition_summary(row),
+        }
+    )
+    return fields
 
 
 def _app_v2_filter_missing(value: Any) -> bool:
@@ -4382,6 +4490,7 @@ def _app_v2_filter_grid_row(
         "identity_key": identity_key,
         "for_trade_date": _first_text(row, "for_trade_date"),
         "display_code": display_code,
+        "mobile_display_code": _app_v2_filter_mobile_code(row, identity_key=identity_key),
         "display_name": display_name,
         "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "v_n6_stock_condition_display_basis"),
         "readonly": True,
@@ -4393,6 +4502,7 @@ def _app_v2_filter_grid_row(
         "add_monitor_short_label": "只读",
         "investment_advice": False,
         "cells": _app_v2_filter_display_cells(row, columns),
+        "mobile_fields": _app_v2_filter_mobile_fields(row, columns),
     }
     if include_linked_stock_actions and asset_kind in V2_LINKED_STOCK_ROUTE_BY_KIND:
         parent_key = _first_text(
