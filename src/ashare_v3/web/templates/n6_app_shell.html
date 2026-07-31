@@ -91,7 +91,8 @@
     input:focus-visible,
     select:focus-visible,
     textarea:focus-visible,
-    summary:focus-visible {
+    summary:focus-visible,
+    .table-wrap:focus-visible {
       outline: 3px solid rgba(15, 118, 110, .32);
       outline-offset: 2px;
     }
@@ -463,7 +464,6 @@
       border-top: 1px solid var(--line);
       padding: 10px;
     }
-    .message-card[data-n6-mobile-hidden="true"] { display: none; }
     .message-filter-form {
       display: grid;
       gap: 10px;
@@ -745,6 +745,20 @@
       vertical-align: middle;
     }
     .table-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
+    .mobile-wrap-group {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .mobile-wrap-group .chip {
+      max-width: 100%;
+      height: auto;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .realtime-scope-cards { display: none; }
     table {
       width: 100%;
       min-width: 1080px;
@@ -1146,10 +1160,31 @@
         list-style: none;
       }
       .mobile-safety-details > summary::-webkit-details-marker { display: none; }
-      .mobile-safety-details > .safety-full-text {
+      .mobile-safety-details:not([open]) > .safety-full-text { display: none; }
+      .mobile-safety-details[open] > .safety-full-text {
         display: block;
         padding: 2px 0 7px;
       }
+      main .monitor-actions a,
+      main .monitor-actions button,
+      main .monitor-actions select,
+      main .monitor-actions input[type="search"],
+      main .task-empty-links a,
+      .filter-primary-row > a,
+      .filter-secondary-row > a,
+      .monitor-summary-group a,
+      .monitor-status-group a,
+      .n6-data-workspace .grade-filter-panel > summary,
+      [data-expected-return-filter] > label,
+      [data-expected-return-filter] > input[type="range"],
+      [data-expected-return-filter] > button {
+        min-height: 45px;
+      }
+      [data-expected-return-filter] > label {
+        display: inline-flex;
+        align-items: center;
+      }
+      .message-card[data-n6-mobile-hidden="true"] { display: none; }
       main { padding-top: 8px; gap: 8px; }
       .surface { min-width: 0; }
       .surface-head { min-height: 44px; padding: 8px 10px; }
@@ -1249,6 +1284,48 @@
         color: var(--muted);
         font-size: 12px;
       }
+      .mobile-wrap-group {
+        align-items: flex-start;
+        gap: 7px;
+      }
+      .realtime-scope-table-wrap { display: none; }
+      .realtime-scope-cards {
+        padding: 8px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 8px;
+        border-top: 1px solid var(--line);
+      }
+      .realtime-scope-card {
+        min-width: 0;
+        padding: 10px;
+        display: grid;
+        gap: 9px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+      .realtime-scope-card h4 {
+        margin: 0;
+        font-size: 15px;
+        overflow-wrap: anywhere;
+      }
+      .realtime-scope-card-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+      }
+      .realtime-scope-card-grid > div {
+        min-width: 0;
+        padding: 7px;
+        border-radius: 7px;
+        background: var(--soft);
+      }
+      .realtime-scope-card-grid span,
+      .realtime-scope-card-grid strong { display: block; }
+      .realtime-scope-card-grid span { color: var(--muted); font-size: 12px; }
+      .realtime-scope-card-grid strong { overflow-wrap: anywhere; }
+      .realtime-scope-card .row-action { justify-self: start; }
       .filter-result-card dl {
         margin: 0;
         display: grid;
@@ -1452,6 +1529,7 @@
       {% elif page.page_key == "guide" %}
       {% set user_guide = page.data.guide|default({}) %}
       <div class="guide-hero">
+        <div class="mobile-wrap-group" aria-label="当前位置"><span class="chip active" aria-current="page">新用户说明书</span></div>
         <div>
           <h3>{{ user_guide.title|default("B轨新用户操作说明书") }}</h3>
           <p class="subtle">{{ user_guide.subtitle|default("多用户、全虚拟、只读观察。") }}</p>
@@ -1513,13 +1591,19 @@
           <div class="metric"><span>资金快照时间</span><strong>{{ page.data.cash_summary.snapshot_time or "—" }}</strong></div>
           <div class="metric"><span>资金快照时效</span><strong{% if page.data.cash_summary.freshness_warning %} class="warn"{% endif %}>{{ page.data.cash_summary.freshness_display }}</strong></div>
         </div>
-        {% endif %}
         <div class="task-empty">
           <strong>账户已就绪</strong>
           <p>持仓、N6 分钟行情与止损状态在“持仓与实时估值”中查看。当前没有持仓时，行情与止损状态保持未就绪，不会回查上游或使用旧价格补算。</p>
           <p>虚拟成交不连接真实券商，也不会执行真实下单。</p>
           <div class="task-empty-links"><a href="/n6/app/portfolio">查看持仓与实时估值</a></div>
         </div>
+        {% else %}
+        <div class="task-empty" data-n6-empty-state="cash-snapshot">
+          <strong>账户状态暂不可确认</strong>
+          <p>当前账户没有可用的现金快照，暂时无法确认账户是否已就绪。</p>
+          <p>不会回查上游或使用旧资金数据补算。</p>
+        </div>
+        {% endif %}
         {% else %}
         <div class="task-empty" data-n6-empty-state="account">
           <strong>账户尚未初始化，请联系管理员</strong>
@@ -1589,7 +1673,7 @@
         {% endif %}
         <div class="monitor-actions" aria-label="消息资产类型">
           {% for tab in page.data.asset_kind_tabs %}
-          <a class="{% if tab.active %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+          <a class="{% if tab.active %}active{% endif %}"{% if tab.active %} aria-current="page"{% endif %} href="{{ tab.href }}">{{ tab.label }}</a>
           {% endfor %}
         </div>
         <form method="get" action="/n6/app/signals" class="monitor-actions">
@@ -1764,8 +1848,11 @@
           data-page-limit="{{ page.data.pagination.limit }}"
           data-next-cursor="{{ page.data.pagination.next_cursor }}"
           data-watermark="{{ page.data.pagination.watermark }}"
+          data-has-more="{% if page.data.pagination.has_more %}true{% else %}false{% endif %}"
+          data-total-count="{{ page.data.summary.today_message_count }}"
         >
           <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
+          <span data-n6-card-count-status aria-live="polite">已显示 {{ 20 if page.data.card_items|length > 20 else page.data.card_items|length }} / {{ page.data.summary.today_message_count }}</span>
           <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
           <button type="button" class="row-action" data-n6-load-more{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
           <div class="n6-skeleton" data-n6-skeleton hidden aria-label="卡片加载中"><span></span><span></span><span></span></div>
@@ -1786,7 +1873,7 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}" aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
+        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}"{% if loop.index > 20 %} data-n6-mobile-hidden="true"{% endif %} aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title" id="n6-message-title-{{ item.user_signal_projection_id }}">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
@@ -1805,7 +1892,7 @@
             <div><span>动作状态</span><strong>{{ item.action_state_label }}</strong></div>
           </div>
           <details class="message-card-details">
-            <summary>更多指标</summary>
+            <summary aria-label="展开 {{ item.display_name }} {{ item.display_code or '' }} 更多指标">更多指标</summary>
             <div class="message-card-secondary">
               {% if item.direction == "buy" %}
               <div><span>卖出目标价</span><strong>{{ item.display_values.sell_target_price }}</strong></div>
@@ -1880,7 +1967,7 @@
       {% set filter_reset = page.data.get("filter_reset") %}
       <div class="text-block filter-primary-row" aria-label="筛选中心主筛选">
         {% for sub in page.data.subinterfaces %}
-        <a class="chip{% if sub.active %} active{% endif %}" href="{{ sub.href }}">{{ sub.label }}</a>
+        <a class="chip{% if sub.active %} active{% endif %}"{% if sub.active %} aria-current="page"{% endif %} href="{{ sub.href }}">{{ sub.label }}</a>
         {% endfor %}
         {% if date_selector and date_selector.enabled %}
         <form method="get" action="{{ date_selector.base_href }}" class="monitor-actions">
@@ -2009,6 +2096,7 @@
       {% for section_key, section in page.data.sections.items() %}
       <div class="text-block" id="{{ section.anchor_id }}" data-filter-results-summary>
         <h3>{{ section.component_label }}</h3>
+        <div class="mobile-wrap-group filter-summary-chips">
         <span
           class="chip{% if section.score_comparison.regime == 'bear' %} warn{% endif %}"
           data-score-regime="{{ section.score_comparison.regime }}"
@@ -2017,6 +2105,7 @@
         <span class="chip">总记录数: {{ section.total_count }}</span>
         <span class="chip">筛选后数量: {{ section.filtered_count }}</span>
         <span class="chip">当前显示: {{ section.returned_count }}</span>
+        </div>
         {% if section.date_policy_message %}
         <span class="chip">{{ section.date_policy_message }}</span>
         {% endif %}
@@ -2197,12 +2286,14 @@
       {% elif page.page_key == "my-monitor" %}
       <div class="text-block">
         <h3>我的监控对象</h3>
+	        <div class="mobile-wrap-group monitor-summary-group">
 	        {% for item in page.data.subinterfaces %}
-	        <a class="chip{% if item.active %} active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+	        <a class="chip{% if item.active %} active{% endif %}"{% if item.active %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
 	        {% endfor %}
 	        <span class="chip">{{ page.data.notice }}</span>
 	        <span class="chip">{{ page.data.current_batch_label }}</span>
 	        <span class="chip">{{ page.data.signal_scope_notice }}</span>
+	        </div>
 	        {% if page.data.locked_reason %}
 	        <p>{{ page.data.locked_reason }}</p>
 	        {% endif %}
@@ -2229,13 +2320,15 @@
       {% set selected_section = page.data.sections[page.data.selected_section_key] %}
 	      <div class="text-block">
 	        <h3>{{ selected_section.title }}</h3>
+	        <div class="mobile-wrap-group monitor-status-group">
 	        <span class="chip">状态: {{ selected_section.status_label }}</span>
 	        <span class="chip">数量: {{ selected_section.count }}</span>
 	        <span class="chip">有效: {{ selected_section.status_counts.active }}</span>
 	        {% if page.data.monitor_status_filter != "active" %}<span class="chip">已失效: {{ selected_section.status_counts.expired }}</span>{% endif %}
 	        {% for item in page.data.status_filter_links %}
-	        <a class="chip{% if item.active %} active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+	        <a class="chip{% if item.active %} active{% endif %}"{% if item.active %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
 	        {% endfor %}
+	        </div>
 	      </div>
       {% if selected_section['items'] %}
 	      <div class="table-wrap" role="region" tabindex="0" aria-label="{{ selected_section.title }}表格，可横向滚动">
@@ -2291,7 +2384,7 @@
         <div class="metric"><span>系统默认对象</span><strong>{{ page.data.summary.default_seed_count }}</strong></div>
         <div class="metric"><span>范围管理</span><strong>{{ "已启用" if page.data.controls.write_route_enabled else "未启用" }}</strong></div>
       </div>
-      <div class="table-wrap" role="region" tabindex="0" aria-label="实时监控范围表格，可横向滚动">
+      <div class="table-wrap realtime-scope-table-wrap" role="region" tabindex="0" aria-label="实时监控范围表格，可横向滚动">
         <table>
           <thead><tr><th>类型</th><th>对象</th><th>名称</th><th>来源</th><th>状态</th><th class="sticky-action">操作</th></tr></thead>
           <tbody>
@@ -2313,6 +2406,24 @@
             {% endfor %}
           </tbody>
         </table>
+      </div>
+      <div class="realtime-scope-cards" data-n6-realtime-scope-cards aria-label="实时监控范围移动卡片">
+        {% for item in page.data['items'] %}
+        <article class="realtime-scope-card" data-n6-realtime-scope-id="{{ item.realtime_scope_id }}">
+          <h4>{{ item.display_name or "未命名对象" }} · {{ item.identity_key }}</h4>
+          <div class="realtime-scope-card-grid">
+            <div><span>类型</span><strong>{{ item.asset_kind_label }}</strong></div>
+            <div><span>对象代码</span><strong>{{ item.identity_key }}</strong></div>
+            <div><span>来源</span><strong>{{ "系统默认" if item.is_default_seed or item.source_type == "default_seed" else "用户添加" }}</strong></div>
+            <div><span>状态</span><strong>{{ item.status_label }}</strong></div>
+          </div>
+          {% if page.data.controls.delete_enabled and item.controls.delete_enabled %}
+          <button type="button" class="row-action" data-n6-remove-realtime data-scope-id="{{ item.realtime_scope_id }}">移除</button>
+          {% else %}<span class="subtle">无需操作</span>{% endif %}
+        </article>
+        {% else %}
+        <div class="empty">暂无实时监控范围</div>
+        {% endfor %}
       </div>
       {% elif page.page_key == "trade-log" %}
       <div class="text-block">
@@ -3497,7 +3608,7 @@
             ${primaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
           </div>
           <details class="message-card-details">
-            <summary>更多指标</summary>
+            <summary aria-label="展开 ${escapeHtml(item.display_name || item.display_code || "未命名对象")} ${escapeHtml(item.display_code || "")} 更多指标">更多指标</summary>
             <div class="message-card-secondary">
               ${secondaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
             </div>
@@ -3573,9 +3684,22 @@
           projectionContainer("messages")?.querySelectorAll("article[data-n6-projection-id]") || [],
         );
         const loadMoreButton = root.querySelector("[data-n6-load-more]");
+        const countStatus = root.querySelector("[data-n6-card-count-status]");
+        const updateCountStatus = () => {
+          if (!countStatus) return;
+          const summaryTotal = Number(
+            document.querySelector('[data-summary-key="today_message_count"]')?.textContent || 0,
+          );
+          const total = Math.max(summaryTotal, cards.length);
+          const visible = mobileCardsQuery.matches
+            ? cards.filter((card) => card.dataset.n6MobileHidden !== "true").length
+            : cards.length;
+          countStatus.textContent = `已显示 ${Math.min(visible, total)} / ${total}`;
+        };
         if (!mobileCardsQuery.matches) {
           cards.forEach((card) => card.removeAttribute("data-n6-mobile-hidden"));
           if (loadMoreButton) loadMoreButton.hidden = !state.serverHasMore;
+          updateCountStatus();
           return;
         }
         if (reset) state.mobileVisibleCount = mobileCardsPageSize;
@@ -3585,6 +3709,7 @@
         });
         const hasLocalMore = cards.length > state.mobileVisibleCount;
         if (loadMoreButton) loadMoreButton.hidden = !(hasLocalMore || state.serverHasMore);
+        updateCountStatus();
       };
 
       const revealMobileCardBatch = (root) => {
@@ -3693,11 +3818,11 @@
           messageCardMarkup(cardItem),
           "article[data-n6-projection-id]",
         );
-        applyMobileCardWindow(root);
         if (inserted) {
           incrementMessageSummary(signal);
           n6Voice.speak(cardItem);
         }
+        applyMobileCardWindow(root);
         return inserted ? 1 : 0;
       };
 

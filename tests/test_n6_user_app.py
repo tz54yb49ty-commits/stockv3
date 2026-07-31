@@ -16527,6 +16527,194 @@ process.stdout.write(JSON.stringify(result));
         self.assertEqual(route_methods["/n6/apple-touch-icon.svg"], {"GET"})
         self.assertFalse(any(repo.forbidden_writes.values()))
 
+    def test_b_track_mobile_css_cascade_keeps_filter_cards_visible_at_real_iphone_widths(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        style_source = source.split("<style>", 1)[1].split("</style>", 1)[0]
+        base_source, mobile_source = style_source.split("@media (max-width: 430px)", 1)
+
+        base_rule = re.search(r"\.filter-result-cards\s*\{(?P<body>[^}]*)\}", base_source)
+        mobile_rule = re.search(r"\.filter-result-cards\s*\{(?P<body>[^}]*)\}", mobile_source)
+        self.assertIsNotNone(base_rule)
+        self.assertIsNotNone(mobile_rule)
+        self.assertIn("display: none", base_rule.group("body"))
+        self.assertIn("display: grid", mobile_rule.group("body"))
+        self.assertGreater(style_source.index(mobile_rule.group(0)), style_source.index(base_rule.group(0)))
+
+        diagnostics = []
+        for width in (320, 375, 390, 430, 431):
+            match_media = width <= 430
+            computed_display = "grid" if match_media else "none"
+            advanced_open = not match_media
+            diagnostics.append(
+                {
+                    "innerWidth": width,
+                    "visualViewport.width": width,
+                    "matchMedia": match_media,
+                    "computed display": computed_display,
+                    "advanced open": advanced_open,
+                }
+            )
+        self.assertEqual([item["computed display"] for item in diagnostics[:4]], ["grid"] * 4)
+        self.assertEqual(diagnostics[4]["computed display"], "none")
+        self.assertTrue(all(not item["advanced open"] for item in diagnostics[:4]))
+        self.assertIn(
+            'window.matchMedia?.("(max-width: 430px)") || { matches: false }',
+            source,
+        )
+
+    def test_b_track_messages_ssr_and_mobile_window_are_20_20_10_without_desktop_hiding(self) -> None:
+        client, repo, _, _ = build_client()
+        template = copy.deepcopy(repo.ui_v1_signals[1])
+        rows = []
+        for offset in range(50):
+            row = copy.deepcopy(template)
+            row["user_signal_projection_id"] = 980000 + offset
+            row["user_signal_card_id"] = 990000 + offset
+            row["created_at"] = datetime(2026, 6, 5, 15, 0, tzinfo=timezone.utc) - timedelta(seconds=offset)
+            row["event_time"] = row["created_at"]
+            row["trade_date"] = "20260605"
+            for payload_key in (
+                "display_payload_json",
+                "source_payload_json",
+                "card_payload_json",
+                "trace_json",
+            ):
+                if isinstance(row.get(payload_key), dict):
+                    row[payload_key]["trade_date"] = "20260605"
+            rows.append(row)
+        repo.ui_v1_signals = rows
+        seed_effective_monitor_for_signal(repo, template)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        response = client.get("/n6/app/messages")
+        self.assertEqual(response.status_code, 200)
+        page_main = response.text.split('<details class="technical-details">', 1)[0]
+        article_tags = re.findall(r'<article class="message-card"[^>]*>', page_main)
+        self.assertEqual(len(article_tags), 50)
+        self.assertEqual(sum('data-n6-mobile-hidden="true"' in tag for tag in article_tags), 30)
+        root_tag = re.search(r'<div\s+class="monitor-message"\s+data-n6-auto-refresh="messages"[\s\S]*?>', response.text)
+        self.assertIsNotNone(root_tag)
+        self.assertIn("data-has-more=", root_tag.group(0))
+        self.assertIn("data-total-count=", root_tag.group(0))
+
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        helper = "const applyMobileCardWindow =" + source.split(
+            "const applyMobileCardWindow =", 1
+        )[1].split("const setSignalsViewState =", 1)[0]
+        harness = r"""
+class Card {
+  constructor() { this.dataset = { n6MobileHidden: "true" }; }
+  removeAttribute(name) { if (name === "data-n6-mobile-hidden") delete this.dataset.n6MobileHidden; }
+}
+const cards = Array.from({ length: 50 }, () => new Card());
+const button = { hidden: false };
+const countStatus = { textContent: "" };
+const root = {
+  dataset: { n6AutoRefresh: "messages" },
+  querySelector(selector) {
+    if (selector === "[data-n6-load-more]") return button;
+    if (selector === "[data-n6-card-count-status]") return countStatus;
+    return null;
+  },
+};
+const state = { mobileVisibleCount: 20, serverHasMore: false };
+const scopeState = () => state;
+const container = { querySelectorAll: () => cards };
+const projectionContainer = () => container;
+const mobileCardsQuery = { matches: true };
+const mobileCardsPageSize = 20;
+const document = { querySelector: () => ({ textContent: "50" }) };
+""" + helper + r"""
+const visible = () => cards.filter((card) => card.dataset.n6MobileHidden !== "true").length;
+applyMobileCardWindow(root, { reset: true });
+const initial = visible();
+const firstReveal = revealMobileCardBatch(root);
+const afterFirst = visible();
+const secondReveal = revealMobileCardBatch(root);
+const afterSecond = visible();
+const thirdReveal = revealMobileCardBatch(root);
+mobileCardsQuery.matches = false;
+applyMobileCardWindow(root);
+const desktop = visible();
+process.stdout.write(JSON.stringify({ initial, firstReveal, afterFirst, secondReveal, afterSecond, thirdReveal, desktop, status: countStatus.textContent }));
+"""
+        node_result = subprocess.run(["node", "-"], input=harness, text=True, capture_output=True, check=False)
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        state = json.loads(node_result.stdout)
+        self.assertEqual(
+            {key: state[key] for key in ("initial", "afterFirst", "afterSecond", "desktop")},
+            {"initial": 20, "afterFirst": 40, "afterSecond": 50, "desktop": 50},
+        )
+        self.assertTrue(state["firstReveal"])
+        self.assertTrue(state["secondReveal"])
+        self.assertFalse(state["thirdReveal"])
+        self.assertEqual(state["status"], "已显示 50 / 50")
+
+        short_client, short_repo, _, _ = build_client()
+        short_repo.ui_v1_signals = rows[:17]
+        seed_effective_monitor_for_signal(short_repo, template)
+        short_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        short_response = short_client.get("/n6/app/messages")
+        short_main = short_response.text.split('<details class="technical-details">', 1)[0]
+        short_tags = re.findall(r'<article class="message-card"[^>]*>', short_main)
+        self.assertEqual(len(short_tags), 17)
+        self.assertFalse(any('data-n6-mobile-hidden="true"' in tag for tag in short_tags))
+        self.assertIn("已显示 17 / 17", short_response.text)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+        self.assertFalse(any(short_repo.forbidden_writes.values()))
+
+    def test_b_track_mobile_closeout_dom_contracts_preserve_actions_and_account_truth(self) -> None:
+        client, repo, _, _ = build_client(scope_write_enabled=True, csrf_secret="scope-secret")
+        repo.cash_snapshot = {}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        account = client.get("/n6/app/account")
+        guide = client.get("/n6/app/guide")
+        filters = client.get("/n6/app/filter-center/stocks")
+        monitor = client.get("/n6/app/my-monitor/stocks")
+        realtime = client.get("/n6/app/realtime-scope")
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-n6-empty-state="cash-snapshot"', account.text)
+        self.assertIn("账户状态暂不可确认", account.text)
+        self.assertNotIn("账户已就绪", account.text)
+        self.assertIn('aria-current="page">新用户说明书', guide.text)
+        self.assertIn('class="mobile-wrap-group filter-summary-chips"', filters.text)
+        self.assertIn('class="mobile-wrap-group monitor-summary-group"', monitor.text)
+        self.assertIn('class="mobile-wrap-group monitor-status-group"', monitor.text)
+        self.assertIn('class="realtime-scope-cards"', realtime.text)
+        for label in ("类型", "对象代码", "来源", "状态"):
+            self.assertIn(f"<span>{label}</span>", realtime.text)
+        desktop_actions = re.findall(r'data-n6-remove-realtime data-scope-id="([0-9]+)"', realtime.text)
+        self.assertEqual(len(desktop_actions), len(set(desktop_actions)) * 2)
+
+        style_source = source.split("<style>", 1)[1].split("</style>", 1)[0]
+        mobile_source = style_source.split("@media (max-width: 430px)", 1)[1]
+        self.assertIn(".table-wrap:focus-visible", style_source)
+        self.assertIn('.mobile-safety-details:not([open]) > .safety-full-text { display: none; }', mobile_source)
+        self.assertIn('.mobile-safety-details[open] > .safety-full-text {', mobile_source)
+        self.assertNotIn('.mobile-safety-details > .safety-full-text {\n        display: block;', mobile_source)
+        self.assertIn(".realtime-scope-table-wrap { display: none; }", mobile_source)
+        self.assertIn(".realtime-scope-cards {", mobile_source)
+        self.assertIn("min-height: 45px", mobile_source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_expected_return_range_has_44px_mobile_touch_height(self) -> None:
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        mobile_source = source.split("@media (max-width: 430px)", 1)[1]
+        touch_rule = re.search(
+            r"(?P<selectors>[^{}]*\[data-expected-return-filter\][^{}]*)"
+            r"\{\s*min-height:\s*(?P<height>[0-9]+)px;\s*\}",
+            mobile_source,
+        )
+
+        self.assertIsNotNone(touch_rule)
+        self.assertIn(
+            '[data-expected-return-filter] > input[type="range"]',
+            touch_rule.group("selectors"),
+        )
+        self.assertGreaterEqual(int(touch_rule.group("height")), 44)
+
     def test_b_track_shared_header_mobile_nav_hint_and_single_safety_source(self) -> None:
         client, repo, _, _ = build_client()
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
@@ -21061,6 +21249,7 @@ class N6SignalSSEContractTest(unittest.TestCase):
             "          incrementMessageSummary(signal);\n"
             "          n6Voice.speak(cardItem);\n"
             "        }\n"
+            "        applyMobileCardWindow(root);\n"
             "        return inserted ? 1 : 0;"
         )
 
