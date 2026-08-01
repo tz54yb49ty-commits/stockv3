@@ -1922,6 +1922,14 @@
           </form>
         </div>
       </div>
+      <details class="technical-details message-voice-settings">
+        <summary>语音设置</summary>
+        <div class="monitor-actions" aria-label="卡片语音播报">
+          <button type="button" class="row-action" role="switch" aria-checked="false" data-n6-voice-toggle>开启语音</button>
+          <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
+          <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报当前交易日新消息</span>
+        </div>
+      </details>
       {% set message_action_state_by_label = {"已确认": "executed", "未确认": "blocked", "待确认": "eligible"} %}
       {% set message_action_state_labels = {"executed": "已确认", "blocked": "未确认", "eligible": "待确认"} %}
       {% set loaded_message_counts = namespace(executed=0, blocked=0, eligible=0) %}
@@ -2009,14 +2017,6 @@
       <div class="message-load-more">
         <button type="button" class="row-action" data-n6-load-more-for="messages"{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
       </div>
-      <details class="technical-details message-voice-settings">
-        <summary>语音设置</summary>
-        <div class="monitor-actions" aria-label="卡片语音播报">
-          <button type="button" class="row-action" role="switch" aria-checked="false" data-n6-voice-toggle>开启语音</button>
-          <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
-          <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报当前交易日新消息</span>
-        </div>
-      </details>
       <div
         class="monitor-message"
         data-n6-auto-refresh="messages"

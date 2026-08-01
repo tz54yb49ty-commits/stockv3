@@ -17008,9 +17008,9 @@ process.stdout.write(JSON.stringify({ first, second, terminal }));
         cards_position = rendered_markup.index('data-n6-message-cards')
         voice_position = rendered_markup.index('class="technical-details message-voice-settings"')
         self.assertLess(date_position, assets_position)
-        self.assertLess(assets_position, summary_position)
+        self.assertLess(assets_position, voice_position)
+        self.assertLess(voice_position, summary_position)
         self.assertLess(summary_position, cards_position)
-        self.assertLess(cards_position, voice_position)
 
         short_client, short_repo, _, _ = build_client()
         short_repo.ui_v1_signals = rows[:17]
