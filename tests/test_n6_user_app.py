@@ -18701,7 +18701,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertNotIn('data-n6-create-proposal data-source-type="manual_position"', portfolio.text)
 
     def test_b_track_signals_empty_dom_keeps_materializable_target_and_refresh_state_switch(self) -> None:
-        client, repo, _, _ = build_client()
+        client, _, _, _ = build_client()
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
         response = client.get("/n6/app/signals")
@@ -18716,7 +18716,19 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         empty_start = response.text.index('data-n6-empty-state="signals"')
         self.assertLess(table_end, empty_start)
 
+        populated_client, populated_repo, _, _ = build_client()
+        seed_effective_monitor_for_signal(populated_repo, populated_repo.ui_v1_signals[0])
+        populated_client.post(
+            "/api/n6/auth/login",
+            json={"login_name": "admin", "password": "correct-password"},
+        )
+        populated_response = populated_client.get("/n6/app/signals")
+        self.assertEqual(populated_response.status_code, 200)
+        self.assertNotIn("data-n6-signals-table hidden", populated_response.text)
+        self.assertIn('data-n6-empty-state="signals" hidden', populated_response.text)
+
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        self.assertIn(".task-empty[hidden] { display: none; }", source)
         refresh_start = source.index("const n6AutoRefresh =")
         refresh_end = source.index("return { init };", refresh_start)
         refresh_source = source[refresh_start:refresh_end]
@@ -18735,6 +18747,46 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertEqual(refresh_source.count("new EventSource("), 1)
         self.assertNotIn("setInterval", refresh_source)
         self.assertNotIn("window.location.reload", refresh_source)
+
+        state_source = source.split("const setSignalsViewState =", 1)[1].split(
+            "const currentAfterId =",
+            1,
+        )[0]
+        harness = f"""
+const title = {{ textContent: "SSR title" }};
+const table = {{ hidden: false }};
+const empty = {{ hidden: true, querySelector: () => title }};
+const document = {{
+  querySelector(selector) {{
+    if (selector === "[data-n6-signals-table]") return table;
+    if (selector === '[data-n6-empty-state="signals"]') return empty;
+    return null;
+  }},
+}};
+const setSignalsViewState ={state_source}
+setSignalsViewState(false, "动态空状态");
+const emptyState = {{ tableHidden: table.hidden, emptyHidden: empty.hidden, title: title.textContent }};
+setSignalsViewState(true);
+const populatedState = {{ tableHidden: table.hidden, emptyHidden: empty.hidden }};
+process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
+"""
+        node_result = subprocess.run(
+            ["node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
+        dynamic_state = json.loads(node_result.stdout)
+        self.assertEqual(
+            dynamic_state["emptyState"],
+            {"tableHidden": True, "emptyHidden": False, "title": "动态空状态"},
+        )
+        self.assertEqual(
+            dynamic_state["populatedState"],
+            {"tableHidden": False, "emptyHidden": True},
+        )
 
     def test_b_track_proposal_permission_copy_never_implies_executor_or_fill_enabled(self) -> None:
         disabled_client, _, _, _ = build_client()
