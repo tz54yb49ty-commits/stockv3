@@ -16434,8 +16434,8 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
             self.assertIn("display_values", item)
 
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
-        dynamic_card = "const messageCardMarkup = (item) => {" + source.split(
-            "const messageCardMarkup = (item) => {",
+        dynamic_card = "const messageActionStateByLabel =" + source.split(
+            "const messageActionStateByLabel =",
             1,
         )[1].split("const renderMessageCards =", 1)[0]
         harness = (
@@ -16597,8 +16597,18 @@ process.stdout.write(JSON.stringify(result));
         client, repo, _, _ = build_client()
         for row in repo.ui_v1_signals:
             seed_effective_monitor_for_signal(repo, row)
+        eligible_row = copy.deepcopy(repo.ui_v1_signals[0])
+        eligible_row.update(
+            {
+                "user_signal_projection_id": 103,
+                "user_signal_card_id": 203,
+                "action_state": "eligible",
+                "event_type": "ActionEligible",
+            }
+        )
+        repo.ui_v1_signals.append(eligible_row)
         no_card_row = copy.deepcopy(repo.ui_v1_signals[0])
-        no_card_row["user_signal_projection_id"] = 103
+        no_card_row["user_signal_projection_id"] = 104
         no_card_row["user_signal_card_id"] = None
         repo.ui_v1_signals.insert(0, no_card_row)
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
@@ -16608,19 +16618,92 @@ process.stdout.write(JSON.stringify(result));
 
         self.assertEqual(page_response.status_code, 200)
         self.assertEqual(api_response.status_code, 200)
-        self.assertEqual(api_response.json()["summary"]["today_message_count"], 3)
-        self.assertEqual(len(api_response.json()["card_items"]), 2)
+        self.assertEqual(api_response.json()["summary"]["today_message_count"], 4)
+        self.assertEqual(len(api_response.json()["card_items"]), 3)
+        self.assertEqual(
+            [
+                (item.get("action_state"), item["action_state_label"])
+                for item in api_response.json()["card_items"]
+            ],
+            [(None, "未确认"), (None, "已确认"), (None, "待确认")],
+        )
         rendered = page_response.text.split("<script", 1)[0]
-        self.assertEqual(rendered.count('<article class="message-card"'), 2)
+        self.assertEqual(rendered.count('<article class="message-card"'), 3)
         for summary_key, expected_value in (
-            ("today_message_count", 2),
-            ("action_executed_count", 0),
-            ("action_blocked_count", 0),
-            ("action_eligible_count", 0),
+            ("today_message_count", 3),
+            ("action_executed_count", 1),
+            ("action_blocked_count", 1),
+            ("action_eligible_count", 1),
         ):
             self.assertIn(
                 f'data-summary-key="{summary_key}">{expected_value}</strong>',
                 rendered,
+            )
+        rendered_cards = {
+            projection_id: re.search(
+                rf'<article class="message-card"[^>]+data-n6-projection-id="{projection_id}"[^>]*>.*?</article>',
+                rendered,
+                re.S,
+            ).group(0)
+            for projection_id in (101, 102, 103)
+        }
+        self.assertIn('data-n6-action-state="blocked"', rendered_cards[101])
+        self.assertIn('<span class="message-status-badge">未确认</span>', rendered_cards[101])
+        self.assertIn('data-n6-action-state="executed"', rendered_cards[102])
+        self.assertIn(
+            '<span class="message-status-badge is-confirmed">✓ 已确认</span>',
+            rendered_cards[102],
+        )
+        self.assertIn('data-n6-action-state="eligible"', rendered_cards[103])
+        self.assertIn(
+            '<span class="message-status-badge is-pending">○ 待确认</span>',
+            rendered_cards[103],
+        )
+        original_dashboard_builder = n6_user_app_module.build_app_v2_message_dashboard
+
+        def whitespace_dashboard_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            payload = original_dashboard_builder(*args, **kwargs)
+            payload["card_items"] = [dict(item) for item in payload["card_items"]]
+            payload["card_items"][0]["action_state_label"] = "  已确认  "
+            payload["card_items"][1]["action_state"] = "  eligible  "
+            payload["card_items"][1]["action_state_label"] = "  已确认  "
+            return payload
+
+        with patch.object(
+            n6_user_app_module,
+            "build_app_v2_message_dashboard",
+            side_effect=whitespace_dashboard_builder,
+        ):
+            whitespace_response = client.get("/n6/app/messages")
+        self.assertEqual(whitespace_response.status_code, 200)
+        whitespace_rendered = whitespace_response.text.split("<script", 1)[0]
+        whitespace_cards = {
+            projection_id: re.search(
+                rf'<article class="message-card"[^>]+data-n6-projection-id="{projection_id}"[^>]*>.*?</article>',
+                whitespace_rendered,
+                re.S,
+            ).group(0)
+            for projection_id in (101, 102)
+        }
+        self.assertIn('data-n6-action-state="executed"', whitespace_cards[101])
+        self.assertIn(
+            '<span class="message-status-badge is-confirmed">✓ 已确认</span>',
+            whitespace_cards[101],
+        )
+        self.assertIn('data-n6-action-state="eligible"', whitespace_cards[102])
+        self.assertIn(
+            '<span class="message-status-badge is-pending">○ 待确认</span>',
+            whitespace_cards[102],
+        )
+        for summary_key, expected_value in (
+            ("today_message_count", 3),
+            ("action_executed_count", 1),
+            ("action_blocked_count", 0),
+            ("action_eligible_count", 2),
+        ):
+            self.assertIn(
+                f'data-summary-key="{summary_key}">{expected_value}</strong>',
+                whitespace_rendered,
             )
         self.assertNotIn("data-total-count", page_response.text)
 
@@ -16639,20 +16722,54 @@ process.stdout.write(JSON.stringify(result));
             init_source,
         )
         self.assertNotIn("data-total-count", source)
-        summary_helper = "const updateLoadedMessageSummary =" + source.split(
-            "const updateLoadedMessageSummary =", 1
+        dynamic_block = "const messageActionStateByLabel =" + source.split(
+            "const messageActionStateByLabel =", 1
         )[1].split("const renderMessageCards =", 1)[0]
-        summary_harness = r"""
-const values = {
-  today_message_count: "2",
-  action_executed_count: "0",
-  action_blocked_count: "0",
-  action_eligible_count: "0",
+        dynamic_harness = r"""
+const canonicalProjectionId = (value) => String(value || "");
+const escapeHtml = (value) => String(value ?? "");
+""" + dynamic_block + r"""
+const base = {
+  display_name: "状态测试",
+  display_code: "000001",
+  asset_kind_label: "个股",
+  direction: "buy",
+  direction_label: "买入",
+  display_values: {},
 };
-const cards = [
-  { dataset: { n6ActionState: "" } },
-  { dataset: { n6ActionState: "" } },
-];
+const labelOnly = ["未确认", "已确认", "待确认"].map((action_state_label, index) =>
+  messageCardMarkup({ ...base, user_signal_projection_id: index + 1, action_state_label })
+);
+const explicit = messageCardMarkup({
+  ...base,
+  user_signal_projection_id: 4,
+  action_state: "eligible",
+  action_state_label: "已确认",
+});
+const unknown = messageCardMarkup({
+  ...base,
+  user_signal_projection_id: 5,
+  action_state_label: "其他状态",
+});
+const spacedLabel = messageCardMarkup({
+  ...base,
+  user_signal_projection_id: 6,
+  action_state_label: "  已确认  ",
+});
+const spacedExplicit = messageCardMarkup({
+  ...base,
+  user_signal_projection_id: 7,
+  action_state: "  eligible  ",
+  action_state_label: "  已确认  ",
+});
+const stateOf = (markup) => markup.match(/data-n6-action-state="([^"]*)"/)[1];
+const cards = labelOnly.map((markup) => ({ dataset: { n6ActionState: stateOf(markup) } }));
+const values = {
+  today_message_count: "3",
+  action_executed_count: "1",
+  action_blocked_count: "1",
+  action_eligible_count: "1",
+};
 const document = {
   querySelectorAll: () => cards,
   querySelector(selector) {
@@ -16660,22 +16777,66 @@ const document = {
     return key && key in values ? { set textContent(value) { values[key] = value; } } : null;
   },
 };
-""" + summary_helper + r"""
 const before = { ...values };
 updateLoadedMessageSummary();
-process.stdout.write(JSON.stringify({ before, after: values }));
+process.stdout.write(JSON.stringify({
+  labelOnly,
+  states: labelOnly.map(stateOf),
+  explicit,
+  explicitState: stateOf(explicit),
+  unknown,
+  unknownState: stateOf(unknown),
+  spacedLabel,
+  spacedLabelState: stateOf(spacedLabel),
+  spacedExplicit,
+  spacedExplicitState: stateOf(spacedExplicit),
+  before,
+  after: values,
+}));
 """
-        summary_result = subprocess.run(
-            ["node", "-"], input=summary_harness, text=True, capture_output=True, check=False
+        dynamic_result = subprocess.run(
+            ["node", "-"], input=dynamic_harness, text=True, capture_output=True, check=False
         )
         self.assertEqual(
-            summary_result.returncode,
+            dynamic_result.returncode,
             0,
-            summary_result.stdout + summary_result.stderr,
+            dynamic_result.stdout + dynamic_result.stderr,
         )
-        summary_values = json.loads(summary_result.stdout)
-        self.assertEqual(summary_values["before"], summary_values["after"])
-        self.assertEqual(summary_values["after"]["today_message_count"], "2")
+        dynamic_values = json.loads(dynamic_result.stdout)
+        self.assertEqual(dynamic_values["states"], ["blocked", "executed", "eligible"])
+        self.assertIn('<span class="message-status-badge">未确认</span>', dynamic_values["labelOnly"][0])
+        self.assertIn(
+            '<span class="message-status-badge is-confirmed">✓ 已确认</span>',
+            dynamic_values["labelOnly"][1],
+        )
+        self.assertIn(
+            '<span class="message-status-badge is-pending">○ 待确认</span>',
+            dynamic_values["labelOnly"][2],
+        )
+        self.assertEqual(dynamic_values["explicitState"], "eligible")
+        self.assertIn(
+            '<span class="message-status-badge is-pending">○ 待确认</span>',
+            dynamic_values["explicit"],
+        )
+        self.assertEqual(dynamic_values["unknownState"], "")
+        self.assertIn(
+            '<span class="message-status-badge">其他状态</span>',
+            dynamic_values["unknown"],
+        )
+        self.assertNotIn("is-pending", dynamic_values["unknown"])
+        self.assertNotIn("is-confirmed", dynamic_values["unknown"])
+        self.assertEqual(dynamic_values["spacedLabelState"], "executed")
+        self.assertIn(
+            '<span class="message-status-badge is-confirmed">✓ 已确认</span>',
+            dynamic_values["spacedLabel"],
+        )
+        self.assertEqual(dynamic_values["spacedExplicitState"], "eligible")
+        self.assertIn(
+            '<span class="message-status-badge is-pending">○ 待确认</span>',
+            dynamic_values["spacedExplicit"],
+        )
+        self.assertEqual(dynamic_values["before"], dynamic_values["after"])
+        self.assertEqual(dynamic_values["after"]["today_message_count"], "3")
         self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_messages_ssr_and_keyset_pages_are_20_20_10_without_local_hiding(self) -> None:
@@ -17383,8 +17544,8 @@ process.stdout.write(JSON.stringify({
             "const signalProposalAction = (item, assetKind) => {",
             1,
         )[1].split("const signalRowMarkup =", 1)[0]
-        message_markup = "const messageCardMarkup = (item) => {" + source.split(
-            "const messageCardMarkup = (item) => {",
+        message_markup = "const messageActionStateByLabel =" + source.split(
+            "const messageActionStateByLabel =",
             1,
         )[1].split("const renderMessageCards =", 1)[0]
         harness = (

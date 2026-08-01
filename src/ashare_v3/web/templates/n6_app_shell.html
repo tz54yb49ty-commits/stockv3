@@ -1922,13 +1922,18 @@
           </form>
         </div>
       </div>
+      {% set message_action_state_by_label = {"已确认": "executed", "未确认": "blocked", "待确认": "eligible"} %}
+      {% set message_action_state_labels = {"executed": "已确认", "blocked": "未确认", "eligible": "待确认"} %}
       {% set loaded_message_counts = namespace(executed=0, blocked=0, eligible=0) %}
       {% for item in page.data.card_items %}
-      {% if item.action_state == "executed" %}
+      {% set explicit_message_action_state = (item.action_state or "")|trim %}
+      {% set message_action_state_label_value = (item.action_state_label or "")|trim %}
+      {% set message_action_state = explicit_message_action_state or message_action_state_by_label.get(message_action_state_label_value, "") %}
+      {% if message_action_state == "executed" %}
       {% set loaded_message_counts.executed = loaded_message_counts.executed + 1 %}
-      {% elif item.action_state == "blocked" %}
+      {% elif message_action_state == "blocked" %}
       {% set loaded_message_counts.blocked = loaded_message_counts.blocked + 1 %}
-      {% elif item.action_state == "eligible" %}
+      {% elif message_action_state == "eligible" %}
       {% set loaded_message_counts.eligible = loaded_message_counts.eligible + 1 %}
       {% endif %}
       {% endfor %}
@@ -1946,7 +1951,11 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}" data-n6-action-state="{{ item.action_state }}" aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
+        {% set explicit_message_action_state = (item.action_state or "")|trim %}
+        {% set message_action_state_label_value = (item.action_state_label or "")|trim %}
+        {% set message_action_state = explicit_message_action_state or message_action_state_by_label.get(message_action_state_label_value, "") %}
+        {% set message_action_state_label = message_action_state_labels.get(message_action_state, message_action_state_label_value or "—") %}
+        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}" data-n6-action-state="{{ message_action_state }}" aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title" id="n6-message-title-{{ item.user_signal_projection_id }}">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
@@ -1962,7 +1971,7 @@
             <div><span>卖出收益率</span><strong>{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</strong></div>
             {% endif %}
             <div><span>触发价</span><strong>{{ item.display_values.trigger_price }}</strong></div>
-            <div><span>动作状态</span><strong><span class="message-status-badge{% if item.action_state == 'eligible' %} is-pending{% elif item.action_state == 'executed' %} is-confirmed{% endif %}">{% if item.action_state == "eligible" %}○ {% elif item.action_state == "executed" %}✓ {% endif %}{{ item.action_state_label }}</span></strong></div>
+            <div><span>动作状态</span><strong><span class="message-status-badge{% if message_action_state == 'eligible' %} is-pending{% elif message_action_state == 'executed' %} is-confirmed{% endif %}">{% if message_action_state == "eligible" %}○ {% elif message_action_state == "executed" %}✓ {% endif %}{{ message_action_state_label }}</span></strong></div>
           </div>
           <details class="message-card-details">
             <summary aria-label="展开 {{ item.display_name }} {{ item.display_code or '' }} 更多指标">更多指标</summary>
@@ -3694,10 +3703,33 @@
         return seen.size;
       };
 
+      const messageActionStateByLabel = Object.freeze({
+        "已确认": "executed",
+        "未确认": "blocked",
+        "待确认": "eligible",
+      });
+      const messageActionStateLabels = Object.freeze({
+        executed: "已确认",
+        blocked: "未确认",
+        eligible: "待确认",
+      });
+      const messageDisplayActionState = (item) => {
+        const explicitState = String(item?.action_state || "").trim();
+        if (explicitState) return explicitState;
+        return messageActionStateByLabel[String(item?.action_state_label || "").trim()] || "";
+      };
+      const messageDisplayActionStateLabel = (item, actionState) => (
+        messageActionStateLabels[actionState]
+        || String(item?.action_state_label || "").trim()
+        || "—"
+      );
+
       const messageCardMarkup = (item) => {
         const projectionId = canonicalProjectionId(item.user_signal_projection_id);
         if (!projectionId) return "";
         const display = item.display_values || {};
+        const actionState = messageDisplayActionState(item);
+        const actionStateLabel = messageDisplayActionStateLabel(item, actionState);
         const displayValue = (value) => (
           value === 0 || value === "0" ? "0" : value || "—"
         );
@@ -3732,19 +3764,19 @@
         primaryMetrics.push(
           ["触发价", displayValue(display.trigger_price)],
         );
-        const statusBadgeClass = item.action_state === "eligible"
+        const statusBadgeClass = actionState === "eligible"
           ? " is-pending"
-          : item.action_state === "executed"
+          : actionState === "executed"
             ? " is-confirmed"
             : "";
-        const statusBadgeIcon = item.action_state === "eligible" ? "○ " : item.action_state === "executed" ? "✓ " : "";
+        const statusBadgeIcon = actionState === "eligible" ? "○ " : actionState === "executed" ? "✓ " : "";
         secondaryMetrics.push(
           ["次级收益率", displayPercent(display.up_secondary_expected_return_pct)],
           ["动作价", displayValue(display.action_price)],
           ["触发涨跌幅", displayPercent(display.trigger_pct)],
         );
         return `
-        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}" data-n6-action-state="${escapeHtml(item.action_state || "")}" aria-labelledby="n6-message-title-${projectionId}">
+        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}" data-n6-action-state="${escapeHtml(actionState)}" aria-labelledby="n6-message-title-${projectionId}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title" id="n6-message-title-${projectionId}">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
@@ -3753,7 +3785,7 @@
           </div>
           <div class="message-card-primary">
             ${primaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
-            <div><span>动作状态</span><strong><span class="message-status-badge${statusBadgeClass}">${statusBadgeIcon}${escapeHtml(item.action_state_label || "—")}</span></strong></div>
+            <div><span>动作状态</span><strong><span class="message-status-badge${statusBadgeClass}">${statusBadgeIcon}${escapeHtml(actionStateLabel)}</span></strong></div>
           </div>
           <details class="message-card-details">
             <summary aria-label="展开 ${escapeHtml(item.display_name || item.display_code || "未命名对象")} ${escapeHtml(item.display_code || "")} 更多指标">更多指标</summary>
