@@ -18967,6 +18967,52 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             tuple(re.findall(r'<th scope="col"(?: class="[^"]+")?>([^<]+)</th>', signal_header)),
             expected_headings,
         )
+        expected_stock_alignment = (
+            "signal-text",
+            "signal-text",
+            "signal-text",
+            "signal-text",
+            "signal-text",
+            "signal-period",
+            "signal-period",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-period",
+            "signal-period",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-status",
+            "signal-status",
+            "signal-status",
+            "signal-action",
+        )
+        semantic_classes = (
+            "signal-text",
+            "signal-period",
+            "signal-number",
+            "signal-status",
+            "signal-action",
+        )
+
+        def alignment_classes(tags: list[str]) -> tuple[str, ...]:
+            return tuple(
+                next(name for name in semantic_classes if name in tag)
+                for tag in tags
+            )
+
+        stock_header_tags = re.findall(r"<th\b[^>]*>", signal_header)
+        self.assertEqual(alignment_classes(stock_header_tags), expected_stock_alignment)
+        stock_colgroup = rendered_markup.split(
+            '<colgroup class="signals-stock-columns">', 1
+        )[1].split("</colgroup>", 1)[0]
+        self.assertEqual(stock_colgroup.count("<col>"), 23)
+        self.assertIn("signals-stock-layout", rendered_markup)
         for hidden_heading in ("交易日", "时间", "类型", "股票代码"):
             self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
         stock_body = rendered_markup.split('data-n6-signals-body data-asset-kind="stock"', 1)[1].split(
@@ -18978,7 +19024,9 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             re.DOTALL,
         )
         self.assertIsNotNone(stock_row)
-        self.assertEqual(len(re.findall(r"<td(?:\s[^>]*)?>", stock_row.group(1))), 23)
+        stock_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", stock_row.group(1))
+        self.assertEqual(len(stock_cell_tags), 23)
+        self.assertEqual(alignment_classes(stock_cell_tags), expected_stock_alignment)
         self.assertNotIn("data-n6-signal-detail-toggle", stock_body)
         self.assertNotIn("data-n6-signal-detail-for", stock_body)
         self.assertNotIn("source_trace_only_not_advice", rendered_markup)
@@ -18992,8 +19040,14 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         stock_dynamic_branch = dynamic_row.split('if (assetKind === "stock") {', 1)[1].split(
             "const directionalTarget", 1
         )[0]
-        self.assertEqual(stock_dynamic_branch.count("<td"), 23)
+        stock_dynamic_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", stock_dynamic_branch)
+        self.assertEqual(len(stock_dynamic_cell_tags), 23)
+        self.assertEqual(alignment_classes(stock_dynamic_cell_tags), expected_stock_alignment)
         self.assertNotIn("data-n6-signal-detail-toggle", stock_dynamic_branch)
+        self.assertIn(
+            'value === null || value === undefined || value === "" ? fallback : value',
+            source,
+        )
         self.assertIn("const upsertSignalMarkup =", dynamic_row)
         self.assertIn("const wasExpanded =", dynamic_row)
         self.assertIn("if (detailRow) target.append(summaryRow, detailRow)", dynamic_row)
@@ -19047,16 +19101,82 @@ process.stdout.write(JSON.stringify({ expanded, collapsed }));
                 n6_user_app_module.PostgresN6UserRepository._app_v1_signal_sse_select_list
             ),
         )
+        expected_summary_headings = (
+            "时间",
+            "标的",
+            "方向 / 条件",
+            "周期",
+            "方向性目标价 / 收益率",
+            "触发价",
+            "动作价",
+            "状态 / 确认类型",
+            "操作",
+        )
+        expected_summary_alignment = (
+            "signal-text",
+            "signal-text",
+            "signal-text",
+            "signal-period",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-status",
+            "signal-action",
+        )
         for asset_response in (index_response, board_response):
             asset_markup = asset_response.text.split("<script", 1)[0]
             self.assertEqual(asset_response.status_code, 200)
-            self.assertIn(">标的</th>", asset_markup)
-            self.assertIn(">操作</th>", asset_markup)
+            asset_header = asset_markup.split('<table class="signals-table">', 1)[1].split(
+                "</thead>", 1
+            )[0]
+            asset_header_tags = re.findall(r"<th\b[^>]*>", asset_header)
+            self.assertEqual(len(asset_header_tags), 9)
+            self.assertTrue(all('scope="col"' in tag for tag in asset_header_tags))
+            self.assertEqual(
+                tuple(
+                    re.findall(
+                        r'<th scope="col"(?: class="[^"]+")?>([^<]+)</th>',
+                        asset_header,
+                    )
+                ),
+                expected_summary_headings,
+            )
+            self.assertEqual(alignment_classes(asset_header_tags), expected_summary_alignment)
+            summary_colgroup = asset_markup.split(
+                '<colgroup class="signals-summary-columns">', 1
+            )[1].split("</colgroup>", 1)[0]
+            self.assertEqual(summary_colgroup.count("<col>"), 9)
+            self.assertIn("signals-summary-layout", asset_markup)
+            asset_body = asset_markup.split("data-n6-signals-body", 1)[1].split(
+                "</tbody>", 1
+            )[0]
+            asset_row = re.search(
+                r'<tr data-n6-projection-id="[^"]+">(.*?)</tr>',
+                asset_body,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(asset_row)
+            asset_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", asset_row.group(1))
+            self.assertEqual(len(asset_cell_tags), 9)
+            self.assertEqual(alignment_classes(asset_cell_tags), expected_summary_alignment)
+            self.assertIn('colspan="9"', asset_body)
             self.assertNotIn("data-n6-create-proposal", asset_markup)
             self.assertNotIn("<th>score</th>", asset_markup)
             self.assertNotIn("<th>pe_core</th>", asset_markup)
             self.assertIn("反方向目标 / 收益", asset_markup)
             self.assertIn("projection 状态", asset_markup)
+        summary_dynamic_branch = dynamic_row.split("const directionalTarget", 1)[1].split(
+            "const restoreSignalExpansion", 1
+        )[0]
+        summary_dynamic_row = summary_dynamic_branch.split(
+            '<tr data-n6-projection-id="${projectionId}">', 1
+        )[1].split("</tr>", 1)[0]
+        summary_dynamic_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", summary_dynamic_row)
+        self.assertEqual(len(summary_dynamic_cell_tags), 9)
+        self.assertEqual(alignment_classes(summary_dynamic_cell_tags), expected_summary_alignment)
+        self.assertIn('colspan="9"', summary_dynamic_branch)
+        self.assertIn("table-layout: fixed", source)
+        self.assertIn(".signals-table-wrap .signal-number", source)
         self.assertEqual(n6_app_v1_module._signal_display_decimal("-0"), "0")
         self.assertFalse(any(repo.forbidden_writes.values()))
 
