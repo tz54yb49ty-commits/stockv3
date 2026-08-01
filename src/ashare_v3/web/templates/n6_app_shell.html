@@ -370,6 +370,13 @@
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 12px;
     }
+    .message-card-grid[data-n6-message-cards] {
+      align-items: start;
+    }
+    .message-card-grid[data-n6-message-cards] > .message-card {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 240px;
+    }
     .message-card {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -2064,9 +2071,6 @@
       </div>
       <div class="text-block">
         <h3>消息卡片</h3>
-        {% if page.data.empty_state.message %}
-        <div class="empty">{{ page.data.empty_state.message }}</div>
-        {% endif %}
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
@@ -2120,9 +2124,7 @@
           </details>
         </article>
         {% else %}
-        {% if not page.data.empty_state.message %}
-        <div class="empty">{% if page.data.summary.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
-        {% endif %}
+        <div class="empty">{% if page.data.empty_state.message %}{{ page.data.empty_state.message }}{% elif page.data.summary.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
         {% endfor %}
       </div>
       <div class="message-load-more">

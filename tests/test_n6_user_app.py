@@ -16542,13 +16542,25 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         empty_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
         empty_response = empty_client.get("/api/n6/app/v2/message-dashboard")
+        empty_page_response = empty_client.get("/n6/app/messages")
 
         self.assertEqual(empty_response.status_code, 200)
+        self.assertEqual(empty_page_response.status_code, 200)
         self.assertEqual(empty_response.json()["empty_state"]["reason"], "no_effective_monitor")
         self.assertEqual(
             empty_response.json()["empty_state"]["message"],
             "当前没有有效监控对象，请先从筛选中心加入监控",
         )
+        empty_rendered = empty_page_response.text.split("<script", 1)[0]
+        empty_card_dom = empty_rendered.split('data-n6-message-cards', 1)[1].split(
+            '<div class="message-load-more">', 1
+        )[0]
+        self.assertEqual(
+            empty_rendered.count("当前没有有效监控对象，请先从筛选中心加入监控"),
+            1,
+        )
+        self.assertEqual(empty_card_dom.count('class="empty"'), 1)
+        self.assertIn("当前没有有效监控对象，请先从筛选中心加入监控", empty_card_dom)
 
         client, repo, _, _ = build_client()
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
@@ -16587,6 +16599,7 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         card_dom = rendered.split('data-n6-message-cards', 1)[1].split(
             '<div class="message-load-more">', 1
         )[0]
+        self.assertNotIn('class="empty"', card_dom)
         self.assertNotIn("查看详情", card_dom)
         self.assertNotIn('class="message-card-foot"', card_dom)
         for projection_id in ("101", "102"):
@@ -16610,9 +16623,31 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         ):
             self.assertNotIn(hidden_audit_text, card_dom)
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        messages_grid_rule = re.search(
+            r"\.message-card-grid\[data-n6-message-cards\]\s*\{(?P<body>[^}]*)\}",
+            source,
+        )
+        messages_card_rule = re.search(
+            r"\.message-card-grid\[data-n6-message-cards\]\s*>\s*\.message-card\s*\{(?P<body>[^}]*)\}",
+            source,
+        )
+        shared_card_rule = re.search(r"\n\s*\.message-card\s*\{(?P<body>[^}]*)\}", source)
+        self.assertIsNotNone(messages_grid_rule)
+        self.assertIsNotNone(messages_card_rule)
+        self.assertIsNotNone(shared_card_rule)
+        self.assertIn("align-items: start", messages_grid_rule.group("body"))
+        self.assertIn("content-visibility: auto", messages_card_rule.group("body"))
+        self.assertIn("contain-intrinsic-size: auto 240px", messages_card_rule.group("body"))
+        self.assertNotIn("content-visibility", shared_card_rule.group("body"))
+        self.assertNotIn("contain-intrinsic-size", shared_card_rule.group("body"))
         dynamic_card = source.split("const messageCardMarkup = (item) => {", 1)[1].split(
             "const renderMessageCards =", 1
         )[0]
+        dynamic_renderer = source.split("const renderMessageCards =", 1)[1].split(
+            "const projectionContainer =", 1
+        )[0]
+        self.assertIn('empty.className = "empty"', dynamic_renderer)
+        self.assertIn("cardsTarget.replaceChildren(empty)", dynamic_renderer)
         for hidden_field in (
             "item.summary",
             "item.condition_key",
@@ -17303,7 +17338,9 @@ process.stdout.write(JSON.stringify({ first, second, terminal }));
         date_position = rendered_markup.index('id="messages-trade-date"')
         assets_position = rendered_markup.index('class="message-asset-options"')
         summary_position = rendered_markup.index('class="metric-grid message-summary-grid"')
-        cards_position = rendered_markup.index('data-n6-message-cards')
+        cards_position = rendered_markup.index(
+            '<div class="message-card-grid" data-n6-message-cards>'
+        )
         voice_position = rendered_markup.index('class="technical-details message-voice-settings"')
         self.assertLess(date_position, assets_position)
         self.assertLess(assets_position, voice_position)
