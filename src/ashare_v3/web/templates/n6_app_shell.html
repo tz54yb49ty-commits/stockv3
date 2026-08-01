@@ -65,6 +65,7 @@
     nav:focus-within { outline: none; }
     .nav-scroll-shell { min-width: 0; }
     .nav-overflow-hint { display: none; }
+    .mobile-nav { display: none; }
     a, button {
       min-height: 34px;
       border: 1px solid var(--line);
@@ -386,6 +387,7 @@
       font-size: 15px;
       font-weight: 760;
       overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
     }
     .message-card-summary {
       color: var(--ink);
@@ -437,12 +439,32 @@
       color: var(--ink);
       font-size: 17px;
       overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
     }
     .message-card-secondary strong {
       display: block;
       color: var(--ink);
       font-size: 14px;
       overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+    .message-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 12px;
+      font-weight: 760;
+      line-height: 1.4;
+    }
+    .message-status-badge.is-pending { color: #9a6700; }
+    .message-status-badge.is-confirmed { color: var(--accent); }
+    .message-load-more {
+      display: flex;
+      justify-content: center;
+      padding: 0 12px 14px;
     }
     .message-card-details {
       min-width: 0;
@@ -816,6 +838,47 @@
       white-space: nowrap;
       overflow-wrap: normal;
     }
+    .signals-table-wrap .signal-time-cell {
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      min-width: 138px;
+      background: var(--panel);
+      box-shadow: 1px 0 0 var(--line);
+    }
+    .signals-table-wrap th.signal-time-cell {
+      z-index: 3;
+      background: var(--soft);
+    }
+    .signals-table-wrap .signal-asset-cell {
+      position: sticky;
+      left: 138px;
+      z-index: 2;
+      min-width: 168px;
+      background: var(--panel);
+      box-shadow: 1px 0 0 var(--line);
+    }
+    .signals-table-wrap th.signal-asset-cell {
+      z-index: 3;
+      background: var(--soft);
+    }
+    .signal-detail-row[hidden] { display: none; }
+    .signals-table-wrap .signal-detail-row td {
+      position: static;
+      background: #fbfcfc;
+      white-space: normal;
+    }
+    .signal-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px 16px;
+    }
+    .signal-detail-grid span { color: var(--muted); }
+    .signal-operation-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
     .filter-action-cell {
       position: sticky;
       left: 0;
@@ -1134,6 +1197,48 @@
       }
       .topbar h1 { font-size: 18px; }
       .topbar .subtle { font-size: 12px; }
+      .nav-scroll-shell { display: none; }
+      .mobile-nav {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 6px;
+      }
+      .mobile-nav > a,
+      .mobile-nav > details > summary {
+        min-height: 45px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        font-weight: 720;
+        cursor: pointer;
+      }
+      .mobile-nav > a.active { background: var(--accent); color: #fff; }
+      .mobile-nav > details { position: relative; }
+      .mobile-nav-menu {
+        position: absolute;
+        z-index: 20;
+        top: calc(100% + 4px);
+        right: 0;
+        width: min(82vw, 300px);
+        display: grid;
+        gap: 6px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        padding: 8px;
+      }
+      .mobile-nav-menu a,
+      .mobile-nav-menu button {
+        width: 100%;
+        min-height: 45px;
+        justify-content: flex-start;
+      }
       nav {
         gap: 6px;
         padding-bottom: 4px;
@@ -1231,6 +1336,7 @@
       .message-summary-grid .metric span { margin-bottom: 3px; }
       .message-card-grid { padding: 8px; gap: 8px; }
       .message-card { padding: 10px; gap: 8px; }
+      .message-card-title { font-size: 16px; }
       .message-card-primary,
       .message-card-secondary {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1397,6 +1503,20 @@
           <button id="logout-button" type="button">退出登录</button>
         </nav>
         <span class="nav-overflow-hint">左右滑动查看更多</span>
+      </div>
+      <div class="mobile-nav" role="navigation" aria-label="B轨移动导航">
+        <a class="{% if page.nav.active == 'messages' %}active{% endif %}"{% if page.nav.active == 'messages' %} aria-current="page"{% endif %} href="/n6/app/messages">卡片消息</a>
+        <details>
+          <summary>桌面功能</summary>
+          <div class="mobile-nav-menu">
+            {% for item in page.nav.links %}
+            {% if item.key != "messages" %}
+            <a class="{% if page.nav.active == item.key %}active{% endif %}"{% if page.nav.active == item.key %} aria-current="page"{% endif %} href="{{ item.href }}">{{ item.label }}</a>
+            {% endif %}
+            {% endfor %}
+            <button type="button" data-mobile-logout>退出登录</button>
+          </div>
+        </details>
       </div>
     </div>
   </header>
@@ -1665,6 +1785,7 @@
       {% elif page.page_key == "signals" %}
       {% set signals_auto_refresh_enabled = page.data.available_trade_dates and page.data.selected_trade_date == page.data.available_trade_dates[0] %}
       {% set selected_signal_asset_kind = page.data.selected_asset_kind or "stock" %}
+      {% set signal_action_mark_labels = {"normal": "普通确认", "30m_volume": "30分钟放量确认", "30m_shrink": "30分钟缩量确认"} %}
       <div class="text-block">
         <h3>{{ page.data.component_label }}</h3>
         <span class="chip">消息</span>
@@ -1708,87 +1829,51 @@
         <table class="signals-table">
           <thead>
             <tr>
-              <th>交易日</th>
-              <th>时间</th>
-              <th>类型</th>
-              {% if selected_signal_asset_kind == "stock" %}
-              <th>股票代码</th>
-              <th>股票名称</th>
-              <th>行业代码</th>
-              <th>行业名称</th>
-              {% elif selected_signal_asset_kind == "board" %}
-              <th>板块代码</th>
-              <th>板块名称</th>
-              {% elif selected_signal_asset_kind == "index" %}
-              <th>指数代码</th>
-              <th>指数名称</th>
-              {% endif %}
-              <th>方向</th>
-              <th>条件</th>
-              <th>触发周期</th>
-              <th>主触发周期</th>
-              <th>买入目标价</th>
-              <th>卖出目标价</th>
-              <th>触发价</th>
-              <th>动作价</th>
-              <th>上参考周期</th>
-              <th>下参考周期</th>
-              <th>买入收益率</th>
-              <th>次级收益率</th>
-              <th>卖出收益率</th>
-              <th>触发涨跌幅</th>
-              {% if selected_signal_asset_kind == "stock" %}<th>score</th><th>pe_core</th>{% endif %}
-              <th>projection 状态</th>
-              <th>动作状态</th>
-              <th>action_mark</th>
-              {% if selected_signal_asset_kind == "stock" %}<th class="sticky-action">操作</th>{% endif %}
+              <th scope="col" class="signal-time-cell">时间</th>
+              <th scope="col" class="signal-asset-cell">标的</th>
+              <th scope="col">方向 / 条件</th>
+              <th scope="col">周期</th>
+              <th scope="col">方向性目标价 / 收益率</th>
+              <th scope="col">触发价</th>
+              <th scope="col">动作价</th>
+              <th scope="col">状态 / 确认类型</th>
+              <th scope="col" class="sticky-action">操作</th>
             </tr>
           </thead>
           <tbody data-n6-signals-body data-asset-kind="{{ selected_signal_asset_kind }}">
             {% for item in page.data['items'] %}
+            {% set signal_detail_id = "n6-signal-detail-" ~ item.user_signal_projection_id %}
             <tr data-n6-projection-id="{{ item.user_signal_projection_id }}">
-              <td>{{ item.trade_date }}</td>
-              <td>{{ item.display_values.event_time }}</td>
-              <td>{{ item.asset_kind_label }}</td>
-              {% if selected_signal_asset_kind == "stock" %}
-              <td>{{ item.display_code if item.asset_kind == "stock" else "—" }}</td>
-              <td>{{ item.display_name if item.asset_kind == "stock" else "—" }}</td>
-              <td>{{ item.industry_code if item.asset_kind == "stock" else "—" }}</td>
-              <td>{{ item.industry_name if item.asset_kind == "stock" else "—" }}</td>
-              {% elif selected_signal_asset_kind in ["board", "index"] %}
-              <td>{{ item.display_code }}</td>
-              <td>{{ item.display_name }}</td>
-              {% endif %}
-              <td>{{ item.direction_label }}</td>
-              <td>{{ item.condition_key }}</td>
-              <td>{{ item.triggered_periods }}</td>
-              <td>{{ item.primary_trigger_period }}</td>
-              <td class="numeric">{{ item.display_values.buy_target_price }}</td>
-              <td class="numeric">{{ item.display_values.sell_target_price }}</td>
+              <td class="signal-time-cell">{{ item.trade_date }}<br><span class="subtle">{{ item.display_values.event_time }}</span></td>
+              <td class="signal-asset-cell">{{ item.display_name or "—" }}<br><span class="subtle">{{ item.display_code or "—" }} · {{ item.asset_kind_label }}</span></td>
+              <td>{{ item.direction_label }}<br><span class="subtle">{{ item.condition_key }}</span></td>
+              <td>{{ item.triggered_periods|join(",") or "—" }}<br><span class="subtle">主周期 {{ item.primary_trigger_period or "—" }}</span></td>
+              <td class="numeric">{% if item.direction == "buy" %}{{ item.display_values.buy_target_price }}<br><span class="subtle">{{ item.display_values.buy_expected_return_pct }}{% if item.display_values.buy_expected_return_pct != "—" %}%{% endif %}</span>{% else %}{{ item.display_values.sell_target_price }}<br><span class="subtle">{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</span>{% endif %}</td>
               <td class="numeric">{{ item.display_values.trigger_price }}</td>
               <td class="numeric">{{ item.display_values.action_price }}</td>
-              <td>{{ item.up_ref or "—" }}</td>
-              <td>{{ item.down_ref or "—" }}</td>
-              <td class="numeric">{{ item.display_values.buy_expected_return_pct }}</td>
-              <td class="numeric">{{ item.display_values.up_secondary_expected_return_pct }}</td>
-              <td class="numeric">{{ item.display_values.sell_expected_return_pct }}</td>
-              <td class="numeric">{{ item.display_values.trigger_pct }}</td>
-              {% if selected_signal_asset_kind == "stock" %}
-              <td class="numeric">{{ item.display_values.score }}</td>
-              <td class="numeric">{{ item.display_values.pe_core }}</td>
-              {% endif %}
-              <td>{{ item.projection_message_status or "not_ready" }}</td>
-              <td>{{ item.action_state_label }}</td>
-              <td>{{ item.action_mark }}</td>
-              {% if selected_signal_asset_kind == "stock" %}
+              <td>{{ item.action_state_label }}<br><span class="subtle">{{ signal_action_mark_labels.get(item.action_mark, "未确认") }}</span></td>
               <td class="sticky-action">
-                {% if page.proposal_write_enabled and item.action_state in ["eligible", "executed"] %}
+                <div class="signal-operation-actions">
+                  <button type="button" class="row-action" data-n6-signal-detail-toggle aria-expanded="false" aria-controls="{{ signal_detail_id }}">详情</button>
+                  {% if selected_signal_asset_kind == "stock" and page.proposal_write_enabled and item.action_state in ["eligible", "executed"] %}
                 <button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="{{ item.user_signal_projection_id }}">
                   {{ "买入" if item.direction == "buy" else "卖出" }}{{ "确认" if item.action_state == "executed" else "准备" }}
                 </button>
-                {% else %}<span class="subtle">{{ "未启用" if not page.proposal_write_enabled else "—" }}</span>{% endif %}
+                  {% elif selected_signal_asset_kind == "stock" %}<span class="subtle">{{ "未启用" if not page.proposal_write_enabled else "—" }}</span>{% endif %}
+                </div>
               </td>
-              {% endif %}
+            </tr>
+            <tr id="{{ signal_detail_id }}" class="signal-detail-row" data-n6-signal-detail-for="{{ item.user_signal_projection_id }}" hidden>
+              <td colspan="9"><div class="signal-detail-grid">
+                {% if item.asset_kind == "stock" %}<div><span>行业</span><br>{{ item.industry_name or "—" }} · {{ item.industry_code or "—" }}</div>{% endif %}
+                <div><span>反方向目标 / 收益</span><br>{% if item.direction == "buy" %}{{ item.display_values.sell_target_price }} / {{ item.display_values.sell_expected_return_pct }}{% else %}{{ item.display_values.buy_target_price }} / {{ item.display_values.buy_expected_return_pct }}{% endif %}</div>
+                <div><span>次级收益率</span><br>{{ item.display_values.up_secondary_expected_return_pct }}</div>
+                <div><span>上下参考周期</span><br>{{ item.up_ref or "—" }} / {{ item.down_ref or "—" }}</div>
+                <div><span>触发涨跌幅</span><br>{{ item.display_values.trigger_pct }}</div>
+                {% if item.asset_kind == "stock" %}<div><span>score / pe_core</span><br>{{ item.display_values.score }} / {{ item.display_values.pe_core }}</div>{% endif %}
+                <div><span>projection 状态</span><br>{{ item.projection_message_status or "not_ready" }}</div>
+                <div><span>确认类型技术值</span><br>{{ item.action_mark or "—" }}</div>
+              </div></td>
             </tr>
             {% endfor %}
           </tbody>
@@ -1835,36 +1920,23 @@
               {% endfor %}
             </fieldset>
           </form>
-          <div class="monitor-actions" aria-label="卡片语音播报">
-            <button type="button" class="row-action" role="switch" aria-checked="false" data-n6-voice-toggle>开启语音</button>
-            <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
-            <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报当前交易日新消息</span>
-          </div>
-        <div
-          class="monitor-message"
-          data-n6-auto-refresh="messages"
-          data-refresh-enabled="{% if messages_auto_refresh_enabled %}true{% else %}false{% endif %}"
-          data-refresh-url="{{ page.data.api_refresh_href }}"
-          data-sse-url="{{ page.data.api_stream_href }}"
-          data-page-limit="{{ page.data.pagination.limit }}"
-          data-next-cursor="{{ page.data.pagination.next_cursor }}"
-          data-watermark="{{ page.data.pagination.watermark }}"
-          data-has-more="{% if page.data.pagination.has_more %}true{% else %}false{% endif %}"
-          data-total-count="{{ page.data.summary.today_message_count }}"
-        >
-          <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
-          <span data-n6-card-count-status aria-live="polite">已显示 {{ 20 if page.data.card_items|length > 20 else page.data.card_items|length }} / {{ page.data.summary.today_message_count }}</span>
-          <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
-          <button type="button" class="row-action" data-n6-load-more{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
-          <div class="n6-skeleton" data-n6-skeleton hidden aria-label="卡片加载中"><span></span><span></span><span></span></div>
-        </div>
         </div>
       </div>
+      {% set loaded_message_counts = namespace(executed=0, blocked=0, eligible=0) %}
+      {% for item in page.data.card_items %}
+      {% if item.action_state == "executed" %}
+      {% set loaded_message_counts.executed = loaded_message_counts.executed + 1 %}
+      {% elif item.action_state == "blocked" %}
+      {% set loaded_message_counts.blocked = loaded_message_counts.blocked + 1 %}
+      {% elif item.action_state == "eligible" %}
+      {% set loaded_message_counts.eligible = loaded_message_counts.eligible + 1 %}
+      {% endif %}
+      {% endfor %}
       <div class="metric-grid message-summary-grid">
-        <div class="metric"><span>消息数</span><strong data-summary-key="today_message_count">{{ page.data.summary.today_message_count }}</strong></div>
-        <div class="metric"><span>已确认</span><strong data-summary-key="action_executed_count">{{ page.data.summary.action_executed_count }}</strong></div>
-        <div class="metric"><span>未确认</span><strong data-summary-key="action_blocked_count">{{ page.data.summary.action_blocked_count }}</strong></div>
-        <div class="metric"><span>待确认</span><strong data-summary-key="action_eligible_count">{{ page.data.summary.action_eligible_count }}</strong></div>
+        <div class="metric"><span>已加载消息</span><strong data-summary-key="today_message_count">{{ page.data.card_items|length }}</strong></div>
+        <div class="metric"><span>已确认</span><strong data-summary-key="action_executed_count">{{ loaded_message_counts.executed }}</strong></div>
+        <div class="metric"><span>未确认</span><strong data-summary-key="action_blocked_count">{{ loaded_message_counts.blocked }}</strong></div>
+        <div class="metric"><span>待确认</span><strong data-summary-key="action_eligible_count">{{ loaded_message_counts.eligible }}</strong></div>
       </div>
       <div class="text-block">
         <h3>消息卡片</h3>
@@ -1874,7 +1946,7 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}"{% if loop.index > 20 %} data-n6-mobile-hidden="true"{% endif %} aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
+        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}" data-n6-direction="{{ item.direction }}" data-n6-action-state="{{ item.action_state }}" aria-labelledby="n6-message-title-{{ item.user_signal_projection_id }}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title" id="n6-message-title-{{ item.user_signal_projection_id }}">{{ item.display_name }}{% if item.display_code %} · {{ item.display_code }}{% endif %}</div>
@@ -1890,7 +1962,7 @@
             <div><span>卖出收益率</span><strong>{{ item.display_values.sell_expected_return_pct }}{% if item.display_values.sell_expected_return_pct != "—" %}%{% endif %}</strong></div>
             {% endif %}
             <div><span>触发价</span><strong>{{ item.display_values.trigger_price }}</strong></div>
-            <div><span>动作状态</span><strong>{{ item.action_state_label }}</strong></div>
+            <div><span>动作状态</span><strong><span class="message-status-badge{% if item.action_state == 'eligible' %} is-pending{% elif item.action_state == 'executed' %} is-confirmed{% endif %}">{% if item.action_state == "eligible" %}○ {% elif item.action_state == "executed" %}✓ {% endif %}{{ item.action_state_label }}</span></strong></div>
           </div>
           <details class="message-card-details">
             <summary aria-label="展开 {{ item.display_name }} {{ item.display_code or '' }} 更多指标">更多指标</summary>
@@ -1924,6 +1996,33 @@
         <div class="empty">{% if page.data.summary.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
         {% endif %}
         {% endfor %}
+      </div>
+      <div class="message-load-more">
+        <button type="button" class="row-action" data-n6-load-more-for="messages"{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
+      </div>
+      <details class="technical-details message-voice-settings">
+        <summary>语音设置</summary>
+        <div class="monitor-actions" aria-label="卡片语音播报">
+          <button type="button" class="row-action" role="switch" aria-checked="false" data-n6-voice-toggle>开启语音</button>
+          <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
+          <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报当前交易日新消息</span>
+        </div>
+      </details>
+      <div
+        class="monitor-message"
+        data-n6-auto-refresh="messages"
+        data-refresh-enabled="{% if messages_auto_refresh_enabled %}true{% else %}false{% endif %}"
+        data-refresh-url="{{ page.data.api_refresh_href }}"
+        data-sse-url="{{ page.data.api_stream_href }}"
+        data-page-limit="{{ page.data.pagination.limit }}"
+        data-next-cursor="{{ page.data.pagination.next_cursor }}"
+        data-watermark="{{ page.data.pagination.watermark }}"
+        data-has-more="{% if page.data.pagination.has_more %}true{% else %}false{% endif %}"
+      >
+        <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
+        <span data-n6-card-count-status aria-live="polite">已显示 {{ page.data.card_items|length }}{% if page.data.pagination.has_more %} · 还有更多{% else %} / {{ page.data.card_items|length }}{% endif %}</span>
+        <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
+        <div class="n6-skeleton" data-n6-skeleton hidden aria-label="卡片加载中"><span></span><span></span><span></span></div>
       </div>
       {% elif page.page_key == "buy-messages" %}
       <div class="text-block">
@@ -3377,7 +3476,6 @@
       };
       window.__n6ProjectionStore = sharedStore;
       const correctionIntervalMs = 15000;
-      const mobileCardsPageSize = 20;
       const mobileCardsQuery = window.matchMedia?.("(max-width: 430px)") || { matches: false };
       let eventSource = null;
       let correctionTimer = null;
@@ -3404,7 +3502,6 @@
             watermark: root.dataset.watermark || "0",
             nextCursor: root.dataset.nextCursor || "",
             serverHasMore: root.dataset.hasMore === "true",
-            mobileVisibleCount: mobileCardsPageSize,
             controllers: new Map(),
             activeRequest: null,
           });
@@ -3467,50 +3564,94 @@
         return "";
       };
 
-      const signalProposalCells = (item, assetKind) => {
+      const signalProposalAction = (item, assetKind) => {
         if (assetKind !== "stock") return "";
         const actionable = ["eligible", "executed"].includes(item.action_state);
         const enabled = document.body.dataset.n6ProposalWriteEnabled === "true";
         if (!actionable || !enabled) {
-          return `<td class="sticky-action"><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
+          return `<span class="subtle">${enabled ? "—" : "未启用"}</span>`;
         }
         const side = item.direction === "buy" ? "买入" : "卖出";
         const stage = item.action_state === "executed" ? "确认" : "准备";
-        return `<td class="sticky-action"><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
+        return `<button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button>`;
       };
+
+      const signalActionMarkLabel = (value) => ({
+        normal: "普通确认",
+        "30m_volume": "30分钟放量确认",
+        "30m_shrink": "30分钟缩量确认",
+      })[value] || "未确认";
 
       const signalRowMarkup = (item, assetKind) => {
         const projectionId = canonicalProjectionId(item.user_signal_projection_id);
         if (!projectionId) return "";
         const conditionKey = item.condition_trace?.condition_key ?? item.condition_key;
         const display = item.display_values || {};
+        const directionalTarget = item.direction === "buy" ? display.buy_target_price : display.sell_target_price;
+        const directionalReturn = item.direction === "buy" ? display.buy_expected_return_pct : display.sell_expected_return_pct;
+        const reverseTarget = item.direction === "buy" ? display.sell_target_price : display.buy_target_price;
+        const reverseReturn = item.direction === "buy" ? display.sell_expected_return_pct : display.buy_expected_return_pct;
+        const detailId = `n6-signal-detail-${projectionId}`;
         return `
           <tr data-n6-projection-id="${projectionId}">
-            <td>${escapeHtml(item.trade_date)}</td>
-            <td>${escapeHtml(display.event_time || "—")}</td>
-            <td>${escapeHtml(item.asset_kind_label)}</td>
-            ${renderAssetNameCells(item, assetKind)}
-            <td>${escapeHtml(item.direction_label)}</td>
-            <td>${escapeHtml(conditionKey)}</td>
-            <td>${escapeHtml(formatList(item.triggered_periods))}</td>
-            <td>${escapeHtml(item.primary_trigger_period || "—")}</td>
-            <td class="numeric">${escapeHtml(display.buy_target_price || "—")}</td>
-            <td class="numeric">${escapeHtml(display.sell_target_price || "—")}</td>
+            <td class="signal-time-cell">${escapeHtml(item.trade_date)}<br><span class="subtle">${escapeHtml(display.event_time || "—")}</span></td>
+            <td class="signal-asset-cell">${escapeHtml(item.display_name || "—")}<br><span class="subtle">${escapeHtml(item.display_code || "—")} · ${escapeHtml(item.asset_kind_label || "—")}</span></td>
+            <td>${escapeHtml(item.direction_label)}<br><span class="subtle">${escapeHtml(conditionKey)}</span></td>
+            <td>${escapeHtml(formatList(item.triggered_periods))}<br><span class="subtle">主周期 ${escapeHtml(item.primary_trigger_period || "—")}</span></td>
+            <td class="numeric">${escapeHtml(directionalTarget || "—")}<br><span class="subtle">${escapeHtml(directionalReturn || "—")}${directionalReturn && directionalReturn !== "—" ? "%" : ""}</span></td>
             <td class="numeric">${escapeHtml(display.trigger_price || "—")}</td>
             <td class="numeric">${escapeHtml(display.action_price || "—")}</td>
-            <td>${escapeHtml(item.up_ref || "—")}</td>
-            <td>${escapeHtml(item.down_ref || "—")}</td>
-            <td class="numeric">${escapeHtml(display.buy_expected_return_pct || "—")}</td>
-            <td class="numeric">${escapeHtml(display.up_secondary_expected_return_pct || "—")}</td>
-            <td class="numeric">${escapeHtml(display.sell_expected_return_pct || "—")}</td>
-            <td class="numeric">${escapeHtml(display.trigger_pct || "—")}</td>
-            ${item.asset_kind === "stock" ? `<td class="numeric">${escapeHtml(display.score || "—")}</td><td class="numeric">${escapeHtml(display.pe_core || "—")}</td>` : ""}
-            <td>${escapeHtml(item.projection_message_status || "not_ready")}</td>
-            <td>${escapeHtml(item.action_state_label)}</td>
-            <td>${escapeHtml(item.action_mark || "—")}</td>
-            ${signalProposalCells(item, assetKind)}
+            <td>${escapeHtml(item.action_state_label)}<br><span class="subtle">${escapeHtml(signalActionMarkLabel(item.action_mark))}</span></td>
+            <td class="sticky-action"><div class="signal-operation-actions"><button type="button" class="row-action" data-n6-signal-detail-toggle aria-expanded="false" aria-controls="${detailId}">详情</button>${signalProposalAction(item, assetKind)}</div></td>
+          </tr>
+          <tr id="${detailId}" class="signal-detail-row" data-n6-signal-detail-for="${projectionId}" hidden>
+            <td colspan="9"><div class="signal-detail-grid">
+              ${item.asset_kind === "stock" ? `<div><span>行业</span><br>${escapeHtml(item.industry_name || "—")} · ${escapeHtml(item.industry_code || "—")}</div>` : ""}
+              <div><span>反方向目标 / 收益</span><br>${escapeHtml(reverseTarget || "—")} / ${escapeHtml(reverseReturn || "—")}</div>
+              <div><span>次级收益率</span><br>${escapeHtml(display.up_secondary_expected_return_pct || "—")}</div>
+              <div><span>上下参考周期</span><br>${escapeHtml(item.up_ref || "—")} / ${escapeHtml(item.down_ref || "—")}</div>
+              <div><span>触发涨跌幅</span><br>${escapeHtml(display.trigger_pct || "—")}</div>
+              ${item.asset_kind === "stock" ? `<div><span>score / pe_core</span><br>${escapeHtml(display.score || "—")} / ${escapeHtml(display.pe_core || "—")}</div>` : ""}
+              <div><span>projection 状态</span><br>${escapeHtml(item.projection_message_status || "not_ready")}</div>
+              <div><span>确认类型技术值</span><br>${escapeHtml(item.action_mark || "—")}</div>
+            </div></td>
           </tr>
         `;
+      };
+
+      const restoreSignalExpansion = (summaryRow, detailRow, expanded) => {
+        const toggle = summaryRow?.querySelector("[data-n6-signal-detail-toggle]");
+        if (toggle) toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        if (detailRow) detailRow.hidden = !expanded;
+      };
+
+      const upsertSignalMarkup = (target, projectionId, markup, placement = "prepend") => {
+        if (!target || !projectionId || !markup) return false;
+        const existing = target.querySelector(`tr[data-n6-projection-id="${projectionId}"]`);
+        const existingDetail = target.querySelector(`tr[data-n6-signal-detail-for="${projectionId}"]`);
+        const wasExpanded = existing?.querySelector("[data-n6-signal-detail-toggle]")?.getAttribute("aria-expanded") === "true";
+        const template = document.createElement("template");
+        template.innerHTML = `<table><tbody>${markup.trim()}</tbody></table>`;
+        const rows = template.content.querySelectorAll("tr");
+        const summaryRow = rows[0];
+        const detailRow = rows[1];
+        if (!summaryRow || !detailRow) return false;
+        restoreSignalExpansion(summaryRow, detailRow, wasExpanded);
+        if (existing) {
+          existing.replaceWith(summaryRow);
+          if (existingDetail) existingDetail.replaceWith(detailRow);
+          else summaryRow.after(detailRow);
+        } else if (placement === "append") {
+          target.append(summaryRow, detailRow);
+        } else {
+          target.prepend(summaryRow, detailRow);
+        }
+        const summaries = target.querySelectorAll("tr[data-n6-projection-id]");
+        Array.from(summaries).slice(100).forEach((extra) => {
+          target.querySelector(`tr[data-n6-signal-detail-for="${extra.dataset.n6ProjectionId}"]`)?.remove();
+          extra.remove();
+        });
+        return !existing;
       };
 
       const renderSignals = (root, payload, { append = false } = {}) => {
@@ -3532,11 +3673,10 @@
         entries.forEach(({ item, projectionId }) => {
           seen.add(projectionId);
           state.signals.set(projectionId, item);
-          upsertMarkup(
+          upsertSignalMarkup(
             target,
             projectionId,
             signalRowMarkup(item, assetKind),
-            "tr[data-n6-projection-id]",
             append ? "append" : "prepend",
           );
         });
@@ -3544,6 +3684,7 @@
           target.querySelectorAll("tr[data-n6-projection-id]").forEach((node) => {
             const projectionId = canonicalProjectionId(node.dataset.n6ProjectionId || "");
             if (projectionId && !seen.has(projectionId)) {
+              target.querySelector(`tr[data-n6-signal-detail-for="${projectionId}"]`)?.remove();
               node.remove();
               state.signals.delete(projectionId);
             }
@@ -3590,15 +3731,20 @@
         }
         primaryMetrics.push(
           ["触发价", displayValue(display.trigger_price)],
-          ["动作状态", displayValue(item.action_state_label)],
         );
+        const statusBadgeClass = item.action_state === "eligible"
+          ? " is-pending"
+          : item.action_state === "executed"
+            ? " is-confirmed"
+            : "";
+        const statusBadgeIcon = item.action_state === "eligible" ? "○ " : item.action_state === "executed" ? "✓ " : "";
         secondaryMetrics.push(
           ["次级收益率", displayPercent(display.up_secondary_expected_return_pct)],
           ["动作价", displayValue(display.action_price)],
           ["触发涨跌幅", displayPercent(display.trigger_pct)],
         );
         return `
-        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}" aria-labelledby="n6-message-title-${projectionId}">
+        <article class="message-card" data-n6-projection-id="${projectionId}" data-n6-direction="${escapeHtml(item.direction || "")}" data-n6-action-state="${escapeHtml(item.action_state || "")}" aria-labelledby="n6-message-title-${projectionId}">
           <div class="message-card-head">
             <div>
               <div class="message-card-title" id="n6-message-title-${projectionId}">${escapeHtml(item.display_name)}${item.display_code ? ` · ${escapeHtml(item.display_code)}` : ""}</div>
@@ -3607,6 +3753,7 @@
           </div>
           <div class="message-card-primary">
             ${primaryMetrics.map(([label, value]) => metricMarkup(label, value)).join("")}
+            <div><span>动作状态</span><strong><span class="message-status-badge${statusBadgeClass}">${statusBadgeIcon}${escapeHtml(item.action_state_label || "—")}</span></strong></div>
           </div>
           <details class="message-card-details">
             <summary aria-label="展开 ${escapeHtml(item.display_name || item.display_code || "未命名对象")} ${escapeHtml(item.display_code || "")} 更多指标">更多指标</summary>
@@ -3629,15 +3776,31 @@
       `;
       };
 
+      const updateLoadedMessageSummary = () => {
+        const cards = Array.from(
+          document.querySelectorAll("[data-n6-message-cards] article[data-n6-projection-id]"),
+        );
+        const counts = {
+          today_message_count: cards.length,
+          action_executed_count: 0,
+          action_blocked_count: 0,
+          action_eligible_count: 0,
+          action_skipped_count: 0,
+        };
+        cards.forEach((card) => {
+          const key = `action_${card.dataset.n6ActionState || ""}_count`;
+          if (key in counts) counts[key] += 1;
+        });
+        Object.entries(counts).forEach(([key, value]) => {
+          const target = document.querySelector(`[data-summary-key="${key}"]`);
+          if (target) target.textContent = String(value);
+        });
+      };
+
       const renderMessageCards = (root, payload, { append = false } = {}) => {
         const cardsTarget = document.querySelector("[data-n6-message-cards]");
         if (!cardsTarget) return 0;
         const state = scopeState(root);
-        const summary = payload.summary || {};
-        document.querySelectorAll("[data-summary-key]").forEach((target) => {
-          const value = summary[target.dataset.summaryKey];
-          if (value !== undefined) target.textContent = value;
-        });
         const items = Array.isArray(payload.card_items) ? payload.card_items : [];
         if (!items.length && !append) {
           const message = payload.empty_state?.message || "当前有效监控对象暂无 N6 用户消息";
@@ -3646,6 +3809,7 @@
           empty.textContent = message;
           cardsTarget.replaceChildren(empty);
           state.cards.clear();
+          updateLoadedMessageSummary();
           return 0;
         }
         const seen = new Set();
@@ -3671,6 +3835,7 @@
             }
           });
         }
+        updateLoadedMessageSummary();
         return seen.size;
       };
 
@@ -3678,50 +3843,34 @@
         ? document.querySelector("[data-n6-signals-body]")
         : document.querySelector("[data-n6-message-cards]");
 
-      const applyMobileCardWindow = (root, { reset = false } = {}) => {
+      const loadMoreButtonFor = (root) => root.querySelector("[data-n6-load-more]")
+        || document.querySelector(`[data-n6-load-more-for="${root.dataset.n6AutoRefresh}"]`);
+
+      const refreshRequestLimit = (root, kind, append) => {
+        const configuredPageLimit = Number(root.dataset.pageLimit || "50");
+        const loadedMessageCount = kind === "messages"
+          ? projectionContainer(kind)?.querySelectorAll("article[data-n6-projection-id]").length || 0
+          : 0;
+        return !append && kind === "messages"
+          ? Math.min(100, Math.max(configuredPageLimit, loadedMessageCount))
+          : configuredPageLimit;
+      };
+
+      const applyMobileCardWindow = (root) => {
         if (root?.dataset.n6AutoRefresh !== "messages") return;
         const state = scopeState(root);
         const cards = Array.from(
           projectionContainer("messages")?.querySelectorAll("article[data-n6-projection-id]") || [],
         );
-        const loadMoreButton = root.querySelector("[data-n6-load-more]");
+        const loadMoreButton = loadMoreButtonFor(root);
         const countStatus = root.querySelector("[data-n6-card-count-status]");
-        const updateCountStatus = () => {
-          if (!countStatus) return;
-          const summaryTotal = Number(
-            document.querySelector('[data-summary-key="today_message_count"]')?.textContent || 0,
-          );
-          const total = Math.max(summaryTotal, cards.length);
-          const visible = mobileCardsQuery.matches
-            ? cards.filter((card) => card.dataset.n6MobileHidden !== "true").length
-            : cards.length;
-          countStatus.textContent = `已显示 ${Math.min(visible, total)} / ${total}`;
-        };
-        if (!mobileCardsQuery.matches) {
-          cards.forEach((card) => card.removeAttribute("data-n6-mobile-hidden"));
-          if (loadMoreButton) loadMoreButton.hidden = !state.serverHasMore;
-          updateCountStatus();
-          return;
+        cards.forEach((card) => card.removeAttribute("data-n6-mobile-hidden"));
+        if (loadMoreButton) loadMoreButton.hidden = !state.serverHasMore;
+        if (countStatus) {
+          countStatus.textContent = state.serverHasMore
+            ? `已显示 ${cards.length} · 还有更多`
+            : `已显示 ${cards.length} / ${cards.length}`;
         }
-        if (reset) state.mobileVisibleCount = mobileCardsPageSize;
-        cards.forEach((card, index) => {
-          if (index < state.mobileVisibleCount) card.removeAttribute("data-n6-mobile-hidden");
-          else card.dataset.n6MobileHidden = "true";
-        });
-        const hasLocalMore = cards.length > state.mobileVisibleCount;
-        if (loadMoreButton) loadMoreButton.hidden = !(hasLocalMore || state.serverHasMore);
-        updateCountStatus();
-      };
-
-      const revealMobileCardBatch = (root) => {
-        if (!mobileCardsQuery.matches || root?.dataset.n6AutoRefresh !== "messages") return false;
-        const state = scopeState(root);
-        const cardCount = projectionContainer("messages")
-          ?.querySelectorAll("article[data-n6-projection-id]").length || 0;
-        if (cardCount <= state.mobileVisibleCount) return false;
-        state.mobileVisibleCount += mobileCardsPageSize;
-        applyMobileCardWindow(root);
-        return true;
       };
 
       const setSignalsViewState = (hasItems, emptyMessage = "") => {
@@ -3770,21 +3919,6 @@
         return !existing;
       };
 
-      const incrementMessageSummary = (signal) => {
-        const increment = (key) => {
-          const target = document.querySelector(`[data-summary-key="${key}"]`);
-          if (target) target.textContent = String(Number(target.textContent || 0) + 1);
-        };
-        increment("today_message_count");
-        const keyByState = {
-          executed: "action_executed_count",
-          blocked: "action_blocked_count",
-          eligible: "action_eligible_count",
-          skipped: "action_skipped_count",
-        };
-        if (keyByState[signal.action_state]) increment(keyByState[signal.action_state]);
-      };
-
       const applySignalEvent = (root, payload, lastEventId) => {
         if (payload?.contract_version !== "n6-b-track-signal-sse-v1") return 0;
         const projectionId = canonicalProjectionId(lastEventId);
@@ -3801,11 +3935,10 @@
         if (kind === "signals") {
           const target = projectionContainer(kind);
           const assetKind = target?.dataset.assetKind || signal.asset_kind || "stock";
-          const inserted = upsertMarkup(
+          const inserted = upsertSignalMarkup(
             target,
             projectionId,
             signalRowMarkup(signal, assetKind),
-            "tr[data-n6-projection-id]",
           );
           setSignalsViewState(Boolean(target?.querySelector("tr[data-n6-projection-id]")));
           return inserted ? 1 : 0;
@@ -3819,10 +3952,8 @@
           messageCardMarkup(cardItem),
           "article[data-n6-projection-id]",
         );
-        if (inserted) {
-          incrementMessageSummary(signal);
-          n6Voice.speak(cardItem);
-        }
+        updateLoadedMessageSummary();
+        if (inserted) n6Voice.speak(cardItem);
         applyMobileCardWindow(root);
         return inserted ? 1 : 0;
       };
@@ -3846,7 +3977,7 @@
           ).map((node) => canonicalProjectionId(node.dataset.n6ProjectionId || "")).filter(Boolean))
           : new Set();
         const url = new URL(rawUrl, window.location.origin);
-        url.searchParams.set("limit", root.dataset.pageLimit || "50");
+        url.searchParams.set("limit", String(refreshRequestLimit(root, kind, append)));
         if (append) {
           if (!state.nextCursor) return;
           url.searchParams.set("cursor", state.nextCursor);
@@ -3859,7 +3990,7 @@
           return;
         }
         const button = root.querySelector("[data-n6-refresh-now]");
-        const loadMoreButton = root.querySelector("[data-n6-load-more]");
+        const loadMoreButton = loadMoreButtonFor(root);
         const startedAt = performance.now();
         root.dataset.refreshInFlight = "true";
         if (button) button.disabled = true;
@@ -3951,6 +4082,17 @@
           if (button) button.disabled = false;
           if (loadMoreButton) loadMoreButton.disabled = false;
         }
+      };
+
+      const bindLoadMoreButton = (root) => {
+        const loadMoreButton = loadMoreButtonFor(root);
+        if (!loadMoreButton) return;
+        loadMoreButton.addEventListener("click", () => {
+          void withVoiceSuppressed(() => refreshOnce(
+            root,
+            { append: true, silent: false, speakNew: false },
+          ));
+        });
       };
 
       const foregroundCurrent = (root) => (
@@ -4080,32 +4222,28 @@
       };
 
       const init = () => {
+        document.addEventListener("click", (event) => {
+          const toggle = event.target.closest?.("[data-n6-signal-detail-toggle]");
+          if (!toggle) return;
+          const detail = document.getElementById(toggle.getAttribute("aria-controls") || "");
+          if (!detail) return;
+          const expanded = toggle.getAttribute("aria-expanded") === "true";
+          toggle.setAttribute("aria-expanded", expanded ? "false" : "true");
+          detail.hidden = expanded;
+        });
         document.querySelectorAll("[data-n6-auto-refresh]").forEach((root) => {
           const button = root.querySelector("[data-n6-refresh-now]");
-          const loadMoreButton = root.querySelector("[data-n6-load-more]");
           root.dataset.refreshInFlight = "false";
           scopeState(root);
           if (root.dataset.n6AutoRefresh === "messages") {
-            applyMobileCardWindow(root, { reset: true });
+            applyMobileCardWindow(root);
+            updateLoadedMessageSummary();
           }
           if (button) button.addEventListener("click", () => withVoiceSuppressed(() => refreshOnce(
             root,
             { append: false, silent: false, speakNew: false },
           )));
-          if (loadMoreButton) {
-            loadMoreButton.addEventListener("click", () => {
-              if (revealMobileCardBatch(root)) return;
-              if (mobileCardsQuery.matches && root.dataset.n6AutoRefresh === "messages") {
-                const existingCardCount = projectionContainer("messages")
-                  ?.querySelectorAll("article[data-n6-projection-id]").length || 0;
-                scopeState(root).mobileVisibleCount = existingCardCount + mobileCardsPageSize;
-              }
-              void withVoiceSuppressed(() => refreshOnce(
-                root,
-                { append: true, silent: false, speakNew: false },
-              ));
-            });
-          }
+          bindLoadMoreButton(root);
           if (root.dataset.refreshEnabled !== "true") return;
           activeRoot = root;
           rebuildEventSource(root);
@@ -4120,7 +4258,7 @@
         window.addEventListener("pageshow", recoverLive);
         mobileCardsQuery.addEventListener?.("change", () => {
           document.querySelectorAll('[data-n6-auto-refresh="messages"]').forEach((root) => {
-            applyMobileCardWindow(root, { reset: mobileCardsQuery.matches });
+            applyMobileCardWindow(root);
           });
         });
         const activeNavItem = document.querySelector('nav[aria-label="B轨导航"] a.active');
@@ -4483,9 +4621,11 @@
     n6ScopeWrite.init();
 
 
-    document.getElementById("logout-button").addEventListener("click", async () => {
-      await fetch("/api/n6/auth/logout", { method: "POST" });
-      window.location.href = "/n6/login";
+    document.querySelectorAll("#logout-button, [data-mobile-logout]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await fetch("/api/n6/auth/logout", { method: "POST" });
+        window.location.href = "/n6/login";
+      });
     });
   </script>
 </body>

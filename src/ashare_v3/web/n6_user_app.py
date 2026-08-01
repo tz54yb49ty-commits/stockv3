@@ -263,6 +263,7 @@ N5_ALL_EVENT_TYPES = N5_STANDARD_EVENT_TYPES + N5_LEGACY_EVENT_TYPES
 N5_ACTION_DISPLAY_EVENT_TYPES = ("ActionExecuted", "ActionEligible")
 N5_MESSAGE_DEFAULT_LIMIT = 200
 N6_SIGNAL_PAGE_DEFAULT_LIMIT = 50
+N6_MESSAGE_PAGE_DEFAULT_LIMIT = 20
 N6_SIGNAL_PAGE_MAX_LIMIT = 100
 N6_SIGNAL_SSE_BATCH_LIMIT = 100
 N6_SIGNAL_SSE_DB_READ_INTERVAL_SECONDS = 2.0
@@ -10171,6 +10172,8 @@ def create_app(
 
     async def app_v2_message_context(
         request: Request,
+        *,
+        default_limit: int = N6_SIGNAL_PAGE_DEFAULT_LIMIT,
     ) -> (
         tuple[
             AuthSession,
@@ -10186,7 +10189,7 @@ def create_app(
         filters = app_v2_message_filters_from_request(request)
         page_limit = ui_v1_limit_from_request(
             request,
-            N6_SIGNAL_PAGE_DEFAULT_LIMIT,
+            default_limit,
             max_limit=N6_SIGNAL_PAGE_MAX_LIMIT,
         )
         try:
@@ -10259,7 +10262,10 @@ def create_app(
 
     @app.get("/api/n6/app/v2/message-dashboard")
     async def app_v2_message_dashboard(request: Request) -> Response:
-        context = await app_v2_message_context(request)
+        context = await app_v2_message_context(
+            request,
+            default_limit=N6_MESSAGE_PAGE_DEFAULT_LIMIT,
+        )
         if isinstance(context, JSONResponse):
             return context
         session, principal, rows, scope_metadata, filters, pagination = context
@@ -11882,7 +11888,7 @@ def create_app(
             page_limit = max(
                 1,
                 min(
-                    int((app_filters or {}).get("page_limit") or N6_SIGNAL_PAGE_DEFAULT_LIMIT),
+                    int((app_filters or {}).get("page_limit") or N6_MESSAGE_PAGE_DEFAULT_LIMIT),
                     N6_SIGNAL_PAGE_MAX_LIMIT,
                 ),
             )
@@ -12120,7 +12126,7 @@ def create_app(
             app_filters = dict(app_filters or {})
             app_filters["page_limit"] = ui_v1_limit_from_request(
                 request,
-                N6_SIGNAL_PAGE_DEFAULT_LIMIT,
+                N6_MESSAGE_PAGE_DEFAULT_LIMIT if page_key == "messages" else N6_SIGNAL_PAGE_DEFAULT_LIMIT,
                 max_limit=N6_SIGNAL_PAGE_MAX_LIMIT,
             )
         app_show_all = query_param_enabled(request, "show_all") if is_filter_center_page else False

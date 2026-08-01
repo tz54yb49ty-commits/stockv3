@@ -3042,6 +3042,21 @@ class FakeN6UserRepository:
             user_id=user_id,
             filters=filters,
         )
+        before_created_at = filters.get("before_created_at")
+        before_id = filters.get("before_id")
+        if isinstance(before_created_at, datetime) and before_id is not None:
+            rows = [
+                row
+                for row in rows
+                if isinstance(row.get("created_at"), datetime)
+                and (
+                    row["created_at"] < before_created_at
+                    or (
+                        row["created_at"] == before_created_at
+                        and int(row.get("user_signal_projection_id") or 0) < int(before_id)
+                    )
+                )
+            ]
         return rows[:limit]
 
     def fetch_app_signal_events(
@@ -15116,7 +15131,7 @@ class N6UserAppTest(unittest.TestCase):
             source,
         )
         dynamic_cells = source.split(
-            "const signalProposalCells = (item, assetKind) => {", 1
+            "const signalProposalAction = (item, assetKind) => {", 1
         )[1].split("const signalRowMarkup = (item, assetKind) => {", 1)[0]
         self.assertIn(
             '["eligible", "executed"].includes(item.action_state)',
@@ -15959,10 +15974,8 @@ class N6UserAppTest(unittest.TestCase):
             voice_source,
         )
         self.assertIn(
-            "if (inserted) {\n"
-            "          incrementMessageSummary(signal);\n"
-            "          n6Voice.speak(cardItem);\n"
-            "        }",
+            "updateLoadedMessageSummary();\n"
+            "        if (inserted) n6Voice.speak(cardItem);",
             sse_apply_source,
         )
         self.assertEqual(sse_apply_source.count("n6Voice.speak(cardItem)"), 1)
@@ -16254,13 +16267,14 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         self.assertEqual(detail_response.json()["signal"]["user_signal_projection_id"], "101")
         self.assertIn("我的监控消息总览", page_response.text)
         self.assertIn("投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped", page_response.text)
-        self.assertIn("消息数", page_response.text)
+        self.assertIn("已加载消息", page_response.text)
         self.assertIn("已确认", page_response.text)
         self.assertIn("未确认", page_response.text)
         self.assertIn("待确认", page_response.text)
+        rendered = page_response.text.split("<script", 1)[0]
         self.assertNotIn("当前有效监控交易日", page_response.text)
         self.assertNotIn("条件来源日", page_response.text)
-        self.assertNotIn("projection 状态", page_response.text)
+        self.assertNotIn("projection 状态", rendered)
         self.assertNotIn("消息分组", page_response.text)
         self.assertIn("消息卡片", page_response.text)
         self.assertIn('class="message-card-grid"', page_response.text)
@@ -16272,8 +16286,9 @@ assert.strictEqual(statusNode.textContent, "语音已关闭");
         self.assertNotIn("审计信息请在详情查看", page_response.text)
         self.assertNotIn("消息 preview", page_response.text)
         self.assertNotIn("/api/n6/ui/v1/message-dashboard", page_response.text)
-        rendered = page_response.text.split("<script", 1)[0]
-        card_dom = rendered.split('data-n6-message-cards', 1)[1]
+        card_dom = rendered.split('data-n6-message-cards', 1)[1].split(
+            '<div class="message-load-more">', 1
+        )[0]
         self.assertNotIn("查看详情", card_dom)
         self.assertNotIn('class="message-card-foot"', card_dom)
         for projection_id in ("101", "102"):
@@ -16500,10 +16515,20 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn('rel="icon" href="/n6/favicon.svg"', page_response.text)
         self.assertIn('rel="apple-touch-icon" href="/n6/apple-touch-icon.svg"', page_response.text)
         self.assertIn('<nav aria-label="B轨导航">', page_response.text)
-        self.assertIn('const mobileCardsPageSize = 20', source)
+        self.assertIn('class="mobile-nav" role="navigation" aria-label="B轨移动导航"', page_response.text)
+        self.assertIn("桌面功能", page_response.text)
+        self.assertIn("语音设置", page_response.text)
         self.assertIn('window.matchMedia?.("(max-width: 430px)")', source)
-        self.assertIn("data-n6-mobile-hidden", source)
-        self.assertIn("revealMobileCardBatch(root)", source)
+        self.assertNotIn("revealMobileCardBatch(root)", source)
+        self.assertIn('data-n6-load-more-for="messages"', source)
+        self.assertIn("loadMoreButtonFor(root)", source)
+        refresh_root = re.search(
+            r'<div\s+class="monitor-message"(?=[^>]*data-n6-auto-refresh="messages")[^>]*>',
+            page_response.text,
+            re.S,
+        )
+        self.assertIsNotNone(refresh_root)
+        self.assertEqual(refresh_root.group(0).count("data-has-more="), 1)
         self.assertIn("state.serverHasMore", source)
         self.assertIn("state.nextCursor", source)
         self.assertIn("state.watermark", source)
@@ -16517,7 +16542,13 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr))", source)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", source)
         self.assertIn("min-height: 44px", source)
+        self.assertIn(".message-card-title { font-size: 16px; }", source)
+        self.assertIn(
+            ".mobile-nav-menu a,\n      .mobile-nav-menu button {\n        width: 100%;\n        min-height: 45px;",
+            source,
+        )
         self.assertEqual(n6_user_app_module.N6_SIGNAL_PAGE_DEFAULT_LIMIT, 50)
+        self.assertEqual(n6_user_app_module.N6_MESSAGE_PAGE_DEFAULT_LIMIT, 20)
         self.assertEqual(n6_user_app_module.N6_SIGNAL_PAGE_MAX_LIMIT, 100)
         route_methods = {
             getattr(route, "path", ""): getattr(route, "methods", set())
@@ -16562,7 +16593,92 @@ process.stdout.write(JSON.stringify(result));
             source,
         )
 
-    def test_b_track_messages_ssr_and_mobile_window_are_20_20_10_without_desktop_hiding(self) -> None:
+    def test_b_track_messages_init_recounts_only_rows_with_rendered_cards(self) -> None:
+        client, repo, _, _ = build_client()
+        for row in repo.ui_v1_signals:
+            seed_effective_monitor_for_signal(repo, row)
+        no_card_row = copy.deepcopy(repo.ui_v1_signals[0])
+        no_card_row["user_signal_projection_id"] = 103
+        no_card_row["user_signal_card_id"] = None
+        repo.ui_v1_signals.insert(0, no_card_row)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        page_response = client.get("/n6/app/messages")
+        api_response = client.get("/api/n6/app/v2/message-dashboard")
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(api_response.json()["summary"]["today_message_count"], 3)
+        self.assertEqual(len(api_response.json()["card_items"]), 2)
+        rendered = page_response.text.split("<script", 1)[0]
+        self.assertEqual(rendered.count('<article class="message-card"'), 2)
+        for summary_key, expected_value in (
+            ("today_message_count", 2),
+            ("action_executed_count", 0),
+            ("action_blocked_count", 0),
+            ("action_eligible_count", 0),
+        ):
+            self.assertIn(
+                f'data-summary-key="{summary_key}">{expected_value}</strong>',
+                rendered,
+            )
+        self.assertNotIn("data-total-count", page_response.text)
+
+        source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
+        auto_refresh_source = source.split("const n6AutoRefresh = (() => {", 1)[1].split(
+            "const n6ScopeWrite = (() => {", 1
+        )[0]
+        init_source = auto_refresh_source.split("const init = () => {", 1)[1].split(
+            "return { init };", 1
+        )[0]
+        self.assertIn(
+            'if (root.dataset.n6AutoRefresh === "messages") {\n'
+            "            applyMobileCardWindow(root);\n"
+            "            updateLoadedMessageSummary();\n"
+            "          }",
+            init_source,
+        )
+        self.assertNotIn("data-total-count", source)
+        summary_helper = "const updateLoadedMessageSummary =" + source.split(
+            "const updateLoadedMessageSummary =", 1
+        )[1].split("const renderMessageCards =", 1)[0]
+        summary_harness = r"""
+const values = {
+  today_message_count: "2",
+  action_executed_count: "0",
+  action_blocked_count: "0",
+  action_eligible_count: "0",
+};
+const cards = [
+  { dataset: { n6ActionState: "" } },
+  { dataset: { n6ActionState: "" } },
+];
+const document = {
+  querySelectorAll: () => cards,
+  querySelector(selector) {
+    const key = selector.match(/data-summary-key="([^"]+)"/)?.[1];
+    return key && key in values ? { set textContent(value) { values[key] = value; } } : null;
+  },
+};
+""" + summary_helper + r"""
+const before = { ...values };
+updateLoadedMessageSummary();
+process.stdout.write(JSON.stringify({ before, after: values }));
+"""
+        summary_result = subprocess.run(
+            ["node", "-"], input=summary_harness, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(
+            summary_result.returncode,
+            0,
+            summary_result.stdout + summary_result.stderr,
+        )
+        summary_values = json.loads(summary_result.stdout)
+        self.assertEqual(summary_values["before"], summary_values["after"])
+        self.assertEqual(summary_values["after"]["today_message_count"], "2")
+        self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_b_track_messages_ssr_and_keyset_pages_are_20_20_10_without_local_hiding(self) -> None:
         client, repo, _, _ = build_client()
         template = copy.deepcopy(repo.ui_v1_signals[1])
         rows = []
@@ -16588,78 +16704,164 @@ process.stdout.write(JSON.stringify(result));
 
         response = client.get("/n6/app/messages")
         self.assertEqual(response.status_code, 200)
-        page_main = response.text.split('<details class="technical-details">', 1)[0]
-        article_tags = re.findall(r'<article class="message-card"[^>]*>', page_main)
-        self.assertEqual(len(article_tags), 50)
-        self.assertEqual(sum('data-n6-mobile-hidden="true"' in tag for tag in article_tags), 30)
+        rendered_markup = response.text.split("<script", 1)[0]
+        article_tags = re.findall(r'<article class="message-card"[^>]*>', rendered_markup)
+        self.assertEqual(len(article_tags), 20)
+        self.assertFalse(any('data-n6-mobile-hidden="true"' in tag for tag in article_tags))
         root_tag = re.search(r'<div\s+class="monitor-message"\s+data-n6-auto-refresh="messages"[\s\S]*?>', response.text)
         self.assertIsNotNone(root_tag)
-        self.assertIn("data-has-more=", root_tag.group(0))
-        self.assertIn("data-total-count=", root_tag.group(0))
+        self.assertIn('data-page-limit="20"', root_tag.group(0))
+        self.assertIn('data-has-more="true"', root_tag.group(0))
+        self.assertNotIn("data-total-count=", root_tag.group(0))
+        self.assertIn("已显示 20 · 还有更多", response.text)
+        self.assertEqual(response.text.count('data-n6-load-more-for="messages"'), 1)
+
+        first = client.get("/api/n6/app/v2/message-dashboard").json()
+        second = client.get(
+            f"/api/n6/app/v2/message-dashboard?cursor={first['pagination']['next_cursor']}"
+        ).json()
+        third = client.get(
+            f"/api/n6/app/v2/message-dashboard?cursor={second['pagination']['next_cursor']}"
+        ).json()
+        self.assertEqual([len(first["card_items"]), len(second["card_items"]), len(third["card_items"])], [20, 20, 10])
+        self.assertTrue(first["pagination"]["has_more"])
+        self.assertTrue(second["pagination"]["has_more"])
+        self.assertFalse(third["pagination"]["has_more"])
 
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
-        helper = "const applyMobileCardWindow =" + source.split(
-            "const applyMobileCardWindow =", 1
+        window_helper = "const loadMoreButtonFor =" + source.split(
+            "const loadMoreButtonFor =", 1
         )[1].split("const setSignalsViewState =", 1)[0]
         harness = r"""
 class Card {
-  constructor() { this.dataset = { n6MobileHidden: "true" }; }
-  removeAttribute(name) { if (name === "data-n6-mobile-hidden") delete this.dataset.n6MobileHidden; }
+  constructor(actionState) { this.dataset = { n6ActionState: actionState }; }
+  removeAttribute() {}
 }
-const cards = Array.from({ length: 50 }, () => new Card());
-const button = { hidden: false };
+const cards = [
+  ...Array.from({ length: 20 }, () => new Card("eligible")),
+  ...Array.from({ length: 20 }, () => new Card("executed")),
+];
+const externalButton = { hidden: true };
 const countStatus = { textContent: "" };
 const root = {
   dataset: { n6AutoRefresh: "messages" },
   querySelector(selector) {
-    if (selector === "[data-n6-load-more]") return button;
     if (selector === "[data-n6-card-count-status]") return countStatus;
     return null;
   },
 };
-const state = { mobileVisibleCount: 20, serverHasMore: false };
+const state = { serverHasMore: true };
 const scopeState = () => state;
-const container = { querySelectorAll: () => cards };
-const projectionContainer = () => container;
-const mobileCardsQuery = { matches: true };
-const mobileCardsPageSize = 20;
-const document = { querySelector: () => ({ textContent: "50" }) };
-""" + helper + r"""
-const visible = () => cards.filter((card) => card.dataset.n6MobileHidden !== "true").length;
-applyMobileCardWindow(root, { reset: true });
-const initial = visible();
-const firstReveal = revealMobileCardBatch(root);
-const afterFirst = visible();
-const secondReveal = revealMobileCardBatch(root);
-const afterSecond = visible();
-const thirdReveal = revealMobileCardBatch(root);
-mobileCardsQuery.matches = false;
+const projectionContainer = () => ({ querySelectorAll: () => cards });
+const document = {
+  querySelector(selector) {
+    if (selector === '[data-n6-load-more-for="messages"]') return externalButton;
+    return null;
+  },
+};
+""" + window_helper + r"""
 applyMobileCardWindow(root);
-const desktop = visible();
-process.stdout.write(JSON.stringify({ initial, firstReveal, afterFirst, secondReveal, afterSecond, thirdReveal, desktop, status: countStatus.textContent }));
+const more = { status: countStatus.textContent, hidden: externalButton.hidden };
+root.dataset.pageLimit = "20";
+const correctionLimit = refreshRequestLimit(root, "messages", false);
+const appendLimit = refreshRequestLimit(root, "messages", true);
+state.serverHasMore = false;
+applyMobileCardWindow(root);
+const terminal = { status: countStatus.textContent, hidden: externalButton.hidden };
+process.stdout.write(JSON.stringify({ more, terminal, correctionLimit, appendLimit }));
 """
         node_result = subprocess.run(["node", "-"], input=harness, text=True, capture_output=True, check=False)
         self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
-        state = json.loads(node_result.stdout)
-        self.assertEqual(
-            {key: state[key] for key in ("initial", "afterFirst", "afterSecond", "desktop")},
-            {"initial": 20, "afterFirst": 40, "afterSecond": 50, "desktop": 50},
+        window_state = json.loads(node_result.stdout)
+        self.assertEqual(window_state["more"], {"status": "已显示 40 · 还有更多", "hidden": False})
+        self.assertEqual(window_state["terminal"], {"status": "已显示 40 / 40", "hidden": True})
+        self.assertEqual(window_state["correctionLimit"], 40)
+        self.assertEqual(window_state["appendLimit"], 20)
+
+        bind_helper = "const bindLoadMoreButton =" + source.split(
+            "const bindLoadMoreButton =", 1
+        )[1].split("const foregroundCurrent =", 1)[0]
+        bind_harness = r"""
+let clickHandler = null;
+let receivedOptions = null;
+const button = { addEventListener(type, handler) { if (type === "click") clickHandler = handler; } };
+const root = { dataset: { n6AutoRefresh: "messages" } };
+const loadMoreButtonFor = () => button;
+const refreshOnce = (_root, options) => { receivedOptions = options; };
+const withVoiceSuppressed = (operation) => operation();
+""" + bind_helper + r"""
+bindLoadMoreButton(root);
+clickHandler();
+process.stdout.write(JSON.stringify(receivedOptions));
+"""
+        bind_result = subprocess.run(
+            ["node", "-"], input=bind_harness, text=True, capture_output=True, check=False
         )
-        self.assertTrue(state["firstReveal"])
-        self.assertTrue(state["secondReveal"])
-        self.assertFalse(state["thirdReveal"])
-        self.assertEqual(state["status"], "已显示 50 / 50")
+        self.assertEqual(bind_result.returncode, 0, bind_result.stdout + bind_result.stderr)
+        self.assertEqual(
+            json.loads(bind_result.stdout),
+            {"append": True, "silent": False, "speakNew": False},
+        )
+        summary_helper = "const updateLoadedMessageSummary =" + source.split(
+            "const updateLoadedMessageSummary =", 1
+        )[1].split("const renderMessageCards =", 1)[0]
+        summary_harness = r"""
+let cards = [];
+let values = {};
+const document = {
+  querySelectorAll: () => cards,
+  querySelector(selector) {
+    const key = selector.match(/data-summary-key="([^"]+)"/)?.[1];
+    return key ? { set textContent(value) { values[key] = value; } } : null;
+  },
+};
+""" + summary_helper + r"""
+const snapshot = (length) => {
+  cards = Array.from({ length }, (_, index) => ({
+    dataset: { n6ActionState: index % 2 === 0 ? "eligible" : "executed" },
+  }));
+  values = {};
+  updateLoadedMessageSummary();
+  return { ...values };
+};
+const first = snapshot(20);
+const second = snapshot(40);
+const terminal = snapshot(50);
+process.stdout.write(JSON.stringify({ first, second, terminal }));
+"""
+        summary_result = subprocess.run(
+            ["node", "-"], input=summary_harness, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(summary_result.returncode, 0, summary_result.stdout + summary_result.stderr)
+        summary_states = json.loads(summary_result.stdout)
+        self.assertEqual(summary_states["first"]["today_message_count"], "20")
+        self.assertEqual(summary_states["second"]["today_message_count"], "40")
+        self.assertEqual(summary_states["terminal"]["today_message_count"], "50")
+        self.assertIn("const loadedMessageCount = kind === \"messages\"", source)
+        self.assertIn("Math.min(100, Math.max(configuredPageLimit, loadedMessageCount))", source)
+        self.assertIn('document.querySelector(`[data-n6-load-more-for="${root.dataset.n6AutoRefresh}"]`)', source)
+
+        date_position = rendered_markup.index('id="messages-trade-date"')
+        assets_position = rendered_markup.index('class="message-asset-options"')
+        summary_position = rendered_markup.index('class="metric-grid message-summary-grid"')
+        cards_position = rendered_markup.index('data-n6-message-cards')
+        voice_position = rendered_markup.index('class="technical-details message-voice-settings"')
+        self.assertLess(date_position, assets_position)
+        self.assertLess(assets_position, summary_position)
+        self.assertLess(summary_position, cards_position)
+        self.assertLess(cards_position, voice_position)
 
         short_client, short_repo, _, _ = build_client()
         short_repo.ui_v1_signals = rows[:17]
         seed_effective_monitor_for_signal(short_repo, template)
         short_client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
         short_response = short_client.get("/n6/app/messages")
-        short_main = short_response.text.split('<details class="technical-details">', 1)[0]
-        short_tags = re.findall(r'<article class="message-card"[^>]*>', short_main)
+        short_markup = short_response.text.split("<script", 1)[0]
+        short_tags = re.findall(r'<article class="message-card"[^>]*>', short_markup)
         self.assertEqual(len(short_tags), 17)
         self.assertFalse(any('data-n6-mobile-hidden="true"' in tag for tag in short_tags))
         self.assertIn("已显示 17 / 17", short_response.text)
+        self.assertIn('data-n6-load-more-for="messages" hidden', short_response.text)
         self.assertFalse(any(repo.forbidden_writes.values()))
         self.assertFalse(any(short_repo.forbidden_writes.values()))
 
@@ -17177,8 +17379,8 @@ process.stdout.write(JSON.stringify({
 
     def test_b_track_dynamic_signal_and_message_markup_keeps_accessibility_parity(self) -> None:
         source = (TEMPLATE_DIR / "n6_app_shell.html").read_text(encoding="utf-8")
-        proposal_markup = "const signalProposalCells = (item, assetKind) => {" + source.split(
-            "const signalProposalCells = (item, assetKind) => {",
+        proposal_markup = "const signalProposalAction = (item, assetKind) => {" + source.split(
+            "const signalProposalAction = (item, assetKind) => {",
             1,
         )[1].split("const signalRowMarkup =", 1)[0]
         message_markup = "const messageCardMarkup = (item) => {" + source.split(
@@ -17194,8 +17396,8 @@ const canonicalProjectionId = (value) => String(value || "");
             + proposal_markup
             + message_markup
             + """
-const actionable = signalProposalCells({ action_state: "eligible", direction: "buy", user_signal_projection_id: "101" }, "stock");
-const disabled = signalProposalCells({ action_state: "blocked", direction: "buy", user_signal_projection_id: "102" }, "stock");
+const actionable = signalProposalAction({ action_state: "eligible", direction: "buy", user_signal_projection_id: "101" }, "stock");
+const disabled = signalProposalAction({ action_state: "blocked", direction: "buy", user_signal_projection_id: "102" }, "stock");
 const card = messageCardMarkup({
   user_signal_projection_id: "103",
   display_name: "测试消息",
@@ -17204,6 +17406,7 @@ const card = messageCardMarkup({
   asset_kind_label: "个股",
   direction: "buy",
   direction_label: "买入",
+  action_state: "eligible",
   action_state_label: "待确认",
   display_values: {},
 });
@@ -17219,10 +17422,11 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         )
         self.assertEqual(node_result.returncode, 0, node_result.stdout + node_result.stderr)
         rendered = json.loads(node_result.stdout)
-        self.assertTrue(rendered["actionable"].startswith('<td class="sticky-action">'))
-        self.assertTrue(rendered["disabled"].startswith('<td class="sticky-action">'))
+        self.assertTrue(rendered["actionable"].startswith('<button type="button"'))
+        self.assertTrue(rendered["disabled"].startswith('<span class="subtle">'))
         self.assertIn('aria-labelledby="n6-message-title-103"', rendered["card"])
         self.assertIn('class="message-card-title" id="n6-message-title-103"', rendered["card"])
+        self.assertIn('class="message-status-badge is-pending">○ 待确认</span>', rendered["card"])
 
     def test_b_track_v2_messages_page_supports_historical_card_trade_date(self) -> None:
         client, repo, _, _ = build_client()
@@ -17312,9 +17516,13 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=board", signals_response.text)
         self.assertIn("/n6/app/signals?trade_date=20260605&amp;asset_kind=stock", signals_response.text)
         self.assertIn('name="asset_kind" value="stock"', signals_response.text)
-        self.assertIn("股票名称", signals_response.text)
-        self.assertIn("行业代码", signals_response.text)
-        self.assertIn("行业名称", signals_response.text)
+        rendered_signals = signals_response.text.split("<script", 1)[0]
+        signal_header = rendered_signals.split('<table class="signals-table">', 1)[1].split(
+            "</thead>", 1
+        )[0]
+        self.assertEqual(signal_header.count('<th scope="col"'), 9)
+        self.assertIn(">标的</th>", signal_header)
+        self.assertIn("行业", rendered_signals)
         self.assertIn("浦发银行", signals_response.text)
         self.assertIn("881002", signals_response.text)
         self.assertIn("行业二", signals_response.text)
@@ -17462,26 +17670,36 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         index_response = client.get("/n6/app/signals?asset_kind=index&trade_date=20260605")
 
         self.assertEqual(stock_response.status_code, 200)
-        self.assertIn("股票名称", stock_response.text)
-        self.assertIn("行业代码", stock_response.text)
-        self.assertIn("行业名称", stock_response.text)
+        stock_rendered = stock_response.text.split("<script", 1)[0]
+        stock_header = stock_rendered.split('<table class="signals-table">', 1)[1].split(
+            "</thead>", 1
+        )[0]
+        self.assertEqual(stock_header.count('<th scope="col"'), 9)
+        self.assertIn(">标的</th>", stock_header)
+        self.assertIn("行业", stock_rendered)
         self.assertIn("浦发银行", stock_response.text)
         self.assertIn("881002", stock_response.text)
         self.assertIn("行业二", stock_response.text)
 
         self.assertEqual(board_response.status_code, 200)
-        self.assertIn("板块名称", board_response.text)
+        board_rendered = board_response.text.split("<script", 1)[0]
+        board_header = board_rendered.split('<table class="signals-table">', 1)[1].split(
+            "</thead>", 1
+        )[0]
+        self.assertEqual(board_header.count('<th scope="col"'), 9)
+        self.assertIn(">标的</th>", board_header)
         self.assertIn("煤炭开采", board_response.text)
-        self.assertNotIn("股票名称", board_response.text)
-        self.assertNotIn("行业代码", board_response.text)
-        self.assertNotIn("行业名称", board_response.text)
+        self.assertNotIn("data-n6-create-proposal", board_rendered)
 
         self.assertEqual(index_response.status_code, 200)
-        self.assertIn("指数名称", index_response.text)
+        index_rendered = index_response.text.split("<script", 1)[0]
+        index_header = index_rendered.split('<table class="signals-table">', 1)[1].split(
+            "</thead>", 1
+        )[0]
+        self.assertEqual(index_header.count('<th scope="col"'), 9)
+        self.assertIn(">标的</th>", index_header)
         self.assertIn("上证指数", index_response.text)
-        self.assertNotIn("股票名称", index_response.text)
-        self.assertNotIn("行业代码", index_response.text)
-        self.assertNotIn("行业名称", index_response.text)
+        self.assertNotIn("data-n6-create-proposal", index_rendered)
 
     def test_b_track_signals_and_messages_asset_kind_filter_reuses_monitor_visibility(self) -> None:
         client, repo, _, _ = build_client()
@@ -17554,7 +17772,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertEqual(messages_response.status_code, 200)
         self.assertIn('data-n6-auto-refresh="messages"', messages_response.text)
         self.assertIn('data-refresh-enabled="true"', messages_response.text)
-        self.assertIn('data-page-limit="50"', messages_response.text)
+        self.assertIn('data-page-limit="20"', messages_response.text)
         self.assertIn('data-watermark="', messages_response.text)
         self.assertIn("data-n6-skeleton", messages_response.text)
         self.assertIn("data-n6-load-more", messages_response.text)
@@ -17658,8 +17876,8 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertEqual(signals_payload["pagination"]["limit"], 50)
         self.assertTrue(signals_payload["pagination"]["has_more"])
         self.assertTrue(signals_payload["pagination"]["next_cursor"])
-        self.assertEqual(len(messages_payload["card_items"]), 50)
-        self.assertEqual(messages_payload["pagination"]["limit"], 50)
+        self.assertEqual(len(messages_payload["card_items"]), 20)
+        self.assertEqual(messages_payload["pagination"]["limit"], 20)
         self.assertTrue(messages_payload["pagination"]["has_more"])
         self.assertEqual(len(capped_payload["items"]), 100)
         self.assertEqual(capped_payload["pagination"]["limit"], 100)
@@ -17680,6 +17898,59 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
                 "card_payload_json",
             ):
                 self.assertNotIn(forbidden, item)
+
+    def test_b_track_signal_and_message_routes_keep_distinct_default_limits(self) -> None:
+        client, repo, _, _ = build_client()
+        template = copy.deepcopy(repo.ui_v1_signals[1])
+        rows = []
+        for offset in range(60):
+            row = copy.deepcopy(template)
+            row["user_signal_projection_id"] = 970000 + offset
+            row["user_signal_card_id"] = 980000 + offset
+            row["created_at"] = datetime(2026, 6, 5, 15, 0, tzinfo=timezone.utc) - timedelta(seconds=offset)
+            row["event_time"] = row["created_at"]
+            row["trade_date"] = "20260605"
+            for payload_key in (
+                "display_payload_json",
+                "source_payload_json",
+                "card_payload_json",
+                "trace_json",
+            ):
+                if isinstance(row.get(payload_key), dict):
+                    row[payload_key]["trade_date"] = "20260605"
+            rows.append(row)
+        repo.ui_v1_signals = rows
+        seed_effective_monitor_for_signal(repo, template)
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        signals = client.get("/api/n6/app/v1/signals")
+        messages = client.get("/api/n6/app/v2/message-dashboard")
+        groups = client.get("/api/n6/app/v2/message-dashboard/groups")
+        projection_status = client.get("/api/n6/app/v2/message-dashboard/projection-status")
+        signals_page = client.get("/n6/app/signals")
+        messages_page = client.get("/n6/app/messages")
+        explicit_messages = client.get("/api/n6/app/v2/message-dashboard?limit=999")
+
+        self.assertEqual(signals.json()["pagination"]["limit"], 50)
+        self.assertEqual(len(signals.json()["items"]), 50)
+        self.assertEqual(messages.json()["pagination"]["limit"], 20)
+        self.assertEqual(len(messages.json()["card_items"]), 20)
+        self.assertEqual(groups.status_code, 200)
+        self.assertEqual(projection_status.status_code, 200)
+        self.assertIn('data-page-limit="50"', signals_page.text)
+        self.assertIn('data-page-limit="20"', messages_page.text)
+        self.assertEqual(explicit_messages.json()["pagination"]["limit"], 100)
+        self.assertEqual(len(explicit_messages.json()["card_items"]), 60)
+        app_source = Path(n6_user_app_module.__file__).read_text(encoding="utf-8")
+        context_source = app_source.split("async def app_v2_message_context(", 1)[1].split(
+            "def build_app_v2_buy_messages_data(", 1
+        )[0]
+        dashboard_source = app_source.split(
+            'async def app_v2_message_dashboard(request: Request)', 1
+        )[1].split('@app.get("/api/n6/app/v2/message-dashboard/groups")', 1)[0]
+        self.assertIn("default_limit: int = N6_SIGNAL_PAGE_DEFAULT_LIMIT", context_source)
+        self.assertIn("default_limit=N6_MESSAGE_PAGE_DEFAULT_LIMIT", dashboard_source)
+        self.assertFalse(any(repo.forbidden_writes.values()))
 
     def test_b_track_signal_keyset_cursor_roundtrip_and_invalid_cursor_fail_closed(self) -> None:
         row = {
@@ -18169,35 +18440,70 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         ):
             self.assertIn(compatible_field, api_item)
         for heading in (
-            "股票代码",
-            "股票名称",
-            "行业代码",
-            "行业名称",
-            "买入目标价",
-            "卖出目标价",
+            "时间",
+            "标的",
+            "方向 / 条件",
+            "周期",
+            "方向性目标价 / 收益率",
             "触发价",
             "动作价",
-            "上参考周期",
-            "下参考周期",
-            "买入收益率",
-            "次级收益率",
-            "卖出收益率",
-            "触发涨跌幅",
-            "projection 状态",
-            "动作状态",
-            "action_mark",
+            "状态 / 确认类型",
+            "操作",
         ):
-            self.assertIn(f"<th>{heading}</th>", rendered_markup)
-        for hidden_heading in ("标的", "identity_key", "未确认原因", "数量"):
+            self.assertIn(f">{heading}</th>", rendered_markup)
+        signal_header = rendered_markup.split('<table class="signals-table">', 1)[1].split("</thead>", 1)[0]
+        self.assertEqual(signal_header.count("<th scope=\"col\""), 9)
+        self.assertTrue(all('scope="col"' in tag for tag in re.findall(r"<th\b[^>]*>", signal_header)))
+        for hidden_heading in ("股票代码", "股票名称", "行业代码", "行业名称", "买入目标价", "卖出目标价"):
             self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
+        for detail_label in (
+            "行业",
+            "反方向目标 / 收益",
+            "次级收益率",
+            "上下参考周期",
+            "触发涨跌幅",
+            "score / pe_core",
+            "projection 状态",
+        ):
+            self.assertIn(detail_label, rendered_markup)
+        self.assertIn('data-n6-signal-detail-toggle aria-expanded="false" aria-controls=', rendered_markup)
+        self.assertIn('class="signal-detail-row" data-n6-signal-detail-for=', rendered_markup)
         self.assertNotIn("source_trace_only_not_advice", rendered_markup)
         self.assertNotIn("30万预算，确认时按行情取整", rendered_markup)
         self.assertNotIn("全部 T+1 可卖数量", rendered_markup)
-        self.assertIn('<td class="numeric">12.35</td>', rendered_markup)
-        self.assertIn('<td class="numeric">9.8</td>', rendered_markup)
+        self.assertIn("12.35", rendered_markup)
+        self.assertIn("9.8", rendered_markup)
         self.assertIn("display.buy_target_price", dynamic_row)
         self.assertIn("display.sell_target_price", dynamic_row)
         self.assertIn("display.trigger_pct", dynamic_row)
+        self.assertIn("const upsertSignalMarkup =", dynamic_row)
+        self.assertIn("const wasExpanded =", dynamic_row)
+        restore_helper = "const restoreSignalExpansion =" + source.split(
+            "const restoreSignalExpansion =", 1
+        )[1].split("const upsertSignalMarkup =", 1)[0]
+        restore_harness = r"""
+const attributes = {};
+const toggle = { setAttribute(name, value) { attributes[name] = value; } };
+const summary = { querySelector: () => toggle };
+const detail = { hidden: true };
+""" + restore_helper + r"""
+restoreSignalExpansion(summary, detail, true);
+const expanded = { ariaExpanded: attributes["aria-expanded"], hidden: detail.hidden };
+restoreSignalExpansion(summary, detail, false);
+const collapsed = { ariaExpanded: attributes["aria-expanded"], hidden: detail.hidden };
+process.stdout.write(JSON.stringify({ expanded, collapsed }));
+"""
+        restore_result = subprocess.run(
+            ["node", "-"], input=restore_harness, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(restore_result.returncode, 0, restore_result.stdout + restore_result.stderr)
+        self.assertEqual(
+            json.loads(restore_result.stdout),
+            {
+                "expanded": {"ariaExpanded": "true", "hidden": False},
+                "collapsed": {"ariaExpanded": "false", "hidden": True},
+            },
+        )
         self.assertNotIn("renderingPolicy", dynamic_row)
         self.assertNotIn("blocked_reason_label", dynamic_row)
         self.assertNotIn("quantity", dynamic_row)
@@ -18221,19 +18527,16 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
                 n6_user_app_module.PostgresN6UserRepository._app_v1_signal_sse_select_list
             ),
         )
-        for asset_response, code_heading, name_heading in (
-            (index_response, "指数代码", "指数名称"),
-            (board_response, "板块代码", "板块名称"),
-        ):
+        for asset_response in (index_response, board_response):
             asset_markup = asset_response.text.split("<script", 1)[0]
             self.assertEqual(asset_response.status_code, 200)
-            self.assertIn(f"<th>{code_heading}</th>", asset_markup)
-            self.assertIn(f"<th>{name_heading}</th>", asset_markup)
+            self.assertIn(">标的</th>", asset_markup)
+            self.assertIn(">操作</th>", asset_markup)
             self.assertNotIn("data-n6-create-proposal", asset_markup)
             self.assertNotIn("<th>score</th>", asset_markup)
             self.assertNotIn("<th>pe_core</th>", asset_markup)
-            for heading in ("买入目标价", "卖出目标价", "projection 状态", "动作状态", "action_mark"):
-                self.assertIn(f"<th>{heading}</th>", asset_markup)
+            self.assertIn("反方向目标 / 收益", asset_markup)
+            self.assertIn("projection 状态", asset_markup)
         self.assertEqual(n6_app_v1_module._signal_display_decimal("-0"), "0")
         self.assertFalse(any(repo.forbidden_writes.values()))
 
@@ -21297,18 +21600,17 @@ class N6SignalSSEContractTest(unittest.TestCase):
             "const refreshOnce =", 1
         )[0]
         inserted_branch = (
-            "if (inserted) {\n"
-            "          incrementMessageSummary(signal);\n"
-            "          n6Voice.speak(cardItem);\n"
-            "        }\n"
+            "updateLoadedMessageSummary();\n"
+            "        if (inserted) n6Voice.speak(cardItem);\n"
             "        applyMobileCardWindow(root);\n"
             "        return inserted ? 1 : 0;"
         )
 
         self.assertIn(inserted_branch, sse_apply_source)
         self.assertEqual(sse_apply_source.count("n6Voice.speak(cardItem)"), 1)
-        before_inserted, inserted_and_after = sse_apply_source.split("if (inserted) {", 1)
-        _, after_inserted = inserted_and_after.split("}", 1)
+        before_inserted, after_inserted = sse_apply_source.split(
+            "if (inserted) n6Voice.speak(cardItem);", 1
+        )
         self.assertNotIn("n6Voice.speak", before_inserted)
         self.assertNotIn("n6Voice.speak", after_inserted)
 
@@ -22050,7 +22352,10 @@ class N6AuthenticatedSignalAsyncBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("last_event_id = request.headers.get", route_sources["/api/n6/app/v1/signals/stream"])
         self.assertIn("requested_after_id = request.query_params.get", route_sources["/api/n6/app/v1/signals/stream"])
         self.assertIn(
-            "context = await app_v2_message_context(request)",
+            "context = await app_v2_message_context(\n"
+            "            request,\n"
+            "            default_limit=N6_MESSAGE_PAGE_DEFAULT_LIMIT,\n"
+            "        )",
             route_sources["/api/n6/app/v2/message-dashboard"],
         )
 
