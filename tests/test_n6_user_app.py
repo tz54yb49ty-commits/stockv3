@@ -17979,8 +17979,8 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         signal_header = rendered_signals.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(signal_header.count('<th scope="col"'), 9)
-        self.assertIn(">标的</th>", signal_header)
+        self.assertEqual(signal_header.count('<th scope="col"'), 23)
+        self.assertIn(">股票名称</th>", signal_header)
         self.assertIn("行业", rendered_signals)
         self.assertIn("浦发银行", signals_response.text)
         self.assertIn("881002", signals_response.text)
@@ -18133,8 +18133,8 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         stock_header = stock_rendered.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(stock_header.count('<th scope="col"'), 9)
-        self.assertIn(">标的</th>", stock_header)
+        self.assertEqual(stock_header.count('<th scope="col"'), 23)
+        self.assertIn(">股票名称</th>", stock_header)
         self.assertIn("行业", stock_rendered)
         self.assertIn("浦发银行", stock_response.text)
         self.assertIn("881002", stock_response.text)
@@ -18832,7 +18832,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertIsNone(derived_item["buy_target_price"])
         self.assertEqual(derived_item["display_values"]["buy_target_price"], "—")
 
-    def test_signals_compact_ssr_and_dynamic_rows_share_columns_and_hide_audit_copy(self) -> None:
+    def test_signals_stock_wide_ssr_and_dynamic_rows_match_attachment_columns(self) -> None:
         client, repo, _, _ = build_client(
             proposal_write_enabled=True,
             csrf_secret="proposal-secret",
@@ -18898,35 +18898,52 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "action_mark",
         ):
             self.assertIn(compatible_field, api_item)
-        for heading in (
-            "时间",
-            "标的",
-            "方向 / 条件",
-            "周期",
-            "方向性目标价 / 收益率",
+        expected_headings = (
+            "股票名称",
+            "行业代码",
+            "行业名称",
+            "方向",
+            "条件",
+            "触发周期",
+            "主触发周期",
+            "买入目标价",
+            "卖出目标价",
             "触发价",
             "动作价",
-            "状态 / 确认类型",
-            "操作",
-        ):
-            self.assertIn(f">{heading}</th>", rendered_markup)
-        signal_header = rendered_markup.split('<table class="signals-table">', 1)[1].split("</thead>", 1)[0]
-        self.assertEqual(signal_header.count("<th scope=\"col\""), 9)
-        self.assertTrue(all('scope="col"' in tag for tag in re.findall(r"<th\b[^>]*>", signal_header)))
-        for hidden_heading in ("股票代码", "股票名称", "行业代码", "行业名称", "买入目标价", "卖出目标价"):
-            self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
-        for detail_label in (
-            "行业",
-            "反方向目标 / 收益",
+            "上参考周期",
+            "下参考周期",
+            "买入收益率",
             "次级收益率",
-            "上下参考周期",
+            "卖出收益率",
             "触发涨跌幅",
-            "score / pe_core",
+            "score",
+            "pe_core",
             "projection 状态",
-        ):
-            self.assertIn(detail_label, rendered_markup)
-        self.assertIn('data-n6-signal-detail-toggle aria-expanded="false" aria-controls=', rendered_markup)
-        self.assertIn('class="signal-detail-row" data-n6-signal-detail-for=', rendered_markup)
+            "动作状态",
+            "action_mark",
+            "操作",
+        )
+        signal_header = rendered_markup.split('<table class="signals-table">', 1)[1].split("</thead>", 1)[0]
+        self.assertEqual(signal_header.count("<th scope=\"col\""), 23)
+        self.assertTrue(all('scope="col"' in tag for tag in re.findall(r"<th\b[^>]*>", signal_header)))
+        self.assertEqual(
+            tuple(re.findall(r'<th scope="col"(?: class="[^"]+")?>([^<]+)</th>', signal_header)),
+            expected_headings,
+        )
+        for hidden_heading in ("交易日", "时间", "类型", "股票代码"):
+            self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
+        stock_body = rendered_markup.split('data-n6-signals-body data-asset-kind="stock"', 1)[1].split(
+            "</tbody>", 1
+        )[0]
+        stock_row = re.search(
+            r'<tr data-n6-projection-id="[^"]+">(.*?)</tr>',
+            stock_body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(stock_row)
+        self.assertEqual(len(re.findall(r"<td(?:\s[^>]*)?>", stock_row.group(1))), 23)
+        self.assertNotIn("data-n6-signal-detail-toggle", stock_body)
+        self.assertNotIn("data-n6-signal-detail-for", stock_body)
         self.assertNotIn("source_trace_only_not_advice", rendered_markup)
         self.assertNotIn("30万预算，确认时按行情取整", rendered_markup)
         self.assertNotIn("全部 T+1 可卖数量", rendered_markup)
@@ -18935,8 +18952,15 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertIn("display.buy_target_price", dynamic_row)
         self.assertIn("display.sell_target_price", dynamic_row)
         self.assertIn("display.trigger_pct", dynamic_row)
+        stock_dynamic_branch = dynamic_row.split('if (assetKind === "stock") {', 1)[1].split(
+            "const directionalTarget", 1
+        )[0]
+        self.assertEqual(stock_dynamic_branch.count("<td"), 23)
+        self.assertNotIn("data-n6-signal-detail-toggle", stock_dynamic_branch)
         self.assertIn("const upsertSignalMarkup =", dynamic_row)
         self.assertIn("const wasExpanded =", dynamic_row)
+        self.assertIn("if (detailRow) target.append(summaryRow, detailRow)", dynamic_row)
+        self.assertIn("else target.append(summaryRow)", dynamic_row)
         restore_helper = "const restoreSignalExpansion =" + source.split(
             "const restoreSignalExpansion =", 1
         )[1].split("const upsertSignalMarkup =", 1)[0]
