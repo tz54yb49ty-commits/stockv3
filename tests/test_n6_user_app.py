@@ -14,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 import inspect
 import os
 import subprocess
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 from unittest.mock import call, patch
 
@@ -5010,6 +5010,7 @@ class FakeBTrackAuthorityRepository:
         self.repository = repository
         self.session_hashes: list[str] = []
         self.bulk_calls: list[dict[str, Any]] = []
+        self.recommended_bundle_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
         self.public_ai_calls: list[dict[str, Any]] = []
         self.public_ai_snapshot = {
@@ -5300,6 +5301,41 @@ class FakeBTrackAuthorityRepository:
             "already_active_count": 0,
             "reactivated_count": 0,
         }
+
+    def bulk_upsert_recommended_monitor_bundle(
+        self,
+        session_token_hash: str,
+        *,
+        board_selection: Mapping[str, Any],
+        stock_selection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        authority = self.resolve_authority(session_token_hash)
+        if authority is None:
+            return {"ok": False, "status": "forbidden"}
+        call = {
+            "board_selection": copy.deepcopy(dict(board_selection)),
+            "stock_selection": copy.deepcopy(dict(stock_selection)),
+        }
+        self.recommended_bundle_calls.append(call)
+        results: dict[str, dict[str, Any]] = {}
+        for asset_kind, selection in (
+            ("board", board_selection),
+            ("stock", stock_selection),
+        ):
+            identity_keys = list(selection.get("identity_keys") or [])
+            direction_count = len(identity_keys) * (1 if asset_kind == "stock" else 2)
+            results[asset_kind] = {
+                "ok": True,
+                "status": "active",
+                "asset_kind": asset_kind,
+                "matched_count": len(identity_keys),
+                "direction_row_count": direction_count,
+                "write_row_count": direction_count,
+                "added_count": direction_count,
+                "already_active_count": 0,
+                "reactivated_count": 0,
+            }
+        return {"ok": True, "status": "active", **results}
 
     def bulk_upsert_realtime_scope_items(
         self,
@@ -14420,6 +14456,7 @@ class N6UserAppTest(unittest.TestCase):
         allowed_write_routes = {
             "/api/n6/app/v3/monitor-items": {"POST"},
             "/api/n6/app/v3/monitor-items/bulk": {"POST"},
+            "/api/n6/app/v3/recommended-monitor-bundle": {"POST"},
             "/api/n6/app/v3/monitor-items/{monitor_id}": {"DELETE"},
             "/api/n6/app/v3/realtime-scope-items": {"GET", "POST"},
             "/api/n6/app/v3/realtime-scope-items/bulk": {"POST"},
@@ -14694,6 +14731,267 @@ class N6UserAppTest(unittest.TestCase):
         authority_repo = client.app.state.test_btrack_authority_repository
         self.assertEqual(len(authority_repo.bulk_calls), 1)
         self.assertEqual(len(authority_repo.bulk_calls[0]["identity_keys"]), 250)
+
+    def test_dashboard_recommended_bundle_preview_and_atomic_execute(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["index"][0]["level_up_score"] = "80"
+        repo.app_filter_rows["board"][0]["level_up_score"] = "90"
+        repo.app_filter_rows["stock"][0]["level_up_score"] = "95"
+        repo.app_member_rows["board"][0]["trade_date"] = "20260604"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        dashboard = client.get("/n6/app/dashboard")
+        csrf = re.search(r'data-n6-csrf-token="([^"]+)"', dashboard.text).group(1)
+
+        self.assertIn('aria-label="推荐范围快捷加入"', dashboard.text)
+        self.assertIn("推荐板块加入买向和卖向观察", dashboard.text)
+        self.assertIn("推荐个股仅加入买向观察", dashboard.text)
+        self.assertIn("不加入实时范围", dashboard.text)
+        self.assertLess(dashboard.text.index("唯一下一步"), dashboard.text.index("推荐范围快捷加入"))
+        self.assertLess(dashboard.text.index("推荐范围快捷加入"), dashboard.text.index("新用户说明书摘要"))
+
+        preview = client.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.headers["cache-control"], "no-store")
+        self.assertEqual(preview.json()["board"]["matched_count"], 1)
+        self.assertEqual(preview.json()["board"]["direction_row_count"], 2)
+        self.assertEqual(preview.json()["stock"]["matched_count"], 1)
+        self.assertNotIn("identity_keys", preview.text)
+        token_payload = json.loads(
+            n6_user_app_module._n6_scope_bulk_b64decode(
+                preview.json()["bundle_token"].split(".", 1)[0]
+            )
+        )
+        self.assertNotIn("identity_keys", token_payload["board"])
+        self.assertNotIn("identity_keys", token_payload["stock"])
+
+        result = client.post(
+            "/api/n6/app/v3/recommended-monitor-bundle",
+            headers={"X-CSRF-Token": csrf},
+            json={"bundle_token": preview.json()["bundle_token"]},
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["totals"]["added_count"], 3)
+        authority = client.app.state.test_btrack_authority_repository
+        self.assertEqual(len(authority.recommended_bundle_calls), 1)
+        self.assertEqual(authority.recommended_bundle_calls[0]["board_selection"]["identity_keys"], ["board:TDX:881001"])
+        self.assertEqual(authority.recommended_bundle_calls[0]["stock_selection"]["identity_keys"], ["stock:SH:600000"])
+        self.assertEqual(repo.app_realtime_scope_writes, [])
+        self.assertEqual(repo.app_trade_proposals, [])
+
+    def test_recommended_bundle_healthy_empty_stock_submits_board_only(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        repo.app_filter_rows["index"][0]["level_up_score"] = "80"
+        repo.app_filter_rows["board"][0]["level_up_score"] = "90"
+        repo.app_filter_rows["stock"][0]["level_up_score"] = "70"
+        repo.app_member_rows["board"][0]["trade_date"] = "20260604"
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        page = client.get("/n6/app/dashboard")
+        csrf = re.search(r'data-n6-csrf-token="([^"]+)"', page.text).group(1)
+        preview = client.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["stock"]["matched_count"], 0)
+        result = client.post(
+            "/api/n6/app/v3/recommended-monitor-bundle",
+            headers={"X-CSRF-Token": csrf},
+            json={"bundle_token": preview.json()["bundle_token"]},
+        )
+        self.assertEqual(result.status_code, 200)
+        call = client.app.state.test_btrack_authority_repository.recommended_bundle_calls[0]
+        self.assertEqual(call["stock_selection"]["identity_keys"], [])
+        self.assertEqual(result.json()["totals"]["added_count"], 2)
+
+    def test_recommended_bundle_unavailable_or_stale_is_zero_write(self) -> None:
+        client, repo, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=True,
+            csrf_secret="scope-secret",
+        )
+        repo.app_filter_cache_ready = {"stock": True, "index": True, "board": True}
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        unavailable = client.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+        self.assertEqual(unavailable.status_code, 409)
+        self.assertEqual(unavailable.json()["error"], "index_level_up_score_max_unavailable")
+
+        repo.app_filter_rows["index"][0]["level_up_score"] = "80"
+        repo.app_filter_rows["board"][0]["level_up_score"] = "90"
+        repo.app_filter_rows["stock"][0]["level_up_score"] = "95"
+        missing_membership = client.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+        self.assertEqual(missing_membership.status_code, 409)
+        self.assertEqual(missing_membership.json()["error"], "recommended_stock_source_unavailable")
+        self.assertEqual(client.app.state.test_btrack_authority_repository.recommended_bundle_calls, [])
+
+    def test_recommended_bundle_token_is_expiring_session_bound_metadata_only(self) -> None:
+        session = AuthSession(
+            user_session_id=1,
+            user_id=5,
+            login_name="user5",
+            display_name="用户5",
+            role="user",
+            status="active",
+            session_token_hash="session-hash",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            revoked_at=None,
+        )
+        principal = {"principal_id": 5, "principal_type": "human_user"}
+        selection = {
+            "source_run_id": "condition-run",
+            "identity_count": 1,
+            "selection_sha256": "a" * 64,
+        }
+        token = n6_user_app_module.n6_recommended_monitor_bundle_token(
+            session=session,
+            principal=principal,
+            secret="scope-secret",
+            for_trade_date="20260605",
+            board=selection,
+            stock={**selection, "identity_count": 0},
+            issued_at=100,
+        )
+        payload, error = n6_user_app_module.n6_recommended_monitor_bundle_payload(
+            token,
+            session=session,
+            principal=principal,
+            secret="scope-secret",
+            now=400,
+        )
+        self.assertEqual(error, "")
+        self.assertNotIn("identity_keys", json.dumps(payload))
+        expired, error = n6_user_app_module.n6_recommended_monitor_bundle_payload(
+            token,
+            session=session,
+            principal=principal,
+            secret="scope-secret",
+            now=401,
+        )
+        self.assertIsNone(expired)
+        self.assertEqual(error, "selection_token_expired")
+        other_session = AuthSession(**{**session.__dict__, "session_token_hash": "other-session"})
+        rejected, error = n6_user_app_module.n6_recommended_monitor_bundle_payload(
+            token,
+            session=other_session,
+            principal=principal,
+            secret="scope-secret",
+            now=200,
+        )
+        self.assertIsNone(rejected)
+        self.assertEqual(error, "selection_token_invalid")
+
+    def test_dashboard_recommended_bundle_button_is_bulk_flag_gated(self) -> None:
+        client, _, _, _ = build_client(
+            scope_write_enabled=True,
+            scope_bulk_write_enabled=False,
+            csrf_secret="scope-secret",
+        )
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+        dashboard = client.get("/n6/app/dashboard")
+        self.assertNotIn(
+            '<button type="button" class="row-action" data-n6-recommended-monitor-bundle-submit>',
+            dashboard.text,
+        )
+        preview = client.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+        self.assertEqual(preview.status_code, 403)
+
+    def test_recommended_bundle_authority_uses_one_transaction_and_rolls_back_both(self) -> None:
+        class FakeTransaction:
+            def __init__(self) -> None:
+                self.committed = False
+                self.rolled_back = False
+
+            def __enter__(self) -> "FakeTransaction":
+                return self
+
+            def __exit__(self, exc_type, _exc, _tb) -> bool:
+                self.rolled_back = exc_type is not None
+                self.committed = exc_type is None
+                return False
+
+        class FakeCursor:
+            def __init__(self, payloads: list[dict[str, Any]]) -> None:
+                self.payloads = list(payloads)
+                self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+            def __enter__(self) -> "FakeCursor":
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+                self.calls.append((sql, params))
+
+            def fetchone(self) -> dict[str, Any]:
+                return {"payload": self.payloads.pop(0)}
+
+        class FakeConnection:
+            def __init__(self, payloads: list[dict[str, Any]]) -> None:
+                self.tx = FakeTransaction()
+                self.cur = FakeCursor(payloads)
+
+            def __enter__(self) -> "FakeConnection":
+                return self
+
+            def __exit__(self, *_args) -> bool:
+                return False
+
+            def transaction(self) -> FakeTransaction:
+                return self.tx
+
+            def cursor(self) -> FakeCursor:
+                return self.cur
+
+        board = {
+            "identity_keys": ["board:TDX:881001"],
+            "for_trade_date": "20260605",
+            "source_run_id": "condition-run",
+            "selection_sha256": "a" * 64,
+        }
+        stock = {
+            "identity_keys": ["stock:SH:600000"],
+            "for_trade_date": "20260605",
+            "source_run_id": "condition-run",
+            "selection_sha256": "b" * 64,
+        }
+        repository = PostgresN6BTrackAuthorityRepository("postgresql://unit-test")
+
+        failed_connection = FakeConnection([{"ok": True}, {"ok": False}])
+        with patch(
+            "ashare_v3.web.n6_btrack_authority.psycopg.connect",
+            return_value=failed_connection,
+        ):
+            failed = repository.bulk_upsert_recommended_monitor_bundle(
+                "a" * 64,
+                board_selection=board,
+                stock_selection=stock,
+            )
+        self.assertEqual(failed["error"], "recommended_bundle_rolled_back")
+        self.assertTrue(failed_connection.tx.rolled_back)
+        self.assertFalse(failed_connection.tx.committed)
+        self.assertEqual(len(failed_connection.cur.calls), 2)
+
+        success_connection = FakeConnection([{"ok": True}, {"ok": True}])
+        with patch(
+            "ashare_v3.web.n6_btrack_authority.psycopg.connect",
+            return_value=success_connection,
+        ):
+            success = repository.bulk_upsert_recommended_monitor_bundle(
+                "a" * 64,
+                board_selection=board,
+                stock_selection=stock,
+            )
+        self.assertTrue(success["ok"])
+        self.assertTrue(success_connection.tx.committed)
+        self.assertEqual(len(success_connection.cur.calls), 2)
+        self.assertTrue(all("n6_btrack_monitor_bulk_upsert" in sql for sql, _ in success_connection.cur.calls))
 
     def test_filter_bulk_buttons_render_for_stock_index_and_board_pages(self) -> None:
         client, repo, _, _ = build_client(

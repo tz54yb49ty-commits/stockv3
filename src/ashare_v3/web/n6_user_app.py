@@ -10600,6 +10600,8 @@ def create_app(
         principal: dict[str, Any],
         asset_kind: str,
         filters: Mapping[str, Any],
+        allow_empty: bool = False,
+        require_recommendation: bool = False,
     ) -> tuple[dict[str, Any] | None, JSONResponse | None]:
         if asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET:
             return None, JSONResponse({"ok": False, "error": "invalid_asset_kind"}, status_code=400)
@@ -10648,6 +10650,17 @@ def create_app(
             filters=canonical_filters,
             limit=N6_SCOPE_BULK_MAX_IDENTITIES,
         )
+        recommendation = dict(result.get("level_up_recommendation") or {})
+        if require_recommendation and (
+            not recommendation.get("active") or not recommendation.get("available")
+        ):
+            return None, JSONResponse(
+                {
+                    "ok": False,
+                    "error": str(recommendation.get("blocker") or "recommended_scope_unavailable"),
+                },
+                status_code=409,
+            )
         filtered_count = int(result.get("filtered_count") or 0)
         rows = list(result.get("items") or [])
         identity_keys = sorted(
@@ -10668,7 +10681,7 @@ def create_app(
                 status_code=409,
             )
         if (
-            filtered_count < 1
+            (filtered_count < 1 and not allow_empty)
             or len(rows) != filtered_count
             or len(identity_keys) != filtered_count
             or any(not value.startswith(f"{asset_kind}:") for value in identity_keys)
@@ -10692,7 +10705,56 @@ def create_app(
             "identity_keys": identity_keys,
             "identity_count": len(identity_keys),
             "selection_sha256": n6_scope_bulk_selection_sha256(identity_keys),
+            "source_context": dict(result.get("source_context") or {}),
         }, None
+
+    async def app_v3_recommended_monitor_bundle_selection(
+        *,
+        session: AuthSession,
+        principal: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+        board, blocker = await app_v3_bulk_filter_selection(
+            session=session,
+            principal=principal,
+            asset_kind="board",
+            filters={"level_up_score_recommendation": "index_max"},
+            require_recommendation=True,
+        )
+        if blocker is not None:
+            return None, blocker
+        assert board is not None
+        stock, blocker = await app_v3_bulk_filter_selection(
+            session=session,
+            principal=principal,
+            asset_kind="stock",
+            filters={
+                "source_asset_type": "board",
+                "source_identity_keys": board["identity_keys"],
+                "level_up_score_recommendation": "index_max",
+            },
+            allow_empty=True,
+            require_recommendation=True,
+        )
+        if blocker is not None:
+            return None, blocker
+        assert stock is not None
+        source_context = dict(stock.get("source_context") or {})
+        if (
+            not source_context.get("source_filter_active")
+            or int(source_context.get("membership_count") or 0) < 1
+            or not str(source_context.get("membership_source_table") or "").strip()
+            or not str(source_context.get("membership_trade_date") or "").strip()
+        ):
+            return None, JSONResponse(
+                {"ok": False, "error": "recommended_stock_source_unavailable"},
+                status_code=409,
+            )
+        if board["for_trade_date"] != stock["for_trade_date"]:
+            return None, JSONResponse(
+                {"ok": False, "error": "filter_snapshot_stale"},
+                status_code=409,
+            )
+        return {"board": board, "stock": stock, "source_context": source_context}, None
 
     @app.get("/api/n6/app/v3/filter-scope-bulk-preview")
     async def app_v3_filter_scope_bulk_preview(request: Request) -> JSONResponse:
@@ -10751,6 +10813,137 @@ def create_app(
         )
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/api/n6/app/v3/recommended-monitor-bundle-preview")
+    async def app_v3_recommended_monitor_bundle_preview(request: Request) -> JSONResponse:
+        context = await app_v3_authority_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not scope_bulk_write_active:
+            return JSONResponse({"ok": False, "error": "scope_bulk_write_disabled"}, status_code=403)
+        session, principal, session_token_hash = context
+        bundle, blocker = await app_v3_recommended_monitor_bundle_selection(
+            session=session,
+            principal=principal,
+        )
+        if blocker is not None:
+            blocker.headers["Cache-Control"] = "no-store"
+            return blocker
+        assert bundle is not None
+        previews: dict[str, dict[str, Any]] = {}
+        for asset_kind in ("board", "stock"):
+            selection = bundle[asset_kind]
+            if not selection["identity_keys"]:
+                previews[asset_kind] = {
+                    "ok": True,
+                    "status": "preview",
+                    "asset_kind": asset_kind,
+                    "matched_count": 0,
+                    "direction_row_count": 0,
+                    "write_row_count": 0,
+                    "already_active_count": 0,
+                    "reactivated_count": 0,
+                    "will_add_count": 0,
+                }
+                continue
+            preview = await asyncio.to_thread(
+                btrack_authority_repository.preview_bulk_scope,
+                session_token_hash,
+                target_scope="monitor",
+                asset_kind=asset_kind,
+                identity_keys=selection["identity_keys"],
+                for_trade_date=selection["for_trade_date"],
+                source_run_id=selection["source_run_id"],
+                selection_sha256=selection["selection_sha256"],
+            )
+            if not preview.get("ok"):
+                response = n6_json_response(app_v3_public_payload(preview), status_code=409)
+                response.headers["Cache-Control"] = "no-store"
+                return response
+            previews[asset_kind] = preview
+        token = n6_recommended_monitor_bundle_token(
+            session=session,
+            principal=principal,
+            secret=csrf_secret,
+            for_trade_date=bundle["board"]["for_trade_date"],
+            board=bundle["board"],
+            stock=bundle["stock"],
+        )
+        source_context = bundle["source_context"]
+        response = n6_json_response(
+            app_v3_public_payload(
+                {
+                    "ok": True,
+                    "status": "preview",
+                    "for_trade_date": bundle["board"]["for_trade_date"],
+                    "board": previews["board"],
+                    "stock": previews["stock"],
+                    "membership": {
+                        "for_trade_date": source_context.get("for_trade_date"),
+                        "membership_trade_date": source_context.get("membership_trade_date"),
+                        "fallback_used": bool(source_context.get("fallback_used")),
+                    },
+                    "bundle_token": token,
+                    "bundle_expires_in_seconds": N6_SCOPE_BULK_SELECTION_TTL_SECONDS,
+                }
+            )
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/n6/app/v3/recommended-monitor-bundle")
+    async def app_v3_recommended_monitor_bundle(request: Request) -> JSONResponse:
+        context = await app_v3_scope_write_context(request)
+        if isinstance(context, JSONResponse):
+            return context
+        if not scope_bulk_write_active:
+            return JSONResponse({"ok": False, "error": "scope_bulk_write_disabled"}, status_code=403)
+        session, principal, session_token_hash = context
+        payload = await read_json_object(request)
+        if set(payload) != {"bundle_token"}:
+            return JSONResponse({"ok": False, "error": "client_scope_not_allowed"}, status_code=400)
+        token_payload, token_error = n6_recommended_monitor_bundle_payload(
+            str(payload.get("bundle_token") or ""),
+            session=session,
+            principal=principal,
+            secret=csrf_secret,
+        )
+        if token_payload is None:
+            return JSONResponse({"ok": False, "error": token_error}, status_code=409)
+        bundle, blocker = await app_v3_recommended_monitor_bundle_selection(
+            session=session,
+            principal=principal,
+        )
+        if blocker is not None:
+            return blocker
+        assert bundle is not None
+        if str(token_payload["for_trade_date"]) != bundle["board"]["for_trade_date"]:
+            return JSONResponse({"ok": False, "error": "filter_snapshot_stale"}, status_code=409)
+        for asset_kind in ("board", "stock"):
+            selection = bundle[asset_kind]
+            expected = token_payload[asset_kind]
+            if any(
+                (
+                    selection["source_run_id"] != str(expected["source_run_id"]),
+                    selection["identity_count"] != int(expected["identity_count"]),
+                    selection["selection_sha256"] != str(expected["selection_sha256"]),
+                )
+            ):
+                return JSONResponse({"ok": False, "error": "filter_snapshot_stale"}, status_code=409)
+        result = await asyncio.to_thread(
+            btrack_authority_repository.bulk_upsert_recommended_monitor_bundle,
+            session_token_hash,
+            board_selection=bundle["board"],
+            stock_selection=bundle["stock"],
+        )
+        if not result.get("ok"):
+            return n6_json_response(app_v3_public_payload(result), status_code=409)
+        invalidate_app_user_scope(session, principal)
+        totals = {
+            key: sum(int(dict(result.get(kind) or {}).get(key) or 0) for kind in ("board", "stock"))
+            for key in ("matched_count", "direction_row_count", "write_row_count", "added_count", "already_active_count", "reactivated_count")
+        }
+        return n6_json_response(app_v3_public_payload({**result, "totals": totals}))
 
     async def app_v3_execute_scope_bulk(
         request: Request,
@@ -12665,6 +12858,7 @@ def create_app(
     allowed_b_track_write_routes = {
         ("/api/n6/app/v3/monitor-items", frozenset({"POST"})),
         ("/api/n6/app/v3/monitor-items/bulk", frozenset({"POST"})),
+        ("/api/n6/app/v3/recommended-monitor-bundle", frozenset({"POST"})),
         ("/api/n6/app/v3/monitor-items/{monitor_id}", frozenset({"DELETE"})),
         ("/api/n6/app/v3/realtime-scope-items", frozenset({"POST"})),
         ("/api/n6/app/v3/realtime-scope-items/bulk", frozenset({"POST"})),
@@ -12829,6 +13023,103 @@ def n6_scope_bulk_selection_token(
         hashlib.sha256,
     ).hexdigest()
     return f"{encoded}.{signature}"
+
+
+def n6_recommended_monitor_bundle_token(
+    *,
+    session: AuthSession,
+    principal: Mapping[str, Any],
+    secret: str,
+    for_trade_date: str,
+    board: Mapping[str, Any],
+    stock: Mapping[str, Any],
+    issued_at: int | None = None,
+) -> str:
+    issued = int(time.time()) if issued_at is None else int(issued_at)
+    payload = {
+        "v": 1,
+        "purpose": "recommended_monitor_bundle",
+        "iat": issued,
+        "exp": issued + N6_SCOPE_BULK_SELECTION_TTL_SECONDS,
+        "for_trade_date": for_trade_date,
+        "principal_id": str(principal.get("principal_id") or ""),
+        "principal_type": str(principal.get("principal_type") or ""),
+        "user_id": str(session.user_id),
+        "board": {
+            "source_run_id": str(board.get("source_run_id") or ""),
+            "identity_count": int(board.get("identity_count") or 0),
+            "selection_sha256": str(board.get("selection_sha256") or ""),
+        },
+        "stock": {
+            "source_run_id": str(stock.get("source_run_id") or ""),
+            "identity_count": int(stock.get("identity_count") or 0),
+            "selection_sha256": str(stock.get("selection_sha256") or ""),
+        },
+    }
+    encoded = _n6_scope_bulk_b64encode(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{encoded}.{session.session_token_hash}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def n6_recommended_monitor_bundle_payload(
+    token: str,
+    *,
+    session: AuthSession,
+    principal: Mapping[str, Any],
+    secret: str,
+    now: int | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        encoded, signature = str(token or "").split(".", 1)
+        expected_signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{encoded}.{session.session_token_hash}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not secrets.compare_digest(expected_signature, signature):
+            return None, "selection_token_invalid"
+        payload = json.loads(_n6_scope_bulk_b64decode(encoded))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return None, "selection_token_invalid"
+    current_time = int(time.time()) if now is None else int(now)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("v") != 1
+        or payload.get("purpose") != "recommended_monitor_bundle"
+        or str(payload.get("principal_id") or "") != str(principal.get("principal_id") or "")
+        or str(payload.get("principal_type") or "") != str(principal.get("principal_type") or "")
+        or str(payload.get("user_id") or "") != str(session.user_id)
+    ):
+        return None, "selection_token_invalid"
+    try:
+        issued_at = int(payload.get("iat"))
+        expires_at = int(payload.get("exp"))
+        metadata = {kind: dict(payload.get(kind) or {}) for kind in ("board", "stock")}
+        counts = {kind: int(metadata[kind].get("identity_count")) for kind in metadata}
+    except (TypeError, ValueError):
+        return None, "selection_token_invalid"
+    if issued_at > current_time + 30 or expires_at < current_time:
+        return None, "selection_token_expired"
+    if (
+        not re.fullmatch(r"[0-9]{8}", str(payload.get("for_trade_date") or ""))
+        or counts["board"] < 1
+        or counts["board"] > N6_SCOPE_BULK_MAX_IDENTITIES
+        or counts["stock"] < 0
+        or counts["stock"] > N6_SCOPE_BULK_MAX_IDENTITIES
+        or any(
+            not str(metadata[kind].get("source_run_id") or "").strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", str(metadata[kind].get("selection_sha256") or ""))
+            for kind in metadata
+        )
+    ):
+        return None, "selection_token_invalid"
+    return payload, ""
 
 
 def n6_scope_bulk_selection_payload(

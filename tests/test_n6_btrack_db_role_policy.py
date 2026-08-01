@@ -1702,6 +1702,7 @@ class N6FilterBulkScope054RolePolicyTest(unittest.TestCase):
         for method in (
             "preview_bulk_scope",
             "bulk_upsert_monitor_items",
+            "bulk_upsert_recommended_monitor_bundle",
             "bulk_upsert_realtime_scope_items",
         ):
             self.assertIn(f"def {method}(", source)

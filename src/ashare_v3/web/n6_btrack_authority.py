@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import psycopg
 from psycopg.rows import dict_row
@@ -98,6 +98,15 @@ class N6BTrackAuthorityRepository(Protocol):
         for_trade_date: str,
         source_run_id: str,
         selection_sha256: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def bulk_upsert_recommended_monitor_bundle(
+        self,
+        session_token_hash: str,
+        *,
+        board_selection: Mapping[str, Any],
+        stock_selection: Mapping[str, Any],
     ) -> dict[str, Any]:
         ...
 
@@ -318,6 +327,73 @@ class PostgresN6BTrackAuthorityRepository:
                 selection_sha256,
             ),
         )
+
+    def bulk_upsert_recommended_monitor_bundle(
+        self,
+        session_token_hash: str,
+        *,
+        board_selection: Mapping[str, Any],
+        stock_selection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        session_hash = self._session_hash(session_token_hash)
+        selections = (
+            ("board", board_selection),
+            ("stock", stock_selection),
+        )
+
+        class BundleWriteFailed(RuntimeError):
+            def __init__(self, asset_kind: str) -> None:
+                super().__init__(asset_kind)
+                self.asset_kind = asset_kind
+
+        results: dict[str, dict[str, Any]] = {}
+        try:
+            with psycopg.connect(self.dsn, connect_timeout=10, row_factory=dict_row) as conn:
+                with conn.transaction(), conn.cursor() as cur:
+                    for asset_kind, selection in selections:
+                        identity_keys = list(selection.get("identity_keys") or [])
+                        if not identity_keys:
+                            results[asset_kind] = {
+                                "ok": True,
+                                "status": "active",
+                                "asset_kind": asset_kind,
+                                "matched_count": 0,
+                                "direction_row_count": 0,
+                                "write_row_count": 0,
+                                "added_count": 0,
+                                "already_active_count": 0,
+                                "reactivated_count": 0,
+                            }
+                            continue
+                        cur.execute(
+                            "SELECT public.n6_btrack_monitor_bulk_upsert(%s, %s, %s, %s, %s, %s) AS payload",
+                            (
+                                session_hash,
+                                asset_kind,
+                                identity_keys,
+                                str(selection.get("for_trade_date") or ""),
+                                str(selection.get("source_run_id") or ""),
+                                str(selection.get("selection_sha256") or ""),
+                            ),
+                        )
+                        row = cur.fetchone()
+                        payload = row.get("payload") if row else None
+                        if not isinstance(payload, dict) or not payload.get("ok"):
+                            raise BundleWriteFailed(asset_kind)
+                        results[asset_kind] = dict(payload)
+        except BundleWriteFailed as error:
+            return {
+                "ok": False,
+                "status": "rolled_back",
+                "error": "recommended_bundle_rolled_back",
+                "failed_asset_kind": error.asset_kind,
+            }
+        return {
+            "ok": True,
+            "status": "active",
+            "board": results["board"],
+            "stock": results["stock"],
+        }
 
     def bulk_upsert_realtime_scope_items(
         self,

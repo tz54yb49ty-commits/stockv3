@@ -263,10 +263,12 @@
     .next-action-card p { margin: 4px 0 0; }
     .next-action-card a,
     .guide-summary-card a,
+    .recommended-monitor-card button,
     .guide-step a {
       min-height: 44px;
     }
-    .guide-summary-card {
+    .guide-summary-card,
+    .recommended-monitor-card {
       border: 1px solid var(--line);
       border-radius: 10px;
       background: var(--panel);
@@ -277,6 +279,8 @@
       gap: 12px;
     }
     .guide-summary-card p { margin: 4px 0 0; }
+    .recommended-monitor-card p { margin: 4px 0 0; }
+    .recommended-monitor-card [role="status"] { margin-top: 8px; }
     .guide-quick-links {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1247,6 +1251,7 @@
       nav button,
       .next-action-card a,
       .guide-summary-card a,
+      .recommended-monitor-card button,
       .guide-step a,
       .technical-details > summary {
         min-height: 45px;
@@ -1464,7 +1469,8 @@
       .cockpit-shell { padding: 10px; }
       .cockpit-lead,
       .next-action-card,
-      .guide-summary-card {
+      .guide-summary-card,
+      .recommended-monitor-card {
         align-items: stretch;
         flex-direction: column;
       }
@@ -1476,6 +1482,7 @@
       }
       .status-line,
       .guide-summary-card p,
+      .recommended-monitor-card p,
       .next-action-card p {
         overflow-wrap: anywhere;
       }
@@ -1632,6 +1639,17 @@
           </div>
           <a href="{{ next_action.href }}">{{ next_action.label }}</a>
         </section>
+        {% if page.scope_bulk_write_enabled %}
+        <section class="recommended-monitor-card" aria-label="推荐范围快捷加入" data-n6-recommended-monitor-bundle>
+          <div>
+            <h3>推荐范围快捷加入</h3>
+            <p class="subtle">推荐板块加入买向和卖向观察，推荐个股仅加入买向观察；只写本人监控对象。</p>
+            <p class="subtle">不加入实时范围，不触发 proposal、虚拟成交或交易。</p>
+            <p role="status" aria-live="polite" hidden data-n6-recommended-monitor-bundle-status></p>
+          </div>
+          <button type="button" class="row-action" data-n6-recommended-monitor-bundle-submit>一键加入推荐板块与个股</button>
+        </section>
+        {% endif %}
         <section class="guide-summary-card" aria-label="新用户说明书摘要">
           <div>
             <h3>{{ guide_summary.title }}</h3>
@@ -4395,6 +4413,10 @@
         selection_token_invalid: "批量预览凭证无效，请重新预览",
         selection_token_expired: "批量预览已超过5分钟，请重新预览",
         scope_bulk_write_disabled: "批量加入功能未启用",
+        index_level_up_score_max_unavailable: "当前推荐阈值不可用，未写入任何监控对象",
+        recommended_scope_unavailable: "当前推荐范围不可用，未写入任何监控对象",
+        recommended_stock_source_unavailable: "推荐板块的成分关系不可用，未写入任何监控对象",
+        recommended_bundle_rolled_back: "推荐范围提交失败，板块和个股均已回滚",
       }[error] || "批量加入暂未完成，请稍后重试");
       const applyProposalState = (button, proposal) => {
         const status = String(proposal?.proposal_status || "");
@@ -4548,6 +4570,62 @@
                 buttons.forEach((item) => { item.disabled = false; });
               }
             });
+          });
+        });
+        if (scopeBulkWriteEnabled) document.querySelectorAll("[data-n6-recommended-monitor-bundle]").forEach((container) => {
+          const button = container.querySelector("[data-n6-recommended-monitor-bundle-submit]");
+          const status = container.querySelector("[data-n6-recommended-monitor-bundle-status]");
+          if (!button || !status) return;
+          const showStatus = (message, withLink = false) => {
+            status.hidden = false;
+            status.textContent = message;
+            if (withLink) {
+              status.append(" ");
+              const link = document.createElement("a");
+              link.href = "/n6/app/my-monitor";
+              link.textContent = "查看监控对象";
+              status.append(link);
+            }
+          };
+          button.addEventListener("click", async () => {
+            if (button.disabled) return;
+            button.disabled = true;
+            showStatus("正在计算当日完整推荐范围…");
+            try {
+              const preview = await request(
+                "/api/n6/app/v3/recommended-monitor-bundle-preview",
+                "GET",
+              );
+              const confirmed = window.confirm(
+                `将当日完整推荐范围加入本人监控对象？\n\n`
+                + `推荐板块：命中${preview.board.matched_count}，新增${preview.board.will_add_count}，`
+                + `已存在${preview.board.already_active_count}，重新启用${preview.board.reactivated_count}\n`
+                + `推荐个股：命中${preview.stock.matched_count}，新增${preview.stock.will_add_count}，`
+                + `已存在${preview.stock.already_active_count}，重新启用${preview.stock.reactivated_count}\n\n`
+                + "板块加入买向和卖向观察，个股仅加入买向观察。\n"
+                + "不会加入实时范围，也不会触发 proposal、虚拟成交或交易。",
+              );
+              if (!confirmed) {
+                showStatus("已取消，未写入任何监控对象");
+                return;
+              }
+              showStatus("正在原子提交推荐板块与个股…");
+              const result = await request(
+                "/api/n6/app/v3/recommended-monitor-bundle",
+                "POST",
+                { bundle_token: preview.bundle_token },
+              );
+              showStatus(
+                `推荐范围加入完成：新增${result.totals.added_count || 0}，`
+                + `已存在${result.totals.already_active_count || 0}，`
+                + `重新启用${result.totals.reactivated_count || 0}。`,
+                true,
+              );
+            } catch (error) {
+              showStatus(bulkErrorLabel(error.message));
+            } finally {
+              button.disabled = false;
+            }
           });
         });
         if (scopeWriteEnabled) document.querySelectorAll("[data-n6-remove-monitor]").forEach((button) => {
