@@ -483,6 +483,8 @@ def build_trigger_status_forward_plan(
     source_trigger_run_id: str,
     consumer_name: str,
     for_trade_date: str,
+    source_eligible_action_run_id: str = "",
+    scope_mode: str = "",
     existing_status_event_keys: set[str] | Sequence[str] | None = None,
     max_n4_event_rows: int = 50000,
     max_status_events: int = 50000,
@@ -493,10 +495,28 @@ def build_trigger_status_forward_plan(
         raise ValueError("status-forward bounds must be positive")
     if not str(for_trade_date or ""):
         raise ValueError("for_trade_date is required")
+    resolved_scope_mode = str(scope_mode or "").strip() or (
+        "aggregate_day_action_run" if source_eligible_action_run_id else "single_source_trigger_run"
+    )
+    if resolved_scope_mode == "single_source_trigger_run":
+        if not str(source_trigger_run_id or "") or str(source_eligible_action_run_id or ""):
+            raise ValueError("single-source status-forward requires only source_trigger_run_id")
+    elif resolved_scope_mode == "aggregate_day_action_run":
+        if str(source_trigger_run_id or "") or not str(source_eligible_action_run_id or ""):
+            raise ValueError("aggregate status-forward requires only source_eligible_action_run_id")
+    else:
+        raise ValueError("unsupported status-forward scope_mode")
 
     eligible_by_state_key: dict[str, list[dict[str, Any]]] = {}
+    action_eligible_count = 0
     rejected_action_eligible_count = 0
     for row in action_eligible_event_rows:
+        if source_eligible_action_run_id and str(row.get("source_run_id") or "") != str(
+            source_eligible_action_run_id
+        ):
+            rejected_action_eligible_count += 1
+            continue
+        action_eligible_count += 1
         episode = _verified_action_eligible_status_episode(
             row,
             for_trade_date=for_trade_date,
@@ -515,6 +535,7 @@ def build_trigger_status_forward_plan(
         )
 
     source_rows: list[Mapping[str, Any]] = []
+    source_trigger_run_ids_seen: set[str] = set()
     for row in _sort_event_rows(n4_event_rows):
         if str(row.get("source_layer") or "") != "N4_trigger":
             continue
@@ -525,6 +546,8 @@ def build_trigger_status_forward_plan(
         grain = _tracking_grain_from_event(row)
         if str(grain.get("trade_date") or "") != str(for_trade_date):
             continue
+        if str(row.get("source_run_id") or ""):
+            source_trigger_run_ids_seen.add(str(row.get("source_run_id")))
         if grain.get("signal_type") not in CANONICAL_RUNTIME_SIGNAL_TYPES:
             continue
         if not str(row.get("event_id") or "") or not all(grain.values()):
@@ -532,6 +555,10 @@ def build_trigger_status_forward_plan(
         source_rows.append(row)
     if len(source_rows) > max_n4_event_rows:
         raise ValueError("status-forward N4 input exceeds max_n4_event_rows")
+    source_trigger_run_ids = sorted(source_trigger_run_ids_seen)
+    source_trigger_run_ids_hash = hashlib.sha256(
+        json.dumps(source_trigger_run_ids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
     existing_keys = {str(key) for key in (existing_status_event_keys or set())}
     invalidated_episode_ids: set[str] = set()
@@ -585,6 +612,11 @@ def build_trigger_status_forward_plan(
     return {
         "action_run_id": action_run_id,
         "source_trigger_run_id": source_trigger_run_id,
+        "source_eligible_action_run_id": source_eligible_action_run_id,
+        "scope_mode": resolved_scope_mode,
+        "source_trigger_run_count": len(source_trigger_run_ids),
+        "source_trigger_run_ids": source_trigger_run_ids,
+        "source_trigger_run_ids_hash": source_trigger_run_ids_hash,
         "consumer_name": consumer_name,
         "for_trade_date": str(for_trade_date),
         "planning_mode": "status_forward_only_offline_bounded_v1",
@@ -600,6 +632,7 @@ def build_trigger_status_forward_plan(
         },
         "summary": {
             "n4_event_count": len(source_rows),
+            "action_eligible_count": action_eligible_count,
             "verified_action_eligible_episode_count": sum(len(rows) for rows in eligible_by_state_key.values()),
             "rejected_action_eligible_count": rejected_action_eligible_count,
             "missing_verified_entry_count": missing_verified_entry_count,

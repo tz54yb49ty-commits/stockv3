@@ -1,4 +1,6 @@
 from copy import deepcopy
+import hashlib
+import json
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,7 @@ N6_PROJECTION = ROOT / "src" / "ashare_v3" / "user" / "projection_plan.py"
 ROLLBACK = ROOT / "sql" / "N5_trigger_status_forward_only_rollback.sql"
 TRADE_DATE = "20260731"
 SOURCE_TRIGGER_RUN_ID = "trigger_status_forward_n4_20260731_v1"
+SOURCE_ELIGIBLE_ACTION_RUN_ID = "n5_live_tracking_20260731__active_set_a__fastlane_v1"
 ACTION_RUN_ID = "trigger_status_forward_n5_20260731_v1"
 CONSUMER_NAME = "n5_trigger_status_forward_v1"
 
@@ -34,6 +37,8 @@ def action_eligible(
     event_time: str = "2026-07-31T09:31:00+08:00",
     condition_key: str = "BUY:W",
     close: str = "10",
+    source_action_run_id: str = "entry_action_run",
+    source_trigger_run_id: str = SOURCE_TRIGGER_RUN_ID,
 ) -> dict:
     signal_type = "B_BUY"
     direction = "buy"
@@ -54,7 +59,7 @@ def action_eligible(
         "asset_kind": "stock",
         "identity_key": grain["identity_key"],
         "source_layer": "N5_action",
-        "source_run_id": "entry_action_run",
+        "source_run_id": source_action_run_id,
         "payload_json": {
             **grain,
             "action_state": "eligible",
@@ -72,7 +77,7 @@ def action_eligible(
                 "source_trigger_event_id": entry_event_id,
                 "source_trigger_event_type": "TriggerMatched",
                 "source_trigger_event_time": event_time,
-                "source_trigger_run_id": SOURCE_TRIGGER_RUN_ID,
+                "source_trigger_run_id": source_trigger_run_id,
                 "source_n4_payload": {
                     **grain,
                     "trigger_live": True,
@@ -91,6 +96,7 @@ def trigger_state_changed(
     trigger_live: bool,
     condition_key: str = "BUY:W",
     trigger_price: str = "10.55555555",
+    source_trigger_run_id: str = SOURCE_TRIGGER_RUN_ID,
 ) -> dict:
     return {
         "event_id": event_id,
@@ -100,7 +106,7 @@ def trigger_state_changed(
         "asset_kind": "stock",
         "identity_key": "stock:SH:600000",
         "source_layer": "N4_trigger",
-        "source_run_id": SOURCE_TRIGGER_RUN_ID,
+        "source_run_id": source_trigger_run_id,
         "status": "pending",
         "payload_json": {
             "trade_date": TRADE_DATE,
@@ -119,13 +125,28 @@ def trigger_state_changed(
 
 
 def status_plan(n4_rows, eligible_rows, **kwargs):
+    source_trigger_run_id = kwargs.pop("source_trigger_run_id", SOURCE_TRIGGER_RUN_ID)
+    source_eligible_action_run_id = kwargs.pop("source_eligible_action_run_id", "")
     return poller.build_trigger_status_forward_plan(
         n4_event_rows=n4_rows,
         action_eligible_event_rows=eligible_rows,
         action_run_id=kwargs.pop("action_run_id", ACTION_RUN_ID),
-        source_trigger_run_id=SOURCE_TRIGGER_RUN_ID,
+        source_trigger_run_id=source_trigger_run_id,
+        source_eligible_action_run_id=source_eligible_action_run_id,
+        scope_mode=kwargs.pop("scope_mode", ""),
         consumer_name=CONSUMER_NAME,
         for_trade_date=TRADE_DATE,
+        **kwargs,
+    )
+
+
+def aggregate_status_plan(n4_rows, eligible_rows, **kwargs):
+    return status_plan(
+        n4_rows,
+        eligible_rows,
+        source_trigger_run_id="",
+        source_eligible_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID,
+        scope_mode="aggregate_day_action_run",
         **kwargs,
     )
 
@@ -261,6 +282,115 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status_events"][0]["payload_json"]["operation"], "invalidate")
 
+    def test_aggregate_day_replay_chains_mixed_n4_source_runs_and_reports_census(self) -> None:
+        eligible = action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        rows = [
+            trigger_state_changed(
+                event_id="n4-mixed-true",
+                event_time="2026-07-31T09:35:00+08:00",
+                trigger_live=True,
+                source_trigger_run_id="n4-minute-run-0935",
+            ),
+            trigger_state_changed(
+                event_id="n4-mixed-false",
+                event_time="2026-07-31T09:40:00+08:00",
+                trigger_live=False,
+                source_trigger_run_id="n4-minute-run-0940",
+            ),
+        ]
+
+        plan = aggregate_status_plan(rows, [eligible])
+
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusUpdated", "TriggerStatusInvalidated"],
+        )
+        self.assertEqual(
+            [event["payload_json"]["source_trigger_run_id"] for event in plan["status_events"]],
+            ["n4-minute-run-0935", "n4-minute-run-0940"],
+        )
+        self.assertEqual(plan["scope_mode"], "aggregate_day_action_run")
+        self.assertEqual(plan["source_eligible_action_run_id"], SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        self.assertEqual(plan["source_trigger_run_count"], 2)
+        self.assertEqual(plan["source_trigger_run_ids"], ["n4-minute-run-0935", "n4-minute-run-0940"])
+        expected_hash = hashlib.sha256(
+            json.dumps(plan["source_trigger_run_ids"], separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(plan["source_trigger_run_ids_hash"], expected_hash)
+        self.assertEqual(plan["summary"]["action_eligible_count"], 1)
+
+    def test_aggregate_false_then_new_verified_episode_does_not_revive_old_episode(self) -> None:
+        old = action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        new = action_eligible(
+            event_id="n5-eligible-new",
+            entry_event_id="n4-entry-new",
+            event_time="2026-07-31T10:00:00+08:00",
+            source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID,
+            source_trigger_run_id="n4-match-run-1000",
+        )
+        rows = [
+            trigger_state_changed(
+                event_id="n4-old-false-mixed",
+                event_time="2026-07-31T09:45:00+08:00",
+                trigger_live=False,
+                source_trigger_run_id="n4-minute-run-0945",
+            ),
+            trigger_state_changed(
+                event_id="n4-old-true-after-false-mixed",
+                event_time="2026-07-31T09:50:00+08:00",
+                trigger_live=True,
+                source_trigger_run_id="n4-minute-run-0950",
+            ),
+            trigger_state_changed(
+                event_id="n4-new-true-mixed",
+                event_time="2026-07-31T10:05:00+08:00",
+                trigger_live=True,
+                source_trigger_run_id="n4-minute-run-1005",
+            ),
+        ]
+
+        plan = aggregate_status_plan(rows, [old, new])
+
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusInvalidated", "TriggerStatusUpdated"],
+        )
+        self.assertEqual(plan["status_events"][1]["payload_json"]["entry_trigger_event_id"], "n4-entry-new")
+        self.assertEqual(plan["summary"]["missing_verified_entry_count"], 1)
+
+    def test_aggregate_exact_source_action_run_excludes_other_eligible_run(self) -> None:
+        exact = action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        other = action_eligible(
+            event_id="n5-other-run-eligible",
+            entry_event_id="n4-other-run-entry",
+            event_time="2026-07-31T10:00:00+08:00",
+            source_action_run_id="other-n5-action-run",
+        )
+        rows = [
+            trigger_state_changed(
+                event_id="n4-exact-false",
+                event_time="2026-07-31T09:45:00+08:00",
+                trigger_live=False,
+                source_trigger_run_id="n4-minute-run-0945",
+            ),
+            trigger_state_changed(
+                event_id="n4-other-true",
+                event_time="2026-07-31T10:05:00+08:00",
+                trigger_live=True,
+                source_trigger_run_id="n4-minute-run-1005",
+            ),
+        ]
+
+        plan = aggregate_status_plan(rows, [exact, other])
+
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusInvalidated"],
+        )
+        self.assertEqual(plan["summary"]["action_eligible_count"], 1)
+        self.assertEqual(plan["summary"]["rejected_action_eligible_count"], 1)
+        self.assertEqual(plan["summary"]["missing_verified_entry_count"], 1)
+
     def test_missing_verified_trigger_matched_entry_does_not_forward(self) -> None:
         eligible = action_eligible()
         eligible["payload_json"].pop("action_entry_trigger_matched_ref")
@@ -292,6 +422,25 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         )
 
         self.assertEqual(first["status_events"][0]["event_id"], different_run["status_events"][0]["event_id"])
+        self.assertEqual(replay["status_events"], [])
+        self.assertEqual(replay["summary"]["replay_skipped_count"], 1)
+
+    def test_aggregate_replay_is_idempotent_across_status_forward_run_ids(self) -> None:
+        eligible = action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        row = trigger_state_changed(
+            event_id="n4-aggregate-replay",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+            source_trigger_run_id="n4-minute-run-0935",
+        )
+        first = aggregate_status_plan([row], [eligible])
+        replay = aggregate_status_plan(
+            [row],
+            [eligible],
+            action_run_id="different-status-forward-run",
+            existing_status_event_keys={first["status_events"][0]["event_key"]},
+        )
+
         self.assertEqual(replay["status_events"], [])
         self.assertEqual(replay["summary"]["replay_skipped_count"], 1)
 
@@ -461,9 +610,105 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         )
 
         self.assertEqual(result["verdict"], "N5_TRIGGER_STATUS_FORWARD_PLAN_ONLY")
+        self.assertEqual(result["scope_mode"], "single_source_trigger_run")
+        self.assertEqual(result["source_trigger_run_id"], SOURCE_TRIGGER_RUN_ID)
+        self.assertEqual(result["source_eligible_action_run_id"], "")
         self.assertEqual(result["write_result"]["common_event_outbox"], 0)
         self.assertEqual(result["write_result"]["common_action_event"], 0)
         self.assertEqual(writer_calls, [])
+
+    def test_runner_aggregate_plan_reports_authority_census_and_zero_effects(self) -> None:
+        plan = aggregate_status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-runner-aggregate",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                    source_trigger_run_id="n4-minute-run-0935",
+                )
+            ],
+            [action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)],
+        )
+
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._aggregate_runner_args(),
+            plan_provider=lambda _args: plan,
+        )
+
+        self.assertEqual(result["verdict"], "N5_TRIGGER_STATUS_FORWARD_PLAN_ONLY")
+        self.assertEqual(result["scope_mode"], "aggregate_day_action_run")
+        self.assertEqual(result["source_eligible_action_run_id"], SOURCE_ELIGIBLE_ACTION_RUN_ID)
+        self.assertEqual(result["source_trigger_run_count"], 1)
+        self.assertEqual(result["action_eligible_count"], 1)
+        self.assertEqual(result["write_result"]["common_action_event"], 0)
+        self.assertEqual(result["write_result"]["common_action_tracking_state"], 0)
+        self.assertEqual(result["write_result"]["common_event_inbox"], 0)
+        self.assertEqual(result["write_result"]["common_event_consumer_checkpoint"], 0)
+
+    def test_runner_source_authorities_are_xor_and_missing_authority_fails_closed(self) -> None:
+        provider_calls = []
+        missing = status_runner.run_n5_trigger_status_forward_once(
+            [
+                "--for-trade-date",
+                TRADE_DATE,
+                "--action-run-id",
+                ACTION_RUN_ID,
+                "--consumer-name",
+                CONSUMER_NAME,
+            ],
+            plan_provider=lambda _args: provider_calls.append("missing"),
+        )
+        both = status_runner.run_n5_trigger_status_forward_once(
+            [*self._aggregate_runner_args(), "--source-trigger-run-id", SOURCE_TRIGGER_RUN_ID],
+            plan_provider=lambda _args: provider_calls.append("both"),
+        )
+
+        self.assertEqual(missing["blocked_reason"], "exactly_one_source_authority_required")
+        self.assertEqual(both["blocked_reason"], "exactly_one_source_authority_required")
+        self.assertEqual(provider_calls, [])
+
+    def test_runner_aggregate_rejects_nonexistent_action_eligible_authority(self) -> None:
+        empty_plan = aggregate_status_plan([], [])
+
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._aggregate_runner_args(),
+            plan_provider=lambda _args: empty_plan,
+        )
+
+        self.assertEqual(result["verdict"], "BLOCKED_N5_TRIGGER_STATUS_FORWARD")
+        self.assertEqual(
+            result["blocked_reason"],
+            "source_eligible_action_run_has_no_action_eligible",
+        )
+
+    def test_aggregate_sql_scope_reads_day_n4_exact_action_run_and_day_dedup(self) -> None:
+        class RecordingCursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, query, params):
+                self.calls.append((" ".join(query.split()), params))
+
+            def fetchall(self):
+                return []
+
+        args = status_runner.build_arg_parser().parse_args(self._aggregate_runner_args())
+        cursor = RecordingCursor()
+
+        status_runner._fetch_n4_lifecycle_rows(cursor, args, limit=101)
+        status_runner._fetch_action_eligible_rows(cursor, args, limit=101)
+        status_runner._fetch_existing_status_event_keys(cursor, args, limit=101)
+
+        n4_query, n4_params = cursor.calls[0]
+        eligible_query, eligible_params = cursor.calls[1]
+        dedup_query, dedup_params = cursor.calls[2]
+        self.assertNotIn("AND source_run_id = %s", n4_query)
+        self.assertEqual(n4_params, (TRADE_DATE, 101))
+        self.assertIn("AND source_run_id = %s", eligible_query)
+        self.assertEqual(eligible_params, (TRADE_DATE, SOURCE_ELIGIBLE_ACTION_RUN_ID, 101))
+        self.assertNotIn("payload_json ->> 'source_trigger_run_id'", dedup_query)
+        self.assertIn("event_type = ANY(%s)", dedup_query)
+        self.assertEqual(dedup_params, (TRADE_DATE, list(N5_TRIGGER_STATUS_MESSAGE_TYPES), 101))
 
     def test_runner_execute_without_confirmation_is_blocked_before_provider_or_writer(self) -> None:
         calls = []
@@ -542,6 +787,20 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
             TRADE_DATE,
             "--source-trigger-run-id",
             SOURCE_TRIGGER_RUN_ID,
+            "--action-run-id",
+            ACTION_RUN_ID,
+            "--consumer-name",
+            CONSUMER_NAME,
+            *extra,
+        ]
+
+    @staticmethod
+    def _aggregate_runner_args(*extra: str) -> list[str]:
+        return [
+            "--for-trade-date",
+            TRADE_DATE,
+            "--source-eligible-action-run-id",
+            SOURCE_ELIGIBLE_ACTION_RUN_ID,
             "--action-run-id",
             ACTION_RUN_ID,
             "--consumer-name",

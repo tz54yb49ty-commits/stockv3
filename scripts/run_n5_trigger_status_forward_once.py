@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -39,7 +40,8 @@ class N5TriggerStatusForwardBlocked(RuntimeError):
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--for-trade-date", required=True)
-    parser.add_argument("--source-trigger-run-id", required=True)
+    parser.add_argument("--source-trigger-run-id", default="")
+    parser.add_argument("--source-eligible-action-run-id", default="")
     parser.add_argument("--action-run-id", required=True)
     parser.add_argument("--consumer-name", required=True)
     parser.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS)
@@ -100,7 +102,13 @@ def run_n5_trigger_status_forward_once(
 def _validate_args(args: argparse.Namespace, *, dsn_required: bool) -> None:
     if len(str(args.for_trade_date)) != 8 or not str(args.for_trade_date).isdigit():
         raise N5TriggerStatusForwardBlocked("for_trade_date_must_be_yyyymmdd")
-    for name in ("source_trigger_run_id", "action_run_id", "consumer_name"):
+    source_trigger_run_id = str(args.source_trigger_run_id or "").strip()
+    source_eligible_action_run_id = str(args.source_eligible_action_run_id or "").strip()
+    if bool(source_trigger_run_id) == bool(source_eligible_action_run_id):
+        raise N5TriggerStatusForwardBlocked("exactly_one_source_authority_required")
+    args.source_trigger_run_id = source_trigger_run_id
+    args.source_eligible_action_run_id = source_eligible_action_run_id
+    for name in ("action_run_id", "consumer_name"):
         if not str(getattr(args, name) or "").strip():
             raise N5TriggerStatusForwardBlocked(f"{name}_required")
     if not 0 < int(args.max_events) <= MAX_EVENTS_LIMIT:
@@ -114,6 +122,37 @@ def _validate_args(args: argparse.Namespace, *, dsn_required: bool) -> None:
 def _validate_plan(args: argparse.Namespace, plan: Mapping[str, Any]) -> None:
     if str(plan.get("planning_mode") or "") != PLANNING_MODE:
         raise N5TriggerStatusForwardBlocked("status_forward_planning_mode_required")
+    if str(plan.get("scope_mode") or "") != _scope_mode(args):
+        raise N5TriggerStatusForwardBlocked("status_forward_scope_mode_mismatch")
+    if str(plan.get("source_trigger_run_id") or "") != str(args.source_trigger_run_id or ""):
+        raise N5TriggerStatusForwardBlocked("status_forward_source_trigger_run_mismatch")
+    if str(plan.get("source_eligible_action_run_id") or "") != str(
+        args.source_eligible_action_run_id or ""
+    ):
+        raise N5TriggerStatusForwardBlocked("status_forward_source_action_run_mismatch")
+    source_trigger_run_ids = list(plan.get("source_trigger_run_ids") or [])
+    if source_trigger_run_ids != sorted(set(source_trigger_run_ids)) or any(
+        not str(run_id or "") for run_id in source_trigger_run_ids
+    ):
+        raise N5TriggerStatusForwardBlocked("status_forward_source_run_census_invalid")
+    try:
+        source_trigger_run_count = int(plan.get("source_trigger_run_count", -1))
+        action_eligible_count = int((plan.get("summary") or {}).get("action_eligible_count", -1))
+    except (TypeError, ValueError) as exc:
+        raise N5TriggerStatusForwardBlocked("status_forward_scope_counts_invalid") from exc
+    if source_trigger_run_count != len(source_trigger_run_ids):
+        raise N5TriggerStatusForwardBlocked("status_forward_source_run_count_mismatch")
+    expected_source_run_hash = hashlib.sha256(
+        json.dumps(source_trigger_run_ids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if str(plan.get("source_trigger_run_ids_hash") or "") != expected_source_run_hash:
+        raise N5TriggerStatusForwardBlocked("status_forward_source_run_hash_mismatch")
+    if _scope_mode(args) == "single_source_trigger_run" and any(
+        run_id != args.source_trigger_run_id for run_id in source_trigger_run_ids
+    ):
+        raise N5TriggerStatusForwardBlocked("status_forward_single_source_census_mismatch")
+    if _scope_mode(args) == "aggregate_day_action_run" and action_eligible_count <= 0:
+        raise N5TriggerStatusForwardBlocked("source_eligible_action_run_has_no_action_eligible")
     if plan.get("action_events") or plan.get("tracking_updates") or plan.get("inbox_checkpoint_intent"):
         raise N5TriggerStatusForwardBlocked("status_forward_plan_contains_forbidden_effects")
     persistence = plan.get("persistence") or {}
@@ -186,7 +225,13 @@ def _manifest(
         "planning_mode": PLANNING_MODE,
         "for_trade_date": args.for_trade_date,
         "action_run_id": args.action_run_id,
+        "scope_mode": _scope_mode(args),
         "source_trigger_run_id": args.source_trigger_run_id,
+        "source_eligible_action_run_id": args.source_eligible_action_run_id,
+        "source_trigger_run_count": plan.get("source_trigger_run_count", 0),
+        "source_trigger_run_ids": list(plan.get("source_trigger_run_ids") or []),
+        "source_trigger_run_ids_hash": plan.get("source_trigger_run_ids_hash", ""),
+        "action_eligible_count": (plan.get("summary") or {}).get("action_eligible_count", 0),
         "consumer_name": args.consumer_name,
         "execute_requested": bool(args.execute),
         "status_event_count": len(plan.get("status_events") or []),
@@ -199,6 +244,8 @@ def _manifest(
             "common_event_outbox_only": True,
             "common_action_event_written": False,
             "tracking_written": False,
+            "common_event_inbox_written": False,
+            "common_event_consumer_checkpoint_written": False,
             "n4_inbox_checkpoint_written": False,
             "n4_outbox_status_updated": False,
         },
@@ -216,6 +263,12 @@ def _zero_write_result() -> dict[str, Any]:
         "common_event_consumer_checkpoint": 0,
         "n4_outbox_status_updated": False,
     }
+
+
+def _scope_mode(args: argparse.Namespace) -> str:
+    if str(args.source_eligible_action_run_id or "").strip():
+        return "aggregate_day_action_run"
+    return "single_source_trigger_run"
 
 
 def _default_plan_provider(args: argparse.Namespace) -> dict[str, Any]:
@@ -238,6 +291,8 @@ def _default_plan_provider(args: argparse.Namespace) -> dict[str, Any]:
         action_eligible_event_rows=eligible_rows,
         action_run_id=args.action_run_id,
         source_trigger_run_id=args.source_trigger_run_id,
+        source_eligible_action_run_id=args.source_eligible_action_run_id,
+        scope_mode=_scope_mode(args),
         consumer_name=args.consumer_name,
         for_trade_date=args.for_trade_date,
         existing_status_event_keys=existing_keys,
@@ -247,27 +302,39 @@ def _default_plan_provider(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _fetch_n4_lifecycle_rows(cur: Any, args: argparse.Namespace, *, limit: int) -> list[dict[str, Any]]:
+    source_filter = "AND source_run_id = %s" if args.source_trigger_run_id else ""
+    params: tuple[Any, ...] = (
+        (args.source_trigger_run_id, args.for_trade_date, limit)
+        if args.source_trigger_run_id
+        else (args.for_trade_date, limit)
+    )
     cur.execute(
-        """
+        f"""
         SELECT outbox_id, event_id, event_type, event_schema_version, trade_date,
                asset_kind, identity_key, event_time, source_layer, source_run_id,
                dedup_key, partition_key, payload_json, status
         FROM common_event_outbox
         WHERE source_layer = 'N4_trigger'
-          AND source_run_id = %s
+          {source_filter}
           AND trade_date = %s
           AND event_type = 'TriggerStateChanged'
-        ORDER BY event_time, outbox_id, event_id
+        ORDER BY event_time, source_run_id, outbox_id, event_id
         LIMIT %s
         """,
-        (args.source_trigger_run_id, args.for_trade_date, limit),
+        params,
     )
     return [dict(row) for row in cur.fetchall()]
 
 
 def _fetch_action_eligible_rows(cur: Any, args: argparse.Namespace, *, limit: int) -> list[dict[str, Any]]:
+    if args.source_eligible_action_run_id:
+        authority_filter = "AND source_run_id = %s"
+        authority_value = args.source_eligible_action_run_id
+    else:
+        authority_filter = "AND payload_json ->> 'source_trigger_run_id' = %s"
+        authority_value = args.source_trigger_run_id
     cur.execute(
-        """
+        f"""
         SELECT event_id, event_type, event_schema_version, trade_date, asset_kind,
                identity_key, event_time, source_layer, source_run_id, dedup_key,
                partition_key, payload_json
@@ -275,11 +342,11 @@ def _fetch_action_eligible_rows(cur: Any, args: argparse.Namespace, *, limit: in
         WHERE source_layer = 'N5_action'
           AND trade_date = %s
           AND event_type = 'ActionEligible'
-          AND payload_json ->> 'source_trigger_run_id' = %s
+          {authority_filter}
         ORDER BY event_time, event_id
         LIMIT %s
         """,
-        (args.for_trade_date, args.source_trigger_run_id, limit),
+        (args.for_trade_date, authority_value, limit),
     )
     return [dict(row) for row in cur.fetchall()]
 
@@ -290,23 +357,31 @@ def _fetch_existing_status_event_keys(
     *,
     limit: int,
 ) -> set[str]:
-    cur.execute(
-        """
-        SELECT dedup_key
-        FROM common_event_outbox
-        WHERE source_layer = 'N5_action'
-          AND trade_date = %s
-          AND event_type = ANY(%s)
-          AND payload_json ->> 'source_trigger_run_id' = %s
-        ORDER BY dedup_key
-        LIMIT %s
-        """,
-        (
+    source_filter = (
+        "" if args.source_eligible_action_run_id else "AND payload_json ->> 'source_trigger_run_id' = %s"
+    )
+    params: tuple[Any, ...] = (
+        (args.for_trade_date, list(N5_TRIGGER_STATUS_MESSAGE_TYPES), limit)
+        if args.source_eligible_action_run_id
+        else (
             args.for_trade_date,
             list(N5_TRIGGER_STATUS_MESSAGE_TYPES),
             args.source_trigger_run_id,
             limit,
-        ),
+        )
+    )
+    cur.execute(
+        f"""
+        SELECT DISTINCT dedup_key
+        FROM common_event_outbox
+        WHERE source_layer = 'N5_action'
+          AND trade_date = %s
+          AND event_type = ANY(%s)
+          {source_filter}
+        ORDER BY dedup_key
+        LIMIT %s
+        """,
+        params,
     )
     return {str(row["dedup_key"]) for row in cur.fetchall() if row.get("dedup_key")}
 
