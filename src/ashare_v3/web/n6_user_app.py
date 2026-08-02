@@ -4508,15 +4508,16 @@ class PostgresN6UserRepository:
                   FROM active_accounts
                   HAVING count(*) = 1
                 ),
-                current_trade_day AS (
-                  SELECT min(to_date(c.trade_date, 'YYYYMMDD')) AS trade_date
+                effective_trade_day AS (
+                  SELECT to_date(c.trade_date, 'YYYYMMDD') AS trade_date
                   FROM common_trade_calendar c
-                  WHERE c.trade_date = to_char(
+                  WHERE c.trade_date <= to_char(
                           (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,
                           'YYYYMMDD'
                         )
                     AND c.is_open IS TRUE
-                  HAVING count(*) = 1
+                  ORDER BY c.trade_date DESC
+                  LIMIT 1
                 ),
                 scoped_positions AS (
                   SELECT p.virtual_position_id,
@@ -4545,7 +4546,7 @@ class PostgresN6UserRepository:
                     ON p.virtual_account_id = s.virtual_account_id
                    AND p.principal_id = s.principal_id
                    AND p.principal_type = s.principal_type
-                  CROSS JOIN current_trade_day d
+                  CROSS JOIN effective_trade_day d
                   WHERE p.asset_kind = 'stock'
                     AND p.position_status = 'open_virtual'
                     AND p.quantity > 0

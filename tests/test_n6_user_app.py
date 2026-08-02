@@ -21654,9 +21654,11 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
             "as quote_exchange",
             "q.quality_status",
             "q.quality_reason",
-            "cross join current_trade_day",
+            "cross join effective_trade_day",
+            "c.trade_date <= to_char",
             "c.is_open is true",
-            "having count(*) = 1",
+            "order by c.trade_date desc",
+            "limit 1",
             "l.virtual_account_id = p.virtual_account_id",
             "l.principal_id = p.principal_id",
             "l.principal_type = p.principal_type",
@@ -21672,6 +21674,8 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertNotIn("select *", normalized)
         self.assertNotIn("select p.*", normalized)
         self.assertNotIn("select q.*", normalized)
+        self.assertNotIn("cross join current_trade_day", normalized)
+        self.assertNotIn("c.trade_date = to_char", normalized)
         for forbidden_relation in (
             "condition_basis",
             "condition_pool",
@@ -21685,6 +21689,68 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
                 rf"\b(from|join)\s+(public\.)?{forbidden_relation}\b",
             )
         self.assertNotIn("mootdx", normalized)
+
+    def test_b_track_portfolio_weekend_keeps_position_visible_and_t1_locked(self) -> None:
+        client, repo, _, _ = build_client(proposal_write_enabled=True, csrf_secret="proposal-secret")
+        repo.app_positions = [
+            {
+                "virtual_position_id": 71,
+                "principal_id": 1,
+                "principal_type": "admin",
+                "identity_key": "stock:SZ:002415",
+                "stock_code": "002415",
+                "stock_name": "海康威视",
+                "position_exchange": "SZ",
+                "quote_exchange": "SZ",
+                "position_status": "open_virtual",
+                "quantity": Decimal("8200"),
+                "sellable_quantity": Decimal("0"),
+                "t1_locked_quantity": Decimal("8200"),
+                "lot_quantity_total": Decimal("8200"),
+                "average_cost": Decimal("36.36"),
+                "current_trade_date": "2026-07-31",
+                "holding_episode_no": 1,
+                "first_open_trade_date": "2026-07-31",
+                "current_price": Decimal("36.36"),
+                "quality_status": "passed",
+                "quality_reason": "ok",
+                "quote_minute": datetime(
+                    2026,
+                    7,
+                    31,
+                    15,
+                    0,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+                "fetched_at": datetime(
+                    2026,
+                    7,
+                    31,
+                    15,
+                    0,
+                    30,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            }
+        ]
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        weekend = datetime(2026, 8, 1, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+        with patch("ashare_v3.web.n6_user_app.n6_trading_session_now", return_value=weekend):
+            api = client.get("/api/n6/app/v1/portfolio")
+            page = client.get("/n6/app/portfolio")
+
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(page.status_code, 200)
+        item = api.json()["items"][0]
+        self.assertEqual(item["identity_key"], "stock:SZ:002415")
+        self.assertEqual(item["quote_status"], "market_closed")
+        self.assertEqual(item["sellable_quantity"], "0")
+        self.assertEqual(item["t1_locked_quantity"], "8200")
+        self.assertFalse(item["manual_sell_available"])
+        self.assertEqual(item["manual_sell_disabled_reason"], "T+1 锁定，当前无可卖数量")
+        self.assertIn("002415 海康威视", page.text)
+        self.assertNotIn("暂无虚拟持仓", page.text)
 
     def test_b_track_trade_log_postgres_identity_query_is_asof_readonly_and_unambiguous(self) -> None:
         cursor = RecordingCursor(existing_relations={"n6_virtual_trade"})
