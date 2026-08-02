@@ -2363,19 +2363,6 @@ def _build_trigger_status_forward_event(
         dedup_key=dedup_key,
         event_schema_version=N5_TRIGGER_STATUS_FORWARD_SCHEMA_VERSION,
     )
-    trigger_price = _value(row, payload, "trigger_price")
-    trigger_pct = _percentage_from_price(
-        trigger_price,
-        close=episode.get("entry_close"),
-        inherited_reasons=(),
-        invalid_price_reason="latest_trigger_price_invalid",
-    )
-    if trigger_pct["status"] != "ready":
-        raise ValueError("status-forward trigger_pct is not ready")
-    trigger_period, _primary_trigger_period, triggered_periods = _canonical_trigger_period_payload_fields(
-        grain,
-        payload,
-    )
     trigger_live = _bool_value(_value(row, payload, "trigger_live"), default=True)
     current_status = str(_value(row, payload, "current_status") or "")
     status_payload = {
@@ -2397,12 +2384,6 @@ def _build_trigger_status_forward_event(
         "condition_key": grain["condition_key"],
         "trigger_time": _scope_time_text(episode.get("entry_trigger_time")),
         "source_trigger_event_time": _scope_time_text(row.get("event_time")),
-        "trigger_price": trigger_price,
-        "trigger_pct": trigger_pct["value"],
-        "trigger_pct_status": trigger_pct["status"],
-        "trigger_pct_not_ready_reasons": trigger_pct["not_ready_reasons"],
-        "trigger_period": trigger_period,
-        "triggered_periods": triggered_periods,
         "trigger_live": trigger_live,
         "current_status": current_status,
         "action_eligible_entry_allowed": False,
@@ -2416,11 +2397,24 @@ def _build_trigger_status_forward_event(
                 entry_trigger_event_id,
                 source_trigger_event_id,
             ],
-            "trigger_pct_close_source": "verified_action_eligible.entry_n2_condition_projection_context.fields.close",
-            "trigger_pct_price_source": "latest_trigger_state_changed.trigger_price",
             "immutable_action_snapshot_mutated": False,
         },
     }
+    if event_type == "TriggerStatusUpdated":
+        trigger_price = _value(row, payload, "trigger_price")
+        if _positive_finite_decimal_or_none(trigger_price) is None:
+            raise ValueError("status-forward trigger_price is not ready")
+        trigger_period, _primary_trigger_period, triggered_periods = _canonical_trigger_period_payload_fields(
+            grain,
+            payload,
+        )
+        status_payload.update(
+            {
+                "trigger_price": trigger_price,
+                "trigger_period": trigger_period,
+                "triggered_periods": triggered_periods,
+            }
+        )
     return {
         "event_id": event_id,
         "event_key": dedup_key,

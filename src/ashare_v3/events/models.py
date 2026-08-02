@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 
@@ -151,14 +152,21 @@ N5_TRIGGER_STATUS_MESSAGE_PAYLOAD_KEYS = (
     "signal_type",
     "condition_key",
     "trigger_time",
-    "trigger_price",
-    "trigger_pct",
-    "trigger_period",
-    "triggered_periods",
-    "trigger_live",
-    "current_status",
     "action_eligible_entry_allowed",
 )
+N5_TRIGGER_STATUS_MESSAGE_OPERATION_PAYLOAD_KEYS = {
+    "TriggerStatusUpdated": (
+        "trigger_price",
+        "trigger_period",
+        "triggered_periods",
+        "trigger_live",
+        "current_status",
+    ),
+    "TriggerStatusInvalidated": (
+        "trigger_live",
+        "current_status",
+    ),
+}
 N4_DIRECTIONS = ("buy", "sell")
 N5_ACTION_TYPES = (
     "buy_candidate",
@@ -415,6 +423,10 @@ def validate_n5_payload_fields(envelope: EventEnvelope) -> None:
 
 def validate_n5_trigger_status_message_payload(envelope: EventEnvelope) -> None:
     payload = envelope.payload_json
+    required_keys = (
+        *N5_TRIGGER_STATUS_MESSAGE_PAYLOAD_KEYS,
+        *N5_TRIGGER_STATUS_MESSAGE_OPERATION_PAYLOAD_KEYS[envelope.event_type],
+    )
     value_may_be_false_or_empty = {
         "triggered_periods",
         "trigger_live",
@@ -422,7 +434,7 @@ def validate_n5_trigger_status_message_payload(envelope: EventEnvelope) -> None:
     }
     missing = [
         key
-        for key in N5_TRIGGER_STATUS_MESSAGE_PAYLOAD_KEYS
+        for key in required_keys
         if not (
             _payload_has_key_value_or_empty_collection(payload, key)
             if key in value_may_be_false_or_empty
@@ -432,6 +444,16 @@ def validate_n5_trigger_status_message_payload(envelope: EventEnvelope) -> None:
     if missing:
         raise EventContractError(
             "N5 trigger-status payload missing required fields: " + ", ".join(missing)
+        )
+    unexpected_percentage_fields = [
+        key
+        for key in ("trigger_pct", "trigger_pct_status", "trigger_pct_not_ready_reasons")
+        if key in payload
+    ]
+    if unexpected_percentage_fields:
+        raise EventContractError(
+            "N5 trigger-status payload must not include percentage fields: "
+            + ", ".join(unexpected_percentage_fields)
         )
     forbidden = [key for key in ("action_state", "confirmation_status", "action_mark") if key in payload]
     if forbidden:
@@ -485,15 +507,20 @@ def validate_n5_trigger_status_message_payload(envelope: EventEnvelope) -> None:
         raise EventContractError("BUY_HINT must keep direction=buy in N5 trigger-status payload")
     if condition_key == "SELL_HINT" and direction != "sell":
         raise EventContractError("SELL_HINT must keep direction=sell in N5 trigger-status payload")
-    if str(payload.get("trigger_pct_status") or "") != "ready":
-        raise EventContractError("N5 trigger-status payload trigger_pct must be ready")
-    if not isinstance(payload.get("triggered_periods"), (list, tuple)):
-        raise EventContractError("N5 trigger-status payload triggered_periods must be a list")
-    if condition_key in HINT_CONDITION_KEYS:
-        if str(payload.get("trigger_period") or "") != "30m":
-            raise EventContractError("N5 trigger-status HINT payload requires trigger_period=30m")
-        if payload.get("triggered_periods"):
-            raise EventContractError("N5 trigger-status HINT payload must hide internal triggered_periods")
+    if envelope.event_type == "TriggerStatusUpdated":
+        try:
+            trigger_price = Decimal(str(payload.get("trigger_price")))
+        except (InvalidOperation, ValueError):
+            trigger_price = None
+        if trigger_price is None or not trigger_price.is_finite() or trigger_price <= 0:
+            raise EventContractError("N5 trigger-status update requires positive trigger_price")
+        if not isinstance(payload.get("triggered_periods"), (list, tuple)):
+            raise EventContractError("N5 trigger-status payload triggered_periods must be a list")
+        if condition_key in HINT_CONDITION_KEYS:
+            if str(payload.get("trigger_period") or "") != "30m":
+                raise EventContractError("N5 trigger-status HINT payload requires trigger_period=30m")
+            if payload.get("triggered_periods"):
+                raise EventContractError("N5 trigger-status HINT payload must hide internal triggered_periods")
 
 
 def validate_n5_trigger_fact_passthrough_payload(payload: Mapping[str, Any]) -> None:

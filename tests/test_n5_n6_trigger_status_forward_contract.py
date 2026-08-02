@@ -192,6 +192,12 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
 
     def test_status_payload_and_lifecycle_are_decision_complete(self) -> None:
         text = CONTRACT.read_text(encoding="utf-8")
+        update_contract = text.split("### 2.1 TriggerStatusUpdated", 1)[1].split(
+            "### 2.2 TriggerStatusInvalidated", 1
+        )[0]
+        invalidation_contract = text.split("### 2.2 TriggerStatusInvalidated", 1)[1].split(
+            "### 2.3 Required Payload", 1
+        )[0]
         for field in (
             "contract_version",
             "operation",
@@ -209,7 +215,6 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
             "condition_key",
             "trigger_time",
             "trigger_price",
-            "trigger_pct",
             "trigger_period",
             "triggered_periods",
             "trigger_live",
@@ -219,13 +224,15 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
 
         for rule in (
             "ActionEligible -> idempotent insert",
-            "TriggerStatusUpdated -> update trigger_pct, trigger_price, trigger_period,",
+            "TriggerStatusUpdated -> update trigger_price, trigger_period,",
             "TriggerStatusInvalidated -> delete the exact episode; missing delete is idempotent",
             "missing update target -> fail closed; do not advance inbox/checkpoint",
             "ActionExecuted -> no current-trigger-status mutation",
             "asset_kind + identity_key + direction",
         ):
             self.assertIn(rule, text)
+        self.assertNotIn("trigger_pct", update_contract)
+        self.assertIn("does not require trigger price or period fields", invalidation_contract)
 
     def test_architecture_and_tasks_register_the_isolated_status_branch(self) -> None:
         architecture = ARCHITECTURE.read_text(encoding="utf-8")
@@ -240,7 +247,7 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertIn("N6_user 独立实现/PG16 测试", tasks)
         self.assertIn("首版禁止 scheduler、LaunchAgent、SSE、worker", tasks)
 
-    def test_true_state_change_builds_current_update_from_frozen_entry_close(self) -> None:
+    def test_true_state_change_builds_update_without_percentage_fields(self) -> None:
         eligible = action_eligible()
         row = trigger_state_changed(
             event_id="n4-tsc-true",
@@ -253,11 +260,64 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertEqual([event["event_type"] for event in plan["status_events"]], ["TriggerStatusUpdated"])
         payload = plan["status_events"][0]["payload_json"]
         self.assertEqual(payload["operation"], "update")
-        self.assertEqual(payload["trigger_pct"], "5.555556")
+        self.assertEqual(payload["trigger_price"], "10.55555555")
+        self.assertEqual(payload["trigger_period"], "W")
+        self.assertEqual(payload["triggered_periods"], ["W"])
+        for field in ("trigger_pct", "trigger_pct_status", "trigger_pct_not_ready_reasons"):
+            self.assertNotIn(field, payload)
+        self.assertNotIn("trigger_pct_close_source", payload["trace_json"])
+        self.assertNotIn("trigger_pct_price_source", payload["trace_json"])
         self.assertEqual(payload["entry_trigger_event_id"], "n4-entry-1")
         self.assertEqual(payload["trigger_time"], "2026-07-31T09:31:00+08:00")
         self.assertEqual(payload["source_trigger_event_time"], "2026-07-31T09:35:00+08:00")
         self.assertFalse(payload["action_eligible_entry_allowed"])
+
+    def test_update_missing_or_invalid_trigger_price_fails_closed(self) -> None:
+        for trigger_price in (None, "", "invalid", "NaN", "0", "-1"):
+            with self.subTest(trigger_price=trigger_price):
+                row = trigger_state_changed(
+                    event_id=f"n4-tsc-update-price-{trigger_price}",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+                if trigger_price is None:
+                    row["payload_json"].pop("trigger_price")
+                else:
+                    row["payload_json"]["trigger_price"] = trigger_price
+                with self.assertRaisesRegex(ValueError, "trigger_price is not ready"):
+                    status_plan([row], [action_eligible()])
+
+    def test_invalidation_ignores_missing_empty_or_invalid_trigger_context(self) -> None:
+        forbidden_fields = {
+            "trigger_price",
+            "trigger_period",
+            "triggered_periods",
+            "trigger_pct",
+            "trigger_pct_status",
+            "trigger_pct_not_ready_reasons",
+        }
+        for trigger_price in (None, "", "invalid", "NaN", "0", "-1"):
+            with self.subTest(trigger_price=trigger_price):
+                row = trigger_state_changed(
+                    event_id=f"n4-tsc-invalidate-price-{trigger_price}",
+                    event_time="2026-07-31T09:40:00+08:00",
+                    trigger_live=False,
+                )
+                if trigger_price is None:
+                    row["payload_json"].pop("trigger_price")
+                else:
+                    row["payload_json"]["trigger_price"] = trigger_price
+                row["payload_json"]["trigger_period"] = "invalid-period"
+                row["payload_json"]["triggered_periods"] = "invalid-periods"
+
+                event = status_plan([row], [action_eligible()])["status_events"][0]
+                payload = event["payload_json"]
+
+                self.assertEqual(payload["operation"], "invalidate")
+                self.assertIs(payload["trigger_live"], False)
+                self.assertEqual(payload["current_status"], "inactive")
+                self.assertTrue(forbidden_fields.isdisjoint(payload))
+                validate_event_envelope(status_runner._event_envelope(event))
 
     def test_legacy_entry_without_embedded_date_inherits_verified_action_date(self) -> None:
         eligible = action_eligible()
@@ -383,7 +443,11 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
                     [event["event_type"] for event in plan["status_events"]],
                     ["TriggerStatusInvalidated"],
                 )
-                self.assertEqual(plan["status_events"][0]["payload_json"]["operation"], "invalidate")
+                payload = plan["status_events"][0]["payload_json"]
+                self.assertEqual(payload["operation"], "invalidate")
+                self.assertNotIn("trigger_price", payload)
+                self.assertNotIn("trigger_period", payload)
+                self.assertNotIn("triggered_periods", payload)
 
     def test_aggregate_day_replay_chains_mixed_n4_source_runs_and_reports_census(self) -> None:
         eligible = action_eligible(source_action_run_id=SOURCE_ELIGIBLE_ACTION_RUN_ID)
@@ -596,7 +660,8 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertEqual(eligible, frozen_eligible)
         self.assertEqual(row, frozen_row)
         self.assertEqual(eligible["payload_json"]["trigger_pct"], "1.000000")
-        self.assertEqual(plan["status_events"][0]["payload_json"]["trigger_pct"], "20.000000")
+        self.assertEqual(plan["status_events"][0]["payload_json"]["trigger_price"], "12")
+        self.assertNotIn("trigger_pct", plan["status_events"][0]["payload_json"])
 
     def test_hint_public_period_does_not_leak_internal_30m_list(self) -> None:
         eligible = action_eligible(condition_key="BUY_HINT")
@@ -674,6 +739,64 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         )
         for event in events:
             validate_event_envelope(status_runner._event_envelope(event))
+
+    def test_event_envelope_requires_operation_specific_status_fields(self) -> None:
+        update = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-model-update-required",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [action_eligible()],
+        )["status_events"][0]
+        for field in ("trigger_price", "trigger_period", "triggered_periods"):
+            with self.subTest(update_missing=field):
+                invalid = deepcopy(update)
+                invalid["payload_json"].pop(field)
+                with self.assertRaisesRegex(EventContractError, "missing required fields"):
+                    validate_event_envelope(status_runner._event_envelope(invalid))
+
+        invalid_price = deepcopy(update)
+        invalid_price["payload_json"]["trigger_price"] = "invalid"
+        with self.assertRaisesRegex(EventContractError, "positive trigger_price"):
+            validate_event_envelope(status_runner._event_envelope(invalid_price))
+
+        invalidation_row = trigger_state_changed(
+            event_id="n4-model-invalidate-minimal",
+            event_time="2026-07-31T09:40:00+08:00",
+            trigger_live=False,
+        )
+        invalidation_row["payload_json"].pop("trigger_price")
+        invalidation = status_plan([invalidation_row], [action_eligible()])["status_events"][0]
+        validate_event_envelope(status_runner._event_envelope(invalidation))
+        for field in ("trigger_live", "current_status"):
+            with self.subTest(invalidation_missing=field):
+                invalid = deepcopy(invalidation)
+                invalid["payload_json"].pop(field)
+                with self.assertRaisesRegex(EventContractError, "missing required fields"):
+                    validate_event_envelope(status_runner._event_envelope(invalid))
+
+    def test_event_envelope_rejects_percentage_fields_for_both_operations(self) -> None:
+        rows = [
+            trigger_state_changed(
+                event_id="n4-model-no-pct-update",
+                event_time="2026-07-31T09:35:00+08:00",
+                trigger_live=True,
+            ),
+            trigger_state_changed(
+                event_id="n4-model-no-pct-invalidate",
+                event_time="2026-07-31T09:40:00+08:00",
+                trigger_live=False,
+            ),
+        ]
+        for event in status_plan(rows, [action_eligible()])["status_events"]:
+            with self.subTest(event_type=event["event_type"]):
+                invalid = deepcopy(event)
+                invalid["payload_json"]["trigger_pct"] = "1.000000"
+                with self.assertRaisesRegex(EventContractError, "percentage fields"):
+                    validate_event_envelope(status_runner._event_envelope(invalid))
 
     def test_event_envelope_rejects_action_fields_and_operation_mismatch(self) -> None:
         row = trigger_state_changed(
