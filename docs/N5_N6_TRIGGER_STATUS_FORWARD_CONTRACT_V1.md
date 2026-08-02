@@ -104,9 +104,8 @@ TriggerStateChanged(trigger_live=true, current_status=matched)
 
 It forwards current trigger context only. It must not replace the immutable
 entry snapshot in the original `ActionEligible` or `ActionExecuted` event.
-`trigger_pct` is calculated from the latest N4 trigger price and the verified
-entry N2 close, using the existing N5 Decimal/ROUND_HALF_UP/six-fraction-digit
-contract.
+It forwards only the latest `trigger_price`, `trigger_period`, and
+`triggered_periods` values.
 
 ### 2.2 TriggerStatusInvalidated
 
@@ -119,8 +118,15 @@ TriggerStateChanged(trigger_live=false, current_status=inactive)
 It is emitted after a verified `ActionEligible` even when N5 action tracking is
 already terminal or executed. It does not delete N5/N4 history and does not
 replace canonical `ActionSkipped(action_state=expired)` action semantics.
+Its only projection effect is deleting the exact episode. The invalidate
+operation-specific payload does not require trigger price or period fields,
+because deletion depends only on the episode, grain, and audit keys. Source
+values may be ignored when present; missing price data must not block
+invalidation.
 
 ### 2.3 Required Payload
+
+The common identity, episode, and audit payload is:
 
 ```text
 contract_version
@@ -139,20 +145,30 @@ direction
 signal_type
 condition_key
 trigger_time
-trigger_price
-trigger_pct
-trigger_period
-triggered_periods
-trigger_live
-current_status
 action_eligible_entry_allowed
 ```
 
 `operation` is `update` for `TriggerStatusUpdated` and `invalidate` for
 `TriggerStatusInvalidated`.
 
-For HINT provenance, the public status payload keeps `trigger_period=30m` and
-must not expose the internal compatibility-only `triggered_periods=[30m]`.
+`TriggerStatusUpdated` additionally requires:
+
+```text
+trigger_price
+trigger_period
+triggered_periods
+trigger_live
+current_status
+```
+
+`TriggerStatusInvalidated` has no operation-specific trigger price or period
+requirement. For HINT provenance, the public update payload keeps
+`trigger_period=30m` and must not expose the internal compatibility-only
+`triggered_periods=[30m]`.
+
+This change is limited to the new trigger-status branch. The immutable
+`trigger_pct` in existing `ActionEligible` events and the existing
+Signals/Messages/Cards projection contracts remain unchanged.
 
 ## 3. N6 Current-State Read Model
 
@@ -160,6 +176,19 @@ The L2 implementation adds one N6-owned relation:
 
 ```text
 n6_trigger_status_current
+```
+
+The N6 current table, API, and page fields are fixed to:
+
+```text
+trigger_time
+asset_kind
+asset_code
+asset_name
+direction
+trigger_price
+trigger_period
+triggered_periods
 ```
 
 Storage grain is one trigger episode. The episode key contains the canonical
@@ -171,7 +200,7 @@ Mutation rules:
 
 ```text
 ActionEligible -> idempotent insert
-TriggerStatusUpdated -> update trigger_pct, trigger_price, trigger_period,
+TriggerStatusUpdated -> update trigger_price, trigger_period,
                         triggered_periods and audit watermark only
 TriggerStatusInvalidated -> delete the exact episode; missing delete is idempotent
 missing update target -> fail closed; do not advance inbox/checkpoint
@@ -197,9 +226,9 @@ GET /n6/app/status-monitor
 ```
 
 The page label is `触发状态`. Its columns are trigger time, asset kind, code,
-name, direction, trigger percentage, trigger price, trigger period, and
-triggered periods. It remains read-only and has no proposal, order, trade,
-voice, mobile, sim, executor, or real-broker control.
+name, direction, trigger price, trigger period, and triggered periods. It
+remains read-only and has no proposal, order, trade, voice, mobile, sim,
+executor, or real-broker control.
 
 ## 4. Gate Sequence And Rollback Boundary
 
