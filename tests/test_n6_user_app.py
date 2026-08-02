@@ -1438,6 +1438,8 @@ class FakeN6UserRepository:
                 "board_name": "行业一",
                 "industry_code": "881001",
                 "industry_name": "行业一",
+                "signal_industry_code": "881001",
+                "signal_industry_name": "行业一",
                 "card_payload_json": {
                     "blocked_reason": "price_confirmation_failed",
                     "trigger_kind": "market_action_confirmation",
@@ -1496,6 +1498,8 @@ class FakeN6UserRepository:
                 "board_name": "行业二",
                 "industry_code": "881002",
                 "industry_name": "行业二",
+                "signal_industry_code": "881002",
+                "signal_industry_name": "行业二",
                 "card_payload_json": {
                     "trigger_kind": "market_action_confirmation",
                     "source_n4_run_id": "trigger_action_confirmation_metric_execute_20260602_1105",
@@ -6104,6 +6108,14 @@ class RecordingCursor:
                     )
                 }
             )
+            default_columns["v_n6_board_membership_fact"] = [
+                "trade_date",
+                "board_identity_key",
+                "stock_identity_key",
+                "board_code",
+                "board_name",
+                "board_type",
+            ]
             default_columns[n6_user_app_module.APP_REALTIME_SCOPE_TABLE] = [
                 "realtime_scope_id",
                 "principal_id",
@@ -11276,6 +11288,7 @@ class N6UserAppTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
             n6_user_app_module.APP_REALTIME_SCOPE_TABLE,
             "n6_virtual_account",
             "n6_virtual_position",
@@ -11402,6 +11415,7 @@ class N6UserAppTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
         }
         cursor = RecordingCursor(existing_relations=required_relations)
         original_connect = n6_user_app_module.psycopg.connect
@@ -11459,6 +11473,7 @@ class N6UserAppTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
         }
         cursor = RecordingCursor(existing_relations=required_relations)
         repo = PostgresN6UserRepository("postgresql://unused")
@@ -11480,6 +11495,7 @@ class N6UserAppTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
         }
         cursor = RecordingCursor(existing_relations=required_relations)
         repo = PostgresN6UserRepository("postgresql://unused")
@@ -11520,7 +11536,7 @@ class N6UserAppTest(unittest.TestCase):
             all(
                 repo._app_v2_filter_column_cache[view]
                 for view in required_relations
-                if view.startswith("v_n6_")
+                if view.endswith("_condition_display_basis")
             )
         )
 
@@ -11561,6 +11577,7 @@ class N6UserAppTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
         }
         catalog_started = threading.Event()
         catalog_release = threading.Event()
@@ -11592,7 +11609,16 @@ class N6UserAppTest(unittest.TestCase):
                     {"relation_name": relation_name, "column_name": column_name}
                     for relation_name in sorted(required_relations)
                     for column_name in (
-                        ["identity_key", "source_trade_date", "for_trade_date", "run_id", "updated_at"]
+                        [
+                            "trade_date",
+                            "board_identity_key",
+                            "stock_identity_key",
+                            "board_code",
+                            "board_name",
+                            "board_type",
+                        ]
+                        if relation_name == "v_n6_board_membership_fact"
+                        else ["identity_key", "source_trade_date", "for_trade_date", "run_id", "updated_at"]
                         if relation_name.startswith("v_n6_")
                         else [
                             "monitor_id",
@@ -18016,7 +18042,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         signal_header = rendered_signals.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(signal_header.count('<th scope="col"'), 23)
+        self.assertEqual(signal_header.count('<th scope="col"'), 26)
         self.assertIn(">股票名称</th>", signal_header)
         self.assertIn("行业", rendered_signals)
         self.assertIn("浦发银行", signals_response.text)
@@ -18170,7 +18196,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         stock_header = stock_rendered.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(stock_header.count('<th scope="col"'), 23)
+        self.assertEqual(stock_header.count('<th scope="col"'), 26)
         self.assertIn(">股票名称</th>", stock_header)
         self.assertIn("行业", stock_rendered)
         self.assertIn("浦发银行", stock_response.text)
@@ -18182,8 +18208,10 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         board_header = board_rendered.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(board_header.count('<th scope="col"'), 9)
-        self.assertIn(">标的</th>", board_header)
+        self.assertEqual(board_header.count('<th scope="col"'), 21)
+        self.assertIn(">板块名称</th>", board_header)
+        self.assertIn(">板块代码</th>", board_header)
+        self.assertNotIn(">操作</th>", board_header)
         self.assertIn("煤炭开采", board_response.text)
         self.assertNotIn("data-n6-create-proposal", board_rendered)
 
@@ -18192,8 +18220,10 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         index_header = index_rendered.split('<table class="signals-table">', 1)[1].split(
             "</thead>", 1
         )[0]
-        self.assertEqual(index_header.count('<th scope="col"'), 9)
-        self.assertIn(">标的</th>", index_header)
+        self.assertEqual(index_header.count('<th scope="col"'), 21)
+        self.assertIn(">指数名称</th>", index_header)
+        self.assertIn(">指数代码</th>", index_header)
+        self.assertNotIn(">操作</th>", index_header)
         self.assertIn("上证指数", index_response.text)
         self.assertNotIn("data-n6-create-proposal", index_rendered)
 
@@ -18808,6 +18838,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "target_price": "12.345",
             "trigger_price": "0",
             "action_price": None,
+            "action_pct": "8.654",
             "buy_expected_return_pct": "1.005",
             "up_secondary_expected_return_pct": "-0.004",
             "sell_expected_return_pct": "NaN",
@@ -18839,6 +18870,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
                 "up_secondary_expected_return_pct": "0",
                 "sell_expected_return_pct": "—",
                 "trigger_pct": "2.68",
+                "action_pct": "8.65",
                 "score": "88",
                 "pe_core": "15.21",
             },
@@ -18881,6 +18913,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         }
         signal["trigger_price"] = "10.005"
         signal["action_price"] = "10.004"
+        signal["action_pct"] = "8.654"
         signal["buy_expected_return_pct"] = "2.675"
         signal["trigger_pct"] = "0"
         index_signal = copy.deepcopy(signal)
@@ -18927,6 +18960,9 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertEqual(api_item["buy_target_price"], "12.345")
         self.assertEqual(api_item["sell_target_price"], "9.800")
         self.assertEqual(api_item["display_values"]["event_time"], "11:05:00")
+        self.assertEqual(api_item["display_values"]["action_pct"], "8.65")
+        self.assertEqual(api_item["industry_code"], "881002")
+        self.assertEqual(api_item["industry_name"], "行业二")
         for compatible_field in (
             "event_time",
             "identity_key",
@@ -18936,7 +18972,9 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         ):
             self.assertIn(compatible_field, api_item)
         expected_headings = (
+            "时间",
             "股票名称",
+            "股票代码",
             "行业代码",
             "行业名称",
             "方向",
@@ -18953,6 +18991,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "次级收益率",
             "卖出收益率",
             "触发涨跌幅",
+            "动作涨跌幅",
             "score",
             "pe_core",
             "projection 状态",
@@ -18961,13 +19000,15 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "操作",
         )
         signal_header = rendered_markup.split('<table class="signals-table">', 1)[1].split("</thead>", 1)[0]
-        self.assertEqual(signal_header.count("<th scope=\"col\""), 23)
+        self.assertEqual(signal_header.count("<th scope=\"col\""), 26)
         self.assertTrue(all('scope="col"' in tag for tag in re.findall(r"<th\b[^>]*>", signal_header)))
         self.assertEqual(
             tuple(re.findall(r'<th scope="col"(?: class="[^"]+")?>([^<]+)</th>', signal_header)),
             expected_headings,
         )
         expected_stock_alignment = (
+            "signal-time",
+            "signal-text",
             "signal-text",
             "signal-text",
             "signal-text",
@@ -18981,6 +19022,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "signal-number",
             "signal-period",
             "signal-period",
+            "signal-number",
             "signal-number",
             "signal-number",
             "signal-number",
@@ -18993,6 +19035,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "signal-action",
         )
         semantic_classes = (
+            "signal-time",
             "signal-text",
             "signal-period",
             "signal-number",
@@ -19011,10 +19054,10 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         stock_colgroup = rendered_markup.split(
             '<colgroup class="signals-stock-columns">', 1
         )[1].split("</colgroup>", 1)[0]
-        self.assertEqual(stock_colgroup.count("<col>"), 23)
+        self.assertEqual(stock_colgroup.count("<col>"), 26)
         self.assertIn("signals-stock-layout", rendered_markup)
-        for hidden_heading in ("交易日", "时间", "类型", "股票代码"):
-            self.assertNotIn(f"<th>{hidden_heading}</th>", rendered_markup)
+        for hidden_heading in ("交易日", "类型"):
+            self.assertNotIn(f">{hidden_heading}</th>", rendered_markup)
         stock_body = rendered_markup.split('data-n6-signals-body data-asset-kind="stock"', 1)[1].split(
             "</tbody>", 1
         )[0]
@@ -19025,7 +19068,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         )
         self.assertIsNotNone(stock_row)
         stock_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", stock_row.group(1))
-        self.assertEqual(len(stock_cell_tags), 23)
+        self.assertEqual(len(stock_cell_tags), 26)
         self.assertEqual(alignment_classes(stock_cell_tags), expected_stock_alignment)
         self.assertNotIn("data-n6-signal-detail-toggle", stock_body)
         self.assertNotIn("data-n6-signal-detail-for", stock_body)
@@ -19034,14 +19077,18 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
         self.assertNotIn("全部 T+1 可卖数量", rendered_markup)
         self.assertIn("12.35", rendered_markup)
         self.assertIn("9.8", rendered_markup)
+        self.assertIn("11:05:00", stock_row.group(1))
+        self.assertNotIn("20260605", stock_row.group(1))
+        self.assertIn("600000", stock_row.group(1))
         self.assertIn("display.buy_target_price", dynamic_row)
         self.assertIn("display.sell_target_price", dynamic_row)
         self.assertIn("display.trigger_pct", dynamic_row)
+        self.assertIn("display.action_pct", dynamic_row)
         stock_dynamic_branch = dynamic_row.split('if (assetKind === "stock") {', 1)[1].split(
-            "const directionalTarget", 1
+            "\n        }\n        return `", 1
         )[0]
         stock_dynamic_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", stock_dynamic_branch)
-        self.assertEqual(len(stock_dynamic_cell_tags), 23)
+        self.assertEqual(len(stock_dynamic_cell_tags), 26)
         self.assertEqual(alignment_classes(stock_dynamic_cell_tags), expected_stock_alignment)
         self.assertNotIn("data-n6-signal-detail-toggle", stock_dynamic_branch)
         self.assertIn(
@@ -19049,35 +19096,9 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             source,
         )
         self.assertIn("const upsertSignalMarkup =", dynamic_row)
-        self.assertIn("const wasExpanded =", dynamic_row)
-        self.assertIn("if (detailRow) target.append(summaryRow, detailRow)", dynamic_row)
-        self.assertIn("else target.append(summaryRow)", dynamic_row)
-        restore_helper = "const restoreSignalExpansion =" + source.split(
-            "const restoreSignalExpansion =", 1
-        )[1].split("const upsertSignalMarkup =", 1)[0]
-        restore_harness = r"""
-const attributes = {};
-const toggle = { setAttribute(name, value) { attributes[name] = value; } };
-const summary = { querySelector: () => toggle };
-const detail = { hidden: true };
-""" + restore_helper + r"""
-restoreSignalExpansion(summary, detail, true);
-const expanded = { ariaExpanded: attributes["aria-expanded"], hidden: detail.hidden };
-restoreSignalExpansion(summary, detail, false);
-const collapsed = { ariaExpanded: attributes["aria-expanded"], hidden: detail.hidden };
-process.stdout.write(JSON.stringify({ expanded, collapsed }));
-"""
-        restore_result = subprocess.run(
-            ["node", "-"], input=restore_harness, text=True, capture_output=True, check=False
-        )
-        self.assertEqual(restore_result.returncode, 0, restore_result.stdout + restore_result.stderr)
-        self.assertEqual(
-            json.loads(restore_result.stdout),
-            {
-                "expanded": {"ariaExpanded": "true", "hidden": False},
-                "collapsed": {"ariaExpanded": "false", "hidden": True},
-            },
-        )
+        self.assertNotIn("restoreSignalExpansion", source)
+        self.assertNotIn("data-n6-signal-detail", source)
+        self.assertIn("target.append(row)", dynamic_row)
         self.assertNotIn("renderingPolicy", dynamic_row)
         self.assertNotIn("blocked_reason_label", dynamic_row)
         self.assertNotIn("quantity", dynamic_row)
@@ -19101,36 +19122,58 @@ process.stdout.write(JSON.stringify({ expanded, collapsed }));
                 n6_user_app_module.PostgresN6UserRepository._app_v1_signal_sse_select_list
             ),
         )
-        expected_summary_headings = (
+        expected_summary_tail = (
             "时间",
-            "标的",
-            "方向 / 条件",
-            "周期",
-            "方向性目标价 / 收益率",
+            "方向",
+            "条件",
+            "触发周期",
+            "主触发周期",
+            "买入目标价",
+            "卖出目标价",
             "触发价",
             "动作价",
-            "状态 / 确认类型",
-            "操作",
+            "上参考周期",
+            "下参考周期",
+            "买入收益率",
+            "次级收益率",
+            "卖出收益率",
+            "触发涨跌幅",
+            "动作涨跌幅",
+            "projection 状态",
+            "动作状态",
+            "action_mark",
         )
         expected_summary_alignment = (
+            "signal-time",
+            "signal-text",
             "signal-text",
             "signal-text",
             "signal-text",
             "signal-period",
+            "signal-period",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-number",
+            "signal-period",
+            "signal-period",
+            "signal-number",
+            "signal-number",
             "signal-number",
             "signal-number",
             "signal-number",
             "signal-status",
-            "signal-action",
+            "signal-status",
+            "signal-status",
         )
-        for asset_response in (index_response, board_response):
+        for asset_kind, asset_response in (("index", index_response), ("board", board_response)):
             asset_markup = asset_response.text.split("<script", 1)[0]
             self.assertEqual(asset_response.status_code, 200)
             asset_header = asset_markup.split('<table class="signals-table">', 1)[1].split(
                 "</thead>", 1
             )[0]
             asset_header_tags = re.findall(r"<th\b[^>]*>", asset_header)
-            self.assertEqual(len(asset_header_tags), 9)
+            self.assertEqual(len(asset_header_tags), 21)
             self.assertTrue(all('scope="col"' in tag for tag in asset_header_tags))
             self.assertEqual(
                 tuple(
@@ -19139,13 +19182,18 @@ process.stdout.write(JSON.stringify({ expanded, collapsed }));
                         asset_header,
                     )
                 ),
-                expected_summary_headings,
+                (
+                    "时间",
+                    "指数名称" if asset_kind == "index" else "板块名称",
+                    "指数代码" if asset_kind == "index" else "板块代码",
+                    *expected_summary_tail[1:],
+                ),
             )
             self.assertEqual(alignment_classes(asset_header_tags), expected_summary_alignment)
             summary_colgroup = asset_markup.split(
                 '<colgroup class="signals-summary-columns">', 1
             )[1].split("</colgroup>", 1)[0]
-            self.assertEqual(summary_colgroup.count("<col>"), 9)
+            self.assertEqual(summary_colgroup.count("<col>"), 21)
             self.assertIn("signals-summary-layout", asset_markup)
             asset_body = asset_markup.split("data-n6-signals-body", 1)[1].split(
                 "</tbody>", 1
@@ -19157,28 +19205,121 @@ process.stdout.write(JSON.stringify({ expanded, collapsed }));
             )
             self.assertIsNotNone(asset_row)
             asset_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", asset_row.group(1))
-            self.assertEqual(len(asset_cell_tags), 9)
+            self.assertEqual(len(asset_cell_tags), 21)
             self.assertEqual(alignment_classes(asset_cell_tags), expected_summary_alignment)
-            self.assertIn('colspan="9"', asset_body)
+            self.assertIn("11:05:00", asset_row.group(1))
+            self.assertNotIn("20260605", asset_row.group(1))
+            self.assertNotIn("colspan=", asset_body)
             self.assertNotIn("data-n6-create-proposal", asset_markup)
-            self.assertNotIn("<th>score</th>", asset_markup)
-            self.assertNotIn("<th>pe_core</th>", asset_markup)
-            self.assertIn("反方向目标 / 收益", asset_markup)
-            self.assertIn("projection 状态", asset_markup)
-        summary_dynamic_branch = dynamic_row.split("const directionalTarget", 1)[1].split(
-            "const restoreSignalExpansion", 1
-        )[0]
-        summary_dynamic_row = summary_dynamic_branch.split(
+            self.assertNotIn("详情", asset_body)
+            self.assertNotIn("操作</th>", asset_header)
+            self.assertIn("动作涨跌幅", asset_header)
+        summary_dynamic_row = dynamic_row.rsplit(
             '<tr data-n6-projection-id="${projectionId}">', 1
         )[1].split("</tr>", 1)[0]
         summary_dynamic_cell_tags = re.findall(r"<td(?:\s[^>]*)?>", summary_dynamic_row)
-        self.assertEqual(len(summary_dynamic_cell_tags), 9)
+        self.assertEqual(len(summary_dynamic_cell_tags), 21)
         self.assertEqual(alignment_classes(summary_dynamic_cell_tags), expected_summary_alignment)
-        self.assertIn('colspan="9"', summary_dynamic_branch)
+        self.assertNotIn("data-n6-signal-detail", dynamic_row)
         self.assertIn("table-layout: fixed", source)
         self.assertIn(".signals-table-wrap .signal-number", source)
         self.assertEqual(n6_app_v1_module._signal_display_decimal("-0"), "0")
         self.assertFalse(any(repo.forbidden_writes.values()))
+
+    def test_signals_stock_industry_uses_unique_tdx_asof_membership_without_card_fallback(self) -> None:
+        base = {
+            "user_signal_projection_id": 9401,
+            "user_signal_card_id": 9402,
+            "user_projection_run_id": "projection-run-industry",
+            "event_type": "ActionExecuted",
+            "event_time": datetime(2026, 7, 31, 1, 34, tzinfo=timezone.utc),
+            "trade_date": "20260731",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "code": "600000",
+            "name": "浦发银行",
+            "direction": "buy",
+            "condition_key": "BUY:M,W,D",
+            "action_state": "executed",
+            "board_code": "projection-industry-code",
+            "board_name": "投影行业",
+            "signal_industry_code": "881386",
+            "signal_industry_name": "全国性银行",
+        }
+        model = n6_app_v1_module.app_signals_model(
+            {"principal_id": 1, "principal_type": "admin"},
+            user={"user_id": 1, "login_name": "admin", "role": "admin"},
+            rows=[base],
+            filters={"asset_kind": "stock", "trade_date": "20260731"},
+            scope_metadata={"scope_mode": "historical_projection"},
+        )
+        self.assertEqual(model["items"][0]["industry_code"], "881386")
+        self.assertEqual(model["items"][0]["industry_name"], "全国性银行")
+
+        unresolved = dict(base)
+        unresolved["user_signal_projection_id"] = 9403
+        unresolved["signal_industry_code"] = None
+        unresolved["signal_industry_name"] = None
+        unresolved_model = n6_app_v1_module.app_signals_model(
+            {"principal_id": 1, "principal_type": "admin"},
+            user={"user_id": 1, "login_name": "admin", "role": "admin"},
+            rows=[unresolved],
+            filters={"asset_kind": "stock", "trade_date": "20260731"},
+            scope_metadata={"scope_mode": "historical_projection"},
+        )
+        self.assertEqual(unresolved_model["items"][0]["industry_code"], "—")
+        self.assertEqual(unresolved_model["items"][0]["industry_name"], "—")
+
+        index_row = dict(base)
+        index_row.update(
+            {
+                "user_signal_projection_id": 9404,
+                "user_signal_card_id": None,
+                "asset_kind": "index",
+                "identity_key": "index:SH:000001",
+                "code": "000001",
+                "name": "上证指数",
+                "signal_industry_code": None,
+                "signal_industry_name": None,
+            }
+        )
+        index_model = n6_app_v1_module.app_signals_model(
+            {"principal_id": 1, "principal_type": "admin"},
+            user={"user_id": 1, "login_name": "admin", "role": "admin"},
+            rows=[index_row],
+            filters={"asset_kind": "index", "trade_date": "20260731"},
+            scope_metadata={"scope_mode": "historical_projection"},
+        )
+        self.assertEqual(index_model["items"][0]["industry_code"], "projection-industry-code")
+        self.assertEqual(index_model["items"][0]["industry_name"], "投影行业")
+
+        sse_payload = n6_app_v1_module.app_signal_sse_data_model(base)
+        self.assertEqual(sse_payload["signal"]["industry_code"], "881386")
+        self.assertEqual(sse_payload["signal"]["industry_name"], "全国性银行")
+        self.assertEqual(sse_payload["card"]["industry_code"], "projection-industry-code")
+        self.assertEqual(sse_payload["card"]["industry_name"], "投影行业")
+
+        join_source = inspect.getsource(
+            n6_user_app_module.PostgresN6UserRepository._app_v1_signal_stock_industry_join
+        )
+        select_source = inspect.getsource(
+            n6_user_app_module.PostgresN6UserRepository._app_v1_signal_select_list
+        )
+        sse_select_source = inspect.getsource(
+            n6_user_app_module.PostgresN6UserRepository._app_v1_signal_sse_select_list
+        )
+        self.assertIn("membership.board_type = 'tdx_industry'", join_source)
+        self.assertIn("membership.trade_date = (", join_source)
+        self.assertIn("SELECT max(asof_membership.trade_date)", join_source)
+        self.assertIn(
+            "asof_membership.trade_date <= pg_catalog.to_char(p.for_trade_date, 'YYYYMMDD')",
+            join_source,
+        )
+        self.assertIn("SELECT DISTINCT membership.board_identity_key", join_source)
+        self.assertIn("CASE WHEN count(*) = 1", join_source)
+        for source in (select_source, sse_select_source):
+            self.assertIn("signal_industry.industry_code AS signal_industry_code", source)
+            self.assertIn("signal_industry.industry_name AS signal_industry_name", source)
 
     def test_b_track_signal_item_falls_back_to_selected_list_payload_columns(self) -> None:
         condition_context = {
@@ -22730,6 +22871,7 @@ class N6SignalSSEContractTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
         }
         cursor = RecordingCursor(existing_relations=required_relations)
 
@@ -22794,6 +22936,7 @@ class N6SignalSSEContractTest(unittest.TestCase):
             "v_n6_stock_condition_display_basis",
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
+            "v_n6_board_membership_fact",
             n6_user_app_module.APP_REALTIME_SCOPE_TABLE,
             "n6_virtual_account",
             "n6_virtual_position",

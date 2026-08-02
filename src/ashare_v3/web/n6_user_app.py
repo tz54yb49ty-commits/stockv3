@@ -1919,6 +1919,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
+                {self._app_v1_signal_stock_industry_join()}
                 {self._app_v1_web_signal_scope_join()}
                 WHERE p.user_id = %(user_id)s
                   AND p.user_signal_projection_id > %(after_id)s
@@ -4725,6 +4726,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
+                {self._app_v1_signal_stock_industry_join()}
                 {self._app_v1_web_signal_scope_join()}
                 WHERE {where_sql}
                 ORDER BY p.created_at DESC, p.user_signal_projection_id DESC
@@ -4770,6 +4772,7 @@ class PostgresN6UserRepository:
                   ON c.user_signal_projection_id = p.user_signal_projection_id
                  AND c.user_projection_run_id = p.user_projection_run_id
                  AND c.user_id = p.user_id
+                {self._app_v1_signal_stock_industry_join()}
                 {self._app_v1_web_signal_scope_join()}
                 WHERE {where_sql}
                   AND p.user_signal_projection_id = %(user_signal_projection_id)s
@@ -5068,6 +5071,33 @@ class PostgresN6UserRepository:
             row["display_name"] = resolved_names.get((asset_kind, identity_key), "—")
         return enriched
 
+    def _app_v1_signal_stock_industry_join(self) -> str:
+        return """
+            LEFT JOIN LATERAL (
+              SELECT CASE WHEN count(*) = 1 THEN max(latest_industry.board_code) END AS industry_code,
+                     CASE WHEN count(*) = 1 THEN max(latest_industry.board_name) END AS industry_name
+              FROM (
+                SELECT DISTINCT membership.board_identity_key,
+                                membership.board_code,
+                                membership.board_name
+                FROM v_n6_board_membership_fact membership
+                WHERE p.asset_kind = 'stock'
+                  AND membership.stock_identity_key = p.identity_key
+                  AND membership.board_type = 'tdx_industry'
+                  AND NULLIF(pg_catalog.btrim(membership.board_identity_key::text), '') IS NOT NULL
+                  AND NULLIF(pg_catalog.btrim(membership.board_code::text), '') IS NOT NULL
+                  AND NULLIF(pg_catalog.btrim(membership.board_name::text), '') IS NOT NULL
+                  AND membership.trade_date = (
+                    SELECT max(asof_membership.trade_date)
+                    FROM v_n6_board_membership_fact asof_membership
+                    WHERE asof_membership.stock_identity_key = p.identity_key
+                      AND asof_membership.board_type = 'tdx_industry'
+                      AND asof_membership.trade_date <= pg_catalog.to_char(p.for_trade_date, 'YYYYMMDD')
+                  )
+              ) latest_industry
+            ) signal_industry ON TRUE
+        """
+
     def _app_v1_signal_select_list(self) -> str:
         actual_trigger_period_expr = self._app_v1_actual_trigger_period_expr()
         return f"""
@@ -5087,6 +5117,8 @@ class PostgresN6UserRepository:
                p.name AS display_name,
                COALESCE(c.board_code, p.board_code) AS industry_code,
                COALESCE(c.board_name, p.board_name) AS industry_name,
+               signal_industry.industry_code AS signal_industry_code,
+               signal_industry.industry_name AS signal_industry_name,
                p.direction,
                p.signal_type,
                {self._app_v1_action_state_expr()} AS action_state,
@@ -5187,6 +5219,8 @@ class PostgresN6UserRepository:
                p.name AS display_name,
                COALESCE(c.board_code, p.board_code) AS industry_code,
                COALESCE(c.board_name, p.board_name) AS industry_name,
+               signal_industry.industry_code AS signal_industry_code,
+               signal_industry.industry_name AS signal_industry_name,
                p.direction,
                p.signal_type,
                {self._app_v1_action_state_expr()} AS action_state,
@@ -5331,6 +5365,14 @@ class PostgresN6UserRepository:
             "v_n6_index_condition_display_basis",
             "v_n6_board_condition_display_basis",
         )
+        required_membership_columns = {
+            "trade_date",
+            "board_identity_key",
+            "stock_identity_key",
+            "board_code",
+            "board_name",
+            "board_type",
+        }
         capabilities = self._app_v1_signal_schema_capabilities()
         monitor_lineage_columns = {
             "monitor_id",
@@ -5354,6 +5396,8 @@ class PostgresN6UserRepository:
         ) and all(
             approved_batch_columns.issubset(capabilities.get(view_name, frozenset()))
             for view_name in required_display_views
+        ) and required_membership_columns.issubset(
+            capabilities.get("v_n6_board_membership_fact", frozenset())
         )
 
     def _app_v1_signal_schema_capabilities(self) -> dict[str, frozenset[str]]:
@@ -5369,6 +5413,7 @@ class PostgresN6UserRepository:
         relation_names = (
             *monitor_tables,
             *display_views,
+            "v_n6_board_membership_fact",
             APP_REALTIME_SCOPE_TABLE,
             "n6_virtual_account",
             "n6_virtual_position",

@@ -1659,7 +1659,15 @@ def app_signals_model(
     selected_asset_kind = app_message_asset_kind(filters.get("asset_kind"))
     items = []
     for row in rows:
-        items.append(app_signal_item(row))
+        item = app_signal_item(row)
+        if item.get("asset_kind") == "stock":
+            item["industry_code"] = _first_available_text(
+                row.get("signal_industry_code")
+            ) or "—"
+            item["industry_name"] = _first_available_text(
+                row.get("signal_industry_name")
+            ) or "—"
+        items.append(item)
     metadata = dict(scope_metadata or {})
     excluded_reason_counts = {
         "message_trade_date_missing": 0,
@@ -3384,6 +3392,15 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
     event_type = _first_text(row, "event_type", "source_action_event_type")
     action_state = _first_text(row, "action_state")
     blocked_reason = _first_text(row, "blocked_reason")
+    signal_industry_code = normalized["industry_code"]
+    signal_industry_name = normalized["industry_name"]
+    if normalized.get("asset_kind") == "stock":
+        signal_industry_code = _first_available_text(
+            row.get("signal_industry_code")
+        ) or "—"
+        signal_industry_name = _first_available_text(
+            row.get("signal_industry_name")
+        ) or "—"
     signal = {
         "user_signal_projection_id": projection_id,
         "user_signal_card_id": card_id,
@@ -3397,8 +3414,8 @@ def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
         "identity_key": _first_text(row, "identity_key"),
         "display_code": _first_text(row, "display_code", "code"),
         "display_name": _first_text(row, "display_name", "name"),
-        "industry_code": _first_text(row, "industry_code", "board_code"),
-        "industry_name": _first_text(row, "industry_name", "board_name"),
+        "industry_code": signal_industry_code,
+        "industry_name": signal_industry_name,
         "direction": _first_text(row, "direction"),
         "direction_label": _direction_label(row.get("direction")),
         "condition_key": _first_text(row, "condition_key"),
@@ -3524,6 +3541,7 @@ def _signal_display_values(item: dict[str, Any], *, event_time: Any) -> dict[str
         ),
         "sell_expected_return_pct": _signal_display_decimal(item.get("sell_expected_return_pct")),
         "trigger_pct": _signal_display_decimal(item.get("trigger_pct")),
+        "action_pct": _signal_display_decimal(item.get("action_pct")),
         "score": _signal_display_decimal(item.get("score")),
         "pe_core": _signal_display_decimal(item.get("pe_core")),
     }
