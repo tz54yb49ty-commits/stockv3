@@ -2239,7 +2239,17 @@ def _verified_action_eligible_status_episode(
         return {}
     if str(payload.get("projection_message_status") or "") != "ready":
         return {}
-    if str(_value(row, payload, "trade_date", "for_trade_date") or "") != str(for_trade_date):
+    action_trade_dates = {
+        str(value).strip()
+        for value in (
+            row.get("trade_date"),
+            row.get("for_trade_date"),
+            payload.get("trade_date"),
+            payload.get("for_trade_date"),
+        )
+        if value is not None and str(value).strip()
+    }
+    if action_trade_dates != {str(for_trade_date)}:
         return {}
 
     entry_ref = normalize_mapping(payload.get("action_entry_trigger_matched_ref") or {})
@@ -2269,6 +2279,15 @@ def _verified_action_eligible_status_episode(
         return {}
 
     entry_payload = normalize_mapping(entry_ref.get("source_n4_payload") or {})
+    entry_trade_dates = {
+        str(value).strip()
+        for value in (entry_payload.get("trade_date"), entry_payload.get("for_trade_date"))
+        if value is not None and str(value).strip()
+    }
+    if entry_trade_dates and entry_trade_dates != {str(for_trade_date)}:
+        return {}
+    if not entry_trade_dates:
+        entry_payload = {**entry_payload, "trade_date": str(for_trade_date)}
     entry_grain = _tracking_grain_from_event({"payload_json": entry_payload})
     if entry_grain != grain:
         return {}

@@ -259,6 +259,109 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertEqual(payload["source_trigger_event_time"], "2026-07-31T09:35:00+08:00")
         self.assertFalse(payload["action_eligible_entry_allowed"])
 
+    def test_legacy_entry_without_embedded_date_inherits_verified_action_date(self) -> None:
+        eligible = action_eligible()
+        entry_payload = eligible["payload_json"]["action_entry_trigger_matched_ref"]["source_n4_payload"]
+        entry_payload.pop("trade_date")
+        entry_payload.pop("for_trade_date", None)
+
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-tsc-legacy-no-date",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [eligible],
+        )
+
+        self.assertEqual(plan["summary"]["verified_action_eligible_episode_count"], 1)
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusUpdated"],
+        )
+
+    def test_legacy_entry_without_date_rejects_mismatched_action_date(self) -> None:
+        eligible = action_eligible()
+        eligible["trade_date"] = "20260801"
+        entry_payload = eligible["payload_json"]["action_entry_trigger_matched_ref"]["source_n4_payload"]
+        entry_payload.pop("trade_date")
+        entry_payload.pop("for_trade_date", None)
+
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-tsc-action-date-mismatch",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [eligible],
+        )
+
+        self.assertEqual(plan["summary"]["verified_action_eligible_episode_count"], 0)
+        self.assertEqual(plan["status_events"], [])
+
+    def test_embedded_date_conflict_is_not_overwritten_by_action_date(self) -> None:
+        eligible = action_eligible()
+        entry_payload = eligible["payload_json"]["action_entry_trigger_matched_ref"]["source_n4_payload"]
+        entry_payload["trade_date"] = TRADE_DATE
+        entry_payload["for_trade_date"] = "20260801"
+
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-tsc-entry-date-conflict",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [eligible],
+        )
+
+        self.assertEqual(plan["summary"]["verified_action_eligible_episode_count"], 0)
+        self.assertEqual(plan["status_events"], [])
+
+    def test_legacy_entry_without_date_does_not_relax_other_grain_fields(self) -> None:
+        eligible = action_eligible()
+        entry_payload = eligible["payload_json"]["action_entry_trigger_matched_ref"]["source_n4_payload"]
+        entry_payload.pop("trade_date")
+        entry_payload.pop("for_trade_date", None)
+        entry_payload.pop("identity_key")
+
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-tsc-missing-entry-identity",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [eligible],
+        )
+
+        self.assertEqual(plan["summary"]["verified_action_eligible_episode_count"], 0)
+        self.assertEqual(plan["status_events"], [])
+
+    def test_canonical_embedded_date_behavior_is_unchanged(self) -> None:
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-tsc-canonical-date",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [action_eligible()],
+        )
+
+        self.assertEqual(plan["summary"]["verified_action_eligible_episode_count"], 1)
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusUpdated"],
+        )
+
     def test_false_state_change_invalidates_eligible_and_executed_tracking(self) -> None:
         row = trigger_state_changed(
             event_id="n4-tsc-false",
