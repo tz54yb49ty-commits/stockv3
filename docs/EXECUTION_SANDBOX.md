@@ -346,16 +346,26 @@ non-regressing source/target lineage and exact diff allowlist, strategy-write
 `0` throughout, exact retired `307` plus three `410`/`no-store` routes,
 evaluator absence/zero operations, and virtual-executor object disjointness/
 zero operations. Natural virtual-executor StartInterval PID/runs rotation is
-not drift. It must select exactly one runner form: byte-identical relative
-`python3` + `scripts/run_n6_user_app.py` with exact WorkingDirectory/PYTHONPATH
-source-to-target, or an absolute runner Release-binding replacement. It must
-simulate target runner containment, regular/non-symlink/non-writable,
-owner/mode/hash/manifest checks; one plist replace/swap, one bootout, wait
+not drift. It must select exactly one interpreter form: literal `python3` or a
+frozen absolute immutable non-Release-bound system interpreter; source/target
+ProgramArguments remain two byte-identical tokens followed by relative
+`scripts/run_n6_user_app.py`, while WorkingDirectory/PYTHONPATH alone rebind.
+For an absolute interpreter it must simulate the source/target-identical
+`/Library` trusted path chain, every in-boundary symlink hop/readlink, resolved
+canonical regular target, owner/group/mode/flags/ACL/SHA, no escape/cycle/
+ambiguity, zero replacement, and effective non-writability of every object by
+the frozen Web service principal. It must also simulate target script
+containment, regular/non-symlink/non-writable, owner/mode/hash/manifest checks.
+Target always needs a Release-specific
+immutable manifest. A pre-manifest legacy source may use read-only reconstructed
+exact commit/tree/exclusions, all-present blob/mode, no-extra, sealed and
+deterministic object-hash evidence only for source/rollback, never target. It
+then simulates one plist replace/swap, one bootout, wait
 `>=1s` and old job/PID absence, one bootstrap; and failure-only single frozen-
-source rollback. Any missing/mixed field, Strategy restoration, kickstart,
-retry, downgrade, second attempt, route/plist/side-effect/operation-count drift,
-or DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect
-predicts `STOP`.
+source rollback. Any missing/mixed/extra argv, interpreter/script, legacy
+reconstruction or target-manifest drift, Strategy restoration, kickstart,
+retry, downgrade, second attempt, route/plist/side-effect/operation-count drift
+or any forbidden effect predicts `STOP`.
 
 For `n6_btrack_delivery_l2_n6_business_v1`, implementation, migration,
 Release rebind, and acceptance are simulated as separate gates. The simulation

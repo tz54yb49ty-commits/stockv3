@@ -344,15 +344,28 @@ Detailed rules:
     remain absent with zero operations. The virtual executor may remain loaded
     and naturally rotate PID/runs, but must stay label/plist/Release/runner/
     role/ACL/ownership/object/hash disjoint from Web with zero operations.
-    Source/target Releases, lineage, manifest/hash and exact Web-only diff;
+    Exact source evidence mode, target Release-specific immutable manifest,
+    lineage and exact Web-only diff;
     retired `307` notice redirect and all three exact `410`/`no-store` APIs;
-    Release-binding-only plist delta; exactly one relative-or-absolute runner
-    form; and target runner containment/type/symlink/write-bit/owner/mode/hash/
-    manifest evidence are mandatory. The primary budget is one safe plist
+    WorkingDirectory/PYTHONPATH-only Release binding delta; exactly two byte-
+    identical ProgramArguments using literal `python3` or a frozen absolute
+    immutable non-Release-bound system interpreter plus the fixed relative
+    script. Absolute-interpreter evidence must freeze the `/Library` trusted
+    path chain, each in-boundary symlink hop/readlink, resolved canonical regular
+    target, owner/group/mode/flags/ACL/SHA, no escape/cycle/ambiguity, exact
+    source/target identity, zero replacement, and effective non-writability by
+    the frozen Web service principal. Target script containment/type/symlink/
+    write-bit/owner/mode/hash/manifest evidence is mandatory. A pre-manifest
+    legacy source may use
+    read-only reconstructed exact commit/tree/exclusions, complete present-file
+    blob/mode, no-extra, sealed and deterministic object-hash evidence only for
+    source/rollback; it cannot be modified or replace target manifest. The
+    primary budget is one safe plist
     replace/swap, one bootout, wait `>=1s` plus old job/PID absence, and one
     bootstrap. Kickstart/retry/downgrade/second primary are forbidden; primary
     failure alone permits one frozen-source rollback. Missing evidence or any
-    route/plist/side-effect/operation-count drift returns `REJECT`.
+    runner/manifest/reconstruction/route/plist/side-effect/operation-count drift
+    returns `REJECT`.
 19. L2 accepts only separate N6-user migration and runtime-control Web rebind
     phases. The full migration filename is the identity, forward/rollback and
     PG16 evidence are mandatory, and automatic proposal, virtual-money or

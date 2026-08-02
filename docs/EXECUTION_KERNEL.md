@@ -2569,14 +2569,32 @@ drift. The retired page remains an exact `307` to
 APIs remain exact `410`, `Cache-Control: no-store`, and
 `code=strategy_center_retired`.
 
-Both Releases must be immutable and bound by exact non-regressing lineage,
-manifest/hash evidence, and a Web-only/UX-only/non-Strategy diff allowlist.
-The Web plist may change only Release binding. Relative `python3` plus
-`scripts/run_n6_user_app.py` keeps both runner tokens byte-identical while
-WorkingDirectory/PYTHONPATH move exactly source to target; the absolute-runner
-form may replace only the absolute Release binding. Mixed runner forms or a
-target runner that is not contained, regular, non-symlink, non-writable, and
-owner/mode/hash/manifest exact returns `REJECT`.
+The target Release always requires a Release-specific immutable manifest that
+binds target commit/tree, exact archive/fileset, per-entry mode/owner/SHA, the
+canonical retirement exclusion set, and filesystem/object hash. A pre-manifest
+legacy source may instead be frozen by read-only reconstruction of exact source
+commit/tree, exact canonical exclusions, full present-fileset Git blob/mode
+equivalence, no extras, sealed owner/mode, no write bits or symlinks, and a
+deterministic filesystem/object hash. Reconstruction is source/rollback-only:
+it cannot write back to the legacy Release or substitute for the target
+manifest. Missing, ambiguous, extra, or drifted evidence returns `REJECT`.
+
+The Web plist may change only WorkingDirectory/PYTHONPATH Release bindings.
+ProgramArguments must contain exactly two byte-identical source/target tokens:
+either literal `python3` or a frozen absolute immutable system interpreter,
+followed by relative `scripts/run_n6_user_app.py` without `..`. The absolute
+interpreter token may be a frozen symlink chain. Its token, every hop and
+readlink text, resolved canonical regular target, and the full trusted path
+chain from `/Library` through the Python 3.11 bin boundary must remain within
+that boundary where applicable, be escape/cycle/ambiguity-free, and have exact
+source/target owner/group/mode/flags/ACL/SHA evidence. The Web service principal
+must be neither the owner nor a member of a write-enabled group, and no ACL or
+flags may grant it write access; every path-chain object must be effectively
+non-writable by that principal. The interpreter is not Release-bound, cannot be
+replaced, and has replacement count `0`. The relative script must resolve inside
+the target Release and be regular, non-symlink, non-writable, and exact against
+its target-manifest owner/mode/hash entry. Mixed forms, extra argv, or
+interpreter/script/evidence drift returns `REJECT`.
 
 The primary budget is one safe plist replace/swap, one bootout, a wait of at
 least one second followed by old job/PID absence, and one bootstrap. Kickstart,

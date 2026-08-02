@@ -1443,12 +1443,26 @@ L1 post-decommission Web deployment phase：
   可 loaded 并自然 StartInterval 轮转，正常 PID/runs 变化不算漂移，但其
   label/plist/Release/runner/role/ACL/ownership/object/hash 必须与 Web disjoint，
   且操作次数 `0`。
-- source/target Release 必须 immutable、lineage 非回归，并以 exact Web-only、
-  UX-only、non-Strategy diff allowlist 绑定。Web plist 仅允许 Release binding
-  替换；相对 runner `python3` + `scripts/run_n6_user_app.py` 的 runner token 必须
-  byte-identical，WorkingDirectory/PYTHONPATH 精确 source→target；absolute runner
-  仅可替换绝对 Release binding。mixed runner 或 target runner containment、
-  regular/non-symlink/non-writable、owner/mode/hash/manifest 任一失败均 `REJECT`。
+- target Release 必须使用 Release-specific immutable manifest，绑定 target
+  commit/tree、exact archive/fileset、逐项 mode/owner/SHA、canonical retirement
+  exclusion set 与 filesystem/object hash。pre-manifest legacy source 只能用只读
+  重建证据冻结 source/rollback：exact source commit/tree、exact exclusion set、
+  全部 present files 的 Git blob/mode 等价、无 extras、sealed owner/mode、无 write
+  bits/symlink 及 deterministic object hash；禁止写回 source，且不得替代 target
+  manifest。缺失、多义、extra 或 hash 漂移均 `REJECT`。
+- Web plist 仅允许 WorkingDirectory/PYTHONPATH 的 Release binding 精确
+  source→target；ProgramArguments 必须逐 token byte-identical、恰好两个 token，
+  第二个固定为无 `..` 的相对 `scripts/run_n6_user_app.py`。interpreter 可以是
+  literal `python3`，或冻结的 absolute immutable system Python；absolute
+  interpreter token 可为冻结的 symlink chain，但 token、每个 hop/readlink text、
+  resolved canonical regular target 及 `/Library` 至 trusted bin boundary 全路径链的
+  owner/group/mode/flags/ACL/hash 必须 source/target 完全一致且无 escape/cycle/ambiguity。
+  Web service principal 必须不是 owner、不得属于有写权限的 group，ACL/flags 也不得
+  授予写权限，完整路径链必须 `effective_non_writable_by_service_principal`；该
+  interpreter 不得当作 Release-bound runner、不得替换且 replacement count 必须为
+  `0`。relative script 必须解析到 target Release 内并与 target manifest 的
+  owner/mode/hash/entry 精确一致。mixed/extra argv、interpreter/script drift 或任一
+  runner check 失败均 `REJECT`。
 - primary 仅一次安全 plist replace/swap、一次 bootout、至少等待 1 秒并确认旧
   job/PID 消失、一次 bootstrap；禁止 kickstart、retry、第二次 primary、降级。
   仅 primary failure 可做一次 frozen-source rollback。DB、N1-N5、evaluator、

@@ -692,10 +692,12 @@ remain decommissioned. Its DAG is:
 
 ```text
 PLAN
-  -> VALIDATE exact L1 ACCEPT; source/target immutable lineage and exact diff;
+  -> VALIDATE exact L1 ACCEPT; exact source evidence mode, target immutable
+              manifest, non-regressing lineage and exact diff;
               strategy-write=0 throughout; retired 307/410/no-store routes;
               evaluator absent; virtual executor disjoint and operation-free;
-              one relative-or-absolute runner form and exact target runner
+              one accepted interpreter plus relative-script form and exact
+              source/target ProgramArguments and target script
   -> MODIFY one safe Web plist Release-binding replace/swap; one bootout; wait
             >=1 second and prove old job/PID absent; one bootstrap
   -> VERIFY Web readiness and exact retired routes; all forbidden effects=0;
@@ -703,14 +705,26 @@ PLAN
   -> FINALIZE append-only trace and PASS/STOP
 ```
 
-The relative form keeps `python3` and `scripts/run_n6_user_app.py` tokens
-byte-identical and moves WorkingDirectory/PYTHONPATH exactly source to target;
-the absolute form replaces only its absolute Release binding. Missing fields,
-mixed runner forms, Strategy restoration, route/plist/lineage/allowlist drift,
-kickstart, retry, second primary attempt, downgrade, operation-count drift, or
-any DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect
-compiles to `REJECT`. This phase is part of the existing L1 policy and cannot
-compile from or create a historical one-off policy.
+ProgramArguments must remain exactly two byte-identical source/target tokens:
+literal `python3` or a frozen absolute immutable non-Release-bound system
+interpreter, then relative `scripts/run_n6_user_app.py`. Only
+WorkingDirectory/PYTHONPATH Release bindings move source to target. The target
+script must resolve inside target and match its immutable manifest entry. An
+absolute interpreter compiles only with source/target-identical evidence for
+the `/Library` trusted path chain, every in-boundary symlink hop/readlink text,
+the resolved canonical regular target, owner/group/mode/flags/ACL/SHA, no
+escape/cycle/ambiguity, zero replacement, and effective non-writability of every
+object by the frozen Web service principal.
+
+Target always requires a Release-specific immutable manifest. A pre-manifest
+legacy source may compile only with read-only reconstructed commit/tree,
+canonical-exclusion, complete present-fileset blob/mode, no-extra, sealed and
+deterministic object-hash evidence; it is source/rollback-only and cannot be
+written back or substitute for target manifest. Missing fields, mixed/extra
+argv, interpreter/script or source/target evidence drift, Strategy restoration,
+route/plist/lineage/allowlist drift, kickstart, retry, second primary attempt,
+downgrade, operation-count drift, or any forbidden effect compiles to `REJECT`.
+This remains part of the existing L1 policy and cannot create a one-off policy.
 
 L2 compiles into separately authorized phases: offline implementation and
 isolated PG16 verification, one exact N6 migration gate with rollback, one

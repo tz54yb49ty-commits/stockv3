@@ -152,33 +152,116 @@
           "release_contract": {
             "source_immutable": true,
             "target_immutable": true,
-            "source_target_commit_tree_archive_manifest_filesystem_hashes_required": true,
             "target_non_regression_lineage_required": true,
             "candidate_exact_diff_allowlist_required": true,
             "diff_scope": "web_only_ux_only_non_strategy",
-            "strategy_surface_files_or_routes_in_diff_allowed": false
+            "strategy_surface_files_or_routes_in_diff_allowed": false,
+            "source_evidence_modes": [
+              "release_specific_immutable_manifest",
+              "legacy_read_only_reconstructed"
+            ],
+            "exactly_one_source_evidence_mode_required": true,
+            "canonical_retirement_exclusion_set": [
+              "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
+              "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
+              "scripts/plan_n6_strategy_center_launchd.py",
+              "scripts/run_n6_strategy_center_auto_once.py",
+              "scripts/run_n6_strategy_center_once.py",
+              "src/ashare_v3/user/strategy_center.py",
+              "src/ashare_v3/user/strategy_center_repository.py",
+              "src/ashare_v3/user/strategy_center_worker.py",
+              "scripts/n6_f464_privileged_materialize_and_install_v2.c",
+              "scripts/n6_f464_release_root_owner_remediation_v1.c",
+              "src/ashare_v3/runtime_control/resumable_activation.py"
+            ],
+            "legacy_read_only_reconstructed_source": {
+              "pre_manifest_release_only": true,
+              "source_writeback_or_modification_allowed": false,
+              "scope": "source_and_rollback_freeze_only",
+              "may_substitute_for_target_manifest": false,
+              "required_checks": [
+                "exact_source_commit",
+                "exact_source_tree",
+                "exact_canonical_retirement_exclusion_set",
+                "full_present_fileset_git_blob_equivalence",
+                "full_present_fileset_git_mode_equivalence",
+                "no_extra_files",
+                "sealed_owner_and_mode",
+                "no_write_bits",
+                "no_symlinks",
+                "deterministic_filesystem_object_sha256"
+              ]
+            },
+            "target_release_specific_immutable_manifest": {
+              "required": true,
+              "legacy_reconstruction_allowed": false,
+              "required_bindings": [
+                "target_commit",
+                "target_tree",
+                "exact_archive_fileset",
+                "mode_owner_sha256_per_entry",
+                "exact_canonical_retirement_exclusion_set",
+                "filesystem_object_sha256"
+              ]
+            }
           },
           "plist_contract": {
             "only_release_binding_may_change": true,
             "allowed_runner_modes": [
-              "relative_runner_token_preserved",
-              "absolute_runner_release_binding_replaced"
+              "absolute_immutable_system_interpreter_plus_relative_script",
+              "literal_python3_interpreter_plus_relative_script"
             ],
             "exactly_one_runner_mode_required": true,
             "mixed_runner_mode_allowed": false,
-            "relative_runner": {
-              "interpreter_token": "python3",
-              "runner_token": "scripts/run_n6_user_app.py",
-              "source_target_runner_tokens_byte_identical": true,
+            "program_arguments": {
+              "exact_token_count": 2,
+              "source_target_tokens_byte_identical": true,
+              "extra_argv_allowed": false,
+              "relative_script_token": "scripts/run_n6_user_app.py",
+              "relative_script_must_not_be_absolute": true,
+              "relative_script_parent_escape_allowed": false,
               "working_directory_exact_source_to_target": true,
               "pythonpath_exact_source_to_target": true
             },
-            "absolute_runner": {
-              "source_target_absolute_runner_release_binding_replacement_only": true,
-              "working_directory_exact_source_to_target": true,
-              "pythonpath_exact_source_to_target": true
+            "literal_python3_interpreter": {
+              "token": "python3",
+              "source_target_byte_identical": true
             },
-            "target_runner_checks": [
+            "absolute_system_interpreter": {
+              "trusted_path_chain_root": "/Library",
+              "trusted_boundary": "/Library/Frameworks/Python.framework/Versions/3.11/bin",
+              "must_be_absolute": true,
+              "release_bound": false,
+              "replacement_allowed": false,
+              "replacement_attempts": 0,
+              "source_target_byte_identical": true,
+              "symlink_chain_allowed": true,
+              "every_hop_must_remain_in_trusted_boundary": true,
+              "escape_cycle_or_ambiguity_allowed": false,
+              "required_frozen_checks": [
+                "trusted_path_chain_owner_group_mode_acl_flags",
+                "trusted_path_chain_effective_non_writable_by_service_principal",
+                "absolute_token_path",
+                "symlink_hop_paths",
+                "symlink_readlink_text_per_hop",
+                "resolved_canonical_path",
+                "all_paths_within_trusted_boundary",
+                "no_escape_cycle_or_ambiguity",
+                "symlink_owner_group_mode_per_hop",
+                "resolved_target_regular_file",
+                "resolved_target_owner",
+                "resolved_target_group",
+                "resolved_target_mode",
+                "resolved_target_sha256",
+                "acl_and_flags_do_not_grant_service_write",
+                "service_principal_uid_and_groups",
+                "service_principal_is_not_owner",
+                "service_principal_not_in_write_enabled_group",
+                "effective_non_writable_by_service_principal",
+                "source_target_complete_chain_evidence_identical"
+              ]
+            },
+            "target_relative_script_checks": [
               "contained_in_target_release",
               "regular_file",
               "not_symlink",
@@ -229,6 +312,9 @@
             "diff_allowlist_drift",
             "plist_delta_beyond_release_binding",
             "runner_validation_failure",
+            "interpreter_or_argv_drift",
+            "legacy_source_reconstruction_drift",
+            "target_manifest_missing_or_drifted",
             "operation_count_drift",
             "forbidden_effect_nonzero"
           ]

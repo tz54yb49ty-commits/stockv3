@@ -1074,16 +1074,41 @@ The positive fixture requires prior L1 `ACCEPT`, Web/read-only UX-only
 non-Strategy non-regression, strategy-write `0` throughout, evaluator absent/
 zero operations, virtual-executor object disjoint/zero operations, immutable
 source/target and exact diff allowlist, exact retired `307` notice route, three
-exact `410`/`Cache-Control:no-store` APIs, one valid relative-or-absolute runner
+exact `410`/`Cache-Control:no-store` APIs, one valid interpreter-plus-relative-
+script runner
 form and all target runner checks, one replace/swap + bootout + `>=1s` wait and
-old job/PID absence + bootstrap, and every forbidden-effect count `0`.
+old job/PID absence + bootstrap, and every forbidden-effect count `0`. Runner
+fixtures must accept both the live frozen absolute immutable system interpreter
+plus relative script and literal `python3` plus the same relative script, with
+exactly two source/target byte-identical argv tokens and only
+WorkingDirectory/PYTHONPATH rebinding. Target script containment and immutable
+manifest entry checks remain mandatory. The live absolute fixture freezes
+service uid `501`, primary group `staff`, no `wheel` membership, the
+`/Library`-through-Python-3.11-bin owner/group/mode/flags/ACL chain, the
+`python3 -> python3.11` hop, and resolved SHA-256
+`09e1a00906ae3a7cf190155f47d0c23fc0b40d207997a9c44c7995ba9db896c2`.
+Modes with a `wheel` group-write bit remain acceptable only when the frozen
+service principal is not in `wheel` and owner/ACL/flags also grant no write;
+the exact contract is effective non-writability, not global no-write-bits.
+
+Release fixtures must accept a strict Release-specific immutable target
+manifest plus either the same strict source-manifest mode or a pre-manifest
+legacy source reconstructed read-only from exact commit/tree, canonical
+retirement exclusions, all-present Git blob/mode equivalence, no extras,
+sealed owner/mode/no-write/no-symlink, and deterministic object hash. Legacy
+reconstruction is source/rollback-only and must never satisfy target manifest.
 
 Negative fixtures must independently produce `REJECT` for every missing field;
 mixed runner form; strategy-write nonzero; evaluator presence/operation;
 virtual-executor boundary/operation drift (while PID/runs-only rotation stays
 accepted); Strategy route/API or surface-restoration drift; Release, lineage,
-manifest/hash, exact diff, plist, runner containment/type/symlink/write-bit/
-owner/mode/hash drift; kickstart, retry, second primary, downgrade or operation-
+manifest/hash, exact diff, plist, extra/mixed argv, interpreter replacement or
+Release misclassification, relative-script escape, runner containment/type/
+symlink/write-bit/owner/mode/hash drift; absolute-interpreter trusted-path,
+hop/readlink, resolved path/hash, owner/group/mode/ACL/flags, service-group,
+escape/cycle/ambiguity or source/target-chain drift; legacy source missing/multivalued/
+extra/hash drift; target manifest absence or legacy substitution; kickstart,
+retry, second primary, downgrade or operation-
 count drift; rollback on success or more than one failure rollback; and any
 DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect. Tests
 must also prove historical one-off policy identifiers are neither referenced
