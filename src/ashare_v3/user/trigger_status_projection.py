@@ -90,6 +90,26 @@ def _optional_decimal(value: Any, field: str) -> Decimal | None:
     return parsed.quantize(Decimal("0.000001"))
 
 
+def _eligible_trade_date(
+    row: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    entry_snapshot: Mapping[str, Any],
+) -> str:
+    values: list[str] = []
+    for source in (row, payload, entry_snapshot):
+        value = str(source.get("trade_date") or "").strip()
+        if not value:
+            continue
+        if len(value) != 8 or not value.isdigit():
+            raise TriggerStatusProjectionError("invalid_trade_date")
+        values.append(value)
+    if not values:
+        raise TriggerStatusProjectionError("missing_trade_date")
+    if len(set(values)) != 1:
+        raise TriggerStatusProjectionError("eligible_trade_date_conflict")
+    return values[0]
+
+
 def _validate_grain(payload: Mapping[str, Any]) -> dict[str, str]:
     grain = {
         field: _required_text(payload, field)
@@ -133,7 +153,11 @@ def episode_from_action_eligible(
     entry_snapshot = entry_ref.get("source_n4_payload")
     if not isinstance(entry_snapshot, Mapping):
         entry_snapshot = {}
-    grain_source = {**entry_snapshot, **payload}
+    grain_source = {
+        **entry_snapshot,
+        **payload,
+        "trade_date": _eligible_trade_date(row, payload, entry_snapshot),
+    }
     grain = _validate_grain(grain_source)
     entry_trigger_event_id = _required_text(entry_ref, "source_trigger_event_id")
     if str(payload.get("source_trigger_event_id") or entry_trigger_event_id) != entry_trigger_event_id:

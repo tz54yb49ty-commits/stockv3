@@ -191,6 +191,111 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         self.assertEqual(str(episode["trigger_price"]), "10.100000")
         self.assertEqual(episode["triggered_periods"], ["W", "D"])
 
+    def test_action_eligible_accepts_envelope_payload_or_entry_trade_date(self) -> None:
+        for source_name in ("envelope", "payload", "entry"):
+            with self.subTest(source_name=source_name):
+                source = eligible_event()
+                source["trade_date"] = None
+                source["payload_json"].pop("trade_date")
+                source["payload_json"]["action_entry_trigger_matched_ref"][
+                    "source_n4_payload"
+                ].pop("trade_date")
+                if source_name == "envelope":
+                    source["trade_date"] = "20260731"
+                elif source_name == "payload":
+                    source["payload_json"]["trade_date"] = "20260731"
+                else:
+                    source["payload_json"]["action_entry_trigger_matched_ref"][
+                        "source_n4_payload"
+                    ]["trade_date"] = "20260731"
+                frozen = deepcopy(source)
+                episode = episode_from_action_eligible(
+                    source, projection_run_id="n6-projection-run"
+                )
+                self.assertEqual(source, frozen)
+                self.assertEqual(episode["trade_date"], "20260731")
+
+    def test_action_eligible_trade_date_conflict_and_missing_fail_closed(self) -> None:
+        conflict = eligible_event()
+        conflict["payload_json"]["trade_date"] = "20260730"
+        with self.assertRaisesRegex(
+            TriggerStatusProjectionError, "eligible_trade_date_conflict"
+        ):
+            episode_from_action_eligible(conflict, projection_run_id="n6-projection-run")
+
+        missing = eligible_event()
+        missing["trade_date"] = None
+        missing["payload_json"].pop("trade_date")
+        missing["payload_json"]["action_entry_trigger_matched_ref"][
+            "source_n4_payload"
+        ].pop("trade_date")
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "missing_trade_date"):
+            episode_from_action_eligible(missing, projection_run_id="n6-projection-run")
+
+        invalid = eligible_event()
+        invalid["payload_json"].pop("trade_date")
+        invalid["payload_json"]["action_entry_trigger_matched_ref"][
+            "source_n4_payload"
+        ].pop("trade_date")
+        invalid["trade_date"] = "2026-07-31"
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "invalid_trade_date"):
+            episode_from_action_eligible(invalid, projection_run_id="n6-projection-run")
+
+    def test_frozen_full_batch_predicts_705_without_persistence(self) -> None:
+        active_episodes: set[tuple[str, str]] = set()
+        selected = 0
+        for number in range(1, 1043):
+            event = eligible_event(
+                outbox_id=4103760 + number,
+                event_id=f"eligible:{number}",
+                entry_event_id=f"entry:{number}",
+                condition_key="BUY:D",
+            )
+            event["payload_json"].pop("trade_date")
+            event["payload_json"]["action_entry_trigger_matched_ref"][
+                "source_n4_payload"
+            ].pop("trade_date")
+            episode = episode_from_action_eligible(
+                event,
+                projection_run_id="n6_trigger_status_projection_20260731_backfill_v1",
+            )
+            active_episodes.add(
+                (episode["tracking_state_key"], episode["entry_trigger_event_id"])
+            )
+            selected += 1
+        selected += 723  # ActionExecuted remains a projection no-op.
+        for number in range(1, 195):
+            mutation = status_mutation_from_event(
+                status_event(
+                    event_type="TriggerStatusUpdated",
+                    outbox_id=4105525 + number,
+                    entry_event_id=f"entry:{number}",
+                    action_eligible_event_id=f"eligible:{number}",
+                    condition_key="BUY:D",
+                )
+            )
+            self.assertIn(
+                (mutation["tracking_state_key"], mutation["entry_trigger_event_id"]),
+                active_episodes,
+            )
+            selected += 1
+        for number in range(706, 1043):
+            mutation = status_mutation_from_event(
+                status_event(
+                    event_type="TriggerStatusInvalidated",
+                    outbox_id=4105719 + number,
+                    entry_event_id=f"entry:{number}",
+                    action_eligible_event_id=f"eligible:{number}",
+                    condition_key="BUY:D",
+                )
+            )
+            active_episodes.discard(
+                (mutation["tracking_state_key"], mutation["entry_trigger_event_id"])
+            )
+            selected += 1
+        self.assertEqual(selected, 2296)
+        self.assertEqual(len(active_episodes), 705)
+
     def test_action_eligible_requires_ready_projection_and_trigger_matched_ref(self) -> None:
         not_ready = eligible_event()
         not_ready["payload_json"]["projection_message_status"] = "not_ready"
@@ -358,6 +463,11 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         blocked = runner.run(argparse.Namespace(**{**vars(base), "execute": True}))
         self.assertEqual(blocked["verdict"], "BLOCKED_N6_TRIGGER_STATUS_PROJECTION")
         self.assertFalse(blocked["writes_database"])
+        consume_source = inspect.getsource(
+            PostgresTriggerStatusProjectionConsumer.consume_once
+        )
+        self.assertIn("AND trade_date = %s", consume_source)
+        self.assertIn("episode_from_action_eligible(row", consume_source)
 
     def test_invalid_status_contract_fails_closed(self) -> None:
         event = status_event()
