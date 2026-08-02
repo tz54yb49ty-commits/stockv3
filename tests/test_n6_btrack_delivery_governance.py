@@ -73,6 +73,25 @@ L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256 = (
 L2_TRIGGER_STATUS_WEB_RECOVERY_REGISTRY_SHA256 = (
     "1b13dc9169ff1609d8e262453cff135cb0dc8338e7eeead550180026cf2232cc"
 )
+L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID = (
+    "trigger_status_web_finalize_evidence_reconciliation_v1"
+)
+L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_SHA256 = (
+    "d13161b6e970aa671f963b6dcefec941880268f6db4f7e8b2e3a26404659bfe4"
+)
+L2_TRIGGER_STATUS_WEB_RECONCILIATION_REGISTRY_SHA256 = (
+    "71a1b0fd5625496071ee958ff431f2abb5f40b4cc06550074f121f60f72a7bc7"
+)
+L2_TRIGGER_STATUS_WEB_RECONCILIATION_REQUEST = {
+    "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+    "phase_id": L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID,
+    "operation_class": "readonly_finalize_evidence_reconciliation",
+    "executor_role": "runtime_control",
+    "governance_session": True,
+    "runtime_execution_requested": False,
+    "exact_evidence_matches": True,
+    "requested_runtime_effect_count": 0,
+}
 L2_TRIGGER_STATUS_WEB_RECOVERY_REQUEST = {
     "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
     "phase_id": L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID,
@@ -491,6 +510,24 @@ def static_l2_web_recovery_phase_decision(
         "ACCEPT"
         if canonical_sha256(phase) == L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256
         and request == L2_TRIGGER_STATUS_WEB_RECOVERY_REQUEST
+        else "REJECT"
+    )
+
+
+def l2_web_reconciliation_request(**overrides: object) -> dict[str, object]:
+    request = copy.deepcopy(L2_TRIGGER_STATUS_WEB_RECONCILIATION_REQUEST)
+    request.update(overrides)
+    return request
+
+
+def static_l2_web_reconciliation_phase_decision(
+    phase: dict[str, object], request: dict[str, object]
+) -> str:
+    return (
+        "ACCEPT"
+        if canonical_sha256(phase)
+        == L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_SHA256
+        and request == L2_TRIGGER_STATUS_WEB_RECONCILIATION_REQUEST
         else "REJECT"
     )
 
@@ -1410,6 +1447,106 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
                     ),
                     "REJECT",
                 )
+
+    def test_l2_trigger_status_web_reconciliation_is_exact_and_registered(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID
+        ]
+        self.assertEqual(
+            canonical_sha256(phase),
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_SHA256,
+        )
+        expected = {
+            ("policy_id",): "n6_btrack_delivery_l2_n6_business_v1",
+            ("operation_class",): "readonly_finalize_evidence_reconciliation",
+            ("executor_role",): "runtime_control",
+            ("default_decision",): "REJECT",
+            ("reconciliation_result",): "PASS_WITH_EVIDENCE_GAP",
+            ("evidence_gap",): "primary_success_attestation_missing_due_tool_channel_and_filename_collision",
+            ("parent_recovery_phase", "phase_canonical_sha256"): L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256,
+            ("parent_recovery_phase", "registry_canonical_sha256"): L2_TRIGGER_STATUS_WEB_RECOVERY_REGISTRY_SHA256,
+            ("canonical_business_target", "commit"): "985202144febffeef3302012675f285e1cf1061a",
+            ("canonical_business_target", "tree"): "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+            ("fresh_release_evidence", "object_file_directory_counts"): [6316, 6271, 45],
+            ("fresh_release_evidence", "provenance_present_expected_counts"): [6316, 6316],
+            ("current_read_only_live_evidence", "route_inventory_count"): 88,
+            ("current_read_only_live_evidence", "route_inventory_sha256"): "8c2500c092b3fb8717add5727acbd27c5c3786fec47332fae8b0f84a418b7277",
+            ("collision_attestation", "sha256"): "6f8e52d090820005d03546bb811f378307a8131f5d3f0ef0b12477e69204af6f",
+        }
+        for path, value in expected.items():
+            with self.subTest(path=path):
+                self.assertEqual(nested_value(phase, path), value)
+        registration = self.registry["append_only_gate_registrations"][
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID
+        ]
+        self.assertEqual(
+            canonical_sha256(registration),
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_REGISTRY_SHA256,
+        )
+        self.assertEqual(
+            registration["phase_canonical_sha256"],
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_SHA256,
+        )
+        self.assertEqual(registration["result"], "PASS_WITH_EVIDENCE_GAP")
+
+    def test_l2_trigger_status_web_reconciliation_is_fail_closed(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID
+        ]
+        self.assertEqual(
+            static_l2_web_reconciliation_phase_decision(
+                phase,
+                l2_web_reconciliation_request(),
+            ),
+            "ACCEPT",
+        )
+        for name, overrides in (
+            ("runtime", {"runtime_execution_requested": True}),
+            ("evidence", {"exact_evidence_matches": False}),
+            ("effect", {"requested_runtime_effect_count": 1}),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    static_l2_web_reconciliation_phase_decision(
+                        phase,
+                        l2_web_reconciliation_request(**overrides),
+                    ),
+                    "REJECT",
+                )
+        missing_request = l2_web_reconciliation_request()
+        del missing_request["exact_evidence_matches"]
+        self.assertEqual(
+            static_l2_web_reconciliation_phase_decision(phase, missing_request),
+            "REJECT",
+        )
+        for key in phase:
+            with self.subTest(missing_phase_field=key):
+                candidate = copy.deepcopy(phase)
+                del candidate[key]
+                self.assertEqual(
+                    static_l2_web_reconciliation_phase_decision(
+                        candidate,
+                        l2_web_reconciliation_request(),
+                    ),
+                    "REJECT",
+                )
+
+    def test_l2_trigger_status_web_reconciliation_forbids_runtime(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECONCILIATION_PHASE_ID
+        ]
+        self.assertTrue(phase["governance_session_only_registers"])
+        self.assertTrue(phase["governance_session_cannot_execute"])
+        self.assertFalse(phase["runtime_execution_allowed"])
+        self.assertFalse(any(phase["forbidden_execution_and_effect_counts"].values()))
+        gap = phase["evidence_gap_interpretation"]
+        self.assertFalse(gap["reexecution_authorized"])
+        self.assertFalse(gap["collision_attestation_reinterpreted_as_success"])
+        self.assertFalse(gap["new_runtime_attestation_generated_or_written"])
+        collision = phase["collision_attestation"]
+        self.assertTrue(collision["preserve_unchanged"])
+        self.assertFalse(collision["reinterpret_as_success_allowed"])
+        self.assertTrue(collision["runtime_mutation_counts_all_zero"])
 
     def test_l2_trigger_status_web_contract_is_synchronized(self) -> None:
         paths = (

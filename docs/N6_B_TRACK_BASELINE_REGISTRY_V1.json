@@ -239,6 +239,40 @@
         "retry_or_second_recovery_allowed": false,
         "separate_current_request_authorization_required": true
       }
+    },
+    "trigger_status_web_finalize_evidence_reconciliation_v1": {
+      "registered_on": "2026-08-02",
+      "evidence_source": "explicit_immutable_timeline_and_current_read_only_live_evidence",
+      "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+      "phase_id": "trigger_status_web_finalize_evidence_reconciliation_v1",
+      "phase_canonical_sha256": "d13161b6e970aa671f963b6dcefec941880268f6db4f7e8b2e3a26404659bfe4",
+      "operation_class": "readonly_finalize_evidence_reconciliation",
+      "executor_role": "runtime_control",
+      "machine_phase_registered": true,
+      "governance_session_only_registers": true,
+      "governance_session_execution_allowed": false,
+      "runtime_execution_allowed": false,
+      "reviewed_evidence": {
+        "parent_phase_id": "trigger_status_web_failed_release_recovery_once_v1",
+        "parent_phase_canonical_sha256": "09b5864c49c5db0bf279dee7fda76b0f48c2603a9320452d2ea5da40650e905b",
+        "parent_registry_canonical_sha256": "1b13dc9169ff1609d8e262453cff135cb0dc8338e7eeead550180026cf2232cc",
+        "business_commit": "985202144febffeef3302012675f285e1cf1061a",
+        "business_tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+        "fresh_release_id": "20260802_202423__985202144febffeef3302012675f285e1cf1061a",
+        "fresh_manifest_sha256": "3465d1a4de5af71d8e145f5ec9baeef959ef8f1b79091601c88939747bde72cf",
+        "collision_attestation_path": "/private/tmp/20260802_202423__985202144febffeef3302012675f285e1cf1061a.l2-trigger-status-web-recovery-attestation.json",
+        "collision_attestation_sha256": "6f8e52d090820005d03546bb811f378307a8131f5d3f0ef0b12477e69204af6f",
+        "collision_attestation_preserved_unchanged": true,
+        "active_plist_sha256": "932974b378e54cfb8d9d3e799f6a803c2ce8085d4f0f6486db87f7065d35e021",
+        "route_inventory_count": 88,
+        "route_inventory_sha256": "8c2500c092b3fb8717add5727acbd27c5c3786fec47332fae8b0f84a418b7277"
+      },
+      "result": "PASS_WITH_EVIDENCE_GAP",
+      "evidence_gap": "primary_success_attestation_missing_due_tool_channel_and_filename_collision",
+      "reexecution_authorized": false,
+      "collision_attestation_reinterpreted_as_success": false,
+      "new_runtime_attestation_generated_or_written": false,
+      "deployment_rebind_rollback_retry_resume_release_plist_service_browser_database_business_trade_push_effects": 0
     }
   }
 }

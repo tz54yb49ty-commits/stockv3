@@ -965,6 +965,142 @@
             "schema_089_consumer_or_trigger_pct_effect",
             "forbidden_effect_nonzero"
           ]
+        },
+        "trigger_status_web_finalize_evidence_reconciliation_v1": {
+          "phase_id": "trigger_status_web_finalize_evidence_reconciliation_v1",
+          "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+          "operation_class": "readonly_finalize_evidence_reconciliation",
+          "executor_role": "runtime_control",
+          "default_decision": "REJECT",
+          "governance_session_only_registers": true,
+          "governance_session_cannot_execute": true,
+          "runtime_execution_allowed": false,
+          "reconciliation_result": "PASS_WITH_EVIDENCE_GAP",
+          "evidence_gap": "primary_success_attestation_missing_due_tool_channel_and_filename_collision",
+          "evidence_gap_interpretation": {
+            "reexecution_authorized": false,
+            "collision_attestation_reinterpreted_as_success": false,
+            "new_runtime_attestation_generated_or_written": false
+          },
+          "parent_recovery_phase": {
+            "phase_id": "trigger_status_web_failed_release_recovery_once_v1",
+            "phase_canonical_sha256": "09b5864c49c5db0bf279dee7fda76b0f48c2603a9320452d2ea5da40650e905b",
+            "registry_canonical_sha256": "1b13dc9169ff1609d8e262453cff135cb0dc8338e7eeead550180026cf2232cc"
+          },
+          "canonical_business_target": {
+            "branch": "codex/n6-btrack-integration",
+            "commit": "985202144febffeef3302012675f285e1cf1061a",
+            "tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0"
+          },
+          "fresh_release_evidence": {
+            "release_id": "20260802_202423__985202144febffeef3302012675f285e1cf1061a",
+            "manifest_sha256": "3465d1a4de5af71d8e145f5ec9baeef959ef8f1b79091601c88939747bde72cf",
+            "object_file_directory_counts": [6316, 6271, 45],
+            "provenance_present_expected_counts": [6316, 6316],
+            "root_mode": "0555",
+            "drift_counters": {
+              "symlink": 0,
+              "writable_entry": 0,
+              "extended_acl_entry": 0,
+              "nonzero_flags": 0,
+              "hash_mismatch": 0,
+              "mode_mismatch": 0,
+              "ownership_mismatch": 0
+            }
+          },
+          "timeline_evidence": {
+            "first_execute_started_at": "2026-08-02T20:36:31+08:00",
+            "first_tool_channel_empty_return_at": "2026-08-02T20:36:42+08:00",
+            "first_tool_channel_empty_return_proves_child_exit": false,
+            "second_execute_started_at": "2026-08-02T20:37:49+08:00",
+            "second_execute_result_reason": "BLOCKED_BEFORE_WEB_MUTATION/fresh_release_identity_or_path_collision",
+            "second_execute_runtime_mutation_counts_all_zero": true,
+            "first_process_later_completed_the_only_mutation": true,
+            "target_and_plist_candidate_formed_at": "2026-08-02T20:39:38+08:00",
+            "new_plist_pid_and_8786_live_at": "2026-08-02T20:41:48+08:00"
+          },
+          "operation_count_evidence": {
+            "mutating_primary": 1,
+            "release_build": 1,
+            "exclusive_release_rename": 1,
+            "retry": 0,
+            "plist_candidate": 1,
+            "plist_swap": 1,
+            "bootout": 1,
+            "bootstrap": 1,
+            "rollback": 0,
+            "kickstart": 0,
+            "second_primary": 0,
+            "second_mutating_recovery": 0
+          },
+          "collision_attestation": {
+            "path": "/private/tmp/20260802_202423__985202144febffeef3302012675f285e1cf1061a.l2-trigger-status-web-recovery-attestation.json",
+            "sha256": "6f8e52d090820005d03546bb811f378307a8131f5d3f0ef0b12477e69204af6f",
+            "status_reason": "BLOCKED_BEFORE_WEB_MUTATION/fresh_release_identity_or_path_collision",
+            "runtime_mutation_counts_all_zero": true,
+            "preserve_unchanged": true,
+            "reinterpret_as_success_allowed": false
+          },
+          "current_read_only_live_evidence": {
+            "observed_at": "2026-08-02T20:41:48+08:00",
+            "exact_label": "com.ashare-v3.n6.user-web",
+            "active_plist_sha256": "932974b378e54cfb8d9d3e799f6a803c2ce8085d4f0f6486db87f7065d35e021",
+            "source_rollback_plist_sha256": "f39e2150011432caf65f982fe5882e96505a367eedc4fca9f5ae180e14e223e1",
+            "live_source_commit": "985202144febffeef3302012675f285e1cf1061a",
+            "new_web_pid_present": true,
+            "listen_host_port": "127.0.0.1:8786",
+            "strategy_write": 0,
+            "route_inventory_count": 88,
+            "route_inventory_sha256": "8c2500c092b3fb8717add5727acbd27c5c3786fec47332fae8b0f84a418b7277",
+            "unauthenticated_get_path_status_no_store": [
+              "/n6/app/login=200",
+              "/n6/app/status-monitor=302",
+              "/api/n6/app/v1/status-monitor=401",
+              "/api/n6/app/v3/strategy-center=410"
+            ],
+            "trigger_pct_present": false,
+            "authenticated_dom_acceptance": "DEFERRED_SEPARATE_AUTHORIZED_GATE"
+          },
+          "preserved_prior_evidence": {
+            "failed_staging_unchanged": true,
+            "failed_attestation_unchanged": true
+          },
+          "forbidden_execution_and_effect_counts": {
+            "deployment": 0,
+            "rebind": 0,
+            "rollback": 0,
+            "retry": 0,
+            "resume": 0,
+            "release_mutation": 0,
+            "plist_mutation": 0,
+            "service_mutation": 0,
+            "other_service": 0,
+            "browser": 0,
+            "database": 0,
+            "consumer": 0,
+            "migration": 0,
+            "n1_n6_business": 0,
+            "trade": 0,
+            "push": 0,
+            "runtime_attestation_write": 0
+          },
+          "static_classifier_contract": {
+            "all_identity_count_timeline_live_and_collision_evidence_must_match": true,
+            "accepted_decision": "ACCEPT",
+            "accepted_reconciliation_result": "PASS_WITH_EVIDENCE_GAP",
+            "any_missing_or_drifted_field_decision": "REJECT"
+          },
+          "reject_on": [
+            "missing_required_field",
+            "identity_parent_business_or_release_drift",
+            "census_provenance_mode_or_drift_counter_drift",
+            "timeline_or_operation_count_drift",
+            "collision_attestation_or_preservation_drift",
+            "current_read_only_live_evidence_or_route_drift",
+            "collision_attestation_reinterpreted_as_success",
+            "reexecution_or_new_runtime_attestation_requested",
+            "forbidden_execution_or_effect_nonzero"
+          ]
         }
       }
     },
