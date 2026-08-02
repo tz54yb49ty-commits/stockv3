@@ -274,7 +274,32 @@ N4 recomputes N2
 N6 directly interprets N4/N5 raw tables to replace standard events
 ```
 
-## 8. Compatibility Notes
+## 8. N5 To N6 Trigger Status Forwarding
+
+`TriggerStateChanged` remains forbidden as an N5 action-confirmation entry.
+After a verified `ActionEligible`, N5 may use its existing forwarding-context
+permission to emit exactly two non-action status messages for an isolated N6
+current-state projection:
+
+```text
+TriggerStateChanged(trigger_live=true)  -> TriggerStatusUpdated
+TriggerStateChanged(trigger_live=false) -> TriggerStatusInvalidated
+```
+
+These messages use `source_layer=N5_action` and
+`message_role=n6_trigger_status_projection_only`. They do not create or modify
+N5 action facts, do not change `action_state`, do not replace any canonical
+Action* event, and must not enter the existing N6 message/card projection.
+
+`TriggerStatusInvalidated` may be forwarded after `ActionExecuted`; action
+terminal state does not end the upstream N4 trigger lifecycle. N6 may delete
+only its new current-state episode row. N4/N5 events, action facts, and existing
+N6 historical projection remain immutable.
+
+The complete payload, idempotency, N6 grain, and rollback contract are frozen
+in `docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`.
+
+## 9. Compatibility Notes
 
 Historical runs and existing code may still contain:
 

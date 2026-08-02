@@ -129,15 +129,21 @@ N4 trigger state/outcome fact + common_event_outbox
 
 N5 action fact + common_event_outbox
   -> canonical action events
+  -> TriggerStatusUpdated / TriggerStatusInvalidated
+     (non-action, N6 current-trigger-status projection only)
   -> historical current-real runs may still show ActionEvent / HintEvent / RiskEvent / PositionEvent
 
 N6 event inbox + user projection
   -> user_card_projection / user_market_projection / user_voice_delivery / sim_projection
+  -> n6_trigger_status_current (isolated L2 current-state read model)
 ```
 
 硬规则：
 
 - 事实和事件必须同事务产生。
+- `TriggerStatusUpdated` / `TriggerStatusInvalidated` 只允许在已有合法
+  `ActionEligible` 后由 N5 转发；不得进入现有消息/卡片投影，也不得修改 N5 action
+  fact。N6 按现有监控对象、实时范围和持仓做多用户只读过滤。
 - `event_id`、`dedup_key`、`event_schema_version` 必填且稳定。
 - consumer 必须幂等，并维护 inbox / checkpoint / watermark。
 - N1 -> N6 消息只允许单向流动；下游不得回写、重算或重新解释上游职责。

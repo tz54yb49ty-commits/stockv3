@@ -5,6 +5,31 @@
 
 ## P0 当前优先级
 
+### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
+
+状态：`RUNTIME_CONTROL_CONTRACT_REGISTERED_PENDING_N5_N6_IMPLEMENTATION`；
+分类：`n6_btrack_delivery_l2_n6_business_v1`；未执行数据库、outbox、consumer、
+Release 或服务操作。
+
+目标：在不改变现有 N6 消息/卡片投影的前提下，使用 N5 非动作状态转发消息维护
+N6 `n6_trigger_status_current`，并复用 `/n6/app/status-monitor` 展示按用户有效监控
+范围过滤的资产+方向当前状态。
+
+固定顺序：
+
+```text
+runtime_control 合同登记
+-> N5_action 独立实现/离线测试
+-> N6_user 独立实现/PG16 测试
+-> N6_user 完整文件名 migration + rollback gate
+-> runtime_control immutable Web Release gate
+-> 用户授权后的只读页面验收
+```
+
+首版禁止 scheduler、LaunchAgent、SSE、worker、现有投影表修改、proposal、资金、
+持仓、executor、语音、mobile、sim 和真实交易。权威合同：
+`docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`。
+
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 
 状态：`n6_btrack_service_lineage_convergence_v1` 已完成；

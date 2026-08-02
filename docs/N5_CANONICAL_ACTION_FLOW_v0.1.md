@@ -423,9 +423,10 @@ SELL_HINT = user hint display
 
 Asset channel is action fact context only. N6 decides display, notification, sim, and trade-intent behavior.
 
-## 10. Canonical Output Events
+## 10. Canonical Action Output Events
 
-N5 may output only these canonical event types for new runtime work:
+N5 may output only these canonical action outcome event types for new runtime
+work:
 
 ```text
 ActionEligible
@@ -453,6 +454,31 @@ PositionEvent
 ```
 
 These deprecated event names may remain in historical artifacts and current-real run evidence. Future alignment must use explicit dry-run, contract, schema, migration, preflight, rollback, and compatibility gates.
+
+### 10.1 Non-Action Trigger Status Forwarding
+
+After a verified `ActionEligible`, N5 may additionally emit exactly two
+non-action messages to an isolated N6 current-trigger-status projection:
+
+```text
+TriggerStatusUpdated
+TriggerStatusInvalidated
+```
+
+They are not canonical action outcomes and do not expand `action_state` or
+`action_mark`. They use `source_layer=N5_action`,
+`message_role=n6_trigger_status_projection_only`, and
+`action_eligible_entry_allowed=false`; they write no N5 action fact and never
+enter the existing N6 signal/message/card projection.
+
+`TriggerStatusUpdated` carries the latest N4 period/price context while keeping
+the original ActionEligible snapshot immutable. `TriggerStatusInvalidated`
+may be emitted after ActionExecuted and only removes the matching N6 current
+episode. Missing verified ActionEligible provenance produces no forwarding
+message.
+
+The exact contract is
+`docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`.
 
 ## 11. Minute Boundary And Confirmation Rules
 
