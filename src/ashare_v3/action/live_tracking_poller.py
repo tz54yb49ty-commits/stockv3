@@ -33,6 +33,19 @@ N5_SOURCE_LAYER = "N5_action"
 N5_LIVE_TRACKING_SCHEMA_VERSION = "v2"
 N5_LIVE_TRACKING_INPUT_EVENTS = ("TriggerMatched", "TriggerStateChanged")
 N5_LIVE_TRACKING_OUTPUT_EVENTS = ("ActionEligible", "ActionExecuted")
+N5_CANONICAL_ACTION_OUTCOME_EVENTS = (
+    "ActionEligible",
+    "ActionBlocked",
+    "ActionExecuted",
+    "ActionSkipped",
+)
+N5_TRIGGER_STATUS_FORWARD_EVENT_TYPES = (
+    "TriggerStatusUpdated",
+    "TriggerStatusInvalidated",
+)
+N5_TRIGGER_STATUS_FORWARD_CONTRACT_VERSION = "N5-N6-trigger-status-forward-v1"
+N5_TRIGGER_STATUS_FORWARD_MESSAGE_ROLE = "n6_trigger_status_projection_only"
+N5_TRIGGER_STATUS_FORWARD_SCHEMA_VERSION = "v1"
 FINAL_ACTION_MARKS = ("normal", "30m_volume", "30m_shrink")
 TERMINAL_TRACKING_STATES = ("blocked", "executed", "skipped", "expired")
 REQUIRED_N3T_SOURCE_BASIS = "N3T_C1_CLOSED"
@@ -458,6 +471,143 @@ def build_live_tracking_plan(
             "active_scope_snapshot_count": active_scope_snapshot_artifact["scope_count"],
             "active_scope_snapshot_empty_noop": active_scope_snapshot_artifact["empty_scope_noop"],
             "n6_output_event_types": list(N5_LIVE_TRACKING_OUTPUT_EVENTS),
+        },
+    }
+
+
+def build_trigger_status_forward_plan(
+    *,
+    n4_event_rows: Sequence[Mapping[str, Any]],
+    action_eligible_event_rows: Sequence[Mapping[str, Any]],
+    action_run_id: str,
+    source_trigger_run_id: str,
+    consumer_name: str,
+    for_trade_date: str,
+    existing_status_event_keys: set[str] | Sequence[str] | None = None,
+    max_n4_event_rows: int = 50000,
+    max_status_events: int = 50000,
+) -> dict[str, Any]:
+    """Plan bounded N5-only trigger-status outbox messages without DB effects."""
+
+    if max_n4_event_rows <= 0 or max_status_events <= 0:
+        raise ValueError("status-forward bounds must be positive")
+    if not str(for_trade_date or ""):
+        raise ValueError("for_trade_date is required")
+
+    eligible_by_state_key: dict[str, list[dict[str, Any]]] = {}
+    rejected_action_eligible_count = 0
+    for row in action_eligible_event_rows:
+        episode = _verified_action_eligible_status_episode(
+            row,
+            for_trade_date=for_trade_date,
+            source_trigger_run_id=source_trigger_run_id,
+        )
+        if not episode:
+            rejected_action_eligible_count += 1
+            continue
+        eligible_by_state_key.setdefault(episode["tracking_state_key"], []).append(episode)
+    for episodes in eligible_by_state_key.values():
+        episodes.sort(
+            key=lambda episode: (
+                _dt_sort_key(episode.get("entry_trigger_time")),
+                str(episode.get("entry_trigger_event_id") or ""),
+            )
+        )
+
+    source_rows: list[Mapping[str, Any]] = []
+    for row in _sort_event_rows(n4_event_rows):
+        if str(row.get("source_layer") or "") != "N4_trigger":
+            continue
+        if str(row.get("event_type") or "") != "TriggerStateChanged":
+            continue
+        if source_trigger_run_id and str(row.get("source_run_id") or "") != source_trigger_run_id:
+            continue
+        grain = _tracking_grain_from_event(row)
+        if str(grain.get("trade_date") or "") != str(for_trade_date):
+            continue
+        if grain.get("signal_type") not in CANONICAL_RUNTIME_SIGNAL_TYPES:
+            continue
+        if not str(row.get("event_id") or "") or not all(grain.values()):
+            continue
+        source_rows.append(row)
+    if len(source_rows) > max_n4_event_rows:
+        raise ValueError("status-forward N4 input exceeds max_n4_event_rows")
+
+    existing_keys = {str(key) for key in (existing_status_event_keys or set())}
+    invalidated_episode_ids: set[str] = set()
+    status_events: list[dict[str, Any]] = []
+    missing_verified_entry_count = 0
+    ignored_noncanonical_state_count = 0
+    replay_skipped_count = 0
+
+    for row in source_rows:
+        payload = _payload(row)
+        trigger_live = _bool_value(_value(row, payload, "trigger_live"), default=True)
+        current_status = str(_value(row, payload, "current_status") or "")
+        if not (
+            (trigger_live and current_status == "matched")
+            or (not trigger_live and current_status == "inactive")
+        ):
+            ignored_noncanonical_state_count += 1
+            continue
+
+        state_key = _tracking_state_key_from_event(row)
+        source_event_time = row.get("event_time")
+        episode = _latest_status_episode_at_or_before(
+            eligible_by_state_key.get(state_key, ()),
+            source_event_time=source_event_time,
+            invalidated_episode_ids=invalidated_episode_ids,
+        )
+        if not episode:
+            missing_verified_entry_count += 1
+            continue
+
+        event_type = "TriggerStatusUpdated" if trigger_live else "TriggerStatusInvalidated"
+        status_event = _build_trigger_status_forward_event(
+            event_type,
+            row,
+            episode=episode,
+            action_run_id=action_run_id,
+            source_trigger_run_id=source_trigger_run_id,
+            consumer_name=consumer_name,
+        )
+        if status_event["event_key"] in existing_keys:
+            replay_skipped_count += 1
+        else:
+            if len(status_events) >= max_status_events:
+                raise ValueError("status-forward output exceeds max_status_events")
+            status_events.append(status_event)
+            existing_keys.add(status_event["event_key"])
+        if not trigger_live:
+            invalidated_episode_ids.add(episode["entry_trigger_event_id"])
+
+    event_counts = Counter(event["event_type"] for event in status_events)
+    return {
+        "action_run_id": action_run_id,
+        "source_trigger_run_id": source_trigger_run_id,
+        "consumer_name": consumer_name,
+        "for_trade_date": str(for_trade_date),
+        "planning_mode": "status_forward_only_offline_bounded_v1",
+        "status_events": status_events,
+        "action_events": [],
+        "tracking_updates": [],
+        "inbox_checkpoint_intent": None,
+        "persistence": {
+            "allowed_targets": ["common_event_outbox"],
+            "common_action_event_write_allowed": False,
+            "database_write_allowed": False,
+            "outbox_write_executed": False,
+        },
+        "summary": {
+            "n4_event_count": len(source_rows),
+            "verified_action_eligible_episode_count": sum(len(rows) for rows in eligible_by_state_key.values()),
+            "rejected_action_eligible_count": rejected_action_eligible_count,
+            "missing_verified_entry_count": missing_verified_entry_count,
+            "ignored_noncanonical_state_count": ignored_noncanonical_state_count,
+            "replay_skipped_count": replay_skipped_count,
+            "status_event_count": len(status_events),
+            "status_event_type_counts": dict(sorted(event_counts.items())),
+            "canonical_action_outcome_event_types": list(N5_CANONICAL_ACTION_OUTCOME_EVENTS),
         },
     }
 
@@ -2037,6 +2187,200 @@ def _pending_tracking_evidence_unchanged(state: Mapping[str, Any], update: Mappi
     return bool(current_status) and all(
         str(current_status.get(key) or "") == str(new_status.get(key) or "") for key in comparable_keys
     )
+
+
+def _verified_action_eligible_status_episode(
+    row: Mapping[str, Any],
+    *,
+    for_trade_date: str,
+    source_trigger_run_id: str,
+) -> dict[str, Any]:
+    if str(row.get("source_layer") or "") != N5_SOURCE_LAYER:
+        return {}
+    if str(row.get("event_type") or "") != "ActionEligible":
+        return {}
+    payload = _payload(row)
+    if str(payload.get("action_state") or "") != "eligible":
+        return {}
+    if str(payload.get("data_quality_status") or "") != "passed":
+        return {}
+    if str(payload.get("projection_message_status") or "") != "ready":
+        return {}
+    if str(_value(row, payload, "trade_date", "for_trade_date") or "") != str(for_trade_date):
+        return {}
+
+    entry_ref = normalize_mapping(payload.get("action_entry_trigger_matched_ref") or {})
+    entry_event_id = str(entry_ref.get("source_trigger_event_id") or "")
+    if (
+        str(entry_ref.get("source_trigger_event_type") or "") != "TriggerMatched"
+        or not entry_event_id
+        or not str(row.get("event_id") or "")
+        or str(payload.get("source_trigger_event_id") or "") != entry_event_id
+        or (
+            source_trigger_run_id
+            and str(entry_ref.get("source_trigger_run_id") or "") != str(source_trigger_run_id)
+        )
+    ):
+        return {}
+
+    grain = _tracking_grain_from_event(row)
+    if not all(
+        grain.get(key)
+        for key in ("trade_date", "asset_kind", "identity_key", "direction", "signal_type", "condition_key")
+    ):
+        return {}
+    expected_state_key = build_action_tracking_state_key(**grain)
+    trace = normalize_mapping(payload.get("trace_json") or {})
+    tracking_state_key = str(trace.get("tracking_state_key") or payload.get("action_key") or "")
+    if tracking_state_key != expected_state_key:
+        return {}
+
+    entry_payload = normalize_mapping(entry_ref.get("source_n4_payload") or {})
+    entry_grain = _tracking_grain_from_event({"payload_json": entry_payload})
+    if entry_grain != grain:
+        return {}
+    if not _bool_value(entry_payload.get("trigger_live"), default=True):
+        return {}
+    if str(entry_payload.get("current_status") or "matched") != "matched":
+        return {}
+    context = entry_payload.get("condition_projection_context")
+    context_fields = context.get("fields") if isinstance(context, Mapping) else None
+    entry_close = _positive_finite_decimal_or_none(
+        context_fields.get("close") if isinstance(context_fields, Mapping) else None
+    )
+    asset_code = payload.get("asset_code")
+    asset_name = payload.get("asset_name")
+    if entry_close is None or not str(asset_code or "") or not str(asset_name or ""):
+        return {}
+    return {
+        "tracking_state_key": tracking_state_key,
+        "entry_trigger_event_id": entry_event_id,
+        "entry_trigger_time": entry_ref.get("source_trigger_event_time") or payload.get("trigger_time") or row.get("event_time"),
+        "action_eligible_event_id": str(row.get("event_id") or ""),
+        "entry_close": entry_close,
+        "asset_code": str(asset_code),
+        "asset_name": str(asset_name),
+    }
+
+
+def _latest_status_episode_at_or_before(
+    episodes: Sequence[Mapping[str, Any]],
+    *,
+    source_event_time: Any,
+    invalidated_episode_ids: set[str],
+) -> dict[str, Any]:
+    source_dt = datetime_or_none(source_event_time)
+    selected: dict[str, Any] = {}
+    for episode in episodes:
+        entry_event_id = str(episode.get("entry_trigger_event_id") or "")
+        if entry_event_id in invalidated_episode_ids:
+            continue
+        entry_dt = datetime_or_none(episode.get("entry_trigger_time"))
+        if source_dt is not None and entry_dt is not None and entry_dt > source_dt:
+            continue
+        selected = dict(episode)
+    return selected
+
+
+def _build_trigger_status_forward_event(
+    event_type: str,
+    row: Mapping[str, Any],
+    *,
+    episode: Mapping[str, Any],
+    action_run_id: str,
+    source_trigger_run_id: str,
+    consumer_name: str,
+) -> dict[str, Any]:
+    if event_type not in N5_TRIGGER_STATUS_FORWARD_EVENT_TYPES:
+        raise ValueError(f"unsupported trigger status event_type: {event_type}")
+    payload = _payload(row)
+    grain = _tracking_grain_from_event(row)
+    state_key = str(episode.get("tracking_state_key") or "")
+    entry_trigger_event_id = str(episode.get("entry_trigger_event_id") or "")
+    source_trigger_event_id = str(row.get("event_id") or "")
+    dedup_key = join_dedup_parts(
+        event_type,
+        state_key,
+        entry_trigger_event_id,
+        source_trigger_event_id,
+    )
+    event_id = build_stable_event_id(
+        source_layer=N5_SOURCE_LAYER,
+        event_type=event_type,
+        source_run_id=N5_TRIGGER_STATUS_FORWARD_CONTRACT_VERSION,
+        dedup_key=dedup_key,
+        event_schema_version=N5_TRIGGER_STATUS_FORWARD_SCHEMA_VERSION,
+    )
+    trigger_price = _value(row, payload, "trigger_price")
+    trigger_pct = _percentage_from_price(
+        trigger_price,
+        close=episode.get("entry_close"),
+        inherited_reasons=(),
+        invalid_price_reason="latest_trigger_price_invalid",
+    )
+    trigger_period, _primary_trigger_period, triggered_periods = _canonical_trigger_period_payload_fields(
+        grain,
+        payload,
+    )
+    trigger_live = _bool_value(_value(row, payload, "trigger_live"), default=True)
+    current_status = str(_value(row, payload, "current_status") or "")
+    status_payload = {
+        "contract_version": N5_TRIGGER_STATUS_FORWARD_CONTRACT_VERSION,
+        "message_role": N5_TRIGGER_STATUS_FORWARD_MESSAGE_ROLE,
+        "operation": "update" if event_type == "TriggerStatusUpdated" else "invalidate",
+        "trade_date": grain["trade_date"],
+        "tracking_state_key": state_key,
+        "entry_trigger_event_id": entry_trigger_event_id,
+        "action_eligible_event_id": episode.get("action_eligible_event_id"),
+        "source_trigger_event_id": source_trigger_event_id,
+        "source_trigger_run_id": str(row.get("source_run_id") or source_trigger_run_id),
+        "asset_kind": grain["asset_kind"],
+        "identity_key": grain["identity_key"],
+        "asset_code": episode.get("asset_code"),
+        "asset_name": episode.get("asset_name"),
+        "direction": grain["direction"],
+        "signal_type": grain["signal_type"],
+        "condition_key": grain["condition_key"],
+        "trigger_time": row.get("event_time"),
+        "trigger_price": trigger_price,
+        "trigger_pct": trigger_pct["value"],
+        "trigger_pct_status": trigger_pct["status"],
+        "trigger_pct_not_ready_reasons": trigger_pct["not_ready_reasons"],
+        "trigger_period": trigger_period,
+        "triggered_periods": triggered_periods,
+        "trigger_live": trigger_live,
+        "current_status": current_status,
+        "action_eligible_entry_allowed": False,
+        "persistence_target": "common_event_outbox",
+        "common_action_event_write_allowed": False,
+        "trace_json": {
+            "consumer_name": consumer_name,
+            "event_identity_fields": [
+                event_type,
+                state_key,
+                entry_trigger_event_id,
+                source_trigger_event_id,
+            ],
+            "trigger_pct_close_source": "verified_action_eligible.entry_n2_condition_projection_context.fields.close",
+            "trigger_pct_price_source": "latest_trigger_state_changed.trigger_price",
+            "immutable_action_snapshot_mutated": False,
+        },
+    }
+    return {
+        "event_id": event_id,
+        "event_key": dedup_key,
+        "event_type": event_type,
+        "event_schema_version": N5_TRIGGER_STATUS_FORWARD_SCHEMA_VERSION,
+        "trade_date": grain["trade_date"],
+        "asset_kind": grain["asset_kind"],
+        "identity_key": grain["identity_key"],
+        "event_time": row.get("event_time"),
+        "source_layer": N5_SOURCE_LAYER,
+        "source_run_id": action_run_id,
+        "dedup_key": dedup_key,
+        "partition_key": grain["identity_key"],
+        "payload_json": status_payload,
+    }
 
 
 def _build_action_event(

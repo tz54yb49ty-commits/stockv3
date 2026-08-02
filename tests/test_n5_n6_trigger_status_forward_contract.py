@@ -1,5 +1,8 @@
+from copy import deepcopy
 import unittest
 from pathlib import Path
+
+from ashare_v3.action import live_tracking_poller as poller
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +12,115 @@ ACTION_FLOW = ROOT / "docs" / "N5_CANONICAL_ACTION_FLOW_v0.1.md"
 ARCHITECTURE = ROOT / "docs" / "Architecture.md"
 TASKS = ROOT / "docs" / "Tasks.md"
 GOVERNANCE = ROOT / "docs" / "N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json"
+N6_PROJECTION = ROOT / "src" / "ashare_v3" / "user" / "projection_plan.py"
+ROLLBACK = ROOT / "sql" / "N5_trigger_status_forward_only_rollback.sql"
+TRADE_DATE = "20260731"
+SOURCE_TRIGGER_RUN_ID = "trigger_status_forward_n4_20260731_v1"
+ACTION_RUN_ID = "trigger_status_forward_n5_20260731_v1"
+CONSUMER_NAME = "n5_trigger_status_forward_v1"
+
+
+def action_eligible(
+    *,
+    event_id: str = "n5-eligible-1",
+    entry_event_id: str = "n4-entry-1",
+    event_time: str = "2026-07-31T09:31:00+08:00",
+    condition_key: str = "BUY:W",
+    close: str = "10",
+) -> dict:
+    signal_type = "B_BUY"
+    direction = "buy"
+    grain = {
+        "trade_date": TRADE_DATE,
+        "asset_kind": "stock",
+        "identity_key": "stock:SH:600000",
+        "direction": direction,
+        "signal_type": signal_type,
+        "condition_key": condition_key,
+    }
+    state_key = poller.build_action_tracking_state_key(**grain)
+    return {
+        "event_id": event_id,
+        "event_type": "ActionEligible",
+        "event_time": event_time,
+        "trade_date": TRADE_DATE,
+        "asset_kind": "stock",
+        "identity_key": grain["identity_key"],
+        "source_layer": "N5_action",
+        "source_run_id": "entry_action_run",
+        "payload_json": {
+            **grain,
+            "action_state": "eligible",
+            "data_quality_status": "passed",
+            "projection_message_status": "ready",
+            "action_key": state_key,
+            "asset_code": "600000",
+            "asset_name": "浦发银行",
+            "trigger_time": event_time,
+            "trigger_price": "10.100000",
+            "trigger_pct": "1.000000",
+            "source_trigger_event_id": entry_event_id,
+            "trace_json": {"tracking_state_key": state_key},
+            "action_entry_trigger_matched_ref": {
+                "source_trigger_event_id": entry_event_id,
+                "source_trigger_event_type": "TriggerMatched",
+                "source_trigger_event_time": event_time,
+                "source_trigger_run_id": SOURCE_TRIGGER_RUN_ID,
+                "source_n4_payload": {
+                    **grain,
+                    "trigger_live": True,
+                    "current_status": "matched",
+                    "condition_projection_context": {"fields": {"close": close}},
+                },
+            },
+        },
+    }
+
+
+def trigger_state_changed(
+    *,
+    event_id: str,
+    event_time: str,
+    trigger_live: bool,
+    condition_key: str = "BUY:W",
+    trigger_price: str = "10.55555555",
+) -> dict:
+    return {
+        "event_id": event_id,
+        "event_type": "TriggerStateChanged",
+        "event_time": event_time,
+        "trade_date": TRADE_DATE,
+        "asset_kind": "stock",
+        "identity_key": "stock:SH:600000",
+        "source_layer": "N4_trigger",
+        "source_run_id": SOURCE_TRIGGER_RUN_ID,
+        "status": "pending",
+        "payload_json": {
+            "trade_date": TRADE_DATE,
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": condition_key,
+            "trigger_live": trigger_live,
+            "current_status": "matched" if trigger_live else "inactive",
+            "trigger_price": trigger_price,
+            "trigger_period": "30m" if "HINT" in condition_key else "W",
+            "triggered_periods": ["30m"] if "HINT" in condition_key else ["W"],
+        },
+    }
+
+
+def status_plan(n4_rows, eligible_rows, **kwargs):
+    return poller.build_trigger_status_forward_plan(
+        n4_event_rows=n4_rows,
+        action_eligible_event_rows=eligible_rows,
+        action_run_id=kwargs.pop("action_run_id", ACTION_RUN_ID),
+        source_trigger_run_id=SOURCE_TRIGGER_RUN_ID,
+        consumer_name=CONSUMER_NAME,
+        for_trade_date=TRADE_DATE,
+        **kwargs,
+    )
 
 
 class TriggerStatusForwardContractTests(unittest.TestCase):
@@ -99,6 +211,182 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertIn("N5_action 独立实现/离线测试", tasks)
         self.assertIn("N6_user 独立实现/PG16 测试", tasks)
         self.assertIn("首版禁止 scheduler、LaunchAgent、SSE、worker", tasks)
+
+    def test_true_state_change_builds_current_update_from_frozen_entry_close(self) -> None:
+        eligible = action_eligible()
+        row = trigger_state_changed(
+            event_id="n4-tsc-true",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+
+        plan = status_plan([row], [eligible])
+
+        self.assertEqual([event["event_type"] for event in plan["status_events"]], ["TriggerStatusUpdated"])
+        payload = plan["status_events"][0]["payload_json"]
+        self.assertEqual(payload["operation"], "update")
+        self.assertEqual(payload["trigger_pct"], "5.555556")
+        self.assertEqual(payload["entry_trigger_event_id"], "n4-entry-1")
+        self.assertFalse(payload["action_eligible_entry_allowed"])
+
+    def test_false_state_change_invalidates_eligible_and_executed_tracking(self) -> None:
+        row = trigger_state_changed(
+            event_id="n4-tsc-false",
+            event_time="2026-07-31T09:40:00+08:00",
+            trigger_live=False,
+        )
+        for later_tracking_status in ("eligible", "executed"):
+            with self.subTest(later_tracking_status=later_tracking_status):
+                eligible = action_eligible()
+                action_history = [eligible]
+                if later_tracking_status == "executed":
+                    executed = deepcopy(eligible)
+                    executed["event_id"] = "n5-executed-1"
+                    executed["event_type"] = "ActionExecuted"
+                    executed["payload_json"]["action_state"] = "executed"
+                    action_history.append(executed)
+                plan = status_plan([row], action_history)
+                self.assertEqual(
+                    [event["event_type"] for event in plan["status_events"]],
+                    ["TriggerStatusInvalidated"],
+                )
+                self.assertEqual(plan["status_events"][0]["payload_json"]["operation"], "invalidate")
+
+    def test_missing_verified_trigger_matched_entry_does_not_forward(self) -> None:
+        eligible = action_eligible()
+        eligible["payload_json"].pop("action_entry_trigger_matched_ref")
+        row = trigger_state_changed(
+            event_id="n4-tsc-no-entry",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+
+        plan = status_plan([row], [eligible])
+
+        self.assertEqual(plan["status_events"], [])
+        self.assertEqual(plan["summary"]["rejected_action_eligible_count"], 1)
+        self.assertEqual(plan["summary"]["missing_verified_entry_count"], 1)
+
+    def test_replay_is_idempotent_and_event_id_depends_on_required_tuple(self) -> None:
+        eligible = action_eligible()
+        row = trigger_state_changed(
+            event_id="n4-tsc-replay",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+        first = status_plan([row], [eligible])
+        different_run = status_plan([row], [eligible], action_run_id="different-status-forward-run")
+        replay = status_plan(
+            [row],
+            [eligible],
+            existing_status_event_keys={first["status_events"][0]["event_key"]},
+        )
+
+        self.assertEqual(first["status_events"][0]["event_id"], different_run["status_events"][0]["event_id"])
+        self.assertEqual(replay["status_events"], [])
+        self.assertEqual(replay["summary"]["replay_skipped_count"], 1)
+
+    def test_false_closes_only_old_episode_and_new_entry_can_forward(self) -> None:
+        old = action_eligible()
+        new = action_eligible(
+            event_id="n5-eligible-2",
+            entry_event_id="n4-entry-2",
+            event_time="2026-07-31T10:00:00+08:00",
+        )
+        rows = [
+            trigger_state_changed(
+                event_id="n4-old-false",
+                event_time="2026-07-31T09:45:00+08:00",
+                trigger_live=False,
+            ),
+            trigger_state_changed(
+                event_id="n4-old-after-false",
+                event_time="2026-07-31T09:50:00+08:00",
+                trigger_live=True,
+            ),
+            trigger_state_changed(
+                event_id="n4-new-true",
+                event_time="2026-07-31T10:05:00+08:00",
+                trigger_live=True,
+            ),
+        ]
+
+        plan = status_plan(rows, [old, new])
+
+        self.assertEqual(
+            [event["event_type"] for event in plan["status_events"]],
+            ["TriggerStatusInvalidated", "TriggerStatusUpdated"],
+        )
+        self.assertEqual(plan["status_events"][1]["payload_json"]["entry_trigger_event_id"], "n4-entry-2")
+
+    def test_status_update_does_not_mutate_immutable_action_snapshot(self) -> None:
+        eligible = action_eligible()
+        row = trigger_state_changed(
+            event_id="n4-tsc-immutable",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+            trigger_price="12",
+        )
+        frozen_eligible = deepcopy(eligible)
+        frozen_row = deepcopy(row)
+
+        plan = status_plan([row], [eligible])
+
+        self.assertEqual(eligible, frozen_eligible)
+        self.assertEqual(row, frozen_row)
+        self.assertEqual(eligible["payload_json"]["trigger_pct"], "1.000000")
+        self.assertEqual(plan["status_events"][0]["payload_json"]["trigger_pct"], "20.000000")
+
+    def test_hint_public_period_does_not_leak_internal_30m_list(self) -> None:
+        eligible = action_eligible(condition_key="BUY_HINT")
+        row = trigger_state_changed(
+            event_id="n4-hint-true",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+            condition_key="BUY_HINT",
+        )
+
+        payload = status_plan([row], [eligible])["status_events"][0]["payload_json"]
+
+        self.assertEqual(payload["trigger_period"], "30m")
+        self.assertEqual(payload["triggered_periods"], [])
+
+    def test_status_only_plan_keeps_action_contract_and_persistence_closed(self) -> None:
+        row = trigger_state_changed(
+            event_id="n4-tsc-only",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+        plan = status_plan([row], [action_eligible()])
+        n6_projection = N6_PROJECTION.read_text(encoding="utf-8")
+
+        self.assertEqual(plan["action_events"], [])
+        self.assertEqual(
+            plan["summary"]["canonical_action_outcome_event_types"],
+            ["ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped"],
+        )
+        self.assertEqual(plan["persistence"]["allowed_targets"], ["common_event_outbox"])
+        self.assertFalse(plan["persistence"]["common_action_event_write_allowed"])
+        self.assertIn(
+            'CANONICAL_EVENT_TYPES = ("ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped")',
+            n6_projection,
+        )
+
+    def test_rollback_draft_is_exact_status_outbox_only(self) -> None:
+        text = ROLLBACK.read_text(encoding="utf-8")
+        for marker in (
+            "TriggerStatusUpdated",
+            "TriggerStatusInvalidated",
+            "N5-N6-trigger-status-forward-v1",
+            "n6_trigger_status_projection_only",
+            "n5.rollback_action_run_id",
+            "n5.rollback_source_trigger_run_id",
+            "n5.rollback_consumer_name",
+            "DELETE FROM common_event_outbox",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("DELETE FROM common_action_event", text)
+        self.assertNotIn("UPDATE common_event_outbox", text)
 
 
 if __name__ == "__main__":
