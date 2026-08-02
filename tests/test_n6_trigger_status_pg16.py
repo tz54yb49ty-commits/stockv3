@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,18 @@ PG_BIN = Path(
     )
 )
 TRADE_DATE = "20260731"
+SCHEMA_HASH = "e50cea0987f7f3b99989e2c23ef2d0f9d526617c688ac7f61a18e765ec439ef2"
+COLUMN_SIGNATURE = (
+    "trigger_status_episode_id:bigint,contract_version:text,consumer_name:text,"
+    "projection_run_id:text,trade_date:text,tracking_state_key:text,"
+    "entry_trigger_event_id:text,action_eligible_event_id:text,asset_kind:text,"
+    "identity_key:text,asset_code:text,asset_name:text,direction:text,"
+    "signal_type:text,condition_key:text,trigger_time:timestamp with time zone,"
+    "trigger_price:numeric(24,6),trigger_period:text,triggered_periods:text[],"
+    "action_eligible_outbox_id:bigint,last_status_outbox_id:bigint,last_event_id:text,"
+    "last_event_type:text,source_action_run_id:text,source_trigger_event_id:text,"
+    "created_at:timestamp with time zone,updated_at:timestamp with time zone"
+)
 
 
 def _safe_environment() -> dict[str, str]:
@@ -263,7 +276,7 @@ def _eligible_payload(
         "identity_key": identity_key, "asset_code": code, "asset_name": name,
         "direction": direction, "signal_type": signal_type,
         "condition_key": condition_key, "projection_message_status": "ready",
-        "trigger_time": trigger_time, "trigger_pct": "1.000000",
+        "trigger_time": trigger_time, "trigger_pct": "must-not-be-read",
         "trigger_price": "10.000000", "trigger_period": "W",
         "triggered_periods": periods or ["W", "D"],
         "source_trigger_event_id": entry_id,
@@ -289,7 +302,7 @@ def _status_payload(
     periods: list[str] | None = None,
 ) -> dict:
     signal_type = "B_BUY" if direction == "buy" else "S_SELL"
-    return {
+    payload = {
         "contract_version": CONTRACT_VERSION, "message_role": MESSAGE_ROLE,
         "operation": operation, "trade_date": TRADE_DATE,
         "tracking_state_key": f"state:{entry_id}",
@@ -301,12 +314,35 @@ def _status_payload(
         "direction": direction, "signal_type": signal_type,
         "condition_key": condition_key,
         "trigger_time": "2099-01-01T00:00:00+08:00",
-        "trigger_pct": "5.555556", "trigger_price": "10.555556",
-        "trigger_period": "M", "triggered_periods": periods or ["M", "D"],
         "trigger_live": operation == "update",
         "current_status": "matched" if operation == "update" else "inactive",
         "action_eligible_entry_allowed": False,
     }
+    if operation == "update":
+        payload.update(
+            {
+                "trigger_price": "10.555556",
+                "trigger_period": "M",
+                "triggered_periods": periods or ["M", "D"],
+            }
+        )
+    return payload
+
+
+class N6TriggerStatusPg16StaticContractTests(unittest.TestCase):
+    def test_forward_and_rollback_share_exact_no_pct_schema_identity(self) -> None:
+        forward = FORWARD.read_text(encoding="utf-8")
+        rollback = ROLLBACK.read_text(encoding="utf-8")
+        create_block = forward.split(
+            "CREATE TABLE public.n6_trigger_status_current", 1
+        )[1].split(");", 1)[0]
+        self.assertNotIn("trigger_pct", create_block)
+        self.assertNotIn("trigger_pct", rollback)
+        self.assertEqual(sha256(COLUMN_SIGNATURE.encode()).hexdigest(), SCHEMA_HASH)
+        marker = f"schema_hash=sha256:{SCHEMA_HASH}"
+        self.assertIn(marker, forward)
+        self.assertIn(marker, rollback)
+        self.assertIn(COLUMN_SIGNATURE, rollback)
 
 
 @unittest.skipUnless(
@@ -411,7 +447,7 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
         with self.cluster.connect() as conn:
             row = conn.execute("SELECT * FROM n6_trigger_status_current").fetchone()
             self.assertEqual(row["asset_name"], "浦发银行")
-            self.assertEqual(str(row["trigger_pct"]), "5.555556")
+            self.assertNotIn("trigger_pct", row)
             self.assertEqual(row["triggered_periods"], ["M", "W", "D"])
             self.assertEqual(row["trigger_time"].isoformat(), "2026-07-31T09:31:00+08:00")
             self.assertEqual(conn.execute("SELECT count(*) AS n FROM common_event_outbox WHERE status <> 'pending'").fetchone()["n"], 0)
@@ -554,17 +590,16 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
                 TRADE_DATE,
             )
             rows = [
-                ("stock:SH:600000", "600000", "浦发银行", "buy", "B_BUY", "BUY:W,D", "entry-stock-direct", 10, ["W", "D"], "2026-07-31 09:31+08", "1.000000", "10.000000", "W"),
-                ("stock:SH:600000", "600000", "浦发银行", "buy", "B_BUY", "BUY:Q,D", "entry-stock-direct-2", 20, ["Q", "D"], "2026-07-31 09:40+08", "2.000000", "11.000000", "Q"),
-                ("stock:SH:600001", "600001", "邯郸钢铁", "buy", "B_BUY", "BUY:D", "entry-stock-holding", 11, ["D"], "2026-07-31 09:32+08", "1.000000", "10.000000", "D"),
-                ("stock:SH:600002", "600002", "齐鲁石化", "buy", "B_BUY", "BUY:D", "entry-stock-user2", 12, ["D"], "2026-07-31 09:33+08", "1.000000", "10.000000", "D"),
-                ("index:SH:000300", "000300", "沪深300", "buy", "B_BUY", "BUY:D", "entry-index", 13, ["D"], "2026-07-31 09:34+08", "1.000000", "10.000000", "D"),
-                ("board:TDX:881001", "881001", "银行", "sell", "S_SELL", "SELL:M", "entry-board", 14, ["M"], "2026-07-31 09:35+08", "1.000000", "10.000000", "M"),
+                ("stock:SH:600000", "600000", "浦发银行", "buy", "B_BUY", "BUY:W,D", "entry-stock-direct", 10, ["W", "D"], "2026-07-31 09:31+08", "10.000000", "W"),
+                ("stock:SH:600000", "600000", "浦发银行", "buy", "B_BUY", "BUY:Q,D", "entry-stock-direct-2", 20, ["Q", "D"], "2026-07-31 09:40+08", "11.000000", "Q"),
+                ("stock:SH:600001", "600001", "邯郸钢铁", "buy", "B_BUY", "BUY:D", "entry-stock-holding", 11, ["D"], "2026-07-31 09:32+08", "10.000000", "D"),
+                ("stock:SH:600002", "600002", "齐鲁石化", "buy", "B_BUY", "BUY:D", "entry-stock-user2", 12, ["D"], "2026-07-31 09:33+08", "10.000000", "D"),
+                ("index:SH:000300", "000300", "沪深300", "buy", "B_BUY", "BUY:D", "entry-index", 13, ["D"], "2026-07-31 09:34+08", "10.000000", "D"),
+                ("board:TDX:881001", "881001", "银行", "sell", "S_SELL", "SELL:M", "entry-board", 14, ["M"], "2026-07-31 09:35+08", "10.000000", "M"),
             ]
             for (
                 identity, code, name, direction, signal_type, condition_key,
-                entry, watermark, periods, trigger_time, trigger_pct,
-                trigger_price, trigger_period,
+                entry, watermark, periods, trigger_time, trigger_price, trigger_period,
             ) in rows:
                 kind = identity.split(":", 1)[0]
                 conn.execute(
@@ -572,18 +607,18 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
                          contract_version, consumer_name, projection_run_id, trade_date,
                          tracking_state_key, entry_trigger_event_id, action_eligible_event_id,
                          asset_kind, identity_key, asset_code, asset_name, direction,
-                         signal_type, condition_key, trigger_time, trigger_pct, trigger_price,
+                         signal_type, condition_key, trigger_time, trigger_price,
                          trigger_period, triggered_periods, action_eligible_outbox_id,
                          last_status_outbox_id, last_event_id, last_event_type,
                          source_action_run_id, source_trigger_event_id
                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                  %s, %s, %s, %s, %s,
-                                 %s, %s, %s, %s, %s, %s, 'ActionEligible',
+                                 %s, %s, %s, %s, %s, 'ActionEligible',
                                  'n5-entry', %s)""",
                     (
                         *episode_values, f"state:{entry}", entry, f"eligible:{entry}",
                         kind, identity, code, name, direction, signal_type, condition_key,
-                        trigger_time, trigger_pct, trigger_price, trigger_period, periods,
+                        trigger_time, trigger_price, trigger_period, periods,
                         watermark, watermark, f"eligible:{entry}", entry,
                     ),
                 )
@@ -614,7 +649,7 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
         grouped = next(row for row in user1 if row["identity_key"] == "stock:SH:600000")
         self.assertEqual(grouped["episode_count"], 2)
         self.assertEqual(grouped["trigger_time"], "2026-07-31 09:31:00+08")
-        self.assertEqual(grouped["trigger_pct"], "2.000000")
+        self.assertNotIn("trigger_pct", grouped)
         self.assertEqual(grouped["trigger_price"], "11.000000")
         self.assertEqual(grouped["trigger_period"], "Q")
         self.assertEqual(grouped["triggered_periods"], ["Q", "W", "D"])

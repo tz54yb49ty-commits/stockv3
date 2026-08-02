@@ -20398,8 +20398,8 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertEqual(first["asset_kind"], "stock")
         self.assertEqual(first["asset_kind_label"], "个股")
         self.assertEqual(first["identity_key"], "stock:SZ:302132")
-        self.assertEqual(first["trigger_pct"], "1.234567")
-        self.assertEqual(first["trigger_pct_display"], "1.23%")
+        self.assertNotIn("trigger_pct", first)
+        self.assertNotIn("trigger_pct_display", first)
         self.assertEqual(first["trigger_price"], "10.123456")
         self.assertEqual(first["trigger_period"], "W")
         self.assertEqual(first["triggered_periods"], ["M", "W", "D"])
@@ -20472,12 +20472,15 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertEqual(response.status_code, 200)
         self.assertIn("触发状态", response.text)
         for column in (
-            "触发时间", "资产类型", "代码", "名称", "方向", "触发涨跌幅",
-            "触发价格", "当前周期", "已触发周期",
+            "触发时间", "资产类型", "代码", "名称", "方向", "触发价格",
+            "当前周期", "已触发周期",
         ):
             self.assertIn(column, response.text)
-        self.assertIn('data-n6-trigger-pct-raw="1.234567"', response.text)
-        self.assertIn("1.23%", response.text)
+        status_table_start = response.text.index('<table class="trigger-status-table"')
+        status_table_end = response.text.index("</table>", status_table_start)
+        status_table = response.text[status_table_start:status_table_end]
+        self.assertNotIn("触发涨跌幅", status_table)
+        self.assertNotIn("data-n6-trigger-pct-raw", status_table)
         self.assertIn("手动刷新", response.text)
         self.assertIn(
             'href="/n6/app/status-monitor?asset_kind=stock&amp;trade_date=20260605"',

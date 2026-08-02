@@ -55,7 +55,6 @@ CREATE TABLE public.n6_trigger_status_current (
   signal_type text NOT NULL,
   condition_key text NOT NULL,
   trigger_time timestamptz NOT NULL,
-  trigger_pct numeric(20,6),
   trigger_price numeric(24,6),
   trigger_period text,
   triggered_periods text[] NOT NULL DEFAULT ARRAY[]::text[],
@@ -115,7 +114,7 @@ ON public.n6_trigger_status_current(
 );
 
 COMMENT ON TABLE public.n6_trigger_status_current IS
-  'migration=089_n6_trigger_status_current.sql;schema_hash=sha256:3538edb4f4cbc6a340fa0459b1050e9ea9637b5c8ab28cfe543c5295d2bbe813;contract=N5-N6-trigger-status-forward-v1';
+  'migration=089_n6_trigger_status_current.sql;schema_hash=sha256:e50cea0987f7f3b99989e2c23ef2d0f9d526617c688ac7f61a18e765ec439ef2;contract=N5-N6-trigger-status-forward-v1';
 
 ALTER TABLE public.n6_trigger_status_current OWNER TO ashare_v3_user;
 REVOKE ALL ON TABLE public.n6_trigger_status_current FROM PUBLIC;

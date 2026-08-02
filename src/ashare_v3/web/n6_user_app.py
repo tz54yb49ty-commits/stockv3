@@ -6982,7 +6982,6 @@ class PostgresN6UserRepository:
                        recent.asset_code,
                        recent.asset_name,
                        recent.direction,
-                       recent.trigger_pct::text AS trigger_pct,
                        recent.trigger_price::text AS trigger_price,
                        recent.trigger_period,
                        ARRAY(

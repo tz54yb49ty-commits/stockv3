@@ -26,7 +26,7 @@ import run_n6_trigger_status_projection_once as runner
 ROOT = Path(__file__).resolve().parents[1]
 FORWARD = (ROOT / "sql/089_n6_trigger_status_current.sql").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "sql/089_n6_trigger_status_current_rollback.sql").read_text(encoding="utf-8")
-SCHEMA_HASH = "3538edb4f4cbc6a340fa0459b1050e9ea9637b5c8ab28cfe543c5295d2bbe813"
+SCHEMA_HASH = "e50cea0987f7f3b99989e2c23ef2d0f9d526617c688ac7f61a18e765ec439ef2"
 
 
 def eligible_event(
@@ -61,7 +61,7 @@ def eligible_event(
             "condition_key": condition_key,
             "projection_message_status": "ready",
             "trigger_time": "2026-07-31T09:31:00+08:00",
-            "trigger_pct": "1.000000",
+            "trigger_pct": "must-not-be-read",
             "trigger_price": "10.100000",
             "trigger_period": "W",
             "triggered_periods": ["W", "D"],
@@ -157,6 +157,7 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         create_block = FORWARD.split("CREATE TABLE public.n6_trigger_status_current", 1)[1].split(");", 1)[0]
         self.assertNotIn("principal_id", create_block)
         self.assertNotIn("user_id", create_block)
+        self.assertNotIn("trigger_pct", create_block)
         self.assertNotRegex(FORWARD, r"(?i)ALTER\s+TABLE\s+public\.(?:user_signal|n6_virtual)")
 
     def test_rollback_checks_hash_scope_dependencies_and_drops_only_feature(self) -> None:
@@ -186,7 +187,7 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         self.assertEqual(source, frozen)
         self.assertEqual(episode["trigger_time"], "2026-07-31T09:31:00+08:00")
         self.assertEqual(episode["asset_name"], "浦发银行")
-        self.assertEqual(str(episode["trigger_pct"]), "1.000000")
+        self.assertNotIn("trigger_pct", episode)
         self.assertEqual(str(episode["trigger_price"]), "10.100000")
         self.assertEqual(episode["triggered_periods"], ["W", "D"])
 
@@ -206,7 +207,7 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
 
     def test_update_contains_only_mutable_values_and_episode_selector(self) -> None:
         mutation = status_mutation_from_event(status_event())
-        self.assertEqual(str(mutation["trigger_pct"]), "5.555556")
+        self.assertNotIn("trigger_pct", mutation)
         self.assertEqual(str(mutation["trigger_price"]), "10.555556")
         self.assertEqual(mutation["trigger_period"], "M")
         self.assertEqual(mutation["triggered_periods"], ["M", "W", "D"])
@@ -219,11 +220,62 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden_assignment, update_source)
 
+    def test_update_requires_positive_price_and_legal_period_fields(self) -> None:
+        non_positive = status_event()
+        non_positive["payload_json"]["trigger_price"] = "0"
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "invalid_trigger_price"):
+            status_mutation_from_event(non_positive)
+        invalid_period = status_event()
+        invalid_period["payload_json"]["trigger_period"] = "1m"
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "invalid_trigger_period"):
+            status_mutation_from_event(invalid_period)
+        missing_periods = status_event()
+        missing_periods["payload_json"].pop("triggered_periods")
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "missing_triggered_periods"):
+            status_mutation_from_event(missing_periods)
+        malformed_periods = status_event()
+        malformed_periods["payload_json"]["triggered_periods"] = "M,D"
+        with self.assertRaisesRegex(TriggerStatusProjectionError, "invalid_triggered_periods"):
+            status_mutation_from_event(malformed_periods)
+
+    def test_invalidate_ignores_price_period_and_percentage_fields(self) -> None:
+        event = status_event(event_type="TriggerStatusInvalidated")
+        event["payload_json"].update(
+            {
+                "trigger_pct": "not-a-number",
+                "trigger_price": "not-a-number",
+                "trigger_period": "not-a-period",
+                "triggered_periods": {"not": "a-list"},
+            }
+        )
+        mutation = status_mutation_from_event(event)
+        for forbidden in ("trigger_pct", "trigger_price", "trigger_period", "triggered_periods"):
+            self.assertNotIn(forbidden, mutation)
+
     def test_missing_update_fails_closed_and_delete_is_idempotent_by_contract(self) -> None:
         update_source = inspect.getsource(PostgresTriggerStatusProjectionConsumer._update_episode)
         delete_source = inspect.getsource(PostgresTriggerStatusProjectionConsumer._invalidate_episode)
         self.assertIn("missing_status_update_target", update_source)
         self.assertIn("return int(cur.rowcount)", delete_source)
+
+    def test_episode_selector_uses_complete_identity_and_insert_is_idempotent(self) -> None:
+        selector_source = inspect.getsource(
+            PostgresTriggerStatusProjectionConsumer._episode_where
+        )
+        for field in (
+            "trade_date", "asset_kind", "identity_key", "direction", "signal_type",
+            "condition_key", "tracking_state_key", "entry_trigger_event_id",
+            "action_eligible_event_id",
+        ):
+            self.assertIn(f'"{field}"', selector_source)
+        insert_source = inspect.getsource(
+            PostgresTriggerStatusProjectionConsumer._insert_episode
+        )
+        self.assertIn(
+            "ON CONFLICT (tracking_state_key, entry_trigger_event_id) DO NOTHING",
+            insert_source,
+        )
+        self.assertIn("eligible_episode_conflict", insert_source)
 
     def test_hint_keeps_public_30m_without_internal_period_leak(self) -> None:
         hint = eligible_event(condition_key="BUY_HINT")
@@ -273,16 +325,18 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
             encoding="utf-8"
         )
         headers = (
-            "触发时间", "资产类型", "代码", "名称", "方向", "触发涨跌幅",
-            "触发价格", "当前周期", "已触发周期",
+            "触发时间", "资产类型", "代码", "名称", "方向", "触发价格",
+            "当前周期", "已触发周期",
         )
         status_block = template.split('{% elif page.page_key == "status-monitor" %}', 1)[1].split(
             '{% elif page.page_key == "portfolio" %}', 1
         )[0]
-        self.assertEqual(status_block.count("<th>"), 9)
+        self.assertEqual(status_block.count("<th>"), 8)
         for header in headers:
             self.assertIn(f"<th>{header}</th>", status_block)
-        self.assertIn('data-n6-trigger-status-columns="9"', status_block)
+        self.assertIn('data-n6-trigger-status-columns="8"', status_block)
+        self.assertNotIn("trigger_pct", status_block)
+        self.assertNotIn("触发涨跌幅", status_block)
         self.assertIn('data-n6-viewport-evidence="320,375,390,430,desktop"', status_block)
         self.assertIn("@media (max-width: 430px)", template)
         self.assertIn(".trigger-status-table { min-width: 980px; }", template)

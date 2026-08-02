@@ -2693,7 +2693,7 @@
         <a href="{{ page.data.refresh_href }}" data-n6-trigger-status-refresh>手动刷新</a>
       </div>
       <div class="table-wrap" role="region" tabindex="0" aria-label="触发状态表格，可横向滚动" data-n6-trigger-status data-n6-viewport-evidence="320,375,390,430,desktop">
-        <table class="trigger-status-table" data-n6-trigger-status-columns="9">
+        <table class="trigger-status-table" data-n6-trigger-status-columns="8">
           <thead>
             <tr>
               <th>触发时间</th>
@@ -2701,7 +2701,6 @@
               <th>代码</th>
               <th>名称</th>
               <th>方向</th>
-              <th>触发涨跌幅</th>
               <th>触发价格</th>
               <th>当前周期</th>
               <th>已触发周期</th>
@@ -2715,7 +2714,6 @@
               <td>{{ item.asset_code }}</td>
               <td>{{ item.asset_name }}</td>
               <td>{{ item.direction_label }}</td>
-              <td data-n6-trigger-pct-raw="{{ item.trigger_pct or '' }}">{{ item.trigger_pct_display }}</td>
               <td>{{ item.trigger_price or "—" }}</td>
               <td>{{ item.trigger_period or "—" }}</td>
               <td>{{ item.triggered_periods|join('、') or "—" }}</td>

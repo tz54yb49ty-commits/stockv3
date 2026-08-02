@@ -38,7 +38,7 @@ BEGIN
   WHERE relation.oid = target_oid;
   IF table_owner IS DISTINCT FROM 'ashare_v3_user'
      OR table_comment IS DISTINCT FROM
-        'migration=089_n6_trigger_status_current.sql;schema_hash=sha256:3538edb4f4cbc6a340fa0459b1050e9ea9637b5c8ab28cfe543c5295d2bbe813;contract=N5-N6-trigger-status-forward-v1' THEN
+        'migration=089_n6_trigger_status_current.sql;schema_hash=sha256:e50cea0987f7f3b99989e2c23ef2d0f9d526617c688ac7f61a18e765ec439ef2;contract=N5-N6-trigger-status-forward-v1' THEN
     RAISE EXCEPTION '089 rollback schema hash or ownership drift';
   END IF;
   IF (
@@ -52,7 +52,7 @@ BEGIN
       AND attribute.attnum > 0
       AND NOT attribute.attisdropped
   ) IS DISTINCT FROM
-    'trigger_status_episode_id:bigint,contract_version:text,consumer_name:text,projection_run_id:text,trade_date:text,tracking_state_key:text,entry_trigger_event_id:text,action_eligible_event_id:text,asset_kind:text,identity_key:text,asset_code:text,asset_name:text,direction:text,signal_type:text,condition_key:text,trigger_time:timestamp with time zone,trigger_pct:numeric(20,6),trigger_price:numeric(24,6),trigger_period:text,triggered_periods:text[],action_eligible_outbox_id:bigint,last_status_outbox_id:bigint,last_event_id:text,last_event_type:text,source_action_run_id:text,source_trigger_event_id:text,created_at:timestamp with time zone,updated_at:timestamp with time zone' THEN
+    'trigger_status_episode_id:bigint,contract_version:text,consumer_name:text,projection_run_id:text,trade_date:text,tracking_state_key:text,entry_trigger_event_id:text,action_eligible_event_id:text,asset_kind:text,identity_key:text,asset_code:text,asset_name:text,direction:text,signal_type:text,condition_key:text,trigger_time:timestamp with time zone,trigger_price:numeric(24,6),trigger_period:text,triggered_periods:text[],action_eligible_outbox_id:bigint,last_status_outbox_id:bigint,last_event_id:text,last_event_type:text,source_action_run_id:text,source_trigger_event_id:text,created_at:timestamp with time zone,updated_at:timestamp with time zone' THEN
     RAISE EXCEPTION '089 rollback column signature drift';
   END IF;
   SELECT count(*) INTO unexpected_dependency_count

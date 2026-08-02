@@ -2538,7 +2538,6 @@ def app_status_monitor_model(
     refresh_query = urlencode(effective_filters)
     items = []
     for row in rows:
-        trigger_pct = number_or_none(row.get("trigger_pct"))
         trigger_price = number_or_none(row.get("trigger_price"))
         items.append(
             {
@@ -2550,8 +2549,6 @@ def app_status_monitor_model(
                 "asset_name": _first_text(row, "asset_name"),
                 "direction": _first_text(row, "direction"),
                 "direction_label": _direction_label(_first_text(row, "direction")),
-                "trigger_pct": f"{trigger_pct:.6f}" if trigger_pct is not None else None,
-                "trigger_pct_display": f"{trigger_pct:.2f}%" if trigger_pct is not None else "—",
                 "trigger_price": f"{trigger_price:.6f}" if trigger_price is not None else None,
                 "trigger_period": _first_text(row, "trigger_period"),
                 "triggered_periods": [str(value) for value in (row.get("triggered_periods") or [])],

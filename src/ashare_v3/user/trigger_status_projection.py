@@ -173,7 +173,6 @@ def episode_from_action_eligible(
         "asset_code": _required_text(grain_source, "asset_code"),
         "asset_name": _required_text(grain_source, "asset_name"),
         "trigger_time": trigger_time,
-        "trigger_pct": _optional_decimal(payload.get("trigger_pct"), "trigger_pct"),
         "trigger_price": _optional_decimal(payload.get("trigger_price"), "trigger_price"),
         "trigger_period": trigger_period,
         "triggered_periods": triggered_periods,
@@ -203,28 +202,39 @@ def status_mutation_from_event(row: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("operation") != expected_operation:
         raise TriggerStatusProjectionError("status_operation_invalid")
     grain = _validate_grain(payload)
-    condition_key = grain["condition_key"]
-    trigger_period = str(payload.get("trigger_period") or "").strip() or None
-    if condition_key in {"BUY_HINT", "SELL_HINT"} or condition_key.startswith(("BUY_HINT:", "SELL_HINT:")):
-        trigger_period = "30m"
-    if trigger_period not in {*FORMAL_PERIOD_ORDER, "30m", None}:
-        raise TriggerStatusProjectionError("invalid_trigger_period")
-    return {
+    mutation = {
         **grain,
         "tracking_state_key": _required_text(payload, "tracking_state_key"),
         "entry_trigger_event_id": _required_text(payload, "entry_trigger_event_id"),
         "action_eligible_event_id": _required_text(payload, "action_eligible_event_id"),
-        "trigger_pct": _optional_decimal(payload.get("trigger_pct"), "trigger_pct"),
-        "trigger_price": _optional_decimal(payload.get("trigger_price"), "trigger_price"),
-        "trigger_period": trigger_period,
-        "triggered_periods": canonical_triggered_periods(
-            payload.get("triggered_periods"), condition_key=condition_key
-        ),
         "last_status_outbox_id": int(row["outbox_id"]),
         "last_event_id": _required_text(row, "event_id"),
         "last_event_type": event_type,
         "source_trigger_event_id": _required_text(payload, "source_trigger_event_id"),
     }
+    if event_type == "TriggerStatusInvalidated":
+        return mutation
+    trigger_price = _optional_decimal(payload.get("trigger_price"), "trigger_price")
+    if trigger_price is None or trigger_price <= 0:
+        raise TriggerStatusProjectionError("invalid_trigger_price")
+    condition_key = grain["condition_key"]
+    trigger_period = _required_text(payload, "trigger_period")
+    if trigger_period not in {*FORMAL_PERIOD_ORDER, "30m"}:
+        raise TriggerStatusProjectionError("invalid_trigger_period")
+    if "triggered_periods" not in payload:
+        raise TriggerStatusProjectionError("missing_triggered_periods")
+    if not isinstance(payload["triggered_periods"], (list, tuple)):
+        raise TriggerStatusProjectionError("invalid_triggered_periods")
+    mutation.update(
+        {
+            "trigger_price": trigger_price,
+            "trigger_period": trigger_period,
+            "triggered_periods": canonical_triggered_periods(
+                payload["triggered_periods"], condition_key=condition_key
+            ),
+        }
+    )
+    return mutation
 
 
 class PostgresTriggerStatusProjectionConsumer:
@@ -373,7 +383,7 @@ class PostgresTriggerStatusProjectionConsumer:
               contract_version, consumer_name, projection_run_id, trade_date,
               tracking_state_key, entry_trigger_event_id, action_eligible_event_id,
               asset_kind, identity_key, asset_code, asset_name, direction,
-              signal_type, condition_key, trigger_time, trigger_pct, trigger_price,
+              signal_type, condition_key, trigger_time, trigger_price,
               trigger_period, triggered_periods, action_eligible_outbox_id,
               last_status_outbox_id, last_event_id, last_event_type,
               source_action_run_id, source_trigger_event_id
@@ -381,7 +391,7 @@ class PostgresTriggerStatusProjectionConsumer:
               %(contract_version)s, %(consumer_name)s, %(projection_run_id)s, %(trade_date)s,
               %(tracking_state_key)s, %(entry_trigger_event_id)s, %(action_eligible_event_id)s,
               %(asset_kind)s, %(identity_key)s, %(asset_code)s, %(asset_name)s, %(direction)s,
-              %(signal_type)s, %(condition_key)s, %(trigger_time)s, %(trigger_pct)s,
+              %(signal_type)s, %(condition_key)s, %(trigger_time)s,
               %(trigger_price)s, %(trigger_period)s, %(triggered_periods)s,
               %(action_eligible_outbox_id)s, %(last_status_outbox_id)s,
               %(last_event_id)s, %(last_event_type)s, %(source_action_run_id)s,
@@ -440,8 +450,7 @@ class PostgresTriggerStatusProjectionConsumer:
         cur.execute(
             f"""
             UPDATE n6_trigger_status_current
-            SET trigger_pct = %s,
-                trigger_price = %s,
+            SET trigger_price = %s,
                 trigger_period = %s,
                 triggered_periods = %s,
                 last_status_outbox_id = %s,
@@ -452,7 +461,6 @@ class PostgresTriggerStatusProjectionConsumer:
             WHERE {where}
             """,
             (
-                mutation["trigger_pct"],
                 mutation["trigger_price"],
                 mutation["trigger_period"],
                 mutation["triggered_periods"],
