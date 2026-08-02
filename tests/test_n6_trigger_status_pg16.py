@@ -596,12 +596,21 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
             principal_id=2, principal_type="human_user", user_id=22,
             trade_date=TRADE_DATE, limit=100,
         )
+        user1_stock = repo.fetch_app_trigger_status(
+            principal_id=1, principal_type="human_user", user_id=11,
+            trade_date=TRADE_DATE, limit=100, asset_kind="stock",
+        )
         user1_ids = {row["identity_key"] for row in user1}
         user2_ids = {row["identity_key"] for row in user2}
         self.assertTrue({"stock:SH:600000", "stock:SH:600001", "board:TDX:881001", "index:SH:000300"}.issubset(user1_ids))
         self.assertIn("stock:SH:600002", user2_ids)
         self.assertNotIn("stock:SH:600002", user1_ids)
         self.assertNotIn("stock:SH:600000", user2_ids)
+        self.assertEqual({row["asset_kind"] for row in user1_stock}, {"stock"})
+        self.assertEqual(
+            {row["identity_key"] for row in user1_stock},
+            {"stock:SH:600000", "stock:SH:600001"},
+        )
         grouped = next(row for row in user1 if row["identity_key"] == "stock:SH:600000")
         self.assertEqual(grouped["episode_count"], 2)
         self.assertEqual(grouped["trigger_time"], "2026-07-31 09:31:00+08")

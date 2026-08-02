@@ -300,7 +300,7 @@ class FakeN6UserRepository:
         self.app_virtual_account_reads: list[tuple[int, str]] = []
         self.app_cash_snapshot_reads: list[int] = []
         self.app_signal_reads: list[tuple[int, str, int]] = []
-        self.app_trigger_status_reads: list[tuple[int, str, int, str]] = []
+        self.app_trigger_status_reads: list[tuple[int, str, int, str, str | None]] = []
         self.app_signal_filter_reads: list[dict[str, Any]] = []
         self.app_signal_event_reads: list[dict[str, Any]] = []
         self.app_signal_scope_metadata_reads = 0
@@ -3100,12 +3100,16 @@ class FakeN6UserRepository:
         user_id: int,
         trade_date: str,
         limit: int,
+        asset_kind: str | None = None,
     ) -> list[dict[str, Any]]:
         self.app_trigger_status_reads.append(
-            (principal_id, principal_type, user_id, trade_date)
+            (principal_id, principal_type, user_id, trade_date, asset_kind)
         )
         self.assert_user(user_id)
-        return [dict(row) for row in self.app_trigger_status_rows[:limit]]
+        rows = self.app_trigger_status_rows
+        if asset_kind:
+            rows = [row for row in rows if row.get("asset_kind") == asset_kind]
+        return [dict(row) for row in rows[:limit]]
 
     def fetch_app_signal_events(
         self,
@@ -20405,10 +20409,55 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertFalse(payload["side_effects"]["writes_database"])
         self.assertFalse(payload["side_effects"]["order_generated"])
         self.assertEqual(repo.app_signal_reads, [])
-        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605")])
+        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605", None)])
         self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
         self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
         self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
+
+    def test_b_track_status_monitor_api_filters_asset_kind_and_rejects_invalid_value(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        stock_response = client.get(
+            "/api/n6/app/v1/status-monitor?asset_kind=stock&trade_date=20260605"
+        )
+        index_response = client.get(
+            "/api/n6/app/v1/status-monitor?asset_kind=index&trade_date=20260605"
+        )
+        invalid_api = client.get("/api/n6/app/v1/status-monitor?asset_kind=fund")
+        invalid_page = client.get("/n6/app/status-monitor?asset_kind=fund")
+
+        self.assertEqual(stock_response.status_code, 200)
+        self.assertEqual(stock_response.json()["filters"], {"asset_kind": "stock", "trade_date": "20260605"})
+        self.assertEqual([item["asset_kind"] for item in stock_response.json()["items"]], ["stock"])
+        self.assertEqual(index_response.status_code, 200)
+        self.assertEqual([item["asset_kind"] for item in index_response.json()["items"]], ["index"])
+        self.assertEqual(invalid_api.status_code, 400)
+        self.assertEqual(invalid_api.json()["error"], "invalid_asset_kind")
+        self.assertEqual(invalid_page.status_code, 400)
+        self.assertEqual(
+            repo.app_trigger_status_reads,
+            [
+                (1, "admin", 1, "20260605", "stock"),
+                (1, "admin", 1, "20260605", "index"),
+            ],
+        )
+
+    def test_b_track_status_monitor_historical_date_fails_closed_for_api_and_page(self) -> None:
+        client, repo, _, _ = build_client()
+        client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
+
+        api_response = client.get(
+            "/api/n6/app/v1/status-monitor?asset_kind=stock&trade_date=20260604"
+        )
+        page_response = client.get(
+            "/n6/app/status-monitor?asset_kind=stock&trade_date=20260604"
+        )
+
+        self.assertEqual(api_response.status_code, 409)
+        self.assertEqual(api_response.json()["error"], "historical_query_disabled_during_trading_session")
+        self.assertEqual(page_response.status_code, 409)
+        self.assertEqual(repo.app_trigger_status_reads, [])
 
     def test_b_track_status_monitor_page_renders_fixed_readonly_columns(self) -> None:
         client, repo, _, _ = build_client()
@@ -20416,7 +20465,9 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
         client.post("/api/n6/auth/login", json={"login_name": "admin", "password": "correct-password"})
 
-        response = client.get("/n6/app/status-monitor")
+        response = client.get(
+            "/n6/app/status-monitor?asset_kind=stock&trade_date=20260605"
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("触发状态", response.text)
@@ -20428,6 +20479,10 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertIn('data-n6-trigger-pct-raw="1.234567"', response.text)
         self.assertIn("1.23%", response.text)
         self.assertIn("手动刷新", response.text)
+        self.assertIn(
+            'href="/n6/app/status-monitor?asset_kind=stock&amp;trade_date=20260605"',
+            response.text,
+        )
         self.assertIn('data-n6-viewport-evidence="320,375,390,430,desktop"', response.text)
         self.assertNotIn("写入投影", response.text)
         self.assertNotIn("生成卡片", response.text)
@@ -20435,7 +20490,7 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertNotIn("一键下单", response.text)
         self.assertNotIn("真实收益", response.text)
         self.assertEqual(repo.app_signal_reads, [])
-        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605")])
+        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605", "stock")])
         self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
 
     def test_b_track_ai_users_api_is_readonly_shadow_observer(self) -> None:

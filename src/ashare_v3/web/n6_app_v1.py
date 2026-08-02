@@ -2530,6 +2530,12 @@ def app_status_monitor_model(
     rows: list[dict[str, Any]],
     filters: dict[str, Any],
 ) -> dict[str, Any]:
+    effective_filters = {
+        key: str(filters.get(key) or "").strip()
+        for key in ("asset_kind", "trade_date")
+        if str(filters.get(key) or "").strip()
+    }
+    refresh_query = urlencode(effective_filters)
     items = []
     for row in rows:
         trigger_pct = number_or_none(row.get("trigger_pct"))
@@ -2559,7 +2565,8 @@ def app_status_monitor_model(
         "component": component,
         "component_label": _component_label(component),
         "principal": app_principal_model(principal, user=user),
-        "filters": {key: value for key, value in filters.items() if value},
+        "filters": effective_filters,
+        "refresh_href": "/n6/app/status-monitor" + (f"?{refresh_query}" if refresh_query else ""),
         "status_summary": status_summary,
         "items": items,
         "write_controls": {

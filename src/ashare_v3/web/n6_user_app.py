@@ -1446,6 +1446,7 @@ class N6UserRepository(Protocol):
         user_id: int,
         trade_date: str,
         limit: int,
+        asset_kind: str | None = None,
     ) -> list[dict[str, Any]]:
         ...
 
@@ -6929,6 +6930,7 @@ class PostgresN6UserRepository:
         user_id: int,
         trade_date: str,
         limit: int,
+        asset_kind: str | None = None,
     ) -> list[dict[str, Any]]:
         scope_cte = self._app_v1_web_signal_scope_cte()
         with self._readonly_connection() as conn, conn.cursor() as cur:
@@ -6945,6 +6947,7 @@ class PostgresN6UserRepository:
                    AND scope.direction = episode.direction
                    AND scope.valid_for_trade_date = episode.trade_date
                   WHERE episode.trade_date = %(trade_date)s
+                    AND (%(asset_kind)s = '' OR episode.asset_kind = %(asset_kind)s)
                 ),
                 ranked_episodes AS (
                   SELECT episode.*,
@@ -7008,6 +7011,7 @@ class PostgresN6UserRepository:
                     "principal_type": principal_type,
                     "user_id": user_id,
                     "trade_date": trade_date,
+                    "asset_kind": normalize_filter_value(asset_kind) or "",
                     "limit": max(1, min(int(limit), 500)),
                 },
             )
@@ -10226,7 +10230,10 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
-        filters = ui_v1_filters_from_request(request)
+        try:
+            filters = app_status_monitor_filters_from_request(request)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid_asset_kind"}, status_code=400)
         current_trade_date = repo.fetch_app_current_signal_trade_date()
         if not current_trade_date:
             return JSONResponse({"ok": False, "error": "signal_current_trade_date_unavailable"}, status_code=409)
@@ -10244,6 +10251,7 @@ def create_app(
             user_id=session.user_id,
             trade_date=current_trade_date,
             limit=web_config.ui_signal_limit,
+            asset_kind=filters.get("asset_kind"),
         ) if current_trade_date else []
         return JSONResponse(
             app_status_monitor_model(principal, user=session_user_payload(session), rows=rows, filters=filters)
@@ -12334,15 +12342,17 @@ def create_app(
                 write_enabled=scope_write_active and not historical_readonly,
             )
         if page_key == "status-monitor":
-            current_trade_date = repo.fetch_app_current_signal_trade_date()
+            filters = dict(app_filters or {})
+            current_trade_date = normalize_filter_value(filters.get("trade_date"))
             rows = repo.fetch_app_trigger_status(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
                 user_id=session.user_id,
                 trade_date=str(current_trade_date or ""),
                 limit=web_config.ui_signal_limit,
+                asset_kind=filters.get("asset_kind"),
             ) if current_trade_date else []
-            return app_status_monitor_model(principal, user=user, rows=rows, filters={})
+            return app_status_monitor_model(principal, user=user, rows=rows, filters=filters)
         if page_key == "watchlist":
             current_trade_date = repo.fetch_app_current_signal_trade_date()
             rows = repo.fetch_app_signals(
@@ -12460,6 +12470,11 @@ def create_app(
             if page_key == "signals"
             else None
         )
+        if page_key == "status-monitor":
+            try:
+                app_filters = app_status_monitor_filters_from_request(request)
+            except ValueError:
+                return HTMLResponse("invalid_asset_kind", status_code=400)
         if page_key in {"signals", "messages"}:
             try:
                 n6_signal_filters_with_cursor(app_filters or {})
@@ -12517,6 +12532,19 @@ def create_app(
                     return HTMLResponse(N6_TRADING_SESSION_HISTORY_MESSAGE, status_code=409)
                 app_filters = dict(app_filters or {})
                 app_filters["trade_date"] = date_policy["effective_trade_date"]
+            if page_key == "status-monitor":
+                current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
+                if not current_trade_date:
+                    return HTMLResponse("signal_current_trade_date_unavailable", status_code=409)
+                date_policy = n6_trade_date_access_policy(
+                    current_trade_date=current_trade_date,
+                    requested_trade_date=(app_filters or {}).get("trade_date"),
+                    live_only=True,
+                )
+                if date_policy["blocked"]:
+                    return HTMLResponse(N6_TRADING_SESSION_HISTORY_MESSAGE, status_code=409)
+                app_filters = dict(app_filters or {})
+                app_filters["trade_date"] = current_trade_date
             if is_monitor_page:
                 current_trade_date = await asyncio.to_thread(repo.fetch_app_current_signal_trade_date)
                 if not current_trade_date:
@@ -13566,6 +13594,16 @@ def ui_v1_filters_from_request(request: Request) -> dict[str, str | None]:
         "blocked_reason": normalize_filter_value(request.query_params.get("blocked_reason")),
         "q": normalize_filter_value(request.query_params.get("q")),
         "cursor": normalize_filter_value(request.query_params.get("cursor")),
+    }
+
+
+def app_status_monitor_filters_from_request(request: Request) -> dict[str, str | None]:
+    asset_kind = normalize_filter_value(request.query_params.get("asset_kind"))
+    if asset_kind and asset_kind not in APP_V2_MONITOR_TABLE_BY_ASSET:
+        raise ValueError("invalid_asset_kind")
+    return {
+        "asset_kind": asset_kind,
+        "trade_date": normalize_filter_value(request.query_params.get("trade_date")),
     }
 
 
