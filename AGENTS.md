@@ -277,7 +277,10 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
   ；其余用户仅可在独立 `N6_user` 会话中精确满足
   `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`，按
   单 principal/user/predecessor CAS 创建一个 pending V2 revision；该策略不
-  允许 all-users、Web PUT、手工 DML 或复用首个用户的冻结 scope
+  允许 all-users、Web PUT、手工 DML 或复用首个用户的冻结 scope；另仅允许后续
+  独立 `N6_user` 请求精确满足 L2
+  `trigger_status_projection_20260731_backfill` machine phase，执行一次冻结历史
+  trigger-status bounded consumer；一般 L2 consumer/runtime execute 仍禁止
 - 语音播报
 - mobile projection
 - 未按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` L3 合同授权的虚拟账户资金、
@@ -1360,6 +1363,9 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
   `N6_user` gate 中按其完整 fail-closed 条件例外；post-083 Gate2 仅可按上述
   frozen/disjoint/zero-operation 合同与既有 virtual executor 共存，不获得任何
   executor 操作权或额外 evaluator DML 表权限。
+- L2 `trigger_status_projection_20260731_backfill` 仅允许后续独立、明确授权的
+  `N6_user` gate 按完整 machine object 处理一次冻结历史 consumer；本治理 gate、
+  任意日期、任意 run、重试或其他 consumer 均不获得 execute 权。
 - 仍禁止一般性 N6 长期 worker/LaunchAgent；
   `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 仅在当前
   reviewed-N6 日期 bounded canary 完整 PASS 后，由独立、明确授权的
@@ -1416,6 +1422,22 @@ L3 = n6_btrack_delivery_l3_virtual_runtime_v1
 永久禁止真实券商、真实订单、自动创建/确认 proposal 和 N6 回写 N1-N5。
 历史具名 policy 与 BLOCKED/PASS 证据保持 append-only；只有独立 retirement gate
 可以停用，不得静默删除或改写。新需求无法可靠分类时必须 `BLOCK`，不得猜测。
+
+L2 trigger-status 历史 consumer phase：
+
+- `trigger_status_projection_20260731_backfill` 只属于既有
+  `n6_btrack_delivery_l2_n6_business_v1`，不是新 policy。仅后续独立、明确授权的
+  `N6_user` gate 可按 machine contract 对
+  `n6_trigger_status_projection_v1`、`20260731`、固定 projection run、2296 条冻结
+  输入执行一次 bounded run-once；本 `runtime_control` 治理会话不得使用该 phase。
+- execute 前必须已有独立 N6_user 提供并通过静态/PG16 验证的 exact projection-run
+  rollback artifact。它只能删除该 run 的 `n6_trigger_status_current`、该 consumer
+  对应冻结 input event 的 inbox，并重算或恢复 exact checkpoint；不得使用会
+  `DROP TABLE` 的 089 rollback，不得删除其他 consumer/旧投影，rollback 仍需独立授权。
+- outbox 只读且 status update=0；ActionExecuted 为 no-op；trigger-status schema/API/UI/
+  payload 不含 `trigger_pct`，现有 `ActionEligible` immutable payload 不得修改。任何
+  migration、Release/Web/service/browser/LaunchAgent/scheduler、N1-N5、交易、virtual
+  executor、Strategy Center、手工 SQL、重试或捎带下一阶段均 `REJECT`。
 
 Git 与 Release 规则：
 

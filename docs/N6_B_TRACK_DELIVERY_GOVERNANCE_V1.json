@@ -354,7 +354,148 @@
         "automatic_proposal_creation",
         "automatic_proposal_confirmation",
         "unapproved_executor_or_stop_loss_operation"
-      ]
+      ],
+      "bounded_consumer_phases": {
+        "trigger_status_projection_20260731_backfill": {
+          "phase_id": "trigger_status_projection_20260731_backfill",
+          "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+          "layer_role": "N6_user",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "scope_lock": {
+            "purpose": "historical_trigger_status_projection_backfill_only",
+            "consumer_name": "n6_trigger_status_projection_v1",
+            "runner": "scripts/run_n6_trigger_status_projection_once.py",
+            "for_trade_date": "20260731",
+            "projection_run_id": "n6_trigger_status_projection_20260731_backfill_v1",
+            "limit": 2296,
+            "bounded_run_once_invocations": 1,
+            "execute_attempts": 1,
+            "retry_attempts": 0,
+            "arbitrary_date_or_current_date_bypass_allowed": false
+          },
+          "required_sequence": [
+            "read_only_preflight",
+            "full_batch_simulation_with_zero_persisted_mutations",
+            "single_bounded_run_once_execute",
+            "read_only_postflight"
+          ],
+          "input_contract": {
+            "read_table": "common_event_outbox",
+            "access": "SELECT_ONLY",
+            "source_layer": "N5_action",
+            "selected_input_count": 2296,
+            "min_outbox_id": 4103761,
+            "max_outbox_id": 4107616,
+            "event_type_counts": {
+              "ActionEligible": 1042,
+              "ActionExecuted": 723,
+              "TriggerStatusUpdated": 194,
+              "TriggerStatusInvalidated": 337
+            },
+            "other_event_type_count": 0
+          },
+          "mutation_contract": {
+            "transaction_count": 1,
+            "allowed_write_tables": [
+              "n6_trigger_status_current",
+              "common_event_inbox",
+              "common_event_consumer_checkpoint"
+            ],
+            "n6_trigger_status_current": {
+              "allowed_operations": [
+                "INSERT",
+                "UPDATE",
+                "DELETE"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "projection_run_id": "n6_trigger_status_projection_20260731_backfill_v1"
+            },
+            "common_event_inbox": {
+              "allowed_operations": [
+                "INSERT"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "source_layer": "N5_action",
+              "event_scope": "exact_frozen_input_event_ids_only"
+            },
+            "common_event_consumer_checkpoint": {
+              "allowed_operations": [
+                "INSERT",
+                "UPDATE"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "partition_key": "trigger-status:20260731",
+              "source_layer": "N5_action"
+            },
+            "common_event_outbox_status_updates": 0
+          },
+          "semantic_locks": {
+            "ActionEligible": "projection_insert",
+            "ActionExecuted": "no_op",
+            "TriggerStatusUpdated": "projection_update",
+            "TriggerStatusInvalidated": "projection_invalidate",
+            "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload": false,
+            "action_eligible_immutable_payload_mutation_allowed": false
+          },
+          "protected_consumers": [
+            "n6_signal_projection",
+            "n6_user_message_projection",
+            "n6_user_card_projection",
+            "every_consumer_other_than_n6_trigger_status_projection_v1"
+          ],
+          "rollback_prerequisite": {
+            "required_before_execute": true,
+            "owner_layer_role": "N6_user",
+            "artifact_scope": "exact_projection_run_id",
+            "projection_run_id": "n6_trigger_status_projection_20260731_backfill_v1",
+            "static_verification_required": true,
+            "pg16_verification_required": true,
+            "allowed_operations": [
+              "delete_exact_projection_run_rows_from_n6_trigger_status_current",
+              "delete_exact_consumer_inbox_rows_for_frozen_input_event_ids",
+              "recompute_or_restore_exact_consumer_checkpoint"
+            ],
+            "drop_089_table_allowed": false,
+            "delete_other_consumer_or_projection_state_allowed": false,
+            "existing_089_schema_rollback_acceptable": false,
+            "rollback_execution_in_this_phase_allowed": false,
+            "rollback_requires_separate_authorization": true
+          },
+          "forbidden_effects": [
+            "migration",
+            "release",
+            "web_or_browser",
+            "service_or_launchagent",
+            "scheduler_or_long_running_worker",
+            "n1_n5_write",
+            "outbox_status_update",
+            "other_consumer_checkpoint_change",
+            "signal_message_or_card_projection",
+            "trade",
+            "virtual_executor",
+            "strategy_center",
+            "manual_sql",
+            "retry",
+            "next_phase_bundling"
+          ],
+          "reject_on": [
+            "missing_required_field",
+            "scope_or_date_drift",
+            "input_census_drift",
+            "runner_or_argument_drift",
+            "rollback_artifact_missing_or_unverified",
+            "mutation_allowlist_drift",
+            "protected_consumer_or_checkpoint_drift",
+            "outbox_status_update_nonzero",
+            "trigger_pct_surface_present",
+            "action_eligible_payload_mutation",
+            "attempt_or_retry_count_drift",
+            "forbidden_effect_present"
+          ]
+        }
+      }
     },
     "L3": {
       "policy_id": "n6_btrack_delivery_l3_virtual_runtime_v1",

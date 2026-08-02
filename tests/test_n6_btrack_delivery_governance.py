@@ -49,6 +49,36 @@ LEGACY_KERNEL_L1_KEYS = (
     "max_mutating_gates",
     "governance_session_cannot_execute",
 )
+LEGACY_L2_SHA256 = "1fa5a2d2810fe32656605341859685bca2694f5ac4bb5b7c0a02c1271d5caa20"
+LEGACY_KERNEL_L2_SHA256 = (
+    "414d17930972249f918616156fda4f37cd1d23154f7d053b5e9d2fae16de88a7"
+)
+L2_TRIGGER_STATUS_PHASE_SHA256 = (
+    "4b6047b093affd3ca31ab7f7ea62f73a80eba0d9bbe25143ffa5c8ca697a8dde"
+)
+L2_TRIGGER_STATUS_PHASE_ID = "trigger_status_projection_20260731_backfill"
+LEGACY_L2_KEYS = (
+    "policy_id",
+    "title",
+    "classification",
+    "implementation_layer_role",
+    "migration_layer_role",
+    "release_rebind_layer_role",
+    "required_sequence",
+    "required_evidence",
+    "forbidden_effects",
+)
+LEGACY_KERNEL_L2_KEYS = (
+    "policy_id",
+    "policy_family",
+    "layer_role",
+    "lane",
+    "default_runtime_execution_decision",
+    "required_phases",
+    "required_controls",
+    "forbidden_effects",
+    "governance_session_cannot_execute",
+)
 CANONICAL_RETIREMENT_EXCLUSION_SET = (
     "config/n6_strategy_center/N6_SC_TEMPORAL_CONFLUENCE_V2_SHADOW_BUNDLE_20260723.json",
     "scripts/build_n6_strategy_center_temporal_confluence_v2_bundle.py",
@@ -809,6 +839,158 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(
                     "post_decommission_web_readonly_rebind",
+                    path.read_text(encoding="utf-8"),
+                )
+
+    def test_l2_legacy_contracts_are_hash_locked(self) -> None:
+        l2 = self.contract["lanes"]["L2"]
+        legacy = {key: l2[key] for key in LEGACY_L2_KEYS}
+        self.assertEqual(canonical_sha256(legacy), LEGACY_L2_SHA256)
+
+        kernel_text = (ROOT / "docs/EXECUTION_KERNEL.md").read_text(
+            encoding="utf-8"
+        )
+        marker = "<!-- policy:n6_btrack_delivery_l2_n6_business_v1:begin -->"
+        block = kernel_text.split(marker, 1)[1].split("```json\n", 1)[1]
+        kernel_l2 = json.loads(block.split("\n```", 1)[0])
+        kernel_legacy = {key: kernel_l2[key] for key in LEGACY_KERNEL_L2_KEYS}
+        self.assertEqual(
+            canonical_sha256(kernel_legacy),
+            LEGACY_KERNEL_L2_SHA256,
+        )
+        binding = kernel_l2["bounded_consumer_phase_contract"]
+        self.assertEqual(binding["phase_id"], L2_TRIGGER_STATUS_PHASE_ID)
+        self.assertEqual(binding["layer_role"], "N6_user")
+        self.assertTrue(binding["exact_source_object_required"])
+        self.assertEqual(binding["missing_or_source_mismatch_decision"], "REJECT")
+        self.assertFalse(binding["governance_session_runtime_operation_allowed"])
+
+    def test_l2_trigger_status_backfill_phase_is_exact_and_fail_closed(self) -> None:
+        phase = self.contract["lanes"]["L2"]["bounded_consumer_phases"][
+            L2_TRIGGER_STATUS_PHASE_ID
+        ]
+        self.assertEqual(canonical_sha256(phase), L2_TRIGGER_STATUS_PHASE_SHA256)
+        self.assertEqual(phase["policy_id"], "n6_btrack_delivery_l2_n6_business_v1")
+        self.assertEqual(phase["layer_role"], "N6_user")
+        self.assertEqual(phase["default_decision"], "REJECT")
+        self.assertTrue(phase["separate_current_request_authorization_required"])
+        self.assertTrue(phase["governance_session_cannot_execute"])
+
+        scope = phase["scope_lock"]
+        self.assertEqual(scope["consumer_name"], "n6_trigger_status_projection_v1")
+        self.assertEqual(scope["for_trade_date"], "20260731")
+        self.assertEqual(
+            scope["projection_run_id"],
+            "n6_trigger_status_projection_20260731_backfill_v1",
+        )
+        self.assertEqual(scope["runner"], "scripts/run_n6_trigger_status_projection_once.py")
+        self.assertEqual(scope["limit"], 2296)
+        self.assertEqual(scope["bounded_run_once_invocations"], 1)
+        self.assertEqual(scope["execute_attempts"], 1)
+        self.assertEqual(scope["retry_attempts"], 0)
+        self.assertFalse(scope["arbitrary_date_or_current_date_bypass_allowed"])
+
+        input_contract = phase["input_contract"]
+        self.assertEqual(input_contract["read_table"], "common_event_outbox")
+        self.assertEqual(input_contract["access"], "SELECT_ONLY")
+        self.assertEqual(input_contract["selected_input_count"], 2296)
+        self.assertEqual(input_contract["min_outbox_id"], 4103761)
+        self.assertEqual(input_contract["max_outbox_id"], 4107616)
+        self.assertEqual(
+            input_contract["event_type_counts"],
+            {
+                "ActionEligible": 1042,
+                "ActionExecuted": 723,
+                "TriggerStatusUpdated": 194,
+                "TriggerStatusInvalidated": 337,
+            },
+        )
+        self.assertEqual(sum(input_contract["event_type_counts"].values()), 2296)
+        self.assertEqual(input_contract["other_event_type_count"], 0)
+
+        mutation = phase["mutation_contract"]
+        self.assertEqual(
+            mutation["allowed_write_tables"],
+            [
+                "n6_trigger_status_current",
+                "common_event_inbox",
+                "common_event_consumer_checkpoint",
+            ],
+        )
+        self.assertEqual(mutation["common_event_outbox_status_updates"], 0)
+        self.assertEqual(phase["semantic_locks"]["ActionExecuted"], "no_op")
+        self.assertFalse(
+            phase["semantic_locks"][
+                "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload"
+            ]
+        )
+        self.assertFalse(
+            phase["semantic_locks"][
+                "action_eligible_immutable_payload_mutation_allowed"
+            ]
+        )
+
+        rollback = phase["rollback_prerequisite"]
+        self.assertTrue(rollback["required_before_execute"])
+        self.assertTrue(rollback["static_verification_required"])
+        self.assertTrue(rollback["pg16_verification_required"])
+        self.assertFalse(rollback["drop_089_table_allowed"])
+        self.assertFalse(rollback["delete_other_consumer_or_projection_state_allowed"])
+        self.assertFalse(rollback["existing_089_schema_rollback_acceptable"])
+        self.assertFalse(rollback["rollback_execution_in_this_phase_allowed"])
+
+    def test_l2_trigger_status_backfill_phase_drift_rejects(self) -> None:
+        phase = self.contract["lanes"]["L2"]["bounded_consumer_phases"][
+            L2_TRIGGER_STATUS_PHASE_ID
+        ]
+
+        def decision(candidate: object) -> str:
+            return (
+                "ACCEPT"
+                if canonical_sha256(candidate) == L2_TRIGGER_STATUS_PHASE_SHA256
+                else "REJECT"
+            )
+
+        self.assertEqual(decision(phase), "ACCEPT")
+        mutations = (
+            ("date", ("scope_lock", "for_trade_date"), "20260803"),
+            ("run", ("scope_lock", "projection_run_id"), "other"),
+            ("limit", ("scope_lock", "limit"), 2295),
+            ("retry", ("scope_lock", "retry_attempts"), 1),
+            ("census", ("input_contract", "selected_input_count"), 2295),
+            ("outbox_write", ("mutation_contract", "common_event_outbox_status_updates"), 1),
+            ("protected_consumer", ("protected_consumers",), []),
+            ("drop_table", ("rollback_prerequisite", "drop_089_table_allowed"), True),
+            ("trigger_pct", (
+                "semantic_locks",
+                "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload",
+            ), True),
+        )
+        for name, path, replacement in mutations:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    decision(mutated_fixture(phase, path, replacement)),
+                    "REJECT",
+                )
+
+        for key in phase:
+            with self.subTest(missing=key):
+                candidate = copy.deepcopy(phase)
+                del candidate[key]
+                self.assertEqual(decision(candidate), "REJECT")
+
+    def test_l2_trigger_status_backfill_contract_is_synchronized(self) -> None:
+        paths = (
+            ROOT / "AGENTS.md",
+            ROOT / "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json",
+            ROOT / "docs/EXECUTION_KERNEL.md",
+            ROOT / "docs/EXECUTION_COMPILER.md",
+            ROOT / "docs/EXECUTION_RUNTIME_GATE.md",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIn(
+                    L2_TRIGGER_STATUS_PHASE_ID,
                     path.read_text(encoding="utf-8"),
                 )
 

@@ -732,6 +732,23 @@ immutable-Release rebind gate, and read-only acceptance. Migration identity is
 the full filename and contract, never the numeric prefix alone. L2 cannot
 compile automatic virtual-money effects.
 
+For `phase_id=trigger_status_projection_20260731_backfill`, L2 may additionally
+compile one independent `N6_user` historical bounded-consumer gate. It compiles
+only when the complete phase object exactly matches
+`docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json`: consumer
+`n6_trigger_status_projection_v1`, runner
+`scripts/run_n6_trigger_status_projection_once.py`, date `20260731`, projection
+run `n6_trigger_status_projection_20260731_backfill_v1`, limit/input count
+`2296`, outbox range `4103761..4107616`, and event counts `1042/723/194/337`.
+The DAG is read-only preflight -> zero-persistence full-batch simulation -> one
+execute -> read-only postflight. Before execute, a separate N6-owned exact-run
+rollback artifact must pass static and PG16 verification; migration 089's
+table-dropping rollback is not acceptable. Compilation rejects any date/input/
+runner/argument/allowlist drift, retry, manual SQL, migration, Release/service,
+outbox status update, protected-consumer/checkpoint change, `trigger_pct` status
+surface, immutable `ActionEligible` payload change, or next-phase bundling. The
+governance session can register this phase but cannot compile its execution.
+
 L3 compiles into separately authorized implementation/regression, migration
 and immutable-Release deployment, bounded smoke, confirmed-queue governance,
 and continuous-runtime authorization phases. Missing bounded-smoke evidence,

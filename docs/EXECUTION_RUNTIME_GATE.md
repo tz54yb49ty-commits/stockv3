@@ -366,10 +366,24 @@ Detailed rules:
     failure alone permits one frozen-source rollback. Missing evidence or any
     runner/manifest/reconstruction/route/plist/side-effect/operation-count drift
     returns `REJECT`.
-19. L2 accepts only separate N6-user migration and runtime-control Web rebind
+19. L2 normally accepts separate N6-user migration and runtime-control Web rebind
     phases. The full migration filename is the identity, forward/rollback and
     PG16 evidence are mandatory, and automatic proposal, virtual-money or
     worker effects return `REJECT`.
+    The sole bounded-consumer addition is
+    `phase_id=trigger_status_projection_20260731_backfill`. Runtime Gate must
+    freshly require the exact L2 machine object, independent current-request
+    N6-user authorization, frozen date/run/runner/limit/input census and outbox
+    range, a zero-persistence full-batch simulation, and an exact-run rollback
+    artifact already verified statically and on PG16. It permits one transaction
+    and one execute attempt, with writes only to `n6_trigger_status_current` and
+    this consumer's exact inbox/checkpoint state; `common_event_outbox` is
+    SELECT-only and status updates are zero. Any 089 table-drop rollback,
+    protected-consumer or old-checkpoint change, `trigger_pct` status surface,
+    `ActionEligible` payload mutation, retry, manual SQL, migration, Release,
+    service, N1-N5, trade, virtual-executor, Strategy Center, or bundled next
+    phase returns `REJECT`. A `runtime_control` governance session cannot use
+    this phase.
 20. L3 accepts only N6 virtual-account work with current-request authorization,
     a unified immutable Release, bounded smoke, governed confirmed queue,
     two-stage human confirmation, current open date/session, two-minute

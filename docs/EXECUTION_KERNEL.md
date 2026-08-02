@@ -2631,6 +2631,14 @@ side-effect, or operation-count drift returns `REJECT`.
     "real_broker",
     "n1_n5_writeback"
   ],
+  "bounded_consumer_phase_contract": {
+    "phase_id": "trigger_status_projection_20260731_backfill",
+    "layer_role": "N6_user",
+    "source": "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json#/lanes/L2/bounded_consumer_phases/trigger_status_projection_20260731_backfill",
+    "exact_source_object_required": true,
+    "missing_or_source_mismatch_decision": "REJECT",
+    "governance_session_runtime_operation_allowed": false
+  },
   "governance_session_cannot_execute": true
 }
 ```
