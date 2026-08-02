@@ -7,9 +7,15 @@
 
 ### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
 
-状态：`RUNTIME_CONTROL_CONTRACT_REGISTERED_PENDING_N5_N6_IMPLEMENTATION`；
-分类：`n6_btrack_delivery_l2_n6_business_v1`；未执行数据库、outbox、consumer、
-Release 或服务操作。
+状态：`MIGRATION_AND_CONSUMER_PASS_WEB_RELEASE_PHASE_GOVERNED_PENDING_SEPARATE_AUTHORIZATION`；
+分类：`n6_btrack_delivery_l2_n6_business_v1`。089 schema migration 与
+`n6_trigger_status_projection_20260731_backfill_v1` 2296-row consumer 已有 PASS
+证据；目标 canonical commit/tree 为
+`985202144febffeef3302012675f285e1cf1061a` /
+`f741f0f0cd7d80648f9897267eb0b2ac8410f9f0`。本治理 gate 只登记 machine phase
+`trigger_status_web_immutable_release_rebind`，未构建 Release、未改 plist、未调用
+launchctl、未连接数据库，也未操作 consumer/migration/rollback、服务、浏览器或
+N1-N6 业务。
 
 目标：在不改变现有 N6 消息/卡片投影的前提下，使用 N5 非动作状态转发消息维护
 N6 `n6_trigger_status_current`，并复用 `/n6/app/status-monitor` 展示按用户有效监控
@@ -19,14 +25,23 @@ N6 `n6_trigger_status_current`，并复用 `/n6/app/status-monitor` 展示按用
 
 ```text
 runtime_control 合同登记
--> N5_action 独立实现/离线测试
--> N6_user 独立实现/PG16 测试
--> N6_user 完整文件名 migration + rollback gate
--> runtime_control immutable Web Release gate
+-> N5_action 独立实现/离线测试（done）
+-> N6_user 独立实现/PG16 测试（done）
+-> N6_user 完整文件名 089 migration + exact rollback gate（PASS）
+-> N6_user trigger-status bounded consumer（2296，PASS）
+-> runtime_control trigger_status_web_immutable_release_rebind（pending separate authorization）
 -> 用户授权后的只读页面验收
 ```
 
-首版禁止 scheduler、LaunchAgent、SSE、worker、现有投影表修改、proposal、资金、
+该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
+fresh immutable Release、一次 bootout/bootstrap，strategy-write 保持 0，Strategy
+evaluator 保持冻结基线且零操作，已 loaded virtual executor 只允许自然 5 秒轮转
+且不得停止/启动/修改。旧 named Web policy 与 L1 post-decommission phase 均不可
+替代。前一发布 gate 为 `BLOCKED_POLICY` 且 Release/plist/bootout/bootstrap 均为
+0；authenticated desktop 与 320/375/390/430 DOM 验收继续后置到独立 gate。
+
+首版除上述后续独立授权的 exact Web 一次 bootout/bootstrap phase 外，禁止
+scheduler、其他 LaunchAgent、SSE、worker、现有投影表修改、proposal、资金、
 持仓、executor、语音、mobile、sim 和真实交易。权威合同：
 `docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`。
 

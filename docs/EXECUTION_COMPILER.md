@@ -749,6 +749,41 @@ outbox status update, protected-consumer/checkpoint change, `trigger_pct` status
 surface, immutable `ActionEligible` payload change, or next-phase bundling. The
 governance session can register this phase but cannot compile its execution.
 
+For `phase_id=trigger_status_web_immutable_release_rebind`, L2 may compile one
+later independent `runtime_control` Web deployment gate only when the complete
+phase object exactly matches
+`docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json`. Its operation class is
+`single_web_immutable_release_rebind`; neither the legacy
+`n6_user_web_immutable_release_bounded_rebind_v1` nor L1 /
+`post_decommission_web_readonly_rebind` can substitute. The DAG is:
+
+```text
+PLAN
+  -> VALIDATE exact target 985202144.../f741f0f0... and reviewed 27-file
+              lineage; completed 089 and 2296-consumer PASS evidence; unique
+              active Web rollback Release/plist/manifest/PID/8786; strategy
+              write=0; frozen evaluator baseline; loaded operation-free
+              virtual executor; prior successful phase executions=0
+  -> MODIFY materialize exactly one fresh immutable Release; apply owner/mode/
+            ACL/xattr/flags -> manifest -> seal -> byte verify; replace only
+            exact Web Release binding/WorkingDirectory/PYTHONPATH; one bootout
+            and one bootstrap
+  -> VERIFY target commit/tree/manifest/plist/new PID/cwd/argv/listen 8786;
+            unauthenticated Strategy 410 and status-monitor 401 by GET/HEAD
+            only; all other routes and non-Web services unchanged
+  -> FINALIZE preserve authenticated desktop and 320/375/390/430 DOM
+              acceptance as a separate authorized gap
+```
+
+Compilation rejects any target, 27-file lineage, prerequisite PASS, source
+rollback evidence, business-state, service scope, route, manifest, plist, or
+postflight drift; any existing/reused/overwritten target Release; kickstart,
+retry, second execution, rollback-target substitution; database/consumer/
+migration/rollback/other-service/scheduler/N1-N6 business/trading/browser/push
+effect; any `trigger_pct` status surface; non-GET/HEAD curl; or bundling
+authenticated browser acceptance. This
+governance session registers the phase but cannot compile or perform it.
+
 L3 compiles into separately authorized implementation/regression, migration
 and immutable-Release deployment, bounded smoke, confirmed-queue governance,
 and continuous-runtime authorization phases. Missing bounded-smoke evidence,

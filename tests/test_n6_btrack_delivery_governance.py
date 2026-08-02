@@ -57,6 +57,56 @@ L2_TRIGGER_STATUS_PHASE_SHA256 = (
     "4b6047b093affd3ca31ab7f7ea62f73a80eba0d9bbe25143ffa5c8ca697a8dde"
 )
 L2_TRIGGER_STATUS_PHASE_ID = "trigger_status_projection_20260731_backfill"
+L2_TRIGGER_STATUS_WEB_PHASE_SHA256 = (
+    "37d1b82cedeac6e62ab640df64e3587ca9f97e8f07e018450b74c16b44945994"
+)
+L2_TRIGGER_STATUS_WEB_REGISTRY_SHA256 = (
+    "af9039218167ca60a4027f9353ce9328c2e782109cf6de4935680a25584357d7"
+)
+L2_TRIGGER_STATUS_WEB_PHASE_ID = "trigger_status_web_immutable_release_rebind"
+L2_TRIGGER_STATUS_REVIEWED_FILES = (
+    "AGENTS.md",
+    "docs/Architecture.md",
+    "docs/EXECUTION_COMPILER.md",
+    "docs/EXECUTION_KERNEL.md",
+    "docs/EXECUTION_RUNTIME_GATE.md",
+    "docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md",
+    "docs/N5_CANONICAL_ACTION_FLOW_v0.1.md",
+    "docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md",
+    "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json",
+    "docs/Tasks.md",
+    "scripts/run_n5_trigger_status_forward_once.py",
+    "scripts/run_n6_trigger_status_projection_once.py",
+    "sql/089_n6_trigger_status_current.sql",
+    "sql/089_n6_trigger_status_current_rollback.sql",
+    "sql/N5_trigger_status_forward_only_rollback.sql",
+    "sql/N6_trigger_status_projection_20260731_backfill_v1_exact_rollback.sql",
+    "src/ashare_v3/action/live_tracking_poller.py",
+    "src/ashare_v3/events/models.py",
+    "src/ashare_v3/user/trigger_status_projection.py",
+    "src/ashare_v3/web/n6_app_v1.py",
+    "src/ashare_v3/web/n6_user_app.py",
+    "src/ashare_v3/web/templates/n6_app_shell.html",
+    "tests/test_n5_n6_trigger_status_forward_contract.py",
+    "tests/test_n6_btrack_delivery_governance.py",
+    "tests/test_n6_trigger_status_pg16.py",
+    "tests/test_n6_trigger_status_projection.py",
+    "tests/test_n6_user_app.py",
+)
+L2_WEB_REQUEST = {
+    "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+    "phase_id": L2_TRIGGER_STATUS_WEB_PHASE_ID,
+    "operation_class": "single_web_immutable_release_rebind",
+    "executor_role": "runtime_control",
+    "requested_service_labels": ["com.ashare-v3.n6.user-web"],
+    "prior_successful_execution_count": 0,
+    "strategy_write": 0,
+    "strategy_evaluator_baseline_frozen": True,
+    "strategy_evaluator_operation_attempts": 0,
+    "virtual_executor_loaded": True,
+    "virtual_executor_operation_attempts": 0,
+    "target_release_path_preexisting": False,
+}
 LEGACY_L2_KEYS = (
     "policy_id",
     "title",
@@ -388,6 +438,23 @@ def static_phase_decision(phase: dict[str, object]) -> str:
     return "ACCEPT"
 
 
+def l2_web_phase_request(**overrides: object) -> dict[str, object]:
+    request = copy.deepcopy(L2_WEB_REQUEST)
+    request.update(overrides)
+    return request
+
+
+def static_l2_web_phase_decision(
+    phase: dict[str, object], request: dict[str, object]
+) -> str:
+    return (
+        "ACCEPT"
+        if canonical_sha256(phase) == L2_TRIGGER_STATUS_WEB_PHASE_SHA256
+        and request == L2_WEB_REQUEST
+        else "REJECT"
+    )
+
+
 def request_payload(**profile: object) -> dict[str, object]:
     return {
         "page_or_feature": "B轨筛选中心",
@@ -510,6 +577,14 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
         self.assertFalse(self.registry["lineage"]["single_release_ready"])
         self.assertFalse(
             self.registry["canonical_integration"]["deployment_authorized"]
+        )
+        self.assertEqual(
+            self.registry["canonical_integration"]["current_commit"],
+            "985202144febffeef3302012675f285e1cf1061a",
+        )
+        self.assertEqual(
+            self.registry["canonical_integration"]["current_tree"],
+            "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
         )
         self.assertEqual(
             self.registry["convergence"]["required_next_gate"],
@@ -864,6 +939,19 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
         self.assertTrue(binding["exact_source_object_required"])
         self.assertEqual(binding["missing_or_source_mismatch_decision"], "REJECT")
         self.assertFalse(binding["governance_session_runtime_operation_allowed"])
+        web_binding = kernel_l2["web_deployment_phase_contract"]
+        self.assertEqual(web_binding["phase_id"], L2_TRIGGER_STATUS_WEB_PHASE_ID)
+        self.assertEqual(
+            web_binding["operation_class"],
+            "single_web_immutable_release_rebind",
+        )
+        self.assertEqual(web_binding["executor_role"], "runtime_control")
+        self.assertTrue(web_binding["exact_source_object_required"])
+        self.assertEqual(
+            web_binding["legacy_named_policy_or_l1_substitution_decision"],
+            "REJECT",
+        )
+        self.assertFalse(web_binding["governance_session_runtime_operation_allowed"])
 
     def test_l2_trigger_status_backfill_phase_is_exact_and_fail_closed(self) -> None:
         phase = self.contract["lanes"]["L2"]["bounded_consumer_phases"][
@@ -991,6 +1079,141 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(
                     L2_TRIGGER_STATUS_PHASE_ID,
+                    path.read_text(encoding="utf-8"),
+                )
+
+    def test_l2_trigger_status_web_phase_is_exact_and_registered(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_PHASE_ID
+        ]
+        self.assertEqual(canonical_sha256(phase), L2_TRIGGER_STATUS_WEB_PHASE_SHA256)
+        expected = {
+            ("policy_id",): "n6_btrack_delivery_l2_n6_business_v1",
+            ("operation_class",): "single_web_immutable_release_rebind",
+            ("executor_role",): "runtime_control",
+            ("governance_session_cannot_execute",): True,
+            ("canonical_target", "commit"): "985202144febffeef3302012675f285e1cf1061a",
+            ("canonical_target", "tree"): "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+            ("canonical_target", "exact_changed_file_count"): 27,
+            ("completed_prerequisite_evidence", "schema_089", "status"): "PASS",
+            ("completed_prerequisite_evidence", "trigger_status_consumer", "processed_input_count"): 2296,
+            ("active_source_and_rollback_target", "unique_rollback_target_required"): True,
+            ("active_source_and_rollback_target", "observed_pid"): 67945,
+            ("active_source_and_rollback_target", "listen_port"): 8786,
+            ("fresh_immutable_release_contract", "fresh_release_count"): 1,
+            ("service_rebind_contract", "exact_label"): "com.ashare-v3.n6.user-web",
+            ("service_rebind_contract", "bootout_attempts"): 1,
+            ("service_rebind_contract", "bootstrap_attempts"): 1,
+            ("service_rebind_contract", "retry_attempts"): 0,
+            ("service_rebind_contract", "second_primary_attempt_allowed"): False,
+            ("business_state_contract", "trigger_status_surface", "trigger_pct_allowed_in_schema_api_ui_or_payload"): False,
+            ("route_contract", "unauthenticated", "/api/n6/app/v3/strategy-center", "status"): 410,
+            ("route_contract", "unauthenticated", "/api/n6/app/v1/status-monitor", "status"): 401,
+            ("route_contract", "unauthenticated_curl_methods_allowed"): ["GET", "HEAD"],
+            ("route_contract", "authenticated_session_or_browser_use_allowed"): False,
+            ("postflight_contract", "authenticated_dom_acceptance", "mobile_viewports_required"): [320, 375, 390, 430],
+        }
+        for path, value in expected.items():
+            with self.subTest(path=path):
+                self.assertEqual(nested_value(phase, path), value)
+        self.assertEqual(
+            tuple(phase["canonical_target"]["exact_changed_files"]),
+            L2_TRIGGER_STATUS_REVIEWED_FILES,
+        )
+        registration = self.registry["append_only_gate_registrations"][
+            L2_TRIGGER_STATUS_WEB_PHASE_ID
+        ]
+        self.assertEqual(canonical_sha256(registration), L2_TRIGGER_STATUS_WEB_REGISTRY_SHA256)
+        self.assertFalse(registration["deployment_authorized"])
+        self.assertFalse(registration["runtime_refreshed_in_this_governance_gate"])
+        self.assertEqual(registration["previous_release_gate"]["result"], "BLOCKED_POLICY")
+        counts = registration["previous_release_gate"]
+        self.assertFalse(any(value for key, value in counts.items() if key != "result"))
+
+    def test_l2_trigger_status_web_machine_classifier_is_fail_closed(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_PHASE_ID
+        ]
+        self.assertEqual(
+            static_l2_web_phase_decision(phase, l2_web_phase_request()),
+            "ACCEPT",
+        )
+        rejected_requests = (
+            ("old_named_policy", {"policy_id": "n6_user_web_immutable_release_bounded_rebind_v1"}),
+            ("l1_policy", {"policy_id": "n6_btrack_delivery_l1_web_readonly_v1"}),
+            ("l1_phase", {"phase_id": "post_decommission_web_readonly_rebind"}),
+            ("operation", {"operation_class": "install_only"}),
+            ("role", {"executor_role": "N6_user"}),
+            ("expanded_scope", {"requested_service_labels": [
+                "com.ashare-v3.n6.user-web",
+                "com.ashare-v3.n6.virtual-executor-v1",
+            ]}),
+            ("strategy_write", {"strategy_write": 1}),
+            ("evaluator_state", {"strategy_evaluator_baseline_frozen": False}),
+            ("evaluator_operation", {"strategy_evaluator_operation_attempts": 1}),
+            ("virtual_executor_state", {"virtual_executor_loaded": False}),
+            ("virtual_executor_operation", {"virtual_executor_operation_attempts": 1}),
+            ("release_reuse", {"target_release_path_preexisting": True}),
+            ("second_execution", {"prior_successful_execution_count": 1}),
+        )
+        for name, overrides in rejected_requests:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    static_l2_web_phase_decision(
+                        phase,
+                        l2_web_phase_request(**overrides),
+                    ),
+                    "REJECT",
+                )
+
+    def test_l2_trigger_status_web_phase_drift_rejects(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_PHASE_ID
+        ]
+        mutations = (
+            ("target", ("canonical_target", "commit"), "other"),
+            ("lineage", ("canonical_target", "exact_changed_file_count"), 28),
+            ("migration", ("completed_prerequisite_evidence", "schema_089", "status"), "BLOCKED"),
+            ("consumer", ("completed_prerequisite_evidence", "trigger_status_consumer", "processed_input_count"), 2295),
+            ("source", ("active_source_and_rollback_target", "plist_sha256"), "other"),
+            ("strategy", ("business_state_contract", "strategy_write", "live_before"), 1),
+            ("executor", ("business_state_contract", "virtual_executor", "loaded"), False),
+            ("release", ("fresh_immutable_release_contract", "fresh_release_count"), 2),
+            ("plist", ("service_rebind_contract", "allowed_plist_semantic_deltas"), []),
+            ("second_bootout", ("service_rebind_contract", "bootout_attempts"), 2),
+            ("curl", ("route_contract", "unauthenticated_curl_methods_allowed"), ["GET", "HEAD", "POST"]),
+            ("postflight", ("postflight_contract", "required_exact_evidence"), []),
+            ("database", ("forbidden_effect_counts", "database_connections"), 1),
+        )
+        for name, path, replacement in mutations:
+            with self.subTest(name=name):
+                candidate = mutated_fixture(phase, path, replacement)
+                self.assertEqual(
+                    static_l2_web_phase_decision(candidate, l2_web_phase_request()),
+                    "REJECT",
+                )
+        for key in phase:
+            with self.subTest(missing=key):
+                candidate = copy.deepcopy(phase)
+                del candidate[key]
+                self.assertEqual(
+                    static_l2_web_phase_decision(candidate, l2_web_phase_request()),
+                    "REJECT",
+                )
+
+    def test_l2_trigger_status_web_contract_is_synchronized(self) -> None:
+        paths = (
+            ROOT / "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json",
+            ROOT / "docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json",
+            ROOT / "docs/EXECUTION_KERNEL.md",
+            ROOT / "docs/EXECUTION_COMPILER.md",
+            ROOT / "docs/EXECUTION_RUNTIME_GATE.md",
+            ROOT / "docs/Tasks.md",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIn(
+                    L2_TRIGGER_STATUS_WEB_PHASE_ID,
                     path.read_text(encoding="utf-8"),
                 )
 

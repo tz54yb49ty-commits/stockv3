@@ -15,6 +15,11 @@
     "parent_commit": "081bd74ae07c327452b2a1fc67bf7df3d73a4b6c",
     "parent_tree": "f85afef6402afa4db9cd93e0359694ddc654066b",
     "parent_subject": "align N6 retirement release archive contract",
+    "current_commit": "985202144febffeef3302012675f285e1cf1061a",
+    "current_tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+    "current_subject": "fix(n6): accept envelope trade date for trigger status",
+    "current_verified_on": "2026-08-02",
+    "current_verification_mode": "read_only_git_in_isolated_worktree",
     "deployment_authorized": false
   },
   "runtime_services": {
@@ -114,5 +119,76 @@
       "build one immutable release",
       "switch services only in separately authorized runtime gates"
     ]
+  },
+  "append_only_gate_registrations": {
+    "trigger_status_web_immutable_release_rebind": {
+      "registered_on": "2026-08-02",
+      "evidence_source": "explicit_current_gate_frozen_evidence",
+      "runtime_refreshed_in_this_governance_gate": false,
+      "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+      "phase_id": "trigger_status_web_immutable_release_rebind",
+      "operation_class": "single_web_immutable_release_rebind",
+      "executor_role": "runtime_control",
+      "machine_phase_registered": true,
+      "deployment_authorized": false,
+      "governance_session_execution_allowed": false,
+      "canonical_target": {
+        "branch": "codex/n6-btrack-integration",
+        "commit": "985202144febffeef3302012675f285e1cf1061a",
+        "tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+        "reviewed_lineage_base_commit": "16950435d4e407890f98234f35fa507ed1a11441",
+        "reviewed_changed_file_count": 27,
+        "reviewed_changed_file_list_sha256": "afdc44e2c142400be2da63c177ab57b56b02c6fbfa779d44bed2a12b364cfec3"
+      },
+      "completed_prerequisites": {
+        "schema_089": {
+          "status": "PASS",
+          "path": "sql/089_n6_trigger_status_current.sql",
+          "sha256": "dbc292bc2e0f5ff12399730711af4bf61485cb4a7040a102745afc171ccac44f"
+        },
+        "trigger_status_consumer": {
+          "status": "PASS",
+          "projection_run_id": "n6_trigger_status_projection_20260731_backfill_v1",
+          "processed_input_count": 2296,
+          "exact_rollback_path": "sql/N6_trigger_status_projection_20260731_backfill_v1_exact_rollback.sql",
+          "exact_rollback_sha256": "453bbb7634ef518d7167299ea79c24edf56e81e54b44b5e72012eda1762d20d6"
+        }
+      },
+      "unique_active_web_rollback_target": {
+        "commit": "16950435d4e407890f98234f35fa507ed1a11441",
+        "tree": "dfd14eb8651c3d9a56b3b1709d06f37779dbafbb",
+        "release_path_source": "exact_working_directory_from_frozen_active_web_plist",
+        "plist_sha256": "f39e2150011432caf65f982fe5882e96505a367eedc4fca9f5ae180e14e223e1",
+        "manifest_sha256": "6997f8cd9f90c315d73e73aa583d48a5413485e0ddece09ff8095270d6a7611b",
+        "observed_pid": 67945,
+        "listen_host": "127.0.0.1",
+        "listen_port": 8786
+      },
+      "current_business_state": {
+        "strategy_write": 0,
+        "strategy_write_change_allowed": false,
+        "strategy_evaluator": "freeze_current_baseline_and_do_not_operate",
+        "virtual_executor": "loaded_natural_startinterval_rotation_allowed_do_not_operate",
+        "trigger_pct_present_in_schema_api_ui_or_payload": false
+      },
+      "unauthenticated_route_contract": {
+        "strategy_api_status": 410,
+        "status_monitor_api_path": "/api/n6/app/v1/status-monitor",
+        "status_monitor_api_status": 401,
+        "allowed_curl_methods": [
+          "GET",
+          "HEAD"
+        ],
+        "authenticated_dom_mobile_acceptance": "DEFERRED_SEPARATE_AUTHORIZED_GATE"
+      },
+      "previous_release_gate": {
+        "result": "BLOCKED_POLICY",
+        "fresh_release_created": 0,
+        "plist_replace_attempts": 0,
+        "bootout_attempts": 0,
+        "bootstrap_attempts": 0,
+        "database_service_browser_business_effects": 0
+      }
+    }
   }
 }

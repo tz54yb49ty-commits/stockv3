@@ -495,6 +495,289 @@
             "forbidden_effect_present"
           ]
         }
+      },
+      "deployment_phases": {
+        "trigger_status_web_immutable_release_rebind": {
+          "phase_id": "trigger_status_web_immutable_release_rebind",
+          "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+          "operation_class": "single_web_immutable_release_rebind",
+          "executor_role": "runtime_control",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "classifier_contract": {
+            "required_lane": "L2",
+            "required_phase_id": "trigger_status_web_immutable_release_rebind",
+            "required_operation_class": "single_web_immutable_release_rebind",
+            "required_executor_role": "runtime_control",
+            "accepted_policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+            "rejected_policy_substitutes": [
+              "n6_user_web_immutable_release_bounded_rebind_v1",
+              "n6_btrack_delivery_l1_web_readonly_v1",
+              "post_decommission_web_readonly_rebind"
+            ],
+            "requested_service_labels": [
+              "com.ashare-v3.n6.user-web"
+            ],
+            "prior_successful_execution_count": 0,
+            "maximum_successful_execution_count": 1,
+            "second_execution_allowed": false
+          },
+          "canonical_target": {
+            "branch": "codex/n6-btrack-integration",
+            "commit": "985202144febffeef3302012675f285e1cf1061a",
+            "tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0",
+            "reviewed_lineage_base_commit": "16950435d4e407890f98234f35fa507ed1a11441",
+            "reviewed_lineage_base_tree": "dfd14eb8651c3d9a56b3b1709d06f37779dbafbb",
+            "exact_changed_file_count": 27,
+            "exact_changed_file_list_sha256": "afdc44e2c142400be2da63c177ab57b56b02c6fbfa779d44bed2a12b364cfec3",
+            "exact_changed_files": [
+              "AGENTS.md",
+              "docs/Architecture.md",
+              "docs/EXECUTION_COMPILER.md",
+              "docs/EXECUTION_KERNEL.md",
+              "docs/EXECUTION_RUNTIME_GATE.md",
+              "docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md",
+              "docs/N5_CANONICAL_ACTION_FLOW_v0.1.md",
+              "docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md",
+              "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json",
+              "docs/Tasks.md",
+              "scripts/run_n5_trigger_status_forward_once.py",
+              "scripts/run_n6_trigger_status_projection_once.py",
+              "sql/089_n6_trigger_status_current.sql",
+              "sql/089_n6_trigger_status_current_rollback.sql",
+              "sql/N5_trigger_status_forward_only_rollback.sql",
+              "sql/N6_trigger_status_projection_20260731_backfill_v1_exact_rollback.sql",
+              "src/ashare_v3/action/live_tracking_poller.py",
+              "src/ashare_v3/events/models.py",
+              "src/ashare_v3/user/trigger_status_projection.py",
+              "src/ashare_v3/web/n6_app_v1.py",
+              "src/ashare_v3/web/n6_user_app.py",
+              "src/ashare_v3/web/templates/n6_app_shell.html",
+              "tests/test_n5_n6_trigger_status_forward_contract.py",
+              "tests/test_n6_btrack_delivery_governance.py",
+              "tests/test_n6_trigger_status_pg16.py",
+              "tests/test_n6_trigger_status_projection.py",
+              "tests/test_n6_user_app.py"
+            ]
+          },
+          "completed_prerequisite_evidence": {
+            "schema_089": {
+              "status": "PASS",
+              "migration_path": "sql/089_n6_trigger_status_current.sql",
+              "migration_sha256": "dbc292bc2e0f5ff12399730711af4bf61485cb4a7040a102745afc171ccac44f",
+              "rollback_path": "sql/089_n6_trigger_status_current_rollback.sql",
+              "rollback_sha256": "1da77a971afe929566b3e74f8835a20e4ea320217f068bedc4a8af49b3bb2a9a",
+              "execution_already_completed": true,
+              "execution_in_this_phase_allowed": false
+            },
+            "trigger_status_consumer": {
+              "status": "PASS",
+              "source_phase_id": "trigger_status_projection_20260731_backfill",
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "projection_run_id": "n6_trigger_status_projection_20260731_backfill_v1",
+              "for_trade_date": "20260731",
+              "processed_input_count": 2296,
+              "runner_path": "scripts/run_n6_trigger_status_projection_once.py",
+              "runner_sha256": "136b0db88b49b0057927dd395438046c0038765bab67ad9b748882564325b045",
+              "exact_rollback_path": "sql/N6_trigger_status_projection_20260731_backfill_v1_exact_rollback.sql",
+              "exact_rollback_sha256": "453bbb7634ef518d7167299ea79c24edf56e81e54b44b5e72012eda1762d20d6",
+              "execution_already_completed": true,
+              "execution_in_this_phase_allowed": false,
+              "retry_allowed": false
+            }
+          },
+          "active_source_and_rollback_target": {
+            "unique_rollback_target_required": true,
+            "release_path_source": "exact_working_directory_from_frozen_active_web_plist",
+            "release_path_must_be_frozen_before_modify": true,
+            "commit": "16950435d4e407890f98234f35fa507ed1a11441",
+            "tree": "dfd14eb8651c3d9a56b3b1709d06f37779dbafbb",
+            "plist_sha256": "f39e2150011432caf65f982fe5882e96505a367eedc4fca9f5ae180e14e223e1",
+            "manifest_sha256": "6997f8cd9f90c315d73e73aa583d48a5413485e0ddece09ff8095270d6a7611b",
+            "observed_pid": 67945,
+            "listen_host": "127.0.0.1",
+            "listen_port": 8786,
+            "source_plist_bytes_are_only_rollback_plist": true,
+            "source_release_reuse_or_overwrite_allowed": false
+          },
+          "business_state_contract": {
+            "strategy_write": {
+              "live_before": 0,
+              "source_plist": 0,
+              "target_plist": 0,
+              "after_readiness": 0,
+              "after_rollback": 0,
+              "change_allowed": false
+            },
+            "strategy_evaluator": {
+              "label": "com.ashare-v3.n6.strategy-center-evaluator-v1",
+              "current_baseline_must_be_frozen_before_modify": true,
+              "label_plist_release_runner_role_acl_ownership_hash_must_remain_identical": true,
+              "operation_attempts": 0
+            },
+            "virtual_executor": {
+              "label": "com.ashare-v3.n6.virtual-executor-v1",
+              "loaded": true,
+              "natural_startinterval_rotation_allowed": true,
+              "pid_or_runs_change_alone_is_drift": false,
+              "label_plist_release_runner_role_acl_ownership_object_hash_must_remain_identical": true,
+              "stop_attempts": 0,
+              "start_attempts": 0,
+              "modify_attempts": 0
+            },
+            "trigger_status_surface": {
+              "trigger_pct_allowed_in_schema_api_ui_or_payload": false,
+              "existing_message_and_card_routes_must_remain_identical": true
+            }
+          },
+          "fresh_immutable_release_contract": {
+            "fresh_release_count": 1,
+            "build_attempts": 1,
+            "target_release_path_must_not_exist_before_build": true,
+            "reuse_existing_release_allowed": false,
+            "overwrite_existing_release_allowed": false,
+            "source_commit_and_tree_must_equal_canonical_target": true,
+            "ordered_steps": [
+              "materialize_one_fresh_release",
+              "apply_owner_mode_acl_xattr_flags",
+              "write_release_specific_manifest",
+              "seal_release",
+              "byte_verify_against_manifest"
+            ],
+            "manifest_required_bindings": [
+              "target_commit",
+              "target_tree",
+              "exact_27_file_reviewed_lineage",
+              "exact_archive_fileset",
+              "mode_owner_acl_xattr_flags_sha256_per_entry",
+              "filesystem_object_sha256"
+            ]
+          },
+          "service_rebind_contract": {
+            "exact_label": "com.ashare-v3.n6.user-web",
+            "only_mutable_service": true,
+            "allowed_plist_semantic_deltas": [
+              "release_path",
+              "WorkingDirectory",
+              "EnvironmentVariables.PYTHONPATH"
+            ],
+            "all_other_plist_configuration_byte_identical": true,
+            "program_arguments_byte_identical": true,
+            "safe_plist_replace_or_swap_attempts": 1,
+            "bootout_attempts": 1,
+            "old_job_and_pid_absence_required_before_bootstrap": true,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "second_primary_attempt_allowed": false
+          },
+          "rollback_contract": {
+            "trigger": "primary_failure_only",
+            "restore_frozen_source_plist_and_release_max_attempts": 1,
+            "success_path_rollback_attempts": 0,
+            "rollback_target_substitution_allowed": false
+          },
+          "route_contract": {
+            "unauthenticated": {
+              "/api/n6/app/v3/strategy-center": {
+                "method": "GET",
+                "status": 410,
+                "cache_control": "no-store"
+              },
+              "/api/n6/app/v3/strategy-center/selection": {
+                "method": "PUT",
+                "status": 410,
+                "cache_control": "no-store",
+                "runtime_probe_allowed_in_this_phase": false
+              },
+              "/api/n6/app/v3/strategy-center/stream": {
+                "method": "GET",
+                "status": 410,
+                "cache_control": "no-store"
+              },
+              "/api/n6/app/v1/status-monitor": {
+                "method": "GET",
+                "status": 401
+              }
+            },
+            "all_other_existing_routes_must_remain_identical": true,
+            "source_target_route_inventory_sha256_must_match": true,
+            "unauthenticated_curl_methods_allowed": [
+              "GET",
+              "HEAD"
+            ],
+            "authenticated_session_or_browser_use_allowed": false
+          },
+          "postflight_contract": {
+            "required_exact_evidence": [
+              "target_commit",
+              "target_tree",
+              "target_manifest_sha256",
+              "target_plist_sha256",
+              "new_web_pid",
+              "new_web_cwd",
+              "new_web_argv",
+              "listen_127_0_0_1_8786",
+              "exact_route_contract",
+              "trigger_status_schema_api_ui_payload_no_trigger_pct",
+              "source_rollback_target_unchanged",
+              "strategy_evaluator_unchanged",
+              "virtual_executor_unchanged_except_natural_pid_or_runs_rotation"
+            ],
+            "authenticated_dom_acceptance": {
+              "status": "DEFERRED_SEPARATE_AUTHORIZED_GATE",
+              "desktop_required": true,
+              "mobile_viewports_required": [
+                320,
+                375,
+                390,
+                430
+              ],
+              "may_be_claimed_by_release_rebind_phase": false
+            }
+          },
+          "forbidden_effect_counts": {
+            "database_connections": 0,
+            "consumer": 0,
+            "migration": 0,
+            "rollback": 0,
+            "other_service": 0,
+            "scheduler": 0,
+            "strategy_evaluator": 0,
+            "virtual_executor": 0,
+            "n1_n6_business": 0,
+            "proposal": 0,
+            "cash": 0,
+            "position": 0,
+            "trade": 0,
+            "browser": 0,
+            "push": 0
+          },
+          "reject_on": [
+            "missing_required_field",
+            "policy_or_phase_substitution",
+            "legacy_named_policy_substitution",
+            "l1_phase_substitution",
+            "canonical_target_commit_or_tree_drift",
+            "reviewed_27_file_lineage_drift",
+            "schema_089_or_consumer_pass_evidence_drift",
+            "source_release_plist_manifest_pid_or_port_drift",
+            "rollback_target_ambiguity",
+            "strategy_write_nonzero_or_changed",
+            "strategy_evaluator_baseline_or_operation_drift",
+            "virtual_executor_not_loaded_or_configuration_operation_drift",
+            "release_not_fresh_or_count_drift",
+            "release_build_order_manifest_seal_or_byte_verify_drift",
+            "plist_delta_beyond_release_binding",
+            "operation_count_or_second_execution_drift",
+            "route_or_unauthenticated_status_drift",
+            "trigger_pct_surface_present",
+            "curl_method_or_browser_boundary_drift",
+            "postflight_evidence_missing_or_drifted",
+            "forbidden_effect_nonzero"
+          ]
+        }
       }
     },
     "L3": {

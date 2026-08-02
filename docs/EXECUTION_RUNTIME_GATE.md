@@ -384,6 +384,32 @@ Detailed rules:
     service, N1-N5, trade, virtual-executor, Strategy Center, or bundled next
     phase returns `REJECT`. A `runtime_control` governance session cannot use
     this phase.
+19a. The L2 `phase_id=trigger_status_web_immutable_release_rebind` accepts only
+    the exact machine object under
+    `n6_btrack_delivery_l2_n6_business_v1`, in a later independently authorized
+    `runtime_control` request, with operation class
+    `single_web_immutable_release_rebind`. The legacy named Web policy, L1, and
+    `post_decommission_web_readonly_rebind` are substitutions and return
+    `REJECT`. Runtime Gate must freshly match canonical target
+    `985202144...`/`f741f0f0...`, the exact reviewed 27-file lineage, completed
+    089 and 2296-consumer PASS evidence, the unique frozen old Web
+    Release/plist/manifest/PID/8786 rollback target, strategy-write `0`, the
+    untouched current Strategy-evaluator baseline, the loaded but operation-
+    free virtual executor, and zero prior successful execution of this phase.
+    It permits one fresh non-existing immutable Release built in the fixed
+    owner/mode/ACL/xattr/flags -> manifest -> seal -> byte-verify order, one
+    exact-Web plist replace/swap changing only Release binding/
+    WorkingDirectory/PYTHONPATH, one bootout, and one bootstrap. Reuse,
+    overwrite, kickstart, retry, second execution, expanded service scope, or
+    rollback-target substitution returns `REJECT`; only primary failure permits
+    one frozen-source restore. Database, consumer, migration, rollback,
+    other-service, scheduler, N1-N6 business, proposal/cash/position/trade,
+    browser, and push effects remain zero. Unauthenticated curl is GET/HEAD
+    only; Strategy APIs remain 410, status-monitor remains 401, `trigger_pct`
+    remains absent from trigger-status schema/API/UI/payload, and other routes
+    remain identical. Postflight must freeze target commit/tree/manifest/plist,
+    PID/cwd/argv/listen 8786 and routes. Authenticated desktop and
+    320/375/390/430 DOM acceptance stays a separate gap.
 20. L3 accepts only N6 virtual-account work with current-request authorization,
     a unified immutable Release, bounded smoke, governed confirmed queue,
     two-stage human confirmation, current open date/session, two-minute

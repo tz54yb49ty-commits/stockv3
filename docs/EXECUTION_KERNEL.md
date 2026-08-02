@@ -2639,10 +2639,48 @@ side-effect, or operation-count drift returns `REJECT`.
     "missing_or_source_mismatch_decision": "REJECT",
     "governance_session_runtime_operation_allowed": false
   },
+  "web_deployment_phase_contract": {
+    "phase_id": "trigger_status_web_immutable_release_rebind",
+    "operation_class": "single_web_immutable_release_rebind",
+    "executor_role": "runtime_control",
+    "source": "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json#/lanes/L2/deployment_phases/trigger_status_web_immutable_release_rebind",
+    "exact_source_object_required": true,
+    "missing_or_source_mismatch_decision": "REJECT",
+    "legacy_named_policy_or_l1_substitution_decision": "REJECT",
+    "governance_session_runtime_operation_allowed": false
+  },
   "governance_session_cannot_execute": true
 }
 ```
 <!-- policy:n6_btrack_delivery_l2_n6_business_v1:end -->
+
+The L2 `trigger_status_web_immutable_release_rebind` phase accepts only the
+exact source object above in a later, independently authorized
+`runtime_control` request. It binds canonical target
+`985202144febffeef3302012675f285e1cf1061a` /
+`f741f0f0cd7d80648f9897267eb0b2ac8410f9f0`, the complete reviewed 27-file
+lineage from `16950435d4e407890f98234f35fa507ed1a11441`, completed 089 and
+2296-row consumer `PASS` evidence, and the frozen active Web Release/plist as
+the sole rollback target. `n6_user_web_immutable_release_bounded_rebind_v1`,
+L1, and `post_decommission_web_readonly_rebind` are not substitutes.
+
+The phase may build exactly one fresh immutable Release, apply owner/mode/ACL/
+xattr/flags before manifest/seal/byte verification, and change only the exact
+Web Release binding, WorkingDirectory, and PYTHONPATH. It permits one safe
+plist replace/swap, one bootout, and one bootstrap; kickstart, retry, a second
+primary execution, Release reuse/overwrite, or rollback-target substitution
+returns `REJECT`. Strategy-write stays `0`; the Strategy evaluator remains on
+its freshly frozen baseline with zero operations; the loaded virtual executor
+may rotate naturally but cannot be stopped, started, or modified.
+
+Database connection, consumer, migration, rollback, other-service, scheduler,
+N1-N6 business, proposal/cash/position/trade, browser, and push effects are
+zero. Unauthenticated curl probes are GET/HEAD only: Strategy APIs retain 410,
+the status-monitor API retains 401, trigger-status schema/API/UI/payload remain
+free of `trigger_pct`, and all other routes remain unchanged.
+Postflight must freeze target commit/tree/manifest/plist, new PID/cwd/argv,
+listen 127.0.0.1:8786, and route evidence. Authenticated DOM acceptance at
+desktop and 320/375/390/430 remains a separate gate and cannot be claimed here.
 
 <!-- policy:n6_btrack_delivery_l3_virtual_runtime_v1:begin -->
 ```json
