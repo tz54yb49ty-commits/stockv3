@@ -1429,6 +1429,34 @@ Git 与 Release 规则：
   分叉必须登记在 `docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`，不得在发布时临时猜测。
 - 当前 registry 的 `deployment_authorized=false`；本治理提交不得据此切换服务。
 
+L1 post-decommission Web deployment phase：
+
+- `post_decommission_web_readonly_rebind` 是既有
+  `n6_btrack_delivery_l1_web_readonly_v1` 的可复用 `runtime_control` deployment
+  phase，不是新 policy，也不得复活或复制历史 Strategy Center one-off policy。
+- 仅适用于已由 L1 分类 `ACCEPT` 的 Web/read-only、UX-only、非 Strategy surface
+  恢复、非回归 candidate；source/target/live/rollback 的 strategy-write 必须恒为
+  `0`，退役页面必须精确 `307` 到
+  `/n6/app/signals?notice=strategy_center_retired`，三个 Strategy API 必须精确
+  `410` 且 `Cache-Control: no-store`，不得恢复任何 Strategy surface。
+- exact Strategy evaluator 必须 job/PID absent 且操作次数 `0`。virtual executor
+  可 loaded 并自然 StartInterval 轮转，正常 PID/runs 变化不算漂移，但其
+  label/plist/Release/runner/role/ACL/ownership/object/hash 必须与 Web disjoint，
+  且操作次数 `0`。
+- source/target Release 必须 immutable、lineage 非回归，并以 exact Web-only、
+  UX-only、non-Strategy diff allowlist 绑定。Web plist 仅允许 Release binding
+  替换；相对 runner `python3` + `scripts/run_n6_user_app.py` 的 runner token 必须
+  byte-identical，WorkingDirectory/PYTHONPATH 精确 source→target；absolute runner
+  仅可替换绝对 Release binding。mixed runner 或 target runner containment、
+  regular/non-symlink/non-writable、owner/mode/hash/manifest 任一失败均 `REJECT`。
+- primary 仅一次安全 plist replace/swap、一次 bootout、至少等待 1 秒并确认旧
+  job/PID 消失、一次 bootstrap；禁止 kickstart、retry、第二次 primary、降级。
+  仅 primary failure 可做一次 frozen-source rollback。DB、N1-N5、evaluator、
+  executor、业务、proposal、资金、持仓、交易影响全部为 `0`；缺字段或 route/
+  plist/side-effect/operation-count 漂移全部 `REJECT`。
+- governance-only 合同修改会话不得使用本 phase 执行 Release、plist、launchctl
+  或任何服务操作；deployment 必须是后续独立且明确授权的请求。
+
 
 ## N2-R2 静态参考周期硬规则
 

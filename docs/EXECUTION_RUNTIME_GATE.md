@@ -337,6 +337,22 @@ Detailed rules:
     Release rebind after an isolated implementation/test gate. Database,
     migration, quote writer, executor, stop-loss and
     proposal/order/trade/cash/position/lot effects must all be zero.
+18a. The reusable L1 `post_decommission_web_readonly_rebind` deployment phase
+    accepts only a prior L1 `ACCEPT` for a Web/read-only, UX-only,
+    non-Strategy, non-regressing candidate. Live/source/target/readiness/
+    rollback strategy-write must stay `0`; the exact Strategy evaluator must
+    remain absent with zero operations. The virtual executor may remain loaded
+    and naturally rotate PID/runs, but must stay label/plist/Release/runner/
+    role/ACL/ownership/object/hash disjoint from Web with zero operations.
+    Source/target Releases, lineage, manifest/hash and exact Web-only diff;
+    retired `307` notice redirect and all three exact `410`/`no-store` APIs;
+    Release-binding-only plist delta; exactly one relative-or-absolute runner
+    form; and target runner containment/type/symlink/write-bit/owner/mode/hash/
+    manifest evidence are mandatory. The primary budget is one safe plist
+    replace/swap, one bootout, wait `>=1s` plus old job/PID absence, and one
+    bootstrap. Kickstart/retry/downgrade/second primary are forbidden; primary
+    failure alone permits one frozen-source rollback. Missing evidence or any
+    route/plist/side-effect/operation-count drift returns `REJECT`.
 19. L2 accepts only separate N6-user migration and runtime-control Web rebind
     phases. The full migration filename is the identity, forward/rollback and
     PG16 evidence are mandatory, and automatic proposal, virtual-money or

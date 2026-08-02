@@ -62,7 +62,178 @@
         "executor_operation",
         "stop_loss_operation",
         "proposal_order_trade_cash_position_lot"
-      ]
+      ],
+      "legacy_contract_sha256": "ff9d899636e0e742d833709eb3e778781522b33b0800557ce2ef30173b2f1a47",
+      "deployment_phases": {
+        "post_decommission_web_readonly_rebind": {
+          "phase_id": "post_decommission_web_readonly_rebind",
+          "policy_id": "n6_btrack_delivery_l1_web_readonly_v1",
+          "layer_role": "runtime_control",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "applicability": {
+            "l1_classification_decision": "ACCEPT",
+            "candidate_scope": "web_read_only_ux_only",
+            "strategy_surface_state_source": "decommissioned",
+            "strategy_surface_state_target": "decommissioned",
+            "strategy_surface_restore_allowed": false,
+            "non_regression_candidate_required": true
+          },
+          "exact_services": {
+            "web": {
+              "label": "com.ashare-v3.n6.user-web",
+              "only_mutable_service": true
+            },
+            "strategy_evaluator": {
+              "label": "com.ashare-v3.n6.strategy-center-evaluator-v1",
+              "job_present": false,
+              "pid_present": false,
+              "operation_attempts": 0
+            },
+            "virtual_executor": {
+              "label": "com.ashare-v3.n6.virtual-executor-v1",
+              "loaded_and_natural_startinterval_rotation_allowed": true,
+              "pid_or_runs_change_alone_is_drift": false,
+              "operation_attempts": 0,
+              "must_be_disjoint_from_web_on": [
+                "label",
+                "plist",
+                "release",
+                "runner",
+                "role",
+                "acl",
+                "ownership",
+                "object_boundary",
+                "hash"
+              ]
+            }
+          },
+          "strategy_write_contract": {
+            "live_before": 0,
+            "source_plist": 0,
+            "target_plist": 0,
+            "after_readiness": 0,
+            "after_rollback": 0
+          },
+          "route_contract": {
+            "/n6/app/strategy-center": {
+              "method": "GET",
+              "status": 307,
+              "location": "/n6/app/signals?notice=strategy_center_retired"
+            },
+            "/api/n6/app/v3/strategy-center": {
+              "method": "GET",
+              "status": 410,
+              "cache_control": "no-store",
+              "json": {
+                "ok": false,
+                "code": "strategy_center_retired"
+              }
+            },
+            "/api/n6/app/v3/strategy-center/selection": {
+              "method": "PUT",
+              "status": 410,
+              "cache_control": "no-store",
+              "json": {
+                "ok": false,
+                "code": "strategy_center_retired"
+              }
+            },
+            "/api/n6/app/v3/strategy-center/stream": {
+              "method": "GET",
+              "status": 410,
+              "cache_control": "no-store",
+              "json": {
+                "ok": false,
+                "code": "strategy_center_retired"
+              }
+            }
+          },
+          "release_contract": {
+            "source_immutable": true,
+            "target_immutable": true,
+            "source_target_commit_tree_archive_manifest_filesystem_hashes_required": true,
+            "target_non_regression_lineage_required": true,
+            "candidate_exact_diff_allowlist_required": true,
+            "diff_scope": "web_only_ux_only_non_strategy",
+            "strategy_surface_files_or_routes_in_diff_allowed": false
+          },
+          "plist_contract": {
+            "only_release_binding_may_change": true,
+            "allowed_runner_modes": [
+              "relative_runner_token_preserved",
+              "absolute_runner_release_binding_replaced"
+            ],
+            "exactly_one_runner_mode_required": true,
+            "mixed_runner_mode_allowed": false,
+            "relative_runner": {
+              "interpreter_token": "python3",
+              "runner_token": "scripts/run_n6_user_app.py",
+              "source_target_runner_tokens_byte_identical": true,
+              "working_directory_exact_source_to_target": true,
+              "pythonpath_exact_source_to_target": true
+            },
+            "absolute_runner": {
+              "source_target_absolute_runner_release_binding_replacement_only": true,
+              "working_directory_exact_source_to_target": true,
+              "pythonpath_exact_source_to_target": true
+            },
+            "target_runner_checks": [
+              "contained_in_target_release",
+              "regular_file",
+              "not_symlink",
+              "no_write_bits",
+              "owner_matches_manifest",
+              "mode_matches_manifest",
+              "sha256_matches_manifest",
+              "manifest_entry_exact"
+            ]
+          },
+          "primary_operation_budget": {
+            "safe_plist_replace_or_swap_attempts": 1,
+            "bootout_attempts": 1,
+            "minimum_wait_after_bootout_seconds": 1,
+            "old_job_and_pid_absence_required_before_bootstrap": true,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "fallback_or_downgrade_attempts": 0
+          },
+          "rollback_contract": {
+            "trigger": "primary_failure_only",
+            "frozen_source_rollback_max_attempts": 1,
+            "success_path_rollback_attempts": 0,
+            "second_primary_attempt_allowed": false
+          },
+          "forbidden_effect_counts": {
+            "database": 0,
+            "n1_n5": 0,
+            "strategy_evaluator": 0,
+            "virtual_executor": 0,
+            "business": 0,
+            "proposal": 0,
+            "cash": 0,
+            "position": 0,
+            "trade": 0
+          },
+          "reject_on": [
+            "missing_required_field",
+            "classification_drift",
+            "mixed_runner_mode",
+            "strategy_write_nonzero",
+            "strategy_evaluator_present_or_operated",
+            "virtual_executor_boundary_or_operation_drift",
+            "strategy_route_or_api_drift",
+            "strategy_surface_restore",
+            "release_or_lineage_drift",
+            "diff_allowlist_drift",
+            "plist_delta_beyond_release_binding",
+            "runner_validation_failure",
+            "operation_count_drift",
+            "forbidden_effect_nonzero"
+          ]
+        }
+      }
     },
     "L2": {
       "policy_id": "n6_btrack_delivery_l2_n6_business_v1",

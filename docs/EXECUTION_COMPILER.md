@@ -685,6 +685,33 @@ exact N6 Web immutable-Release rebind gate. It may not compile database,
 quote-writer, executor, stop-loss, proposal, order, trade, cash, position, or
 lot effects.
 
+When `phase_id=post_decommission_web_readonly_rebind`, L1 compiles a separate
+`runtime_control` deployment phase only for an already accepted Web/read-only,
+UX-only, non-Strategy, non-regressing candidate whose source and target both
+remain decommissioned. Its DAG is:
+
+```text
+PLAN
+  -> VALIDATE exact L1 ACCEPT; source/target immutable lineage and exact diff;
+              strategy-write=0 throughout; retired 307/410/no-store routes;
+              evaluator absent; virtual executor disjoint and operation-free;
+              one relative-or-absolute runner form and exact target runner
+  -> MODIFY one safe Web plist Release-binding replace/swap; one bootout; wait
+            >=1 second and prove old job/PID absent; one bootstrap
+  -> VERIFY Web readiness and exact retired routes; all forbidden effects=0;
+            failure only may enter one frozen-source rollback
+  -> FINALIZE append-only trace and PASS/STOP
+```
+
+The relative form keeps `python3` and `scripts/run_n6_user_app.py` tokens
+byte-identical and moves WorkingDirectory/PYTHONPATH exactly source to target;
+the absolute form replaces only its absolute Release binding. Missing fields,
+mixed runner forms, Strategy restoration, route/plist/lineage/allowlist drift,
+kickstart, retry, second primary attempt, downgrade, operation-count drift, or
+any DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect
+compiles to `REJECT`. This phase is part of the existing L1 policy and cannot
+compile from or create a historical one-off policy.
+
 L2 compiles into separately authorized phases: offline implementation and
 isolated PG16 verification, one exact N6 migration gate with rollback, one
 immutable-Release rebind gate, and read-only acceptance. Migration identity is

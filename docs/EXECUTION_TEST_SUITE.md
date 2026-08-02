@@ -1067,6 +1067,28 @@ automatic proposal creation or confirmation -> REJECT
 ordinary request asking for a new one-off policy -> REJECT
 ```
 
+The L1 static suite must additionally bind the unchanged legacy L1 contract by
+SHA-256 and prove the reusable `post_decommission_web_readonly_rebind` object is
+part of that policy, with `layer_role=runtime_control` and default `REJECT`.
+The positive fixture requires prior L1 `ACCEPT`, Web/read-only UX-only
+non-Strategy non-regression, strategy-write `0` throughout, evaluator absent/
+zero operations, virtual-executor object disjoint/zero operations, immutable
+source/target and exact diff allowlist, exact retired `307` notice route, three
+exact `410`/`Cache-Control:no-store` APIs, one valid relative-or-absolute runner
+form and all target runner checks, one replace/swap + bootout + `>=1s` wait and
+old job/PID absence + bootstrap, and every forbidden-effect count `0`.
+
+Negative fixtures must independently produce `REJECT` for every missing field;
+mixed runner form; strategy-write nonzero; evaluator presence/operation;
+virtual-executor boundary/operation drift (while PID/runs-only rotation stays
+accepted); Strategy route/API or surface-restoration drift; Release, lineage,
+manifest/hash, exact diff, plist, runner containment/type/symlink/write-bit/
+owner/mode/hash drift; kickstart, retry, second primary, downgrade or operation-
+count drift; rollback on success or more than one failure rollback; and any
+DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect. Tests
+must also prove historical one-off policy identifiers are neither referenced
+nor reintroduced by the new phase.
+
 The tests must also parse
 `docs/N6_B_TRACK_BASELINE_REGISTRY_V1.json`, require an honest `FRAGMENTED`
 status while active services use different Release lineages, and prove the

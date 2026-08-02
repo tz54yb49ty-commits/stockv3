@@ -2537,10 +2537,54 @@ function, retry, second mutation, or forbidden side effect returns `REJECT`.
     "n1_n5_writeback"
   ],
   "max_mutating_gates": 2,
-  "governance_session_cannot_execute": true
+  "governance_session_cannot_execute": true,
+  "legacy_contract_sha256": "64c31c8b992029072461aaee430bc44f3724a803ff3edb48ce6a3bb339d5dd13",
+  "deployment_phase_contract": {
+    "phase_id": "post_decommission_web_readonly_rebind",
+    "layer_role": "runtime_control",
+    "source": "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json#/lanes/L1/deployment_phases/post_decommission_web_readonly_rebind",
+    "source_policy_legacy_contract_sha256": "ff9d899636e0e742d833709eb3e778781522b33b0800557ce2ef30173b2f1a47",
+    "exact_source_object_required": true,
+    "missing_or_source_mismatch_decision": "REJECT",
+    "governance_session_runtime_operation_allowed": false
+  }
 }
 ```
 <!-- policy:n6_btrack_delivery_l1_web_readonly_v1:end -->
+
+The L1 deployment phase above is not a new policy and does not revive any
+historical one-off Strategy Center policy. It compiles only after an L1
+classification `ACCEPT`, and only for a separately authorized
+`runtime_control` deployment of a Web/read-only, UX-only, non-Strategy,
+non-regressing candidate whose source and target both retain Strategy Center
+decommission.
+
+The referenced phase object is the complete value-level authority. Kernel
+evaluation requires exact equality with that object: strategy-write is `0` at
+live/source/target/readiness/rollback; the exact Strategy evaluator is absent
+and has zero operations; the virtual executor has zero operations and remains
+object-disjoint from Web while normal StartInterval PID/runs rotation is not
+drift. The retired page remains an exact `307` to
+`/n6/app/signals?notice=strategy_center_retired`; all three retired Strategy
+APIs remain exact `410`, `Cache-Control: no-store`, and
+`code=strategy_center_retired`.
+
+Both Releases must be immutable and bound by exact non-regressing lineage,
+manifest/hash evidence, and a Web-only/UX-only/non-Strategy diff allowlist.
+The Web plist may change only Release binding. Relative `python3` plus
+`scripts/run_n6_user_app.py` keeps both runner tokens byte-identical while
+WorkingDirectory/PYTHONPATH move exactly source to target; the absolute-runner
+form may replace only the absolute Release binding. Mixed runner forms or a
+target runner that is not contained, regular, non-symlink, non-writable, and
+owner/mode/hash/manifest exact returns `REJECT`.
+
+The primary budget is one safe plist replace/swap, one bootout, a wait of at
+least one second followed by old job/PID absence, and one bootstrap. Kickstart,
+retry, downgrade, or a second primary attempt is forbidden; only primary
+failure permits one frozen-source rollback. Database, N1-N5, evaluator,
+virtual-executor, business, proposal, cash, position, and trade effects must
+all remain zero. Missing fields or classification, runner, route, plist,
+side-effect, or operation-count drift returns `REJECT`.
 
 <!-- policy:n6_btrack_delivery_l2_n6_business_v1:begin -->
 ```json

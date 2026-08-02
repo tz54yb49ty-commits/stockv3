@@ -101,6 +101,19 @@ Detailed rules:
     rollback/bootout evidence required by that lane, and a forbidden-effect
     zero summary. Mixed lanes or a new one-off policy request must trace
     `BLOCK`/`REJECT` before runtime.
+8b. An L1 `post_decommission_web_readonly_rebind` trace must additionally bind
+    the prior L1 `ACCEPT`, Web-only UX-only non-Strategy exact diff, immutable
+    source/target commit/tree/archive/manifest/filesystem hashes and lineage;
+    live/source/target/readiness/rollback strategy-write values; exact retired
+    `307` and three `410`/`no-store` results; evaluator absence/operation count;
+    virtual-executor disjoint hashes, operation count and PID/runs-only rotation
+    verdict; runner form/tokens, WorkingDirectory/PYTHONPATH and target runner
+    checks; plist before/after hashes; replace/swap, bootout, wait, old job/PID
+    absence, bootstrap, kickstart/retry/downgrade counts; rollback trigger/count;
+    and DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade zeroes.
+    Missing fields or any mismatch must trace `REJECT`/`STOP`; the trace must
+    retain the existing L1 policy id and must not name or revive a historical
+    one-off policy.
 9. A scheduled-evaluator `ACCEPT` must additionally record the exact label/plist,
    immutable Release commit/tree/archive/manifest/filesystem hashes, auto
    runner/planner blobs, dependency lock/runtime-env and argv hashes, the frozen

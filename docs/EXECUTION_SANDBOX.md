@@ -340,6 +340,23 @@ exact Web diff and, when separately authorized, one Web immutable-Release
 rebind. Any database, quote-writer, executor, stop-loss, or virtual-account
 effect predicts `STOP`.
 
+For its `post_decommission_web_readonly_rebind` phase, simulation must also
+freeze an L1-accepted Web/read-only UX-only non-Strategy candidate, immutable
+non-regressing source/target lineage and exact diff allowlist, strategy-write
+`0` throughout, exact retired `307` plus three `410`/`no-store` routes,
+evaluator absence/zero operations, and virtual-executor object disjointness/
+zero operations. Natural virtual-executor StartInterval PID/runs rotation is
+not drift. It must select exactly one runner form: byte-identical relative
+`python3` + `scripts/run_n6_user_app.py` with exact WorkingDirectory/PYTHONPATH
+source-to-target, or an absolute runner Release-binding replacement. It must
+simulate target runner containment, regular/non-symlink/non-writable,
+owner/mode/hash/manifest checks; one plist replace/swap, one bootout, wait
+`>=1s` and old job/PID absence, one bootstrap; and failure-only single frozen-
+source rollback. Any missing/mixed field, Strategy restoration, kickstart,
+retry, downgrade, second attempt, route/plist/side-effect/operation-count drift,
+or DB/N1-N5/evaluator/executor/business/proposal/cash/position/trade effect
+predicts `STOP`.
+
 For `n6_btrack_delivery_l2_n6_business_v1`, implementation, migration,
 Release rebind, and acceptance are simulated as separate gates. The simulation
 must bind the complete migration filename, rollback, function/ACL contract, and
