@@ -3,6 +3,13 @@ import unittest
 from pathlib import Path
 
 from ashare_v3.action import live_tracking_poller as poller
+from ashare_v3.events.models import (
+    EventContractError,
+    N5_EVENT_TYPES,
+    N5_TRIGGER_STATUS_MESSAGE_TYPES,
+    validate_event_envelope,
+)
+import run_n5_trigger_status_forward_once as status_runner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -227,6 +234,8 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
         self.assertEqual(payload["operation"], "update")
         self.assertEqual(payload["trigger_pct"], "5.555556")
         self.assertEqual(payload["entry_trigger_event_id"], "n4-entry-1")
+        self.assertEqual(payload["trigger_time"], "2026-07-31T09:31:00+08:00")
+        self.assertEqual(payload["source_trigger_event_time"], "2026-07-31T09:35:00+08:00")
         self.assertFalse(payload["action_eligible_entry_allowed"])
 
     def test_false_state_change_invalidates_eligible_and_executed_tracking(self) -> None:
@@ -387,6 +396,158 @@ class TriggerStatusForwardContractTests(unittest.TestCase):
             self.assertIn(marker, text)
         self.assertNotIn("DELETE FROM common_action_event", text)
         self.assertNotIn("UPDATE common_event_outbox", text)
+
+    def test_event_envelope_accepts_only_valid_non_action_status_messages(self) -> None:
+        rows = [
+            trigger_state_changed(
+                event_id="n4-model-true",
+                event_time="2026-07-31T09:35:00+08:00",
+                trigger_live=True,
+            ),
+            trigger_state_changed(
+                event_id="n4-model-false",
+                event_time="2026-07-31T09:40:00+08:00",
+                trigger_live=False,
+            ),
+        ]
+        events = status_plan(rows, [action_eligible()])["status_events"]
+
+        self.assertEqual(
+            N5_EVENT_TYPES,
+            ("ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped"),
+        )
+        self.assertEqual(
+            N5_TRIGGER_STATUS_MESSAGE_TYPES,
+            ("TriggerStatusUpdated", "TriggerStatusInvalidated"),
+        )
+        for event in events:
+            validate_event_envelope(status_runner._event_envelope(event))
+
+    def test_event_envelope_rejects_action_fields_and_operation_mismatch(self) -> None:
+        row = trigger_state_changed(
+            event_id="n4-model-invalid",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+        event = status_plan([row], [action_eligible()])["status_events"][0]
+
+        action_pollution = deepcopy(event)
+        action_pollution["payload_json"]["action_state"] = "eligible"
+        with self.assertRaisesRegex(EventContractError, "must not include action fields"):
+            validate_event_envelope(status_runner._event_envelope(action_pollution))
+
+        operation_mismatch = deepcopy(event)
+        operation_mismatch["payload_json"]["operation"] = "invalidate"
+        with self.assertRaisesRegex(EventContractError, "operation mismatch"):
+            validate_event_envelope(status_runner._event_envelope(operation_mismatch))
+
+    def test_runner_plan_only_is_zero_write(self) -> None:
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-runner-plan",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                )
+            ],
+            [action_eligible()],
+        )
+        writer_calls = []
+
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._runner_args(),
+            plan_provider=lambda _args: plan,
+            writer=lambda _args, events: writer_calls.append(events),
+        )
+
+        self.assertEqual(result["verdict"], "N5_TRIGGER_STATUS_FORWARD_PLAN_ONLY")
+        self.assertEqual(result["write_result"]["common_event_outbox"], 0)
+        self.assertEqual(result["write_result"]["common_action_event"], 0)
+        self.assertEqual(writer_calls, [])
+
+    def test_runner_execute_without_confirmation_is_blocked_before_provider_or_writer(self) -> None:
+        calls = []
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._runner_args("--execute"),
+            plan_provider=lambda _args: calls.append("provider"),
+            writer=lambda _args, _events: calls.append("writer"),
+        )
+
+        self.assertEqual(result["verdict"], "BLOCKED_N5_TRIGGER_STATUS_FORWARD")
+        self.assertEqual(result["blocked_reason"], "execute_requires_user_confirmed")
+        self.assertEqual(calls, [])
+
+    def test_runner_fake_writer_receives_only_two_status_message_types(self) -> None:
+        plan = status_plan(
+            [
+                trigger_state_changed(
+                    event_id="n4-runner-true",
+                    event_time="2026-07-31T09:35:00+08:00",
+                    trigger_live=True,
+                ),
+                trigger_state_changed(
+                    event_id="n4-runner-false",
+                    event_time="2026-07-31T09:40:00+08:00",
+                    trigger_live=False,
+                ),
+            ],
+            [action_eligible()],
+        )
+        captured = []
+
+        def fake_writer(_args, events):
+            captured.extend(deepcopy(list(events)))
+            return {
+                **status_runner._zero_write_result(),
+                "executed": True,
+                "common_event_outbox": len(events),
+            }
+
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._runner_args("--execute", "--user-confirmed"),
+            plan_provider=lambda _args: plan,
+            writer=fake_writer,
+        )
+
+        self.assertEqual(result["verdict"], "N5_TRIGGER_STATUS_FORWARD_EXECUTE_PASS")
+        self.assertEqual(
+            [event["event_type"] for event in captured],
+            ["TriggerStatusUpdated", "TriggerStatusInvalidated"],
+        )
+        self.assertFalse(any(event["event_type"].startswith("Action") for event in captured))
+        self.assertEqual(result["write_result"]["common_action_event"], 0)
+
+    def test_runner_runtime_bound_fails_closed_before_write(self) -> None:
+        row = trigger_state_changed(
+            event_id="n4-runner-timeout",
+            event_time="2026-07-31T09:35:00+08:00",
+            trigger_live=True,
+        )
+        calls = []
+        ticks = iter((0.0, 11.0))
+        result = status_runner.run_n5_trigger_status_forward_once(
+            self._runner_args("--max-runtime-seconds", "10"),
+            plan_provider=lambda _args: status_plan([row], [action_eligible()]),
+            writer=lambda _args, _events: calls.append("writer"),
+            now_monotonic=lambda: next(ticks),
+        )
+
+        self.assertEqual(result["blocked_reason"], "max_runtime_seconds_exceeded")
+        self.assertEqual(calls, [])
+
+    @staticmethod
+    def _runner_args(*extra: str) -> list[str]:
+        return [
+            "--for-trade-date",
+            TRADE_DATE,
+            "--source-trigger-run-id",
+            SOURCE_TRIGGER_RUN_ID,
+            "--action-run-id",
+            ACTION_RUN_ID,
+            "--consumer-name",
+            CONSUMER_NAME,
+            *extra,
+        ]
 
 
 if __name__ == "__main__":

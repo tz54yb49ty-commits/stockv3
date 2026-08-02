@@ -31,6 +31,10 @@ N5_EVENT_TYPES = (
     "ActionExecuted",
     "ActionSkipped",
 )
+N5_TRIGGER_STATUS_MESSAGE_TYPES = (
+    "TriggerStatusUpdated",
+    "TriggerStatusInvalidated",
+)
 N5_LEGACY_EVENT_TYPES = tuple(f"{prefix}Event" for prefix in ("Action", "Hint", "Risk", "Position"))
 ASSET_KINDS = ("stock", "index", "board", "common")
 
@@ -128,6 +132,33 @@ N5_TRIGGER_FACT_PASSTHROUGH_PAYLOAD_KEYS = (
     "period_trigger_baseline_trace",
     "baseline_source",
 )
+N5_TRIGGER_STATUS_MESSAGE_PAYLOAD_KEYS = (
+    "contract_version",
+    "message_role",
+    "operation",
+    "trade_date",
+    "tracking_state_key",
+    "entry_trigger_event_id",
+    "action_eligible_event_id",
+    "source_trigger_event_id",
+    "source_trigger_event_time",
+    "source_trigger_run_id",
+    "asset_kind",
+    "identity_key",
+    "asset_code",
+    "asset_name",
+    "direction",
+    "signal_type",
+    "condition_key",
+    "trigger_time",
+    "trigger_price",
+    "trigger_pct",
+    "trigger_period",
+    "triggered_periods",
+    "trigger_live",
+    "current_status",
+    "action_eligible_entry_allowed",
+)
 N4_DIRECTIONS = ("buy", "sell")
 N5_ACTION_TYPES = (
     "buy_candidate",
@@ -210,7 +241,7 @@ def validate_n4_event_type(event_type: str) -> None:
 def validate_n5_event_type(event_type: str) -> None:
     if event_type.startswith(("User", "Voice", "Sim")):
         raise EventContractError("N5 event names must not use User*, Voice*, or Sim* prefixes")
-    if event_type not in N5_EVENT_TYPES:
+    if event_type not in N5_EVENT_TYPES + N5_TRIGGER_STATUS_MESSAGE_TYPES:
         raise EventContractError(f"unsupported N5 event_type: {event_type}")
 
 
@@ -382,6 +413,89 @@ def validate_n5_payload_fields(envelope: EventEnvelope) -> None:
         )
 
 
+def validate_n5_trigger_status_message_payload(envelope: EventEnvelope) -> None:
+    payload = envelope.payload_json
+    value_may_be_false_or_empty = {
+        "triggered_periods",
+        "trigger_live",
+        "action_eligible_entry_allowed",
+    }
+    missing = [
+        key
+        for key in N5_TRIGGER_STATUS_MESSAGE_PAYLOAD_KEYS
+        if not (
+            _payload_has_key_value_or_empty_collection(payload, key)
+            if key in value_may_be_false_or_empty
+            else _payload_has_value(payload, key)
+        )
+    ]
+    if missing:
+        raise EventContractError(
+            "N5 trigger-status payload missing required fields: " + ", ".join(missing)
+        )
+    forbidden = [key for key in ("action_state", "confirmation_status", "action_mark") if key in payload]
+    if forbidden:
+        raise EventContractError(
+            "N5 trigger-status payload must not include action fields: " + ", ".join(forbidden)
+        )
+    if str(payload.get("contract_version") or "") != "N5-N6-trigger-status-forward-v1":
+        raise EventContractError("N5 trigger-status payload contract_version mismatch")
+    if str(payload.get("message_role") or "") != "n6_trigger_status_projection_only":
+        raise EventContractError("N5 trigger-status payload message_role mismatch")
+
+    expected = {
+        "TriggerStatusUpdated": ("update", True, "matched"),
+        "TriggerStatusInvalidated": ("invalidate", False, "inactive"),
+    }
+    operation, trigger_live, current_status = expected[envelope.event_type]
+    if str(payload.get("operation") or "") != operation:
+        raise EventContractError("N5 trigger-status payload operation mismatch")
+    if payload.get("trigger_live") is not trigger_live:
+        raise EventContractError("N5 trigger-status payload trigger_live mismatch")
+    if str(payload.get("current_status") or "") != current_status:
+        raise EventContractError("N5 trigger-status payload current_status mismatch")
+    if payload.get("action_eligible_entry_allowed") is not False:
+        raise EventContractError("N5 trigger-status payload must forbid action entry")
+    if payload.get("common_action_event_write_allowed") is not False:
+        raise EventContractError("N5 trigger-status payload must forbid common_action_event writes")
+    if str(payload.get("persistence_target") or "") != "common_event_outbox":
+        raise EventContractError("N5 trigger-status payload persistence target mismatch")
+
+    if str(payload.get("trade_date") or "") != envelope.trade_date:
+        raise EventContractError("N5 trigger-status payload trade_date must match event envelope")
+    if str(payload.get("asset_kind") or "") != envelope.asset_kind:
+        raise EventContractError("N5 trigger-status payload asset_kind must match event envelope")
+    if str(payload.get("identity_key") or "") != envelope.identity_key:
+        raise EventContractError("N5 trigger-status payload identity_key must match event envelope")
+    if str(payload.get("source_trigger_event_time") or "") != envelope.event_time.isoformat():
+        raise EventContractError("N5 trigger-status source_trigger_event_time must match event envelope")
+
+    direction = str(payload.get("direction") or "")
+    signal_type = str(payload.get("signal_type") or "")
+    condition_key = str(payload.get("condition_key") or "")
+    if direction not in N4_DIRECTIONS:
+        raise EventContractError(f"unsupported N5 trigger-status direction: {direction}")
+    if signal_type not in N5_RUNTIME_SIGNAL_TYPES:
+        raise EventContractError(f"unsupported N5 trigger-status signal_type: {signal_type}")
+    if signal_type == "B_BUY" and direction != "buy":
+        raise EventContractError("B_BUY must keep direction=buy in N5 trigger-status payload")
+    if signal_type == "S_SELL" and direction != "sell":
+        raise EventContractError("S_SELL must keep direction=sell in N5 trigger-status payload")
+    if condition_key == "BUY_HINT" and direction != "buy":
+        raise EventContractError("BUY_HINT must keep direction=buy in N5 trigger-status payload")
+    if condition_key == "SELL_HINT" and direction != "sell":
+        raise EventContractError("SELL_HINT must keep direction=sell in N5 trigger-status payload")
+    if str(payload.get("trigger_pct_status") or "") != "ready":
+        raise EventContractError("N5 trigger-status payload trigger_pct must be ready")
+    if not isinstance(payload.get("triggered_periods"), (list, tuple)):
+        raise EventContractError("N5 trigger-status payload triggered_periods must be a list")
+    if condition_key in HINT_CONDITION_KEYS:
+        if str(payload.get("trigger_period") or "") != "30m":
+            raise EventContractError("N5 trigger-status HINT payload requires trigger_period=30m")
+        if payload.get("triggered_periods"):
+            raise EventContractError("N5 trigger-status HINT payload must hide internal triggered_periods")
+
+
 def validate_n5_trigger_fact_passthrough_payload(payload: Mapping[str, Any]) -> None:
     trigger_kind = str(payload.get("trigger_kind") or "")
     condition_key = str(payload.get("condition_key") or payload.get("original_condition_key") or "")
@@ -484,4 +598,7 @@ def validate_event_envelope(envelope: EventEnvelope) -> None:
         validate_n4_payload_fields(envelope)
     if envelope.source_layer == N5_SOURCE_LAYER:
         validate_n5_event_type(envelope.event_type)
-        validate_n5_payload_fields(envelope)
+        if envelope.event_type in N5_TRIGGER_STATUS_MESSAGE_TYPES:
+            validate_n5_trigger_status_message_payload(envelope)
+        else:
+            validate_n5_payload_fields(envelope)

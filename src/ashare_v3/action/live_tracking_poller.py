@@ -2318,6 +2318,8 @@ def _build_trigger_status_forward_event(
         inherited_reasons=(),
         invalid_price_reason="latest_trigger_price_invalid",
     )
+    if trigger_pct["status"] != "ready":
+        raise ValueError("status-forward trigger_pct is not ready")
     trigger_period, _primary_trigger_period, triggered_periods = _canonical_trigger_period_payload_fields(
         grain,
         payload,
@@ -2341,7 +2343,8 @@ def _build_trigger_status_forward_event(
         "direction": grain["direction"],
         "signal_type": grain["signal_type"],
         "condition_key": grain["condition_key"],
-        "trigger_time": row.get("event_time"),
+        "trigger_time": _scope_time_text(episode.get("entry_trigger_time")),
+        "source_trigger_event_time": _scope_time_text(row.get("event_time")),
         "trigger_price": trigger_price,
         "trigger_pct": trigger_pct["value"],
         "trigger_pct_status": trigger_pct["status"],
