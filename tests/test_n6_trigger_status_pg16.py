@@ -27,6 +27,9 @@ from ashare_v3.web.n6_user_app import PostgresN6UserRepository
 ROOT = Path(__file__).resolve().parents[1]
 FORWARD = ROOT / "sql/089_n6_trigger_status_current.sql"
 ROLLBACK = ROOT / "sql/089_n6_trigger_status_current_rollback.sql"
+EXACT_BACKFILL_ROLLBACK = (
+    ROOT / "sql/N6_trigger_status_projection_20260731_backfill_v1_exact_rollback.sql"
+)
 PG_ENABLED = os.environ.get("ASHARE_V3_N6_TRIGGER_STATUS_PG16") == "1"
 PG_BIN = Path(
     os.environ.get(
@@ -344,6 +347,38 @@ class N6TriggerStatusPg16StaticContractTests(unittest.TestCase):
         self.assertIn(marker, rollback)
         self.assertIn(COLUMN_SIGNATURE, rollback)
 
+    def test_exact_backfill_rollback_is_projection_scoped_and_non_uninstalling(self) -> None:
+        text = EXACT_BACKFILL_ROLLBACK.read_text(encoding="utf-8")
+        for marker in (
+            "n6_trigger_status_projection_20260731_backfill_v1",
+            "n6_trigger_status_projection_v1",
+            "trigger-status:20260731",
+            "4103761 AND 4107616",
+            "eligible_count <> 1042",
+            "executed_count <> 723",
+            "updated_count <> 194",
+            "invalidated_count <> 337",
+            "deleted_current_count <> 705",
+            "deleted_inbox_count <> 2296",
+            "deleted_checkpoint_count <> 1",
+            "before_outbox_range_fingerprint",
+            "after_outbox_range_fingerprint",
+            "immutable external backup",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("trigger_pct", text)
+        self.assertNotRegex(text, r"(?i)\bTRUNCATE\s+(?:TABLE\s+)?public\.")
+        self.assertNotRegex(text, r"(?i)\bDROP\s+(?:TABLE\s+)?")
+        self.assertNotRegex(text, r"(?i)\bCASCADE\b")
+        self.assertNotRegex(
+            text, r"(?i)(?:DELETE\s+FROM|UPDATE)\s+public\.common_event_outbox"
+        )
+        self.assertNotIn("089_n6_trigger_status_current_rollback.sql", text)
+        self.assertIn(
+            "DELETE FROM public.common_event_inbox inbox\n  USING public.common_event_outbox outbox",
+            text,
+        )
+
 
 @unittest.skipUnless(
     PG_ENABLED,
@@ -653,6 +688,362 @@ class N6TriggerStatusPg16Tests(unittest.TestCase):
         self.assertEqual(grouped["trigger_price"], "11.000000")
         self.assertEqual(grouped["trigger_period"], "Q")
         self.assertEqual(grouped["triggered_periods"], ["Q", "W", "D"])
+
+    def test_y_exact_20260731_backfill_rollback_preserves_sentinels(self) -> None:
+        target_rows: list[tuple] = []
+        for entry_number in range(1, 1043):
+            ordinal = entry_number
+            outbox_id = 4103760 + ordinal
+            event_id = f"eligible:{entry_number}"
+            identity_key = f"stock:TEST:{entry_number:06d}"
+            payload = {
+                "trade_date": TRADE_DATE,
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "asset_code": f"{entry_number:06d}",
+                "asset_name": f"测试{entry_number}",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:D",
+                "projection_message_status": "ready",
+                "trace_json": {"tracking_state_key": f"state:{entry_number}"},
+                "action_entry_trigger_matched_ref": {
+                    "source_trigger_event_id": f"entry:{entry_number}",
+                    "source_trigger_event_type": "TriggerMatched",
+                },
+            }
+            target_rows.append(
+                (
+                    outbox_id, event_id, "ActionEligible", "n5.action.v1",
+                    identity_key, event_id, identity_key,
+                    json.dumps(payload, ensure_ascii=False),
+                )
+            )
+        for executed_number in range(1, 724):
+            ordinal = 1042 + executed_number
+            event_id = f"executed:{executed_number}"
+            identity_key = f"stock:EXEC:{executed_number:06d}"
+            target_rows.append(
+                (
+                    4103760 + ordinal, event_id, "ActionExecuted", "n5.action.v1",
+                    identity_key, event_id, identity_key,
+                    json.dumps({"action_state": "executed"}),
+                )
+            )
+        for entry_number in range(1, 195):
+            ordinal = 1765 + entry_number
+            event_id = f"updated:{entry_number}"
+            identity_key = f"stock:TEST:{entry_number:06d}"
+            payload = {
+                "contract_version": CONTRACT_VERSION,
+                "message_role": MESSAGE_ROLE,
+                "operation": "update",
+                "trade_date": TRADE_DATE,
+                "action_eligible_event_id": f"eligible:{entry_number}",
+                "source_trigger_event_id": f"state-change:{entry_number}",
+            }
+            target_rows.append(
+                (
+                    4103760 + ordinal, event_id, "TriggerStatusUpdated",
+                    "n5.trigger-status.v1", identity_key, event_id, identity_key,
+                    json.dumps(payload),
+                )
+            )
+        for entry_number in range(706, 1043):
+            ordinal = 1254 + entry_number
+            outbox_id = 4107616 if ordinal == 2296 else 4103760 + ordinal
+            event_id = f"invalidated:{entry_number}"
+            identity_key = f"stock:TEST:{entry_number:06d}"
+            payload = {
+                "contract_version": CONTRACT_VERSION,
+                "message_role": MESSAGE_ROLE,
+                "operation": "invalidate",
+                "trade_date": TRADE_DATE,
+                "action_eligible_event_id": f"eligible:{entry_number}",
+                "source_trigger_event_id": f"state-change:{entry_number}",
+            }
+            target_rows.append(
+                (
+                    outbox_id, event_id, "TriggerStatusInvalidated",
+                    "n5.trigger-status.v1", identity_key, event_id, identity_key,
+                    json.dumps(payload),
+                )
+            )
+        self.assertEqual(len(target_rows), 2296)
+
+        with self.cluster.connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO common_event_outbox (
+                      outbox_id, event_id, event_type, event_schema_version,
+                      trade_date, asset_kind, identity_key, event_time,
+                      source_layer, source_run_id, dedup_key, partition_key,
+                      payload_json, status
+                    ) OVERRIDING SYSTEM VALUE
+                    VALUES (%s, %s, %s, %s, %s, 'stock', %s,
+                            '2026-07-31 15:00:00+08', 'N5_action',
+                            'n5-source-run', %s, %s, %s::jsonb, 'pending')
+                    """,
+                    [
+                        (
+                            outbox_id, event_id, event_type, schema_version,
+                            TRADE_DATE, identity_key, dedup_key, partition_key,
+                            payload_json,
+                        )
+                        for (
+                            outbox_id, event_id, event_type, schema_version,
+                            identity_key, dedup_key, partition_key, payload_json,
+                        ) in target_rows
+                    ],
+                )
+            conn.execute(
+                """
+                INSERT INTO common_event_inbox (
+                  consumer_name, event_id, event_type, event_schema_version,
+                  source_layer, source_run_id, dedup_key, partition_key,
+                  payload_json, status, attempt_count, received_at, processed_at,
+                  raw_json
+                )
+                SELECT 'n6_trigger_status_projection_v1', event_id, event_type,
+                       event_schema_version, source_layer, source_run_id, dedup_key,
+                       partition_key, payload_json, 'processed', 1,
+                       pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp(),
+                       pg_catalog.jsonb_build_object(
+                         'outbox_id', outbox_id, 'event_id', event_id,
+                         'event_type', event_type,
+                         'trade_date', trade_date, 'source_layer', source_layer,
+                         'payload_json', payload_json
+                       )
+                FROM common_event_outbox
+                WHERE outbox_id BETWEEN 4103761 AND 4107616
+                ORDER BY outbox_id
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO n6_trigger_status_current (
+                  contract_version, consumer_name, projection_run_id, trade_date,
+                  tracking_state_key, entry_trigger_event_id,
+                  action_eligible_event_id, asset_kind, identity_key, asset_code,
+                  asset_name, direction, signal_type, condition_key, trigger_time,
+                  trigger_price, trigger_period, triggered_periods,
+                  action_eligible_outbox_id, last_status_outbox_id, last_event_id,
+                  last_event_type, source_action_run_id, source_trigger_event_id
+                )
+                SELECT %s, 'n6_trigger_status_projection_v1',
+                       'n6_trigger_status_projection_20260731_backfill_v1',
+                       %s, 'state:' || number, 'entry:' || number,
+                       'eligible:' || number, 'stock',
+                       'stock:TEST:' || pg_catalog.lpad(number::text, 6, '0'),
+                       pg_catalog.lpad(number::text, 6, '0'), '测试' || number,
+                       'buy', 'B_BUY', 'BUY:D',
+                       '2026-07-31 09:31:00+08', 10, 'D', ARRAY['D']::text[],
+                       4103760 + number,
+                       CASE WHEN number <= 194
+                            THEN 4103760 + 1765 + number
+                            ELSE 4103760 + number END,
+                       CASE WHEN number <= 194
+                            THEN 'updated:' || number
+                            ELSE 'eligible:' || number END,
+                       CASE WHEN number <= 194
+                            THEN 'TriggerStatusUpdated'
+                            ELSE 'ActionEligible' END,
+                       'n5-source-run',
+                       CASE WHEN number <= 194
+                            THEN 'state-change:' || number
+                            ELSE 'entry:' || number END
+                FROM pg_catalog.generate_series(1, 705) AS number
+                """,
+                (CONTRACT_VERSION, TRADE_DATE),
+            )
+            conn.execute(
+                """
+                INSERT INTO common_event_consumer_checkpoint (
+                  consumer_name, partition_key, source_layer, last_event_id,
+                  last_event_time, last_outbox_id, checkpoint_payload, updated_at
+                )
+                SELECT 'n6_trigger_status_projection_v1',
+                       'trigger-status:20260731', 'N5_action', event_id, event_time,
+                       outbox_id,
+                       pg_catalog.jsonb_build_object(
+                         'contract_version', %s::text,
+                         'projection_run_id',
+                           'n6_trigger_status_projection_20260731_backfill_v1',
+                         'trade_date', %s::text
+                       ),
+                       pg_catalog.clock_timestamp()
+                FROM common_event_outbox WHERE outbox_id = 4107616
+                """,
+                (CONTRACT_VERSION, TRADE_DATE),
+            )
+
+            other_consumer_payload = json.dumps(
+                {"sentinel": "other-consumer-same-date"}
+            )
+            conn.execute(
+                """
+                INSERT INTO common_event_outbox (
+                  outbox_id, event_id, event_type, event_schema_version,
+                  trade_date, asset_kind, identity_key, event_time, source_layer,
+                  source_run_id, dedup_key, partition_key, payload_json, status
+                ) OVERRIDING SYSTEM VALUE
+                VALUES (4107000, 'sentinel-other-consumer', 'ActionEligible',
+                        'n5.action.v1', %s, 'stock', 'stock:SENTINEL:OTHER',
+                        '2026-07-31 15:01:00+08', 'N5_action', 'sentinel-run',
+                        'sentinel-other-consumer', 'stock:SENTINEL:OTHER',
+                        %s::jsonb, 'delivered')
+                """,
+                (TRADE_DATE, other_consumer_payload),
+            )
+            conn.execute(
+                """
+                INSERT INTO common_event_inbox (
+                  consumer_name, event_id, event_type, event_schema_version,
+                  source_layer, source_run_id, dedup_key, partition_key,
+                  payload_json, status, attempt_count, received_at, processed_at,
+                  raw_json
+                ) VALUES (
+                  'sentinel_other_consumer', 'sentinel-other-consumer',
+                  'ActionEligible', 'n5.action.v1', 'N5_action', 'sentinel-run',
+                  'sentinel-other-consumer', 'stock:SENTINEL:OTHER', %s::jsonb,
+                  'processed', 1, pg_catalog.clock_timestamp(),
+                  pg_catalog.clock_timestamp(), '{}'::jsonb
+                )
+                """,
+                (other_consumer_payload,),
+            )
+
+            other_date_payload = json.dumps({"sentinel": "other-date"})
+            conn.execute(
+                """
+                INSERT INTO common_event_outbox (
+                  outbox_id, event_id, event_type, event_schema_version,
+                  trade_date, asset_kind, identity_key, event_time, source_layer,
+                  source_run_id, dedup_key, partition_key, payload_json, status
+                ) OVERRIDING SYSTEM VALUE
+                VALUES (5000000, 'sentinel-other-date', 'ActionEligible',
+                        'n5.action.v1', '20260730', 'stock',
+                        'stock:SENTINEL:OLD', '2026-07-30 15:00:00+08',
+                        'N5_action', 'old-run', 'sentinel-other-date',
+                        'stock:SENTINEL:OLD', %s::jsonb, 'pending')
+                """,
+                (other_date_payload,),
+            )
+            conn.execute(
+                """
+                INSERT INTO common_event_inbox (
+                  consumer_name, event_id, event_type, event_schema_version,
+                  source_layer, source_run_id, dedup_key, partition_key,
+                  payload_json, status, attempt_count, received_at, processed_at,
+                  raw_json
+                ) VALUES (
+                  'n6_trigger_status_projection_v1', 'sentinel-other-date',
+                  'ActionEligible', 'n5.action.v1', 'N5_action', 'old-run',
+                  'sentinel-other-date', 'stock:SENTINEL:OLD', %s::jsonb,
+                  'processed', 1, pg_catalog.clock_timestamp(),
+                  pg_catalog.clock_timestamp(), '{}'::jsonb
+                )
+                """,
+                (other_date_payload,),
+            )
+            conn.execute(
+                """
+                INSERT INTO n6_trigger_status_current (
+                  contract_version, consumer_name, projection_run_id, trade_date,
+                  tracking_state_key, entry_trigger_event_id,
+                  action_eligible_event_id, asset_kind, identity_key, asset_code,
+                  asset_name, direction, signal_type, condition_key, trigger_time,
+                  trigger_price, trigger_period, triggered_periods,
+                  action_eligible_outbox_id, last_status_outbox_id, last_event_id,
+                  last_event_type, source_action_run_id, source_trigger_event_id
+                ) VALUES (
+                  %s, 'n6_trigger_status_projection_v1', 'older-projection',
+                  '20260730', 'state:old', 'entry:old', 'sentinel-other-date',
+                  'stock', 'stock:SENTINEL:OLD', 'OLD', '旧投影', 'buy',
+                  'B_BUY', 'BUY:D', '2026-07-30 09:31:00+08', 9, 'D',
+                  ARRAY['D']::text[], 5000000, 5000000,
+                  'sentinel-other-date', 'ActionEligible', 'old-run', 'entry:old'
+                )
+                """,
+                (CONTRACT_VERSION,),
+            )
+            conn.execute(
+                """
+                INSERT INTO common_event_consumer_checkpoint (
+                  consumer_name, partition_key, source_layer, last_event_id,
+                  last_event_time, last_outbox_id, checkpoint_payload, updated_at
+                ) VALUES
+                  ('n6_trigger_status_projection_v1', 'trigger-status:20260730',
+                   'N5_action', 'sentinel-other-date',
+                   '2026-07-30 15:00:00+08', 5000000,
+                   '{"sentinel":"other-date"}'::jsonb,
+                   pg_catalog.clock_timestamp()),
+                  ('sentinel_other_consumer', 'trigger-status:20260731',
+                   'N5_action', 'sentinel-other-consumer',
+                   '2026-07-31 15:01:00+08', 4107000,
+                   '{"sentinel":"other-consumer"}'::jsonb,
+                   pg_catalog.clock_timestamp())
+                """
+            )
+
+        with self.cluster.connect() as conn:
+            before_outbox = conn.execute(
+                "SELECT count(*) AS n, count(*) FILTER (WHERE status = 'delivered') AS delivered FROM common_event_outbox"
+            ).fetchone()
+        self.cluster.apply(EXACT_BACKFILL_ROLLBACK)
+        with self.cluster.connect() as conn:
+            after_outbox = conn.execute(
+                "SELECT count(*) AS n, count(*) FILTER (WHERE status = 'delivered') AS delivered FROM common_event_outbox"
+            ).fetchone()
+            self.assertEqual(dict(after_outbox), dict(before_outbox))
+            self.assertEqual(
+                conn.execute(
+                    "SELECT count(*) AS n FROM n6_trigger_status_current WHERE projection_run_id = 'n6_trigger_status_projection_20260731_backfill_v1'"
+                ).fetchone()["n"],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT projection_run_id FROM n6_trigger_status_current"
+                ).fetchone()["projection_run_id"],
+                "older-projection",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT count(*) AS n FROM common_event_inbox WHERE consumer_name = 'n6_trigger_status_projection_v1'"
+                ).fetchone()["n"],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT count(*) AS n FROM common_event_inbox WHERE consumer_name = 'sentinel_other_consumer'"
+                ).fetchone()["n"],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT count(*) AS n FROM common_event_consumer_checkpoint"
+                ).fetchone()["n"],
+                2,
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT pg_catalog.to_regclass('public.n6_trigger_status_current') AS oid"
+                ).fetchone()["oid"]
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT pg_catalog.to_regclass('public.n6_trigger_status_current_trigger_status_episode_id_seq') AS oid"
+                ).fetchone()["oid"]
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT pg_catalog.to_regclass('public.idx_089_n6_trigger_status_public_group') AS oid"
+                ).fetchone()["oid"]
+            )
+        with self.assertRaisesRegex(AssertionError, "input/inbox scope drift"):
+            self.cluster.apply(EXACT_BACKFILL_ROLLBACK)
 
     def test_z_forward_rollback_reapply(self) -> None:
         with self.cluster.connect() as conn:
