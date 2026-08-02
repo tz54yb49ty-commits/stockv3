@@ -189,6 +189,56 @@
         "bootstrap_attempts": 0,
         "database_service_browser_business_effects": 0
       }
+    },
+    "trigger_status_web_failed_release_recovery_once_v1": {
+      "registered_on": "2026-08-02",
+      "evidence_source": "passed_read_only_recovery_review_and_exact_failed_attestation",
+      "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+      "phase_id": "trigger_status_web_failed_release_recovery_once_v1",
+      "phase_canonical_sha256": "09b5864c49c5db0bf279dee7fda76b0f48c2603a9320452d2ea5da40650e905b",
+      "operation_class": "single_web_immutable_release_rebind_eacces_recovery",
+      "executor_role": "runtime_control",
+      "machine_phase_registered": true,
+      "deployment_authorized": false,
+      "governance_session_execution_allowed": false,
+      "prior_phase": {
+        "phase_id": "trigger_status_web_immutable_release_rebind",
+        "phase_canonical_sha256": "37d1b82cedeac6e62ab640df64e3587ca9f97e8f07e018450b74c16b44945994",
+        "consumed_primary_execution_count": 1,
+        "retry_resume_or_reuse_allowed": false
+      },
+      "failed_evidence": {
+        "attestation_path": "/private/tmp/20260802_192641__985202144febffeef3302012675f285e1cf1061a.l2-trigger-status-web-rebind-attestation.json",
+        "attestation_sha256": "71964ef2a231e3307f566f64845c6141d771d7da55e9dc344caf7ac1480934b9",
+        "result": "BLOCKED_PRE_SERVICE",
+        "failed_release_id": "20260802_192641__985202144febffeef3302012675f285e1cf1061a",
+        "failed_target_absent": true,
+        "web_plist_service_and_port_unchanged": true,
+        "database_consumer_migration_n1_n6_business_trade_browser_effects": 0
+      },
+      "invalid_staging": {
+        "path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/.20260802_192641__985202144febffeef3302012675f285e1cf1061a.staging-l2-trigger-status-v1",
+        "manifest_sha256": "f427d169c29c0c83b270d59bff8f6bfb0a3fd72511472b13e03d2fe9a1f10c91",
+        "object_count": 6316,
+        "file_count": 6271,
+        "directory_count": 45,
+        "root_mode": "0555",
+        "disposition": "evidence_only_preserve_in_place",
+        "cleanup_delete_quarantine_rename_modify_repair_reuse_or_promote_allowed": false
+      },
+      "recovery_qualification": {
+        "read_only_review_result": "PASS",
+        "root_cause": "staging_root_sealed_0555_before_renameatx_np",
+        "fresh_unique_release_required": true,
+        "fresh_build_attempts": 1,
+        "fresh_recovery_primary_attempts": 1,
+        "staging_root_0700_until_exclusive_rename": true,
+        "target_root_0555_and_fsync_immediately_after_rename": true,
+        "git_executable_modes_preserved": true,
+        "failed_fresh_staging_sealed_and_preserved": true,
+        "retry_or_second_recovery_allowed": false,
+        "separate_current_request_authorization_required": true
+      }
     }
   }
 }

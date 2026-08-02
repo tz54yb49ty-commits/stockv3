@@ -777,6 +777,194 @@
             "postflight_evidence_missing_or_drifted",
             "forbidden_effect_nonzero"
           ]
+        },
+        "trigger_status_web_failed_release_recovery_once_v1": {
+          "phase_id": "trigger_status_web_failed_release_recovery_once_v1",
+          "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+          "operation_class": "single_web_immutable_release_rebind_eacces_recovery",
+          "executor_role": "runtime_control",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "consumed_phase_contract": {
+            "phase_id": "trigger_status_web_immutable_release_rebind",
+            "canonical_sha256": "37d1b82cedeac6e62ab640df64e3587ca9f97e8f07e018450b74c16b44945994",
+            "primary_execution_count": 1,
+            "consumed": true,
+            "retry_allowed": false,
+            "resume_allowed": false,
+            "reuse_allowed": false
+          },
+          "canonical_control_baseline": {
+            "branch": "codex/n6-btrack-integration",
+            "head": "26cb9ac6d9e7d14a8a364c3c436de14c7341c674",
+            "tree": "717c614ad422cc3e3fb898e40b057f8b8066099c",
+            "parent": "985202144febffeef3302012675f285e1cf1061a",
+            "business_target_commit": "985202144febffeef3302012675f285e1cf1061a",
+            "business_target_tree": "f741f0f0cd7d80648f9897267eb0b2ac8410f9f0"
+          },
+          "failed_execution_attestation": {
+            "path": "/private/tmp/20260802_192641__985202144febffeef3302012675f285e1cf1061a.l2-trigger-status-web-rebind-attestation.json",
+            "sha256": "71964ef2a231e3307f566f64845c6141d771d7da55e9dc344caf7ac1480934b9",
+            "normalized_result": "BLOCKED_PRE_SERVICE",
+            "attested_result": "BLOCKED",
+            "attested_status": "BLOCKED_BEFORE_WEB_MUTATION",
+            "primary_execution_count": 1,
+            "operation_counts": {
+              "release_build": 1,
+              "exclusive_release_rename": 1,
+              "retry": 0,
+              "plist_candidate": 0,
+              "primary_plist_swap": 0,
+              "primary_bootout": 0,
+              "primary_bootstrap": 0,
+              "rollback_restore": 0,
+              "rollback_plist_swap": 0,
+              "rollback_bootout": 0,
+              "rollback_bootstrap": 0
+            },
+            "failed_release_id": "20260802_192641__985202144febffeef3302012675f285e1cf1061a",
+            "failed_target_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/20260802_192641__985202144febffeef3302012675f285e1cf1061a",
+            "failed_target_absent": true,
+            "old_web_unchanged": {
+              "commit": "16950435d4e407890f98234f35fa507ed1a11441",
+              "plist_sha256": "f39e2150011432caf65f982fe5882e96505a367eedc4fca9f5ae180e14e223e1",
+              "pid": 67945,
+              "listen_host": "127.0.0.1",
+              "listen_port": 8786
+            }
+          },
+          "invalid_staging_evidence": {
+            "path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/.20260802_192641__985202144febffeef3302012675f285e1cf1061a.staging-l2-trigger-status-v1",
+            "manifest_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/.20260802_192641__985202144febffeef3302012675f285e1cf1061a.staging-l2-trigger-status-v1/n6-b-track-immutable-release-manifest-v5.json",
+            "manifest_sha256": "f427d169c29c0c83b270d59bff8f6bfb0a3fd72511472b13e03d2fe9a1f10c91",
+            "object_count": 6316,
+            "file_count": 6271,
+            "directory_count": 45,
+            "root_mode": "0555",
+            "same_device_and_owner": true,
+            "symlink_count": 0,
+            "writable_entry_count": 0,
+            "extended_acl_entry_count": 0,
+            "nonzero_flags_count": 0,
+            "full_provenance": true,
+            "seal_partial_flattened_git_100755_to_0444": [
+              "scripts/build_condition_basis.py",
+              "scripts/check_condition_source_ready.py",
+              "scripts/export_minute_target_scope.py",
+              "scripts/run_real_daily_incremental.py"
+            ],
+            "disposition": "evidence_only_preserve_in_place",
+            "delete_allowed": false,
+            "quarantine_allowed": false,
+            "cleanup_allowed": false,
+            "rename_allowed": false,
+            "modify_allowed": false,
+            "repair_allowed": false,
+            "reuse_allowed": false,
+            "promote_allowed": false
+          },
+          "root_cause_contract": {
+            "cause": "staging_root_sealed_0555_before_renameatx_np",
+            "errno": 13,
+            "rename_api": "renameatx_np",
+            "rename_flags": [
+              "RENAME_EXCL",
+              "RENAME_NOFOLLOW_ANY",
+              "RENAME_RESOLVE_BENEATH"
+            ],
+            "weaken_flags_allowed": false,
+            "shell_copy_mv_or_ordinary_rename_allowed": false
+          },
+          "recovery_preflight_contract": {
+            "rehash_failed_attestation_required": true,
+            "rehash_invalid_staging_manifest_required": true,
+            "full_invalid_staging_identity_hash_census_mode_match_required": true,
+            "invalid_staging_preserved_in_place_required": true,
+            "failed_target_absent_required": true,
+            "old_web_plist_pid_port_and_source_unchanged_required": true,
+            "strategy_write_required": 0,
+            "strategy_evaluator_absent_and_untouched_required": true,
+            "virtual_executor_untouched_except_natural_ticks_required": true,
+            "any_drift_decision": "REJECT"
+          },
+          "fresh_release_contract": {
+            "fresh_release_count": 1,
+            "fresh_release_id_and_path_required": true,
+            "failed_release_id_and_path_forbidden": true,
+            "fresh_staging_and_target_absent_before_required": true,
+            "build_attempts": 1,
+            "recovery_primary_attempts": 1,
+            "retry_attempts": 0,
+            "ordered_steps": [
+              "materialize_payload_metadata",
+              "write_release_specific_manifest",
+              "seal_child_directories_and_files_preserving_git_modes",
+              "verify_full_payload_and_manifest_with_staging_root_0700",
+              "renameatx_np_exclusive_no_follow_beneath",
+              "chmod_target_root_0555",
+              "fsync_target_root",
+              "full_target_post_verify"
+            ],
+            "staging_root_mode_through_pre_rename_verification": "0700",
+            "target_root_mode_immediately_after_rename": "0555",
+            "git_mode_100755_child_mode": "0555",
+            "git_mode_100644_child_mode": "0444",
+            "failure_before_rename_closeout": "seal_root_0555_and_preserve_as_evidence",
+            "failed_fresh_staging_cleanup_allowed": false,
+            "second_recovery_allowed": false
+          },
+          "service_rebind_contract": {
+            "exact_label": "com.ashare-v3.n6.user-web",
+            "only_mutable_service": true,
+            "allowed_plist_semantic_deltas": [
+              "release_path",
+              "WorkingDirectory",
+              "EnvironmentVariables.PYTHONPATH"
+            ],
+            "plist_swap_attempts": 1,
+            "bootout_attempts": 1,
+            "old_job_and_pid_absence_required_before_bootstrap": true,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "second_primary_attempt_allowed": false
+          },
+          "rollback_contract": {
+            "trigger": "primary_service_failure_only",
+            "restore_frozen_old_plist_and_release_max_attempts": 1,
+            "success_path_rollback_attempts": 0,
+            "schema_089_or_consumer_rollback_allowed": false
+          },
+          "business_and_acceptance_contract": {
+            "strategy_write": 0,
+            "strategy_evaluator_operation_attempts": 0,
+            "virtual_executor_operation_attempts": 0,
+            "database_consumer_migration_n1_n6_business_trade_browser_push_effects": 0,
+            "trigger_pct_allowed_anywhere": false,
+            "unauthenticated_route_methods_allowed": [
+              "GET",
+              "HEAD"
+            ],
+            "authenticated_dom_acceptance": "DEFERRED_SEPARATE_AUTHORIZED_GATE"
+          },
+          "reject_on": [
+            "missing_required_field",
+            "prior_phase_not_consumed_or_reused",
+            "failed_attestation_or_invalid_staging_drift",
+            "invalid_staging_cleanup_quarantine_rename_modify_repair_reuse_or_promotion",
+            "old_web_or_failed_target_state_drift",
+            "fresh_release_identity_or_path_collision",
+            "staging_root_not_0700_before_rename",
+            "child_git_mode_flattening",
+            "rename_api_or_flags_drift",
+            "target_root_not_immediately_sealed_and_fsynced",
+            "service_or_plist_scope_drift",
+            "retry_second_primary_or_second_recovery",
+            "strategy_write_evaluator_or_virtual_executor_drift",
+            "schema_089_consumer_or_trigger_pct_effect",
+            "forbidden_effect_nonzero"
+          ]
         }
       }
     },

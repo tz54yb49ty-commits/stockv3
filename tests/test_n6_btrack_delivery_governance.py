@@ -64,6 +64,29 @@ L2_TRIGGER_STATUS_WEB_REGISTRY_SHA256 = (
     "af9039218167ca60a4027f9353ce9328c2e782109cf6de4935680a25584357d7"
 )
 L2_TRIGGER_STATUS_WEB_PHASE_ID = "trigger_status_web_immutable_release_rebind"
+L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID = (
+    "trigger_status_web_failed_release_recovery_once_v1"
+)
+L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256 = (
+    "09b5864c49c5db0bf279dee7fda76b0f48c2603a9320452d2ea5da40650e905b"
+)
+L2_TRIGGER_STATUS_WEB_RECOVERY_REGISTRY_SHA256 = (
+    "1b13dc9169ff1609d8e262453cff135cb0dc8338e7eeead550180026cf2232cc"
+)
+L2_TRIGGER_STATUS_WEB_RECOVERY_REQUEST = {
+    "policy_id": "n6_btrack_delivery_l2_n6_business_v1",
+    "phase_id": L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID,
+    "operation_class": "single_web_immutable_release_rebind_eacces_recovery",
+    "executor_role": "runtime_control",
+    "current_request_authorized": True,
+    "governance_session": False,
+    "prior_phase_consumed": True,
+    "failed_evidence_matches": True,
+    "current_state_matches": True,
+    "invalid_staging_preserved_in_place": True,
+    "fresh_release_id_and_path": True,
+    "prior_recovery_execution_count": 0,
+}
 L2_TRIGGER_STATUS_REVIEWED_FILES = (
     "AGENTS.md",
     "docs/Architecture.md",
@@ -451,6 +474,23 @@ def static_l2_web_phase_decision(
         "ACCEPT"
         if canonical_sha256(phase) == L2_TRIGGER_STATUS_WEB_PHASE_SHA256
         and request == L2_WEB_REQUEST
+        else "REJECT"
+    )
+
+
+def l2_web_recovery_request(**overrides: object) -> dict[str, object]:
+    request = copy.deepcopy(L2_TRIGGER_STATUS_WEB_RECOVERY_REQUEST)
+    request.update(overrides)
+    return request
+
+
+def static_l2_web_recovery_phase_decision(
+    phase: dict[str, object], request: dict[str, object]
+) -> str:
+    return (
+        "ACCEPT"
+        if canonical_sha256(phase) == L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256
+        and request == L2_TRIGGER_STATUS_WEB_RECOVERY_REQUEST
         else "REJECT"
     )
 
@@ -1198,6 +1238,176 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
                 del candidate[key]
                 self.assertEqual(
                     static_l2_web_phase_decision(candidate, l2_web_phase_request()),
+                    "REJECT",
+                )
+
+    def test_l2_trigger_status_web_recovery_is_exact_and_registered(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID
+        ]
+        self.assertEqual(
+            canonical_sha256(phase),
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256,
+        )
+        expected = {
+            ("policy_id",): "n6_btrack_delivery_l2_n6_business_v1",
+            ("operation_class",): "single_web_immutable_release_rebind_eacces_recovery",
+            ("executor_role",): "runtime_control",
+            ("default_decision",): "REJECT",
+            ("separate_current_request_authorization_required",): True,
+            ("governance_session_cannot_execute",): True,
+            ("consumed_phase_contract", "phase_id"): L2_TRIGGER_STATUS_WEB_PHASE_ID,
+            ("consumed_phase_contract", "canonical_sha256"): L2_TRIGGER_STATUS_WEB_PHASE_SHA256,
+            ("consumed_phase_contract", "primary_execution_count"): 1,
+            ("consumed_phase_contract", "consumed"): True,
+            ("failed_execution_attestation", "sha256"): "71964ef2a231e3307f566f64845c6141d771d7da55e9dc344caf7ac1480934b9",
+            ("failed_execution_attestation", "normalized_result"): "BLOCKED_PRE_SERVICE",
+            ("failed_execution_attestation", "failed_target_absent"): True,
+            ("invalid_staging_evidence", "manifest_sha256"): "f427d169c29c0c83b270d59bff8f6bfb0a3fd72511472b13e03d2fe9a1f10c91",
+            ("invalid_staging_evidence", "object_count"): 6316,
+            ("invalid_staging_evidence", "file_count"): 6271,
+            ("invalid_staging_evidence", "directory_count"): 45,
+            ("invalid_staging_evidence", "root_mode"): "0555",
+            ("invalid_staging_evidence", "disposition"): "evidence_only_preserve_in_place",
+            ("root_cause_contract", "cause"): "staging_root_sealed_0555_before_renameatx_np",
+            ("fresh_release_contract", "staging_root_mode_through_pre_rename_verification"): "0700",
+            ("fresh_release_contract", "target_root_mode_immediately_after_rename"): "0555",
+            ("fresh_release_contract", "git_mode_100755_child_mode"): "0555",
+            ("fresh_release_contract", "git_mode_100644_child_mode"): "0444",
+            ("service_rebind_contract", "exact_label"): "com.ashare-v3.n6.user-web",
+            ("service_rebind_contract", "plist_swap_attempts"): 1,
+            ("service_rebind_contract", "bootout_attempts"): 1,
+            ("service_rebind_contract", "bootstrap_attempts"): 1,
+            ("business_and_acceptance_contract", "strategy_write"): 0,
+            ("business_and_acceptance_contract", "trigger_pct_allowed_anywhere"): False,
+        }
+        for path, value in expected.items():
+            with self.subTest(path=path):
+                self.assertEqual(nested_value(phase, path), value)
+
+        operations = phase["failed_execution_attestation"]["operation_counts"]
+        self.assertEqual(operations["release_build"], 1)
+        self.assertEqual(operations["exclusive_release_rename"], 1)
+        self.assertFalse(
+            any(
+                count
+                for name, count in operations.items()
+                if name not in {"release_build", "exclusive_release_rename"}
+            )
+        )
+        registry = self.registry["append_only_gate_registrations"][
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID
+        ]
+        self.assertEqual(
+            canonical_sha256(registry),
+            L2_TRIGGER_STATUS_WEB_RECOVERY_REGISTRY_SHA256,
+        )
+        self.assertEqual(
+            registry["phase_canonical_sha256"],
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_SHA256,
+        )
+        self.assertFalse(registry["deployment_authorized"])
+        self.assertFalse(registry["governance_session_execution_allowed"])
+
+    def test_l2_trigger_status_web_recovery_preserves_failed_staging(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID
+        ]
+        staging = phase["invalid_staging_evidence"]
+        for key in (
+            "delete_allowed",
+            "quarantine_allowed",
+            "cleanup_allowed",
+            "rename_allowed",
+            "modify_allowed",
+            "repair_allowed",
+            "reuse_allowed",
+            "promote_allowed",
+        ):
+            with self.subTest(key=key):
+                self.assertFalse(staging[key])
+        self.assertEqual(
+            phase["root_cause_contract"]["rename_flags"],
+            ["RENAME_EXCL", "RENAME_NOFOLLOW_ANY", "RENAME_RESOLVE_BENEATH"],
+        )
+        self.assertEqual(
+            phase["fresh_release_contract"]["ordered_steps"],
+            [
+                "materialize_payload_metadata",
+                "write_release_specific_manifest",
+                "seal_child_directories_and_files_preserving_git_modes",
+                "verify_full_payload_and_manifest_with_staging_root_0700",
+                "renameatx_np_exclusive_no_follow_beneath",
+                "chmod_target_root_0555",
+                "fsync_target_root",
+                "full_target_post_verify",
+            ],
+        )
+        self.assertFalse(
+            phase["fresh_release_contract"]["failed_fresh_staging_cleanup_allowed"]
+        )
+        self.assertFalse(phase["fresh_release_contract"]["second_recovery_allowed"])
+
+    def test_l2_trigger_status_web_recovery_classifier_is_fail_closed(self) -> None:
+        phase = self.contract["lanes"]["L2"]["deployment_phases"][
+            L2_TRIGGER_STATUS_WEB_RECOVERY_PHASE_ID
+        ]
+        self.assertEqual(
+            static_l2_web_recovery_phase_decision(
+                phase,
+                l2_web_recovery_request(),
+            ),
+            "ACCEPT",
+        )
+        rejected_requests = (
+            ("missing_authorization", {"current_request_authorized": False}),
+            ("governance_execute", {"governance_session": True}),
+            ("prior_not_consumed", {"prior_phase_consumed": False}),
+            ("failed_evidence_drift", {"failed_evidence_matches": False}),
+            ("live_state_drift", {"current_state_matches": False}),
+            ("old_staging_mutation", {"invalid_staging_preserved_in_place": False}),
+            ("release_collision", {"fresh_release_id_and_path": False}),
+            ("second_execution", {"prior_recovery_execution_count": 1}),
+        )
+        for name, overrides in rejected_requests:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    static_l2_web_recovery_phase_decision(
+                        phase,
+                        l2_web_recovery_request(**overrides),
+                    ),
+                    "REJECT",
+                )
+        mutations = (
+            ("attestation", ("failed_execution_attestation", "sha256"), "other"),
+            ("staging", ("invalid_staging_evidence", "manifest_sha256"), "other"),
+            ("cleanup", ("invalid_staging_evidence", "cleanup_allowed"), True),
+            ("root_mode", ("fresh_release_contract", "staging_root_mode_through_pre_rename_verification"), "0555"),
+            ("executable_mode", ("fresh_release_contract", "git_mode_100755_child_mode"), "0444"),
+            ("second_recovery", ("fresh_release_contract", "second_recovery_allowed"), True),
+            ("second_bootout", ("service_rebind_contract", "bootout_attempts"), 2),
+            ("strategy_write", ("business_and_acceptance_contract", "strategy_write"), 1),
+            ("trigger_pct", ("business_and_acceptance_contract", "trigger_pct_allowed_anywhere"), True),
+        )
+        for name, path, replacement in mutations:
+            with self.subTest(name=name):
+                candidate = mutated_fixture(phase, path, replacement)
+                self.assertEqual(
+                    static_l2_web_recovery_phase_decision(
+                        candidate,
+                        l2_web_recovery_request(),
+                    ),
+                    "REJECT",
+                )
+        for key in phase:
+            with self.subTest(missing=key):
+                candidate = copy.deepcopy(phase)
+                del candidate[key]
+                self.assertEqual(
+                    static_l2_web_recovery_phase_decision(
+                        candidate,
+                        l2_web_recovery_request(),
+                    ),
                     "REJECT",
                 )
 
