@@ -300,6 +300,7 @@ class FakeN6UserRepository:
         self.app_virtual_account_reads: list[tuple[int, str]] = []
         self.app_cash_snapshot_reads: list[int] = []
         self.app_signal_reads: list[tuple[int, str, int]] = []
+        self.app_trigger_status_reads: list[tuple[int, str, int, str]] = []
         self.app_signal_filter_reads: list[dict[str, Any]] = []
         self.app_signal_event_reads: list[dict[str, Any]] = []
         self.app_signal_scope_metadata_reads = 0
@@ -485,6 +486,34 @@ class FakeN6UserRepository:
             "n6_virtual_trade_proposal": 0,
             "n6_virtual_pnl_snapshot": 0,
         }
+        self.app_trigger_status_rows = [
+            {
+                "trigger_time": "2026-06-05 09:31:00+08:00",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:302132",
+                "asset_code": "302132",
+                "asset_name": "中航成飞",
+                "direction": "buy",
+                "trigger_pct": "1.234567",
+                "trigger_price": "10.123456",
+                "trigger_period": "W",
+                "triggered_periods": ["M", "W", "D"],
+                "episode_count": 2,
+            },
+            {
+                "trigger_time": "2026-06-05 09:32:00+08:00",
+                "asset_kind": "index",
+                "identity_key": "index:SH:000300",
+                "asset_code": "000300",
+                "asset_name": "沪深300",
+                "direction": "sell",
+                "trigger_pct": "-0.500000",
+                "trigger_price": "3900.000000",
+                "trigger_period": "30m",
+                "triggered_periods": [],
+                "episode_count": 1,
+            },
+        ]
         self.virtual_account = {
             "virtual_account_id": 1,
             "principal_id": 1,
@@ -3062,6 +3091,21 @@ class FakeN6UserRepository:
                 )
             ]
         return rows[:limit]
+
+    def fetch_app_trigger_status(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        trade_date: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        self.app_trigger_status_reads.append(
+            (principal_id, principal_type, user_id, trade_date)
+        )
+        self.assert_user(user_id)
+        return [dict(row) for row in self.app_trigger_status_rows[:limit]]
 
     def fetch_app_signal_events(
         self,
@@ -19603,7 +19647,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "/n6/app/messages": "我的监控消息总览",
             "/n6/app/signals": "我的监控消息列表",
             "/n6/app/my-monitor": "我的监控对象",
-            "/n6/app/status-monitor": "状态监控",
+            "/n6/app/status-monitor": "触发状态",
         }
         for path, title in expected_titles.items():
             with self.subTest(path=path):
@@ -19617,10 +19661,11 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
                 self.assertIn(">消息列表<", response.text)
                 self.assertIn('href="/n6/app/my-monitor"', response.text)
                 self.assertIn(">监控对象<", response.text)
+                self.assertIn('href="/n6/app/status-monitor"', response.text)
+                self.assertIn(">触发状态<", response.text)
                 nav_start = response.text.index('<nav aria-label="B轨导航">')
                 nav_end = response.text.index("</nav>", nav_start)
                 nav_html = response.text[nav_start:nav_end]
-                self.assertNotIn(">状态监控<", nav_html)
                 self.assertNotIn(">" + "信号" + "<", response.text)
 
     def test_b_track_app_nav_shows_minimal_ordered_entries_only(self) -> None:
@@ -19639,6 +19684,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             "筛选中心",
             "监控对象",
             "实时监控范围",
+            "触发状态",
             "消息列表",
             "卡片消息",
             "虚拟账户",
@@ -19650,7 +19696,7 @@ process.stdout.write(JSON.stringify({ actionable, disabled, card }));
             position = nav_html.index(f">{label}<" if label != "退出登录" else label)
             self.assertGreater(position, last_position)
             last_position = position
-        for hidden_label in ("关注池", "买入消息", "状态监控", "方案", "组合", "收益", "AI助手", "排行榜"):
+        for hidden_label in ("关注池", "买入消息", "方案", "组合", "收益", "AI助手", "排行榜"):
             self.assertNotIn(hidden_label, nav_html)
 
     def test_b_track_post_close_ux_cleanup_keeps_empty_pages_task_oriented_and_technical_details_folded(self) -> None:
@@ -20299,6 +20345,7 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
 
         self.assertEqual(route_methods["/api/n6/app/v1/signals"], {"GET"})
         self.assertEqual(route_methods["/api/n6/app/v1/signals/{user_signal_projection_id}"], {"GET"})
+        self.assertEqual(route_methods["/api/n6/app/v1/status-monitor"], {"GET"})
         self.assertIn("/n6/app/{page_key}", route_methods)
         self.assertIn("/n6/app/my-monitor/{monitor_page}", route_methods)
         self.assertNotIn("/api/n6/app/v1/messages", route_methods)
@@ -20306,6 +20353,10 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         for method in ("post", "put", "patch", "delete"):
             with self.subTest(method=method):
                 self.assertIn(getattr(client, method)("/api/n6/app/v1/signals").status_code, {404, 405})
+                self.assertIn(
+                    getattr(client, method)("/api/n6/app/v1/status-monitor").status_code,
+                    {404, 405},
+                )
 
     def test_b_track_v2_principal_scope_unavailable_returns_403(self) -> None:
         client, repo, _, _ = build_client()
@@ -20319,7 +20370,7 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         self.assertEqual(repo.app_filter_reads, [])
         self.assertEqual(repo.forbidden_writes["user_monitor"], 0)
 
-    def test_b_track_status_monitor_api_is_readonly_from_reviewed_signals(self) -> None:
+    def test_b_track_status_monitor_api_reads_current_episode_model_only(self) -> None:
         client, repo, _, _ = build_client()
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
@@ -20331,40 +20382,35 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["component"], "B Track Status Monitor")
-        self.assertEqual(payload["component_label"], "状态监控")
+        self.assertEqual(payload["component_label"], "触发状态")
         self.assertTrue(payload["readonly"])
         self.assertEqual(payload["principal"]["principal_id"], "1")
         self.assertEqual(payload["principal"]["principal_type"], "admin")
         self.assertEqual(payload["status_summary"]["active"], 2)
-        self.assertIn("pending_market_data", payload["status_summary"])
-        self.assertIn("inactive", payload["status_summary"])
+        self.assertEqual(payload["status_summary"]["pending_market_data"], 0)
+        self.assertEqual(payload["status_summary"]["inactive"], 0)
         self.assertEqual(len(payload["items"]), 2)
         first = payload["items"][0]
         self.assertEqual(first["asset_kind"], "stock")
         self.assertEqual(first["asset_kind_label"], "个股")
         self.assertEqual(first["identity_key"], "stock:SZ:302132")
-        self.assertEqual(first["current_status"], "active")
-        self.assertEqual(first["current_status_label"], "有效")
-        self.assertEqual(first["n4_event"]["source_run_id"], "trigger_rule_v4_execute_20260603")
-        self.assertEqual(first["n5_relationship"]["event_type"], "ActionBlocked")
-        self.assertEqual(first["n5_relationship"]["event_label"], "市场动作未确认 (ActionBlocked)")
-        self.assertEqual(first["n5_relationship"]["action_state"], "blocked")
-        self.assertEqual(first["n5_relationship"]["action_state_label"], "未确认")
-        self.assertEqual(first["n5_relationship"]["blocked_reason"], "price_confirmation_failed")
-        self.assertEqual(first["n5_relationship"]["blocked_reason_label"], "价格确认未通过")
-        self.assertIn("N4_trigger", first["evidence_chain"])
-        self.assertIn("N5_action", first["evidence_chain"])
+        self.assertEqual(first["trigger_pct"], "1.234567")
+        self.assertEqual(first["trigger_pct_display"], "1.23%")
+        self.assertEqual(first["trigger_price"], "10.123456")
+        self.assertEqual(first["trigger_period"], "W")
+        self.assertEqual(first["triggered_periods"], ["M", "W", "D"])
         self.assertFalse(payload["write_controls"]["projection_write_enabled"])
         self.assertFalse(payload["write_controls"]["card_write_enabled"])
         self.assertFalse(payload["write_controls"]["outbox_consume_enabled"])
         self.assertFalse(payload["side_effects"]["writes_database"])
         self.assertFalse(payload["side_effects"]["order_generated"])
-        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605")])
         self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
         self.assertEqual(repo.n5_outbox_reads_for_ui_v1, 0)
         self.assertEqual(repo.forbidden_writes["user_signal_card"], 0)
 
-    def test_b_track_status_monitor_page_renders_n4_n5_relationship_without_mutation_controls(self) -> None:
+    def test_b_track_status_monitor_page_renders_fixed_readonly_columns(self) -> None:
         client, repo, _, _ = build_client()
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[0])
         seed_effective_monitor_for_signal(repo, repo.ui_v1_signals[1])
@@ -20373,21 +20419,23 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
         response = client.get("/n6/app/status-monitor")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("状态监控", response.text)
-        self.assertIn("有效", response.text)
-        self.assertIn("等待行情证据", response.text)
-        self.assertIn("已失效", response.text)
-        self.assertIn("N4", response.text)
-        self.assertIn("N5", response.text)
-        self.assertIn("trigger_rule_v4_execute_20260603", response.text)
-        self.assertIn("市场动作未确认 (ActionBlocked)", response.text)
-        self.assertIn("价格确认未通过", response.text)
+        self.assertIn("触发状态", response.text)
+        for column in (
+            "触发时间", "资产类型", "代码", "名称", "方向", "触发涨跌幅",
+            "触发价格", "当前周期", "已触发周期",
+        ):
+            self.assertIn(column, response.text)
+        self.assertIn('data-n6-trigger-pct-raw="1.234567"', response.text)
+        self.assertIn("1.23%", response.text)
+        self.assertIn("手动刷新", response.text)
+        self.assertIn('data-n6-viewport-evidence="320,375,390,430,desktop"', response.text)
         self.assertNotIn("写入投影", response.text)
         self.assertNotIn("生成卡片", response.text)
         self.assertNotIn("消费 outbox", response.text)
         self.assertNotIn("一键下单", response.text)
         self.assertNotIn("真实收益", response.text)
-        self.assertEqual(repo.app_signal_reads, [(1, "admin", 1)])
+        self.assertEqual(repo.app_signal_reads, [])
+        self.assertEqual(repo.app_trigger_status_reads, [(1, "admin", 1, "20260605")])
         self.assertEqual(repo.ui_v1_status_monitor_reads, 0)
 
     def test_b_track_ai_users_api_is_readonly_shadow_observer(self) -> None:
@@ -22198,13 +22246,14 @@ process.stdout.write(JSON.stringify({{ emptyState, populatedState }}));
             "筛选中心",
             "监控对象",
             "实时监控范围",
+            "触发状态",
             "消息列表",
             "卡片消息",
             "虚拟账户",
             "买卖日志",
             "退出登录",
         )
-        hidden_nav = ("关注池", "买入消息", "状态监控", "方案", "组合", "收益", "AI助手", "排行榜")
+        hidden_nav = ("关注池", "买入消息", "方案", "组合", "收益", "AI助手", "排行榜")
         forbidden_wording = (
             "建议买入",
             "建议卖出",

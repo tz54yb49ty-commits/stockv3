@@ -829,6 +829,8 @@
       z-index: 3;
       background: var(--soft);
     }
+    .trigger-status-table { min-width: 1040px; }
+    .trigger-status-table td { white-space: nowrap; }
     .table-wrap .sticky-action {
       position: sticky;
       right: 0;
@@ -1202,6 +1204,9 @@
       }
     }
     @media (max-width: 430px) {
+      .trigger-status-table { min-width: 980px; }
+      .trigger-status-table th,
+      .trigger-status-table td { padding: 9px 10px; font-size: 12px; }
       .wrap,
       main.n6-signals-workspace,
       .n6-data-workspace {
@@ -2680,55 +2685,46 @@
       {% endif %}
       {% elif page.page_key == "status-monitor" %}
       <div class="metric-grid">
-        <div class="metric"><span>有效</span><strong>{{ page.data.status_summary.active }}</strong></div>
-        <div class="metric"><span>等待行情证据</span><strong>{{ page.data.status_summary.pending_market_data }}</strong></div>
-        <div class="metric"><span>已失效</span><strong>{{ page.data.status_summary.inactive }}</strong></div>
-        <div class="metric"><span>投影写入</span><strong>{{ page.data.write_controls.projection_write_enabled }}</strong></div>
+        <div class="metric"><span>当前触发行</span><strong>{{ page.data.status_summary.active }}</strong></div>
       </div>
       <div class="text-block">
-        <h3>状态监控</h3>
-        <span class="chip">卡片写入: {{ page.data.write_controls.card_write_enabled }}</span>
-        <span class="chip">outbox 消费: {{ page.data.write_controls.outbox_consume_enabled }}</span>
-        <span class="chip">worker: {{ page.data.write_controls.worker_enabled }}</span>
+        <h3>触发状态</h3>
+        <span class="chip">只读</span>
+        <a href="/n6/app/status-monitor" data-n6-trigger-status-refresh>手动刷新</a>
       </div>
-      <div class="table-wrap" role="region" tabindex="0" aria-label="状态监控表格，可横向滚动">
-        <table>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="触发状态表格，可横向滚动" data-n6-trigger-status data-n6-viewport-evidence="320,375,390,430,desktop">
+        <table class="trigger-status-table" data-n6-trigger-status-columns="9">
           <thead>
             <tr>
-              <th>类型</th>
-              <th>identity_key</th>
-              <th>当前状态</th>
-              <th>N4 事件</th>
-              <th>N5 关系</th>
-              <th>质量</th>
-              <th>运行批次</th>
+              <th>触发时间</th>
+              <th>资产类型</th>
+              <th>代码</th>
+              <th>名称</th>
+              <th>方向</th>
+              <th>触发涨跌幅</th>
+              <th>触发价格</th>
+              <th>当前周期</th>
+              <th>已触发周期</th>
             </tr>
           </thead>
           <tbody>
             {% for item in page.data['items'] %}
-            <tr>
+            <tr data-n6-trigger-status-row>
+              <td>{{ item.trigger_time }}</td>
               <td>{{ item.asset_kind_label }}</td>
-              <td>{{ item.identity_key }}<br><span class="subtle">{{ item.display_name }} {{ item.display_code }}</span></td>
-              <td>{{ item.current_status_label }}<br><span class="subtle">trigger_live={{ item.trigger_live }}</span></td>
-              <td>
-                N4 {{ item.n4_event.event_id }}<br>
-                <span class="subtle">{{ item.n4_event.source_run_id }}</span>
-              </td>
-              <td>
-                N5 {{ item.n5_relationship.event_label }}<br>
-                <span class="subtle">{{ item.n5_relationship.action_state_label }} · {{ item.n5_relationship.action_mark }} · {{ item.n5_relationship.blocked_reason_label }}</span>
-              </td>
-              <td>{{ item.quality_status }}<br><span class="subtle">{{ item.event_time }}</span></td>
-              <td>
-                N5: {{ item.source_run_id }}<br>
-                N6: {{ item.projection_run_id }}
-              </td>
+              <td>{{ item.asset_code }}</td>
+              <td>{{ item.asset_name }}</td>
+              <td>{{ item.direction_label }}</td>
+              <td data-n6-trigger-pct-raw="{{ item.trigger_pct or '' }}">{{ item.trigger_pct_display }}</td>
+              <td>{{ item.trigger_price or "—" }}</td>
+              <td>{{ item.trigger_period or "—" }}</td>
+              <td>{{ item.triggered_periods|join('、') or "—" }}</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
         {% if not page.data['items'] %}
-        <div class="empty">暂无状态记录。</div>
+        <div class="empty">当前有效范围内暂无触发状态。</div>
         {% endif %}
       </div>
       {% elif page.page_key == "portfolio" %}

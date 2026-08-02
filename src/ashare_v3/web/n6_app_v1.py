@@ -276,7 +276,7 @@ APP_PAGE_LABELS = {
     "buy-messages": "买入消息",
     "filter-center": "筛选中心",
     "my-monitor": "我的监控对象",
-    "status-monitor": "状态监控",
+    "status-monitor": "触发状态",
     "proposals": "方案",
     "portfolio": "组合",
     "pnl": "收益",
@@ -296,7 +296,7 @@ APP_NAV_LABELS = {
     "buy-messages": "买入消息",
     "filter-center": "筛选中心",
     "my-monitor": "监控对象",
-    "status-monitor": "状态监控",
+    "status-monitor": "触发状态",
     "proposals": "方案",
     "portfolio": "组合",
     "pnl": "收益",
@@ -326,7 +326,7 @@ APP_COMPONENT_LABELS = {
     "B Track V2 Board Linked Stocks": "板块关联个股",
     "B Track V2 Index Linked Stocks": "指数关联个股",
     "B Track V2 My Monitor": "我的监控对象",
-    "B Track Status Monitor": "状态监控",
+    "B Track Status Monitor": "触发状态",
     "B Track AI Agent": "AI模拟投资员",
     "B Track AI Users": "AI助手",
     "B Track Proposals": "方案",
@@ -721,6 +721,7 @@ def app_nav_context(active: str) -> dict[str, Any]:
         {"key": "filter-center", "label": APP_NAV_LABELS["filter-center"], "href": "/n6/app/filter-center"},
         {"key": "my-monitor", "label": APP_NAV_LABELS["my-monitor"], "href": "/n6/app/my-monitor"},
         {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
+        {"key": "status-monitor", "label": APP_NAV_LABELS["status-monitor"], "href": "/n6/app/status-monitor"},
         {"key": "signals", "label": APP_NAV_LABELS["signals"], "href": "/n6/app/signals"},
         {"key": "messages", "label": APP_NAV_LABELS["messages"], "href": "/n6/app/messages"},
         {"key": "account", "label": APP_NAV_LABELS["account"], "href": "/n6/app/account"},
@@ -2529,14 +2530,29 @@ def app_status_monitor_model(
     rows: list[dict[str, Any]],
     filters: dict[str, Any],
 ) -> dict[str, Any]:
-    signal_items = [app_signal_item(row) for row in rows]
-    items = [app_status_monitor_item(item) for item in signal_items]
-    status_summary = {"active": 0, "pending_market_data": 0, "inactive": 0}
-    for item in items:
-        status = str(item.get("current_status") or "inactive")
-        if status not in status_summary:
-            status_summary[status] = 0
-        status_summary[status] += 1
+    items = []
+    for row in rows:
+        trigger_pct = number_or_none(row.get("trigger_pct"))
+        trigger_price = number_or_none(row.get("trigger_price"))
+        items.append(
+            {
+                "trigger_time": _first_text(row, "trigger_time"),
+                "asset_kind": _first_text(row, "asset_kind"),
+                "asset_kind_label": _asset_kind_label(_first_text(row, "asset_kind")),
+                "identity_key": _first_text(row, "identity_key"),
+                "asset_code": _first_text(row, "asset_code"),
+                "asset_name": _first_text(row, "asset_name"),
+                "direction": _first_text(row, "direction"),
+                "direction_label": _direction_label(_first_text(row, "direction")),
+                "trigger_pct": f"{trigger_pct:.6f}" if trigger_pct is not None else None,
+                "trigger_pct_display": f"{trigger_pct:.2f}%" if trigger_pct is not None else "—",
+                "trigger_price": f"{trigger_price:.6f}" if trigger_price is not None else None,
+                "trigger_period": _first_text(row, "trigger_period"),
+                "triggered_periods": [str(value) for value in (row.get("triggered_periods") or [])],
+                "episode_count": int(row.get("episode_count") or 0),
+            }
+        )
+    status_summary = {"active": len(items), "pending_market_data": 0, "inactive": 0}
     component = "B Track Status Monitor"
     return {
         "ok": True,
@@ -2555,7 +2571,15 @@ def app_status_monitor_model(
         },
         "readonly": True,
         "safety_banner": list(APP_SAFETY_LABELS),
-        "source_policy": app_signal_source_policy(),
+        "source_policy": {
+            "allowed_sources": [
+                "n6_trigger_status_current",
+                "principal monitor objects",
+                "realtime monitor scope",
+                "current holdings",
+            ],
+            "forbidden_sources": list(APP_FORBIDDEN_SIGNAL_SOURCES),
+        },
         "side_effects": dict(APP_SIDE_EFFECTS),
     }
 

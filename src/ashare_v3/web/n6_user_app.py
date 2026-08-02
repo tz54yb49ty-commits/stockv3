@@ -1438,6 +1438,17 @@ class N6UserRepository(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def fetch_app_trigger_status(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        trade_date: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        ...
+
     def enrich_app_realtime_scope_display_names(
         self,
         result: dict[str, Any],
@@ -6910,6 +6921,98 @@ class PostgresN6UserRepository:
         )
         return {"members": members, "member_count": len(members)}
 
+    def fetch_app_trigger_status(
+        self,
+        *,
+        principal_id: int,
+        principal_type: str,
+        user_id: int,
+        trade_date: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        scope_cte = self._app_v1_web_signal_scope_cte()
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH
+                {scope_cte},
+                scoped_episodes AS MATERIALIZED (
+                  SELECT episode.*
+                  FROM n6_trigger_status_current episode
+                  JOIN deduplicated_monitor_scope scope
+                    ON scope.asset_kind = episode.asset_kind
+                   AND scope.identity_key = episode.identity_key
+                   AND scope.direction = episode.direction
+                   AND scope.valid_for_trade_date = episode.trade_date
+                  WHERE episode.trade_date = %(trade_date)s
+                ),
+                ranked_episodes AS (
+                  SELECT episode.*,
+                         min(episode.trigger_time) OVER (
+                           PARTITION BY episode.asset_kind, episode.identity_key,
+                                        episode.direction
+                         ) AS first_trigger_time,
+                         count(*) OVER (
+                           PARTITION BY episode.asset_kind, episode.identity_key,
+                                        episode.direction
+                         ) AS episode_count,
+                         row_number() OVER (
+                           PARTITION BY episode.asset_kind, episode.identity_key,
+                                        episode.direction
+                           ORDER BY episode.last_status_outbox_id DESC,
+                                    episode.entry_trigger_event_id DESC
+                         ) AS recent_rank
+                  FROM scoped_episodes episode
+                ),
+                period_union AS (
+                  SELECT episode.asset_kind, episode.identity_key, episode.direction,
+                         pg_catalog.array_agg(DISTINCT period.value ORDER BY period.value)
+                           FILTER (WHERE period.value IS NOT NULL) AS unordered_periods
+                  FROM scoped_episodes episode
+                  LEFT JOIN LATERAL pg_catalog.unnest(episode.triggered_periods)
+                    AS period(value) ON true
+                  GROUP BY episode.asset_kind, episode.identity_key, episode.direction
+                )
+                SELECT recent.first_trigger_time::text AS trigger_time,
+                       recent.asset_kind,
+                       recent.identity_key,
+                       recent.asset_code,
+                       recent.asset_name,
+                       recent.direction,
+                       recent.trigger_pct::text AS trigger_pct,
+                       recent.trigger_price::text AS trigger_price,
+                       recent.trigger_period,
+                       ARRAY(
+                         SELECT canonical.period
+                         FROM pg_catalog.unnest(
+                           ARRAY['Y', 'Q', 'M', 'W', 'D']::text[]
+                         ) WITH ORDINALITY canonical(period, ordinal)
+                         WHERE canonical.period = ANY(
+                           COALESCE(periods.unordered_periods, ARRAY[]::text[])
+                         )
+                         ORDER BY canonical.ordinal
+                       ) AS triggered_periods,
+                       recent.episode_count::int AS episode_count
+                FROM ranked_episodes recent
+                JOIN period_union periods
+                  USING (asset_kind, identity_key, direction)
+                WHERE recent.recent_rank = 1
+                ORDER BY recent.first_trigger_time ASC,
+                         recent.asset_kind ASC,
+                         recent.identity_key ASC,
+                         recent.direction ASC
+                LIMIT %(limit)s
+                """,
+                {
+                    "principal_id": principal_id,
+                    "principal_type": principal_type,
+                    "user_id": user_id,
+                    "trade_date": trade_date,
+                    "limit": max(1, min(int(limit), 500)),
+                },
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def fetch_app_monitor_items(
         self,
         *,
@@ -10135,11 +10238,11 @@ def create_app(
         if date_policy["blocked"]:
             return n6_trading_session_blocker_response(date_policy)
         filters["trade_date"] = current_trade_date
-        rows = repo.fetch_app_signals(
+        rows = repo.fetch_app_trigger_status(
             principal_id=int(principal["principal_id"]),
             principal_type=str(principal["principal_type"]),
             user_id=session.user_id,
-            filters=filters,
+            trade_date=current_trade_date,
             limit=web_config.ui_signal_limit,
         ) if current_trade_date else []
         return JSONResponse(
@@ -12232,11 +12335,11 @@ def create_app(
             )
         if page_key == "status-monitor":
             current_trade_date = repo.fetch_app_current_signal_trade_date()
-            rows = repo.fetch_app_signals(
+            rows = repo.fetch_app_trigger_status(
                 principal_id=int(principal["principal_id"]),
                 principal_type=str(principal["principal_type"]),
                 user_id=session.user_id,
-                filters={"trade_date": current_trade_date},
+                trade_date=str(current_trade_date or ""),
                 limit=web_config.ui_signal_limit,
             ) if current_trade_date else []
             return app_status_monitor_model(principal, user=user, rows=rows, filters={})
