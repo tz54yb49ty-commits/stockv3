@@ -244,6 +244,36 @@ runtime_control contract registration
 The first release has no scheduler, LaunchAgent, SSE, or persistent worker. N5
 and N6 status processing is bounded run-once only.
 
+### 4.1 Current-Day Bounded Recovery For 20260803
+
+The explicitly authorized recovery identifier is:
+
+```text
+policy_id=n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1
+for_trade_date=20260803
+n5_action_run_id=n5_trigger_status_forward_20260803_recovery_v1
+n5_consumer_name=n5_trigger_status_forward_20260803_recovery_v1
+n6_consumer_name=n6_trigger_status_projection_v1
+n6_partition_key=trigger-status:20260803
+n6_projection_run_id=n6_trigger_status_projection_20260803_recovery_v1
+```
+
+This is an exact recovery phase within the reusable L2 delivery lane; it does
+not change the feature contract or authorize a general one-off runtime policy.
+The `runtime_control` registration gate cannot execute either business-layer
+step. An independent `N5_action` gate must pass first and may write only the two
+status messages to `common_event_outbox`. A later independent `N6_user` gate may
+consume at most 5000 frozen inputs into `n6_trigger_status_current` and its own
+inbox/checkpoint. Both gates require fresh equality of the Web current date,
+event trade date, and requested date. Date or lineage drift fails closed.
+
+The recovery does not authorize migration, Release/Web/service/browser work,
+LaunchAgent, scheduler, SSE, persistent worker, existing signal/message/card
+projection changes, outbox status updates, Strategy Center, executor, voice,
+mobile, sim, position, cash, or trade behavior. A transport `systemError` is not
+retry authority; zero commit must be proven read-only before a separately
+authorized supersession.
+
 N5 rollback is scoped by action run, source trigger run, consumer, contract
 version, and the two new event types. It must not touch N4 or existing Action*
 facts/events.

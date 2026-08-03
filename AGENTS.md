@@ -63,6 +63,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l1_web_readonly_v1`
   - `n6_btrack_delivery_l2_n6_business_v1`
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
+  - `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -280,7 +281,11 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
   允许 all-users、Web PUT、手工 DML 或复用首个用户的冻结 scope；另仅允许后续
   独立 `N6_user` 请求精确满足 L2
   `trigger_status_projection_20260731_backfill` machine phase，执行一次冻结历史
-  trigger-status bounded consumer；一般 L2 consumer/runtime execute 仍禁止
+  trigger-status bounded consumer；另仅允许当前请求已明确授权且分层精确满足
+  `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1` 时，由独立
+  `N5_action` gate 先执行一次 status-forward-only，再由独立
+  `N6_user` gate 执行一次当日 trigger-status bounded consumer；一般 L2
+  consumer/runtime execute 仍禁止
 - 语音播报
 - mobile projection
 - 未按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` L3 合同授权的虚拟账户资金、
@@ -1366,6 +1371,11 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
 - L2 `trigger_status_projection_20260731_backfill` 仅允许后续独立、明确授权的
   `N6_user` gate 按完整 machine object 处理一次冻结历史 consumer；本治理 gate、
   任意日期、任意 run、重试或其他 consumer 均不获得 execute 权。
+- `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1` 仅允许已授权的
+  `20260803` 当日恢复：独立 `N5_action` gate 只向 `common_event_outbox`
+  写两类状态消息，通过后独立 `N6_user` gate 只写
+  `n6_trigger_status_current`、该 consumer 的 inbox/checkpoint。本 `runtime_control`
+  gate 只登记合同，不得使用该例外执行任一子 gate。
 - 仍禁止一般性 N6 长期 worker/LaunchAgent；
   `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 仅在当前
   reviewed-N6 日期 bounded canary 完整 PASS 后，由独立、明确授权的
@@ -1438,6 +1448,25 @@ L2 trigger-status 历史 consumer phase：
   payload 不含 `trigger_pct`，现有 `ActionEligible` immutable payload 不得修改。任何
   migration、Release/Web/service/browser/LaunchAgent/scheduler、N1-N5、交易、virtual
   executor、Strategy Center、手工 SQL、重试或捎带下一阶段均 `REJECT`。
+
+L2 trigger-status 20260803 当日恢复 phase：
+
+- `policy_id=n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`。执行前
+  Web 当日、N4/N5 event trade date 与请求日期必须全部为 `20260803`；
+  任一日期或 lineage 漂移必须 `BLOCKED_DATE_DRIFT`，不得自动换日。
+- N5 子 gate 只允许 `status_forward_only_offline_bounded_v1`，必须绑定唯一
+  `source_eligible_action_run_id`，只能幂等新增 `TriggerStatusUpdated` /
+  `TriggerStatusInvalidated`；`common_action_event`、action fact/tracking、N4 inbox/
+  checkpoint 和 N4 outbox status 变化必须为 0。
+- N6 子 gate 仅允许 `consumer_name=n6_trigger_status_projection_v1`、
+  `partition_key=trigger-status:20260803`、
+  `projection_run_id=n6_trigger_status_projection_20260803_recovery_v1`。冻结输入不得
+  超过 5000；只写新状态表和该 consumer inbox/checkpoint，不更新 N5 outbox
+  status，不得触碰 Signals/Messages/Cards 或其 consumer checkpoint。
+- 两个子 gate 均最多一次 execute。`systemError` 不是重试权；重试前必须
+  先用 fresh read-only 证据证明零提交，再由独立 supersession gate 授权。
+- 本 phase 不授权 migration、Release/Web/service/browser、LaunchAgent/scheduler、
+  Strategy Center、virtual executor、语音、mobile、sim、持仓、资金或任何交易操作。
 
 Git 与 Release 规则：
 

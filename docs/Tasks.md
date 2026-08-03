@@ -7,7 +7,7 @@
 
 ### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
 
-状态：`MIGRATION_AND_CONSUMER_PASS_WEB_RELEASE_PHASE_GOVERNED_PENDING_SEPARATE_AUTHORIZATION`；
+状态：`CURRENT_DAY_20260803_BOUNDED_RECOVERY_GOVERNED_PENDING_SEPARATE_LAYER_EXECUTION`；
 分类：`n6_btrack_delivery_l2_n6_business_v1`。089 schema migration 与
 `n6_trigger_status_projection_20260731_backfill_v1` 2296-row consumer 已有 PASS
 证据；目标 canonical commit/tree 为
@@ -31,6 +31,10 @@ runtime_control 合同登记
 -> N6_user trigger-status bounded consumer（2296，PASS）
 -> runtime_control trigger_status_web_immutable_release_rebind（pending separate authorization）
 -> 用户授权后的只读页面验收
+-> runtime_control 登记 `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`
+-> N5_action 20260803 status-forward-only（pending separate gate）
+-> N6_user 20260803 trigger-status projection（pending after N5 PASS）
+-> 20260803 数据与只读页面验收
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -44,6 +48,12 @@ evaluator 保持冻结基线且零操作，已 loaded virtual executor 只允许
 scheduler、其他 LaunchAgent、SSE、worker、现有投影表修改、proposal、资金、
 持仓、executor、语音、mobile、sim 和真实交易。权威合同：
 `docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`。
+
+20260803 恢复仍属于首版 bounded run-once，不安装 scheduler/LaunchAgent，
+不修改现有 N6 消息/卡片投影。本 gate 只登记授权，未连接数据库、
+未执行 N5/N6 runner、未操作服务或浏览器。第二阶段 30 秒隔离自动更新
+必须在当日恢复验收 PASS 后再登记独立调度合同，本次不授权。
+首版禁止 scheduler、LaunchAgent、SSE、worker；该语义不因本次当日恢复改变。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 
