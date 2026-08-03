@@ -749,6 +749,25 @@ outbox status update, protected-consumer/checkpoint change, `trigger_pct` status
 surface, immutable `ActionEligible` payload change, or next-phase bundling. The
 governance session can register this phase but cannot compile its execution.
 
+For `phase_id=trigger_status_projection_20260803_recovery`, L2 may compile one
+independent `N6_user` current-day bounded-consumer gate only when the complete
+phase object exactly matches `docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json` and
+policy `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`.
+It binds date `20260803`, consumer `n6_trigger_status_projection_v1`, runner
+`scripts/run_n6_trigger_status_projection_once.py`, projection run
+`n6_trigger_status_projection_20260803_recovery_v1`, partition
+`trigger-status:20260803`, limit/input count `1769`, frozen outbox range
+`4107628..4110567`, event counts `863/587/8/311`, and expected active episode
+count `552`. The DAG is read-only preflight -> exact-run rollback artifact
+static and PG16 verification -> one execute -> read-only postflight. Writes are
+limited to the new current-status table and this consumer's exact inbox and
+checkpoint; `common_event_outbox` remains SELECT-only. Compilation rejects
+date, N5 proof, census/high-water, runner/argument, allowlist or rollback drift,
+retry, manual SQL, migration, Release/service/scheduler, existing projection or
+checkpoint changes, `trigger_pct`, ActionEligible payload mutation, or bundled
+next-phase work. The governance session can register this phase but cannot
+compile or execute it.
+
 For `phase_id=trigger_status_web_immutable_release_rebind`, L2 may compile one
 later independent `runtime_control` Web deployment gate only when the complete
 phase object exactly matches

@@ -57,6 +57,12 @@ L2_TRIGGER_STATUS_PHASE_SHA256 = (
     "4b6047b093affd3ca31ab7f7ea62f73a80eba0d9bbe25143ffa5c8ca697a8dde"
 )
 L2_TRIGGER_STATUS_PHASE_ID = "trigger_status_projection_20260731_backfill"
+L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_SHA256 = (
+    "a8b882a7878ae7123aaac8ade657f8472dc3c1021206bfb959584507fcd9df79"
+)
+L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_ID = (
+    "trigger_status_projection_20260803_recovery"
+)
 L2_TRIGGER_STATUS_WEB_PHASE_SHA256 = (
     "37d1b82cedeac6e62ab640df64e3587ca9f97e8f07e018450b74c16b44945994"
 )
@@ -1016,6 +1022,22 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
         self.assertTrue(binding["exact_source_object_required"])
         self.assertEqual(binding["missing_or_source_mismatch_decision"], "REJECT")
         self.assertFalse(binding["governance_session_runtime_operation_allowed"])
+        current_day_binding = kernel_l2["current_day_bounded_recovery_phase_contract"]
+        self.assertEqual(
+            current_day_binding["phase_id"], L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_ID
+        )
+        self.assertEqual(
+            current_day_binding["policy_id"],
+            "n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1",
+        )
+        self.assertEqual(current_day_binding["layer_role"], "N6_user")
+        self.assertTrue(current_day_binding["exact_source_object_required"])
+        self.assertEqual(
+            current_day_binding["missing_or_source_mismatch_decision"], "REJECT"
+        )
+        self.assertFalse(
+            current_day_binding["governance_session_runtime_operation_allowed"]
+        )
         web_binding = kernel_l2["web_deployment_phase_contract"]
         self.assertEqual(web_binding["phase_id"], L2_TRIGGER_STATUS_WEB_PHASE_ID)
         self.assertEqual(
@@ -1156,6 +1178,127 @@ class N6BTrackDeliveryGovernanceTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(
                     L2_TRIGGER_STATUS_PHASE_ID,
+                    path.read_text(encoding="utf-8"),
+                )
+
+    def test_l2_trigger_status_current_day_recovery_is_exact_and_fail_closed(self) -> None:
+        phase = self.contract["lanes"]["L2"]["bounded_consumer_phases"][
+            L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_ID
+        ]
+        self.assertEqual(
+            canonical_sha256(phase), L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_SHA256
+        )
+        self.assertEqual(
+            phase["policy_id"],
+            "n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1",
+        )
+        self.assertEqual(phase["layer_role"], "N6_user")
+        self.assertEqual(
+            phase["scope_lock"],
+            {
+                "purpose": "current_day_trigger_status_projection_recovery_only",
+                "consumer_name": "n6_trigger_status_projection_v1",
+                "runner": "scripts/run_n6_trigger_status_projection_once.py",
+                "for_trade_date": "20260803",
+                "projection_run_id": "n6_trigger_status_projection_20260803_recovery_v1",
+                "partition_key": "trigger-status:20260803",
+                "limit": 1769,
+                "bounded_run_once_invocations": 1,
+                "execute_attempts": 1,
+                "retry_attempts": 0,
+                "arbitrary_date_or_current_date_bypass_allowed": False,
+            },
+        )
+        self.assertEqual(
+            phase["required_n5_status_forward"],
+            {
+                "source_run_id": "n5_trigger_status_forward_20260803_recovery_v1",
+                "execute_attempts": 1,
+                "TriggerStatusUpdated": 8,
+                "TriggerStatusInvalidated": 311,
+                "total": 319,
+            },
+        )
+        input_contract = phase["input_contract"]
+        self.assertEqual(input_contract["selected_input_count"], 1769)
+        self.assertEqual(input_contract["min_outbox_id"], 4107628)
+        self.assertEqual(input_contract["max_outbox_id"], 4110567)
+        self.assertEqual(
+            input_contract["event_type_counts"],
+            {
+                "ActionEligible": 863,
+                "ActionExecuted": 587,
+                "TriggerStatusUpdated": 8,
+                "TriggerStatusInvalidated": 311,
+            },
+        )
+        self.assertEqual(input_contract["expected_active_episode_count"], 552)
+        self.assertEqual(
+            phase["mutation_contract"]["allowed_write_tables"],
+            [
+                "n6_trigger_status_current",
+                "common_event_inbox",
+                "common_event_consumer_checkpoint",
+            ],
+        )
+        self.assertEqual(
+            phase["mutation_contract"]["common_event_outbox_status_updates"], 0
+        )
+        self.assertFalse(
+            phase["semantic_locks"][
+                "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload"
+            ]
+        )
+        rollback = phase["rollback_prerequisite"]
+        self.assertEqual(
+            rollback["artifact_path"],
+            "sql/N6_trigger_status_projection_20260803_recovery_v1_exact_rollback.sql",
+        )
+        self.assertTrue(rollback["static_verification_required"])
+        self.assertTrue(rollback["pg16_verification_required"])
+        self.assertFalse(rollback["drop_089_table_allowed"])
+        self.assertFalse(rollback["rollback_execution_in_this_phase_allowed"])
+
+    def test_l2_trigger_status_current_day_recovery_drift_rejects(self) -> None:
+        phase = self.contract["lanes"]["L2"]["bounded_consumer_phases"][
+            L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_ID
+        ]
+
+        def decision(candidate: object) -> str:
+            return (
+                "ACCEPT"
+                if canonical_sha256(candidate)
+                == L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_SHA256
+                else "REJECT"
+            )
+
+        self.assertEqual(decision(phase), "ACCEPT")
+        mutations = (
+            (("scope_lock", "for_trade_date"), "20260804"),
+            (("scope_lock", "retry_attempts"), 1),
+            (("input_contract", "selected_input_count"), 1768),
+            (("input_contract", "max_outbox_id"), 4110568),
+            (("required_n5_status_forward", "total"), 318),
+            (("mutation_contract", "common_event_outbox_status_updates"), 1),
+            (("rollback_prerequisite", "drop_089_table_allowed"), True),
+            (("semantic_locks", "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload"), True),
+        )
+        for path, replacement in mutations:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    decision(mutated_fixture(phase, path, replacement)), "REJECT"
+                )
+
+    def test_l2_trigger_status_current_day_recovery_is_synchronized(self) -> None:
+        for path in (
+            ROOT / "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json",
+            ROOT / "docs/EXECUTION_KERNEL.md",
+            ROOT / "docs/EXECUTION_COMPILER.md",
+            ROOT / "docs/EXECUTION_RUNTIME_GATE.md",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    L2_TRIGGER_STATUS_CURRENT_DAY_PHASE_ID,
                     path.read_text(encoding="utf-8"),
                 )
 

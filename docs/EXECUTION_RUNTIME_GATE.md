@@ -384,6 +384,25 @@ Detailed rules:
     service, N1-N5, trade, virtual-executor, Strategy Center, or bundled next
     phase returns `REJECT`. A `runtime_control` governance session cannot use
     this phase.
+19b. The L2 `phase_id=trigger_status_projection_20260803_recovery` accepts only
+    the exact machine object under policy
+    `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`, in a later
+    independently authorized `N6_user` request. Runtime Gate must freshly match
+    date `20260803`, N5 source run
+    `n5_trigger_status_forward_20260803_recovery_v1` with exact status counts
+    `8/311`, consumer `n6_trigger_status_projection_v1`, projection run
+    `n6_trigger_status_projection_20260803_recovery_v1`, partition
+    `trigger-status:20260803`, limit/input count `1769`, frozen outbox range
+    `4107628..4110567`, event counts `863/587/8/311`, expected active count
+    `552`, and an exact-run rollback artifact already verified statically and on
+    PG16. It permits one transaction and one execute attempt, with writes only
+    to `n6_trigger_status_current` and this consumer's exact inbox/checkpoint;
+    `common_event_outbox` is SELECT-only. Any date/lineage/census/high-water
+    drift, retry, manual SQL, migration, Release, service, scheduler, N1-N5
+    write, protected projection/checkpoint change, outbox status update,
+    `trigger_pct`, ActionEligible payload mutation, trade, virtual executor,
+    Strategy Center, or bundled next phase returns `REJECT`. A `runtime_control`
+    governance session cannot use this phase.
 19a. The L2 `phase_id=trigger_status_web_immutable_release_rebind` accepts only
     the exact machine object under
     `n6_btrack_delivery_l2_n6_business_v1`, in a later independently authorized

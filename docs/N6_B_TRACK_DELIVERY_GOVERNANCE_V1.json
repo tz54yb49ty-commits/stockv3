@@ -494,6 +494,156 @@
             "attempt_or_retry_count_drift",
             "forbidden_effect_present"
           ]
+        },
+        "trigger_status_projection_20260803_recovery": {
+          "phase_id": "trigger_status_projection_20260803_recovery",
+          "policy_id": "n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1",
+          "layer_role": "N6_user",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "scope_lock": {
+            "purpose": "current_day_trigger_status_projection_recovery_only",
+            "consumer_name": "n6_trigger_status_projection_v1",
+            "runner": "scripts/run_n6_trigger_status_projection_once.py",
+            "for_trade_date": "20260803",
+            "projection_run_id": "n6_trigger_status_projection_20260803_recovery_v1",
+            "partition_key": "trigger-status:20260803",
+            "limit": 1769,
+            "bounded_run_once_invocations": 1,
+            "execute_attempts": 1,
+            "retry_attempts": 0,
+            "arbitrary_date_or_current_date_bypass_allowed": false
+          },
+          "required_n5_status_forward": {
+            "source_run_id": "n5_trigger_status_forward_20260803_recovery_v1",
+            "execute_attempts": 1,
+            "TriggerStatusUpdated": 8,
+            "TriggerStatusInvalidated": 311,
+            "total": 319
+          },
+          "required_sequence": [
+            "read_only_preflight",
+            "exact_rollback_artifact_static_and_pg16_verification",
+            "single_bounded_run_once_execute",
+            "read_only_postflight"
+          ],
+          "input_contract": {
+            "read_table": "common_event_outbox",
+            "access": "SELECT_ONLY",
+            "source_layer": "N5_action",
+            "selected_input_count": 1769,
+            "min_outbox_id": 4107628,
+            "max_outbox_id": 4110567,
+            "event_type_counts": {
+              "ActionEligible": 863,
+              "ActionExecuted": 587,
+              "TriggerStatusUpdated": 8,
+              "TriggerStatusInvalidated": 311
+            },
+            "other_event_type_count": 0,
+            "expected_active_episode_count": 552
+          },
+          "mutation_contract": {
+            "transaction_count": 1,
+            "allowed_write_tables": [
+              "n6_trigger_status_current",
+              "common_event_inbox",
+              "common_event_consumer_checkpoint"
+            ],
+            "n6_trigger_status_current": {
+              "allowed_operations": [
+                "INSERT",
+                "UPDATE",
+                "DELETE"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "projection_run_id": "n6_trigger_status_projection_20260803_recovery_v1"
+            },
+            "common_event_inbox": {
+              "allowed_operations": [
+                "INSERT"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "source_layer": "N5_action",
+              "event_scope": "exact_frozen_input_event_ids_only"
+            },
+            "common_event_consumer_checkpoint": {
+              "allowed_operations": [
+                "INSERT",
+                "UPDATE"
+              ],
+              "consumer_name": "n6_trigger_status_projection_v1",
+              "partition_key": "trigger-status:20260803",
+              "source_layer": "N5_action"
+            },
+            "common_event_outbox_status_updates": 0
+          },
+          "semantic_locks": {
+            "ActionEligible": "projection_insert",
+            "ActionExecuted": "no_op",
+            "TriggerStatusUpdated": "projection_update",
+            "TriggerStatusInvalidated": "projection_invalidate",
+            "trigger_pct_allowed_in_trigger_status_schema_api_ui_or_payload": false,
+            "action_eligible_immutable_payload_mutation_allowed": false
+          },
+          "protected_consumers": [
+            "n6_signal_projection",
+            "n6_user_message_projection",
+            "n6_user_card_projection",
+            "every_consumer_other_than_n6_trigger_status_projection_v1"
+          ],
+          "rollback_prerequisite": {
+            "required_before_execute": true,
+            "owner_layer_role": "N6_user",
+            "artifact_scope": "exact_projection_run_id",
+            "artifact_path": "sql/N6_trigger_status_projection_20260803_recovery_v1_exact_rollback.sql",
+            "projection_run_id": "n6_trigger_status_projection_20260803_recovery_v1",
+            "static_verification_required": true,
+            "pg16_verification_required": true,
+            "allowed_operations": [
+              "delete_exact_projection_run_rows_from_n6_trigger_status_current",
+              "delete_exact_consumer_inbox_rows_for_frozen_input_event_ids",
+              "delete_exact_empty_baseline_consumer_checkpoint"
+            ],
+            "drop_089_table_allowed": false,
+            "delete_other_consumer_or_projection_state_allowed": false,
+            "existing_089_schema_rollback_acceptable": false,
+            "rollback_execution_in_this_phase_allowed": false,
+            "rollback_requires_separate_authorization": true
+          },
+          "forbidden_effects": [
+            "migration",
+            "release",
+            "web_or_browser",
+            "service_or_launchagent",
+            "scheduler_or_long_running_worker",
+            "n1_n5_write",
+            "outbox_status_update",
+            "other_consumer_checkpoint_change",
+            "signal_message_or_card_projection",
+            "trade",
+            "virtual_executor",
+            "strategy_center",
+            "manual_sql",
+            "retry",
+            "next_phase_bundling"
+          ],
+          "reject_on": [
+            "missing_required_field",
+            "scope_or_date_drift",
+            "input_census_or_highwater_drift",
+            "n5_status_forward_proof_drift",
+            "runner_or_argument_drift",
+            "rollback_artifact_missing_or_unverified",
+            "mutation_allowlist_drift",
+            "protected_consumer_or_checkpoint_drift",
+            "outbox_status_update_nonzero",
+            "trigger_pct_surface_present",
+            "action_eligible_payload_mutation",
+            "attempt_or_retry_count_drift",
+            "forbidden_effect_present"
+          ]
         }
       },
       "deployment_phases": {
