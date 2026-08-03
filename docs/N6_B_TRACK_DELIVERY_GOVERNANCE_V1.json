@@ -646,6 +646,118 @@
           ]
         }
       },
+      "scheduled_convergence_phases": {
+        "trigger_status_n5_forward_scheduler_activation": {
+          "phase_id": "trigger_status_n5_forward_scheduler_activation",
+          "policy_id": "n5_n6_trigger_status_scheduled_convergence_30s_v1",
+          "layer_role": "N5_action",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "prerequisites": {
+            "current_day_recovery": "PASS",
+            "authenticated_get_reload_acceptance": "PASS",
+            "n5_implementation_and_tests": "PASS",
+            "n6_implementation_and_tests": "PASS",
+            "immutable_release_manifest": "FRESH_EXACT",
+            "n5_label_preexisting": false
+          },
+          "runtime_contract": {
+            "label": "com.ashare-v3.n5.trigger-status-forward-v1",
+            "runner": "scripts/run_n5_trigger_status_forward_current_once.py",
+            "planner": "scripts/plan_n5_n6_trigger_status_launchd.py",
+            "consumer_name": "n5_trigger_status_forward_current_v1",
+            "start_interval_seconds": 30,
+            "run_at_load": false,
+            "keep_alive": false,
+            "singleton_required": true,
+            "immutable_release_required": true,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "max_events_per_tick": 5000,
+            "max_runtime_seconds": 20
+          },
+          "date_and_authority_contract": {
+            "source": "current_intraday_worker_lineage",
+            "closed_date_decision": "NOOP",
+            "open_date_mismatch_decision": "BLOCKED_DATE_DRIFT",
+            "stale_lineage_decision": "BLOCKED",
+            "action_eligible_authority_count": 1,
+            "ambiguous_authority_decision": "BLOCKED"
+          },
+          "allowed_effects": [
+            "insert_idempotent_TriggerStatusUpdated_to_common_event_outbox",
+            "insert_idempotent_TriggerStatusInvalidated_to_common_event_outbox",
+            "write_exact_n5_report_and_history",
+            "install_and_bootstrap_exact_n5_label"
+          ],
+          "forbidden_effects": [
+            "common_action_event_or_tracking_write",
+            "ActionEligible_or_ActionExecuted_creation",
+            "n4_inbox_checkpoint_or_outbox_status_update",
+            "n6_projection_write",
+            "existing_poller_or_checkpoint_change",
+            "migration_or_web_or_sse",
+            "strategy_or_executor_or_trade",
+            "kickstart_or_retry"
+          ]
+        },
+        "trigger_status_n6_projection_scheduler_activation": {
+          "phase_id": "trigger_status_n6_projection_scheduler_activation",
+          "policy_id": "n5_n6_trigger_status_scheduled_convergence_30s_v1",
+          "layer_role": "N6_user",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "prerequisites": {
+            "current_day_recovery": "PASS",
+            "authenticated_get_reload_acceptance": "PASS",
+            "n5_scheduler_activation_and_natural_tick_observation": "PASS",
+            "immutable_release_manifest": "SAME_FRESH_EXACT",
+            "n6_label_preexisting": false
+          },
+          "runtime_contract": {
+            "label": "com.ashare-v3.n6.trigger-status-projection-v1",
+            "runner": "scripts/run_n6_trigger_status_projection_current_once.py",
+            "planner": "scripts/plan_n5_n6_trigger_status_launchd.py",
+            "consumer_name": "n6_trigger_status_projection_v1",
+            "start_interval_seconds": 30,
+            "run_at_load": false,
+            "keep_alive": false,
+            "singleton_required": true,
+            "immutable_release_required": true,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "max_events_per_tick": 5000,
+            "steady_state_convergence_seconds": 60
+          },
+          "date_contract": {
+            "source": "current_intraday_worker_lineage",
+            "closed_date_decision": "NOOP",
+            "open_date_mismatch_decision": "BLOCKED_DATE_DRIFT",
+            "stale_lineage_decision": "BLOCKED",
+            "partition_key": "trigger-status:<for_trade_date>"
+          },
+          "allowed_effects": [
+            "write_n6_trigger_status_current",
+            "write_exact_trigger_status_consumer_inbox_checkpoint",
+            "write_exact_n6_report_and_history",
+            "install_and_bootstrap_exact_n6_label"
+          ],
+          "forbidden_effects": [
+            "common_event_outbox_status_update",
+            "signal_message_or_card_projection_change",
+            "other_consumer_or_checkpoint_change",
+            "trigger_pct_surface",
+            "migration_or_web_or_sse",
+            "n1_n5_write",
+            "strategy_or_executor_or_trade",
+            "kickstart_or_retry"
+          ]
+        }
+      },
       "deployment_phases": {
         "trigger_status_web_immutable_release_rebind": {
           "phase_id": "trigger_status_web_immutable_release_rebind",

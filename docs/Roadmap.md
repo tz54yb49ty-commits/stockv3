@@ -5,6 +5,17 @@
 
 ## 状态总览
 
+### 2026-08-03 Trigger-status current-day convergence
+
+20260803 bounded recovery and authenticated read-only page acceptance are PASS.
+The next route is an isolated 30-second convergence pair: governance and
+plan-only plist generation, N5 implementation, N6 implementation, immutable
+Release materialization, N5 exact-label activation, then N6 exact-label
+activation and continuous-tick observation. The two jobs remain non-resident
+run-once tasks and do not alter existing message/card projection or trading
+paths. The governing policy is
+`n5_n6_trigger_status_scheduled_convergence_30s_v1`.
+
 ### 2026-07-28 N6 B轨治理瘦身路线
 
 状态：三通道治理 implementation ready；R3 已形成单一离线候选，当前生产服务

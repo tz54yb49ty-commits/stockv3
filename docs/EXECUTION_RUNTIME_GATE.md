@@ -403,6 +403,22 @@ Detailed rules:
     `trigger_pct`, ActionEligible payload mutation, trade, virtual executor,
     Strategy Center, or bundled next phase returns `REJECT`. A `runtime_control`
     governance session cannot use this phase.
+19c. Policy `n5_n6_trigger_status_scheduled_convergence_30s_v1` accepts only the
+    exact machine object and planner output for the two labels
+    `com.ashare-v3.n5.trigger-status-forward-v1` then
+    `com.ashare-v3.n6.trigger-status-projection-v1`. Both must use one frozen
+    immutable Release, exact runtime Python and lineage config, independent
+    singleton/report/history paths, `StartInterval=30`, `RunAtLoad=false`, and
+    `KeepAlive=false`. The N5 activation belongs only to an independent
+    `N5_action` gate and must pass natural-tick observation before the N6
+    activation can be accepted in an independent `N6_user` gate. Each gate gets
+    one bootstrap attempt and zero kickstart/retry. Closed dates NOOP; open-date
+    drift, stale lineage, ambiguous authority, mutable Release/plist, prior
+    label, overlapping singleton, or forbidden write returns `REJECT/BLOCKED`.
+    Existing pollers/checkpoints, outbox status, Web/SSE/migration, N1-N4,
+    Signals/Messages/Cards, Strategy Center, executor, voice/mobile/sim and all
+    trading paths remain unchanged. The governance session cannot activate or
+    use either job.
 19a. The L2 `phase_id=trigger_status_web_immutable_release_rebind` accepts only
     the exact machine object under
     `n6_btrack_delivery_l2_n6_business_v1`, in a later independently authorized

@@ -7,7 +7,7 @@
 
 ### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
 
-状态：`CURRENT_DAY_20260803_BOUNDED_RECOVERY_GOVERNED_PENDING_SEPARATE_LAYER_EXECUTION`；
+状态：`CURRENT_DAY_20260803_RECOVERY_AND_AUTHENTICATED_PAGE_ACCEPTANCE_PASS_SCHEDULER_GOVERNANCE`；
 分类：`n6_btrack_delivery_l2_n6_business_v1`。089 schema migration 与
 `n6_trigger_status_projection_20260731_backfill_v1` 2296-row consumer 已有 PASS
 证据；目标 canonical commit/tree 为
@@ -35,6 +35,10 @@ runtime_control 合同登记
 -> N5_action 20260803 status-forward-only（pending separate gate）
 -> N6_user 20260803 trigger-status projection（pending after N5 PASS）
 -> 20260803 数据与只读页面验收
+-> runtime_control 登记 `n5_n6_trigger_status_scheduled_convergence_30s_v1`
+-> N5_action 实现并独立激活 30 秒 status forward one-shot
+-> N6_user 实现并独立激活 30 秒 status projection one-shot
+-> 连续 tick 与 60 秒收敛验收
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -49,11 +53,13 @@ scheduler、其他 LaunchAgent、SSE、worker、现有投影表修改、proposal
 持仓、executor、语音、mobile、sim 和真实交易。权威合同：
 `docs/N5_N6_TRIGGER_STATUS_FORWARD_CONTRACT_V1.md`。
 
-20260803 恢复仍属于首版 bounded run-once，不安装 scheduler/LaunchAgent，
-不修改现有 N6 消息/卡片投影。本 gate 只登记授权，未连接数据库、
-未执行 N5/N6 runner、未操作服务或浏览器。第二阶段 30 秒隔离自动更新
-必须在当日恢复验收 PASS 后再登记独立调度合同，本次不授权。
-首版禁止 scheduler、LaunchAgent、SSE、worker；该语义不因本次当日恢复改变。
+20260803 bounded recovery 与已登录 Safari GET/reload 只读验收已经 PASS：底层
+552 个 active episode，当前 admin 有效范围聚合为 14 行，固定 8 列且无
+`trigger_pct`。第二阶段只登记两个 30 秒隔离 one-shot 的 machine contract；本
+runtime_control gate 不连接数据库、不构建 Release、不安装 plist、不调用
+launchctl。实现、immutable Release 与激活必须继续拆成独立分层 gates。
+首版禁止 scheduler、LaunchAgent、SSE、worker；该历史首版边界保持不变，当前
+第二阶段只在新 policy 的两个 exact-label 例外内前向推进。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 

@@ -64,6 +64,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l2_n6_business_v1`
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
   - `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`
+  - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -285,7 +286,10 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
   `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1` 时，由独立
   `N5_action` gate 先执行一次 status-forward-only，再由独立
   `N6_user` gate 执行一次当日 trigger-status bounded consumer；一般 L2
-  consumer/runtime execute 仍禁止
+  consumer/runtime execute 仍禁止；另仅允许当日恢复与登录态只读验收均 PASS 后，
+  按 `n5_n6_trigger_status_scheduled_convergence_30s_v1` 分别在独立
+  `N5_action` / `N6_user` gate 安装两个 exact-label、30 秒、非 resident 的
+  run-once LaunchAgent，必须先 N5 后 N6
 - 语音播报
 - mobile projection
 - 未按 `N6_B_TRACK_DELIVERY_GOVERNANCE_V1` L3 合同授权的虚拟账户资金、
@@ -296,6 +300,8 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
 - 长期 worker 启动；唯一调度例外是独立 `N6_user` 请求完整满足
   `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 的 exact-label、5 秒
   run-once LaunchAgent，且其前置 bounded canary 必须已通过
+  ；另一例外仅为 `n5_n6_trigger_status_scheduled_convergence_30s_v1` 的两个
+  exact-label 30 秒 run-once；它们不得复用或修改现有 N5/N6 poller
 
 ## 2. 必读文档
 
@@ -1468,6 +1474,23 @@ L2 trigger-status 20260803 当日恢复 phase：
 - 本 phase 不授权 migration、Release/Web/service/browser、LaunchAgent/scheduler、
   Strategy Center、virtual executor、语音、mobile、sim、持仓、资金或任何交易操作。
 
+L2 trigger-status 30 秒隔离收敛 phase：
+
+- `policy_id=n5_n6_trigger_status_scheduled_convergence_30s_v1` 仅在 20260803
+  bounded recovery 与已登录 Safari GET/reload 只读验收均 PASS 后生效。
+- 固定 label 为 `com.ashare-v3.n5.trigger-status-forward-v1` 与
+  `com.ashare-v3.n6.trigger-status-projection-v1`；均为 `StartInterval=30`、
+  `RunAtLoad=false`、`KeepAlive=false`，使用 singleton、immutable Release、独立
+  report/history。不得 kickstart，不得改现有 poller/checkpoint。
+- N5 runner 只从当前 stable intraday lineage 读取开放交易日，并要求唯一
+  ActionEligible authority；只可幂等写两类状态消息到 N5 outbox。N6 runner 只消费
+  独立 trigger-status consumer/checkpoint，写当前状态表。日期关闭返回 NOOP；当前
+  开放日与 lineage 不一致或 authority 不唯一时 BLOCKED，均不得猜测换日。
+- 激活必须分层且有序：先由独立 `N5_action` gate 安装/观察 N5 exact label，再由
+  独立 `N6_user` gate 安装/观察 N6 exact label。治理会话不得安装或启动任一 label。
+- 禁止 migration、Web rebind、SSE、现有 Signals/Messages/Cards、N1-N4、Strategy
+  Center、virtual executor、语音、mobile、sim、持仓、资金与任何交易操作。
+
 Git 与 Release 规则：
 
 - canonical branch/worktree 固定为
@@ -1641,6 +1664,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l1_web_readonly_v1`
   - `n6_btrack_delivery_l2_n6_business_v1`
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
+  - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP

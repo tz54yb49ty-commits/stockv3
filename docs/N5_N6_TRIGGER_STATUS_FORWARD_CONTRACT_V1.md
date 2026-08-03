@@ -284,3 +284,39 @@ existing signal/message/card tables and checkpoint are unchanged.
 
 Browser acceptance requires a separate explicit authorization for the existing
 logged-in tab. This contract does not grant browser control.
+
+### 4.2 Scheduled Current-Day Convergence
+
+After the bounded recovery and authenticated read-only page acceptance pass,
+the reusable scheduler policy is:
+
+```text
+policy_id=n5_n6_trigger_status_scheduled_convergence_30s_v1
+n5_label=com.ashare-v3.n5.trigger-status-forward-v1
+n6_label=com.ashare-v3.n6.trigger-status-projection-v1
+StartInterval=30
+RunAtLoad=false
+KeepAlive=false
+```
+
+Each tick is a bounded run-once from an immutable Release and owns an exact
+singleton lock, report, and append-only history file. N5 reads the current
+stable intraday lineage, proves the local date is open and equal to its
+`for_trade_date`, and requires exactly one ActionEligible source authority. It
+then invokes the existing status-forward-only contract and may only insert
+idempotent `TriggerStatusUpdated` / `TriggerStatusInvalidated` rows into
+`common_event_outbox`. N6 reads the same date authority and invokes only the
+independent `n6_trigger_status_projection_v1` consumer and its per-date
+checkpoint.
+
+A closed local date is `NOOP`. An open-date mismatch, stale lineage, ambiguous
+ActionEligible authority, invalid Release, or singleton contract failure is
+`BLOCKED` with no database write. N5 activation and observation must pass before
+N6 activation. The two asynchronous tasks may differ by one tick; steady-state
+convergence target is at most 60 seconds.
+
+This policy does not authorize migrations, Web rebind, SSE, modification of
+existing Signals/Messages/Cards or their consumers/checkpoints, outbox status
+updates, N1-N4 writes, Strategy Center, executor, voice, mobile, sim, position,
+cash, proposal, order, broker, or real-trade effects. Rollback stops only the
+two exact labels and preserves already projected status data.

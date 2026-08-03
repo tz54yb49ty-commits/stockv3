@@ -768,6 +768,23 @@ checkpoint changes, `trigger_pct`, ActionEligible payload mutation, or bundled
 next-phase work. The governance session can register this phase but cannot
 compile or execute it.
 
+For policy `n5_n6_trigger_status_scheduled_convergence_30s_v1`, L2 may compile
+two later, independently authorized activation DAGs only after the 20260803
+bounded recovery and authenticated GET/reload page acceptance are PASS. The
+machine object, planner output, immutable Release manifest, exact plist bytes,
+runtime Python, lineage path, state root, label absence/baseline, and prior
+activation count must be freshly frozen. Both jobs are 30-second non-resident
+run-once tasks with `RunAtLoad=false`, `KeepAlive=false`, singleton locks, and
+separate reports/history. The N5 DAG must complete implementation, offline
+tests, immutable Release readiness, one exact-label bootstrap, and natural tick
+observation before the N6 DAG may compile. The N6 DAG then permits one exact
+label bootstrap and continuous-tick convergence observation. Compilation
+rejects kickstart, retry, mutable source, current-date or lineage drift,
+ambiguous ActionEligible authority, existing-poller/checkpoint changes,
+`trigger_pct`, Web/SSE/migration, or any trading/executor effect. The governance
+session can register and test the planner but cannot materialize the Release or
+activate either job.
+
 For `phase_id=trigger_status_web_immutable_release_rebind`, L2 may compile one
 later independent `runtime_control` Web deployment gate only when the complete
 phase object exactly matches
