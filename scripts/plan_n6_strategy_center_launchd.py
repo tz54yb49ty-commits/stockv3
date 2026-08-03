@@ -21,7 +21,7 @@ START_INTERVAL_SECONDS = 5
 # The evaluator still starts every 5 seconds; this is the per-run bounded
 # ceiling, not the scheduler interval.  A pass may hold the singleton lock
 # across ticks, which are intentionally observed as lock-held no-ops.
-MAX_RUNTIME_SECONDS = 12
+MAX_RUNTIME_SECONDS = 20
 SIGNAL_SOURCE_USER_ID = 1
 DEFAULT_STATE_ROOT = Path("/Users/chuanfuchen/.local/state/ashare-v3/n6-b-track")
 RELEASE_ROOT = Path(
@@ -121,9 +121,10 @@ def _validate_release_entity(
     expected_files: dict[str, tuple[str, str]],
 ) -> dict[str, Any]:
     release_stat = release.lstat()
+    release_owner_uid = release_stat.st_uid
     if (
         not stat.S_ISDIR(release_stat.st_mode)
-        or release_stat.st_uid != os.getuid()
+        or release_owner_uid not in {0, os.getuid()}
         or stat.S_IMODE(release_stat.st_mode) != 0o555
         or release.resolve(strict=True) != release
     ):
@@ -139,7 +140,7 @@ def _validate_release_entity(
         current_stat = current.lstat()
         if (
             not stat.S_ISDIR(current_stat.st_mode)
-            or current_stat.st_uid != os.getuid()
+            or current_stat.st_uid != release_owner_uid
             or stat.S_IMODE(current_stat.st_mode) != 0o555
         ):
             raise ValueError("release directory authority/read-only mode invalid")
@@ -154,7 +155,7 @@ def _validate_release_entity(
             file_stat = file_path.lstat()
             if not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError("release non-regular file forbidden")
-            if file_stat.st_uid != os.getuid() or file_stat.st_nlink != 1:
+            if file_stat.st_uid != release_owner_uid or file_stat.st_nlink != 1:
                 raise ValueError("release file owner/hardlink authority invalid")
             file_rel = file_path.relative_to(release).as_posix()
             expected = expected_files.get(file_rel)
@@ -183,6 +184,10 @@ def _validate_release_entity(
         "directory_count": directory_count,
         "file_count": len(actual_files),
         "git_mode_counts": mode_counts,
+        "release_owner_uid": release_owner_uid,
+        "release_owner_authority": (
+            "root" if release_owner_uid == 0 else "current_user"
+        ),
     }
 
 
@@ -278,7 +283,12 @@ def _validate_immutable_release(release: Path) -> dict[str, Any]:
         "file_count": int(validation["file_count"]),
         "directory_count": entity["directory_count"],
         "git_mode_counts": entity["git_mode_counts"],
-        "entity_validation": "file-set+git-blob-sha1+git-mode+read-only",
+        "release_owner_uid": entity["release_owner_uid"],
+        "release_owner_authority": entity["release_owner_authority"],
+        "entity_validation": (
+            "uniform-owner(root-or-current-user)+file-set+git-blob-sha1+"
+            "git-mode+read-only"
+        ),
     }
 
 

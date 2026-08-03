@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
+from unittest.mock import patch
 
 from ashare_v3.market import historical_closed_minute_source_expansion as runner
+from ashare_v3.mootdx_client import EndpointConfig, MootdxEndpointManager
+
+
+class TdxConnectionError(Exception):
+    pass
 
 
 def _candidate(asset_kind: str, sequence: int, expected_rows: int = 181) -> dict:
@@ -164,7 +171,379 @@ def _combined_payload(subscription_control_row_present: bool = True) -> dict:
     }
 
 
+def _atomic_payload(*, two_trade_dates: bool = False, object_count: int = 2) -> dict:
+    candidates = []
+    for index in range(object_count):
+        trade_date = "20260615" if two_trade_dates and index == 0 else "20260616"
+        candidate = _candidate("stock", index + 1, expected_rows=1)
+        candidate.update(
+            {
+                "code": f"60000{index}",
+                "identity_key": f"stock:SH:60000{index}",
+                "data_trade_date": trade_date,
+                "required_data_kind": (
+                    "previous_day_minute_bar_1m" if trade_date == "20260615" else "minute_bar_1m"
+                ),
+                "latest_closed_minute": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 09:31:00+08:00",
+            }
+        )
+        candidates.append(candidate)
+    return {
+        "target_expansion_run_id": candidates[0]["target_expansion_run_id"],
+        "source_condition_run_id": "condition",
+        "source_trade_date": "20260615",
+        "for_trade_date": "20260616",
+        "latest_closed_minute": "2026-06-16 09:31:00+08:00",
+        "missing_candidates": candidates,
+    }
+
+
+def _endpoint_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    endpoints = (
+        EndpointConfig("primary", "115.238.56.198", 7709, 10, True, False, "x", "x", "protocol_passed"),
+        EndpointConfig("secondary", "180.153.18.170", 7709, 20, True, False, "x", "x", "protocol_passed"),
+    )
+    return MootdxEndpointManager(
+        endpoint_pool_version="test",
+        transport="mootdx",
+        endpoints=endpoints,
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def _passing_minute_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {"checks": {"minute_scope_sentinels": True}}
+
+
+def _raw_historical_minute(trade_date: str) -> dict:
+    return {
+        "year": int(trade_date[:4]),
+        "month": int(trade_date[4:6]),
+        "day": int(trade_date[6:]),
+        "hour": 9,
+        "minute": 31,
+        "open": 10,
+        "high": 10.1,
+        "low": 9.9,
+        "close": 10.05,
+        "vol": 100,
+        "amount": 1000,
+    }
+
+
+class PartialHistoricalClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and symbol == "600001":
+            raise TdxConnectionError("primary failed after first historical object")
+        return [_raw_historical_minute("20260616")]
+
+    def index_bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        return self.bars(symbol=symbol, **kwargs)
+
+
+class MultiDateHistoricalClient:
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        trade_date = "20260615" if symbol == "600000" else "20260616"
+        return [_raw_historical_minute(trade_date)]
+
+    def index_bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        return self.bars(symbol=symbol, **kwargs)
+
+
+class EmptyThenNonemptyHistoricalClient(PartialHistoricalClient):
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if symbol == "600000" else [_raw_historical_minute("20260616")]
+
+
+class EmptyPrimaryHistoricalClient(PartialHistoricalClient):
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if self.endpoint_id == "primary" else [_raw_historical_minute("20260616")]
+
+
+class FailureAuditCursor:
+    def __init__(self, *, fail_quality: bool = False) -> None:
+        self.fail_quality = fail_quality
+        self.executed: list[tuple[str, object]] = []
+        self.quality_rows: list[object] = []
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001, ANN204
+        return False
+
+    def execute(self, sql: str, params=None) -> None:  # noqa: ANN001
+        self.executed.append((sql, params))
+
+    def executemany(self, sql: str, rows) -> None:  # noqa: ANN001
+        if self.fail_quality:
+            raise RuntimeError("quality finalizer failed")
+        self.quality_rows.extend(rows)
+
+
+class FailureAuditTransaction:
+    def __init__(self) -> None:
+        self.committed = False
+        self.rolled_back = False
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001, ANN204
+        self.rolled_back = exc_type is not None
+        self.committed = exc_type is None
+        return False
+
+
+class FailureAuditConnection:
+    def __init__(self, *, fail_quality: bool = False) -> None:
+        self.cursor_value = FailureAuditCursor(fail_quality=fail_quality)
+        self.transaction_value = FailureAuditTransaction()
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001, ANN204
+        return False
+
+    def transaction(self) -> FailureAuditTransaction:
+        return self.transaction_value
+
+    def cursor(self) -> FailureAuditCursor:
+        return self.cursor_value
+
+
 class HistoricalClosedMinuteSourceExpansionTests(unittest.TestCase):
+    def test_local_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        payload = _atomic_payload()
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _endpoint_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def bars(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise AssertionError("local historical invariant bug")
+
+            rows, fetch_results, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=manager,
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(rows, {})
+        self.assertEqual(fetch_results, [])
+        self.assertEqual(outcome.attempts[0]["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(outcome.attempts[0]["retry_allowed"])
+
+    def test_production_entrypoint_delegates_default_transport_to_shared_batch_factory(self) -> None:
+        signature = inspect.signature(runner.run_historical_closed_minute_source_expansion)
+        self.assertIsNone(signature.parameters["endpoint_client_factory"].default)
+        self.assertNotIn("create_mootdx_client", inspect.getsource(runner))
+
+    def test_failed_endpoint_attempt_persists_run_and_quality_atomically(self) -> None:
+        payload = _atomic_payload()
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: PartialHistoricalClient(selection.endpoint_id, calls),
+            )
+        empty_counts = {
+            "table_counts": {
+                "common_market_data_run": 0,
+                "common_market_data_quality_item": 0,
+                "stock_minute_bar_1m": 0,
+                "index_minute_bar_1m": 0,
+                "board_minute_bar_1m": 0,
+            },
+            "event_refs": {"outbox": 0, "inbox": 0, "checkpoint": 0},
+        }
+        post_counts = {
+            **empty_counts,
+            "table_counts": {
+                **empty_counts["table_counts"],
+                "common_market_data_run": 1,
+                "common_market_data_quality_item": 1,
+            },
+        }
+        connection = FailureAuditConnection()
+        with (
+            patch.object(runner, "capture_target_counts", side_effect=[empty_counts, post_counts]),
+            patch.object(runner, "audited_n3_market_execute_connect", return_value=connection),
+        ):
+            result = runner.write_failed_historical_attempt_to_db(
+                dsn="postgresql://must-not-connect",
+                payload=payload,
+                outcome=outcome,
+            )
+
+        self.assertTrue(connection.transaction_value.committed)
+        self.assertFalse(connection.transaction_value.rolled_back)
+        self.assertEqual(result["p_counts"], {"P0": 1, "P1": 0, "P2": 0})
+        self.assertEqual(len(connection.cursor_value.executed), 1)
+        self.assertEqual(len(connection.cursor_value.quality_rows), 1)
+        run_params = connection.cursor_value.executed[0][1]
+        quality_params = connection.cursor_value.quality_rows[0]
+        self.assertIn("mootdx_batch_attempt", run_params[-1].obj)
+        self.assertIn("mootdx_batch_attempt", quality_params[-1].obj)
+        self.assertNotIn("MinuteBarClosed", str(run_params[-1].obj))
+
+    def test_failed_endpoint_quality_error_rolls_back_run_and_quality(self) -> None:
+        payload = _atomic_payload()
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: PartialHistoricalClient(selection.endpoint_id, calls),
+            )
+        empty_counts = {
+            "table_counts": {
+                "common_market_data_run": 0,
+                "common_market_data_quality_item": 0,
+                "stock_minute_bar_1m": 0,
+                "index_minute_bar_1m": 0,
+                "board_minute_bar_1m": 0,
+            },
+            "event_refs": {"outbox": 0, "inbox": 0, "checkpoint": 0},
+        }
+        connection = FailureAuditConnection(fail_quality=True)
+        with (
+            patch.object(runner, "capture_target_counts", return_value=empty_counts),
+            patch.object(runner, "audited_n3_market_execute_connect", return_value=connection),
+            self.assertRaisesRegex(RuntimeError, "quality finalizer failed"),
+        ):
+            runner.write_failed_historical_attempt_to_db(
+                dsn="postgresql://must-not-connect",
+                payload=payload,
+                outcome=outcome,
+            )
+
+        self.assertFalse(connection.transaction_value.committed)
+        self.assertTrue(connection.transaction_value.rolled_back)
+
+    def test_historical_run_and_quality_persist_complete_attempt_provenance(self) -> None:
+        source = inspect.getsource(runner.write_expansion_to_db)
+        quality_source = inspect.getsource(runner._quality_items)
+        self.assertIn('"mootdx_batch_attempt"', source)
+        self.assertIn('"mootdx_batch_attempt"', quality_source)
+
+    def test_historical_probe_validates_each_candidate_trade_date(self) -> None:
+        payload = _atomic_payload(two_trade_dates=True)
+        probe = runner.build_historical_minute_semantic_probe(payload)
+
+        result = probe(object(), lambda profile: MultiDateHistoricalClient())
+
+        self.assertTrue(result["checks"]["minute_scope_sentinels"])
+        self.assertEqual(result["target_trade_dates"], ["20260615", "20260616"])
+
+    def test_multi_object_partial_historical_attempt_replays_secondary_from_first(self) -> None:
+        payload = _atomic_payload()
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, fetch_results, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: PartialHistoricalClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(fetch_results), 2)
+        self.assertTrue(
+            all(row["endpoint_id"] == "secondary" for candidate_rows in rows.values() for row in candidate_rows)
+        )
+
+    def test_observe_historical_partial_failure_has_no_secondary_business_fetch(self) -> None:
+        payload = _atomic_payload()
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, fetch_results, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: PartialHistoricalClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(rows, {})
+        self.assertEqual(fetch_results, [])
+
+    def test_one_empty_historical_object_stays_primary_as_missing_quality(self) -> None:
+        payload = _atomic_payload()
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, fetch_results, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: EmptyThenNonemptyHistoricalClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual([item["status"] for item in fetch_results], ["missing", "fetched"])
+        self.assertEqual(rows[runner._candidate_fetch_key(payload["missing_candidates"][0])], [])
+
+    def test_three_empty_historical_objects_replay_secondary_from_first(self) -> None:
+        payload = _atomic_payload(object_count=3)
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, fetch_results, outcome = runner.prepare_mootdx_historical_batch(
+                payload=payload,
+                manager=_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=_passing_minute_probe,
+                client_factory=lambda selection: EmptyPrimaryHistoricalClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("primary", "600002"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+                ("secondary", "600002"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertTrue(all(item["status"] == "fetched" for item in fetch_results))
+        self.assertEqual(len(rows), 3)
+
     def test_execute_flags_allow_plan_only_and_block_half_confirmed(self) -> None:
         runner.require_execute_flags(execute=False, user_confirmed=False)
         with self.assertRaisesRegex(runner.HistoricalClosedMinuteSourceExpansionBlocked, "missing --user-confirmed"):

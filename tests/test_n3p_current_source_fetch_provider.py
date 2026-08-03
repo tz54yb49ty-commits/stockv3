@@ -7,6 +7,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from ashare_v3.mootdx_client import EndpointConfig, EndpointSelection, MootdxEndpointManager
+from ashare_v3.quote_transport import create_quote_transport
 
 def _args(**overrides):
     values = {
@@ -22,6 +24,106 @@ def _args(**overrides):
 
 def _report():
     return {"step_id": "n3p_current_source_fetch", "target_absence_checked": True}
+
+
+def _provider_stock_scope(count: int) -> dict:
+    return {
+        "for_trade_date": "20260630",
+        "stock_quote_objects": [
+            {
+                "asset_kind": "stock",
+                "identity_key": f"stock:SH:60000{index}",
+                "exchange": "SH",
+                "code": f"60000{index}",
+                "name": f"stock-{index}",
+            }
+            for index in range(count)
+        ],
+        "index_1m_objects": [],
+        "board_1m_objects": [],
+    }
+
+
+def _provider_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    endpoints = (
+        EndpointConfig("primary", "115.238.56.198", 7709, 10, True, False, "x", "x", "protocol_passed"),
+        EndpointConfig("secondary", "180.153.18.170", 7709, 20, True, False, "x", "x", "protocol_passed"),
+    )
+    return MootdxEndpointManager(
+        endpoint_pool_version="test",
+        transport="mootdx",
+        endpoints=endpoints,
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def _passing_provider_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {
+        "checks": {
+            "stock_quote": True,
+            "stock_daily_bars": True,
+            "index_daily_bars": True,
+            "scope_sentinels": True,
+            "minute_scope_sentinels": True,
+        }
+    }
+
+
+class _ProviderClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]], *, empty_primary: int) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+        self.empty_primary = empty_primary
+
+    def quotes(self, *, symbol: str):
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and int(symbol[-1]) < self.empty_primary:
+            return []
+        return [
+            {
+                "code": symbol,
+                "price": 10,
+                "open": 10,
+                "high": 10,
+                "low": 10,
+                "last_close": 10,
+                "vol": 100,
+                "amount": 1000,
+                "servertime": "10:16:00",
+            }
+        ]
+
+
+class TdxConnectionError(Exception):
+    pass
+
+
+class _ProviderExceptionClient(_ProviderClient):
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        super().__init__(endpoint_id, calls, empty_primary=0)
+
+    def quotes(self, *, symbol: str):
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and symbol == "600001":
+            raise TdxConnectionError("provider transport failed")
+        return [
+            {
+                "code": symbol,
+                "price": 10,
+                "open": 10,
+                "high": 10,
+                "low": 10,
+                "last_close": 10,
+                "vol": 100,
+                "amount": 1000,
+                "servertime": "10:16:00",
+            }
+        ]
 
 
 class _FakeCursor:
@@ -132,6 +234,248 @@ class _FakeScopeConnection:
 
 
 class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
+    def test_tdxpy_bj_stock_scope_blocks_before_probe_or_business_fetch(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        scope = _provider_stock_scope(1)
+        scope["stock_quote_objects"][0].update(
+            identity_key="stock:BJ:830001",
+            exchange="BJ",
+            code="830001",
+        )
+        probe_calls: list[str] = []
+        business_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            health_path = Path(tmp) / "health.json"
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=scope,
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=_provider_manager(health_path, mode="active"),
+                endpoint_probe=lambda endpoint, make_client: probe_calls.append(endpoint.endpoint_id),
+                endpoint_client_factory=lambda selection: business_calls.append(selection.endpoint_id),
+                transport="tdxpy",
+            )
+
+            self.assertFalse(health_path.exists())
+
+        self.assertEqual(result["result"], "BLOCKED_N3_TDXPY_BJ_STOCK_QUOTE_UNSUPPORTED")
+        self.assertEqual(result["transport"], "tdxpy")
+        self.assertEqual(result["unsupported_identity_keys"], ["stock:BJ:830001"])
+        self.assertEqual(probe_calls, [])
+        self.assertEqual(business_calls, [])
+
+    def test_n3p_adapter_composes_with_real_tdxpy_transport_without_market_kwarg(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import N3PCurrentMarketFetchAdapter
+
+        class FakeTdxpyApi:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def connect(self, host, port, *, time_out):  # noqa: ANN001, ANN201
+                self.calls.append(("connect", host, port, time_out))
+                return self
+
+            def get_index_bars(self, frequency, market, code, start, count):  # noqa: ANN001, ANN201
+                self.calls.append(("index_bars", frequency, market, code, start, count))
+                return [{"datetime": "2026-06-30 10:16", "open": 1, "high": 2, "low": 1, "close": 2}]
+
+            def disconnect(self) -> None:
+                self.calls.append(("disconnect",))
+
+        selection = EndpointSelection(
+            endpoint_pool_version="test",
+            endpoint_id="primary",
+            host="127.0.0.1",
+            port=7709,
+            transport="tdxpy",
+            health_state="healthy",
+            health_checked_at=None,
+            probe_summary={"passed": True},
+            attempt_id="attempt-1",
+            selection_reason="test",
+            failover_mode="observe",
+            selectable=True,
+        )
+        api = FakeTdxpyApi()
+        transport = create_quote_transport(
+            selection,
+            transport="tdxpy",
+            tdxpy_api_factory=lambda **kwargs: api,
+        )
+        adapter = N3PCurrentMarketFetchAdapter(client_factory=lambda: transport)
+
+        rows = adapter.fetch_index_board_1m_rows(
+            obj={"asset_kind": "index", "code": "000001"},
+            symbol="000001",
+            frequency=8,
+            market=1,
+        )
+        transport.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn(("index_bars", 8, 1, "000001", 0, 800), api.calls)
+        self.assertEqual(api.calls[-1], ("disconnect",))
+
+    def test_provider_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _provider_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def quotes(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise KeyError("local N3P contract bug")
+
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=_provider_stock_scope(1),
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=manager,
+                endpoint_probe=_passing_provider_probe,
+                endpoint_client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        attempt = result["mootdx_batch_attempt"]["attempts"][0]
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(attempt["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(attempt["retry_allowed"])
+
+    def test_production_entrypoint_delegates_default_transport_to_shared_batch_factory(self) -> None:
+        from scripts import n3p_current_source_fetch_provider as provider
+
+        signature = inspect.signature(provider.fetch_n3p_current_market_rows_from_adapter)
+        self.assertIsNone(signature.parameters["endpoint_client_factory"].default)
+        self.assertNotIn("create_mootdx_client", inspect.getsource(provider))
+
+    def test_provider_one_empty_then_nonempty_does_not_fetch_secondary(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=_provider_stock_scope(2),
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=_provider_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_provider_probe,
+                endpoint_client_factory=lambda selection: _ProviderClient(selection.endpoint_id, calls, empty_primary=1),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3p_current_source_20260630__attempt_1")
+
+    def test_provider_three_empty_objects_replay_secondary_from_first(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=_provider_stock_scope(3),
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=_provider_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_provider_probe,
+                endpoint_client_factory=lambda selection: _ProviderClient(selection.endpoint_id, calls, empty_primary=3),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("primary", "600002"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+                ("secondary", "600002"),
+            ],
+        )
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3p_current_source_20260630__attempt_2")
+
+    def test_provider_observe_three_empty_objects_never_fetches_secondary(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=_provider_stock_scope(3),
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=_provider_manager(Path(tmp) / "health.json", mode="observe"),
+                endpoint_probe=_passing_provider_probe,
+                endpoint_client_factory=lambda selection: _ProviderClient(selection.endpoint_id, calls, empty_primary=3),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001"), ("primary", "600002")])
+        self.assertTrue(str(result["result"]).startswith("BLOCKED"))
+
+    def test_provider_transport_exception_replays_secondary_from_first(self) -> None:
+        from scripts.n3p_current_source_fetch_provider import (
+            N3PCurrentMarketFetchAdapter,
+            fetch_n3p_current_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3p_current_market_rows_from_adapter(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                scope=_provider_stock_scope(2),
+                config={},
+                adapter=N3PCurrentMarketFetchAdapter(),
+                endpoint_manager=_provider_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_provider_probe,
+                endpoint_client_factory=lambda selection: _ProviderExceptionClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+            ],
+        )
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3p_current_source_20260630__attempt_2")
+
     def test_stock_quote_canonical_proof_minute_policy_examples(self) -> None:
         from scripts.n3p_current_source_fetch_provider import canonicalize_stock_quote_proof_minute
 
@@ -375,10 +719,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
 
         fake_conn = _FakeScopeConnection()
         provider = N3PCurrentSourceFetchProvider(backend=N3PCurrentSourceFetchBackend(env={}))
-        with (
-            patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=fake_conn),
-            patch("scripts.n3p_current_source_fetch_provider._default_mootdx_client", return_value=None),
-        ):
+        with patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=fake_conn):
             payload = provider.fetch_n3p_current_source_payload(args=_args(), report=_report(), dependencies=SimpleNamespace())
 
         self.assertEqual(payload["result"], "BLOCKED_N3P_SOURCE_FETCH_BACKEND_FETCHER")
@@ -387,10 +728,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         self.assertFalse(payload["database_written"])
 
         default_provider = N3PCurrentSourceFetchProvider()
-        with (
-            patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=fake_conn),
-            patch("scripts.n3p_current_source_fetch_provider._default_mootdx_client", return_value=None),
-        ):
+        with patch("scripts.n3p_current_source_fetch_provider._connect_db", return_value=fake_conn):
             default_payload = default_provider.fetch_n3p_current_source_payload(
                 args=_args(),
                 report=_report(),
@@ -1874,6 +2212,21 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         )
 
         calls: list[str] = []
+        written_artifacts: list[tuple[dict[str, object], dict[str, object]]] = []
+        endpoint_attempt = {
+            "batch_id": "n3p_current_source_20260630",
+            "batch_status": "passed",
+            "winning_attempt_id": "n3p_current_source_20260630__attempt_2",
+            "attempts": [
+                {"attempt_id": "n3p_current_source_20260630__attempt_1", "endpoint_id": "primary"},
+                {
+                    "attempt_id": "n3p_current_source_20260630__attempt_2",
+                    "endpoint_id": "secondary",
+                    "endpoint_host": "192.0.2.2",
+                    "endpoint_port": 7709,
+                },
+            ],
+        }
 
         class ScopeLoader:
             def load_n3p_current_source_scope(self, *, args, report, dependencies, config):
@@ -1892,6 +2245,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
             def fetch_n3p_current_market_rows(self, *, args, report, dependencies, scope, config):
                 calls.append("fetch")
                 return {
+                    "mootdx_batch_attempt": endpoint_attempt,
                     "proof_input_time": "2026-06-30T10:16:00+08:00",
                     "stock_quote_rows": [
                         {
@@ -1921,6 +2275,7 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         class ArtifactWriter:
             def write_n3p_current_source_artifacts(self, *, args, report, dependencies, payload, fetch_report, config):
                 calls.append("artifact")
+                written_artifacts.append((dict(payload), dict(fetch_report)))
                 return {
                     "payload_path": "docs/intraday_live_current/20260630/N3P_mixed_realtime_1016_source_fetch_payload.json",
                     "report_path": "docs/intraday_live_current/20260630/N3P_mixed_realtime_1016_source_fetch_report.json",
@@ -1962,6 +2317,11 @@ class N3PCurrentSourceFetchProviderBackendTest(unittest.TestCase):
         self.assertFalse(fetched["writes_outbox"])
         self.assertTrue(registered["database_written"])
         self.assertEqual(registrar.registered_run_id, "n3p_mixed_realtime_source_payload_20260630_until_1016_v1")
+        artifact_payload, artifact_report = written_artifacts[0]
+        self.assertEqual(artifact_payload["mootdx_batch_attempt"], endpoint_attempt)
+        self.assertEqual(artifact_report["mootdx_batch_attempt"], endpoint_attempt)
+        self.assertEqual(artifact_payload["stock_quote_rows"][0]["endpoint_id"], "secondary")
+        self.assertEqual(artifact_payload["index_board_1m_rows"][0]["attempt_id"], endpoint_attempt["winning_attempt_id"])
 
     def test_missing_fetcher_and_registration_dependencies_fail_closed(self) -> None:
         from scripts.n3p_current_source_fetch_provider import N3PCurrentSourceFetchBackend, N3PCurrentSourceFetchProvider

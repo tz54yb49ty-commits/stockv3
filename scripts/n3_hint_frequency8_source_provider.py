@@ -19,6 +19,24 @@ import re
 import stat
 from typing import Any, Callable
 
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchObjectTracker,
+    MootdxEndpointTransportError,
+    build_mootdx_minute_semantic_probe,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+)
+from ashare_v3.market.realtime_snapshot_execute import build_default_mootdx_endpoint_probe
+from ashare_v3.market.today_minute_execute import MootdxTodayMinuteAdapter
+from ashare_v3.mootdx_client import (
+    DEFAULT_REQUIRED_PROBE_CHECKS,
+    EndpointSelection,
+    MootdxEndpointManager,
+)
+from ashare_v3.quote_transport import (
+    quote_transport_scope_blocker,
+    resolve_quote_transport_name,
+)
 from scripts.n3_n4_combined_child_contract import MIDDAY_BRIDGE_HINT_PROOF_KIND
 
 
@@ -1019,7 +1037,7 @@ class N3HintFrequency8MarketFetchAdapter:
     """
 
     def __init__(self, *, client_factory: Callable[[], Any] | None = None) -> None:
-        self._client_factory = client_factory or _default_mootdx_client
+        self._client_factory = client_factory
         self._client: Any = None
 
     def fetch_index_board_1m_rows(
@@ -1060,19 +1078,21 @@ class N3HintFrequency8MarketFetchAdapter:
         method = getattr(client, "index_bars", None) or getattr(client, "index", None)
         if not callable(method):
             raise RuntimeError("mootdx client does not expose index_bars()/index()")
+        routed_kwargs = dict(kwargs)
+        if not getattr(client, "transport_name", None):
+            routed_kwargs["market"] = market
         return _call_with_supported_kwargs(
             method,
             symbol=symbol,
             frequency=frequency,
             start=start,
             offset=offset,
-            market=market,
-            **kwargs,
+            **routed_kwargs,
         )
 
     def _resolve_client(self) -> Any:
         if self._client is None:
-            client = self._client_factory()
+            client = self._client_factory() if self._client_factory is not None else None
             if client is None:
                 raise RuntimeError("mootdx client factory unavailable")
             self._client = client
@@ -1427,6 +1447,92 @@ def fetch_n3_hint_frequency8_market_rows_from_adapter(
     args: Any,
     scope: Mapping[str, Any],
     adapter: Any,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
+    transport: str | None = None,
+) -> Mapping[str, Any]:
+    if isinstance(adapter, N3HintFrequency8MarketFetchAdapter) and adapter._client_factory is None:
+        objects = [*_rows(scope, "index_1m_objects"), *_rows(scope, "board_1m_objects")]
+        resolved_transport = resolve_quote_transport_name(transport)
+        capability_blocker = quote_transport_scope_blocker(
+            resolved_transport,
+            objects,
+        )
+        if capability_blocker is not None:
+            return _blocked(
+                str(capability_blocker["blocker"]),
+                str(capability_blocker["reason"]),
+                transport=resolved_transport,
+                unsupported_identity_keys=capability_blocker["unsupported_identity_keys"],
+            )
+        trade_date = str(getattr(args, "for_trade_date", "") or scope.get("for_trade_date") or "")
+        manager = endpoint_manager or MootdxEndpointManager.from_toml()
+        outcome = run_mootdx_batch_attempt(
+            manager=manager,
+            batch_id=f"n3_hint_frequency8_{trade_date}",
+            probe=endpoint_probe or _build_hint_provider_probe(objects, trade_date),
+            client_factory=endpoint_client_factory,
+            transport=resolved_transport,
+            required_checks=(*DEFAULT_REQUIRED_PROBE_CHECKS, "minute_scope_sentinels"),
+            fetch_batch=lambda client, selection: _fetch_n3_hint_frequency8_rows_with_pinned_adapter(
+                args=args,
+                scope=scope,
+                adapter=N3HintFrequency8MarketFetchAdapter(client_factory=lambda: client),
+                object_tracker=MootdxBatchObjectTracker(manager, selection),
+            ),
+        )
+        if outcome.status != "passed":
+            return _blocked(
+                HINT_SOURCE_FETCHER_BLOCKER,
+                "atomic Mootdx HINT provider batch failed",
+                mootdx_batch_attempt=outcome.to_provenance(),
+            )
+        result = dict(outcome.result or {})
+        result["mootdx_batch_attempt"] = outcome.to_provenance()
+        return result
+    return _fetch_n3_hint_frequency8_rows_with_pinned_adapter(
+        args=args,
+        scope=scope,
+        adapter=adapter,
+    )
+
+
+def _build_hint_provider_probe(
+    objects: Sequence[Mapping[str, Any]],
+    trade_date: str,
+) -> Callable[..., Mapping[str, Any]]:
+    snapshot_probe = build_default_mootdx_endpoint_probe(objects)
+    minute_probe = build_mootdx_minute_semantic_probe(
+        subscriptions=objects,
+        trade_date=trade_date,
+        adapter_factory=lambda client: MootdxTodayMinuteAdapter(
+            client=client,
+            intraday_trade_date=trade_date,
+        ),
+    )
+
+    def probe(endpoint: Any, make_client: Callable[[str], Any]) -> Mapping[str, Any]:
+        snapshot = snapshot_probe(endpoint, make_client)
+        minute = minute_probe(endpoint, make_client)
+        return {
+            "checks": {
+                **dict(snapshot.get("checks") or {}),
+                "minute_scope_sentinels": bool(
+                    (minute.get("checks") or {}).get("minute_scope_sentinels")
+                ),
+            }
+        }
+
+    return probe
+
+
+def _fetch_n3_hint_frequency8_rows_with_pinned_adapter(
+    *,
+    args: Any,
+    scope: Mapping[str, Any],
+    adapter: Any,
+    object_tracker: MootdxBatchObjectTracker | None = None,
 ) -> Mapping[str, Any]:
     if not callable(getattr(adapter, "fetch_index_board_1m_rows", None)):
         return _blocked(HINT_SOURCE_FETCHER_BLOCKER, "market fetch dependency is required for HINT source fetch")
@@ -1447,8 +1553,18 @@ def fetch_n3_hint_frequency8_market_rows_from_adapter(
                 )
             )
         except Exception as exc:
+            if object_tracker is not None and is_endpoint_transport_exception(exc):
+                raise MootdxEndpointTransportError(str(exc)) from exc
+            if object_tracker is not None:
+                raise
             fetch_errors.append(f"{obj.get('identity_key')}:{type(exc).__name__}:{exc}")
             continue
+        if object_tracker is not None:
+            object_tracker.record(
+                identity_key=str(obj.get("identity_key") or ""),
+                value=raw_records,
+                empty=not raw_records,
+            )
         for raw in raw_records:
             row = _normalize_index_board_row(raw=raw, obj=obj, for_trade_date=for_trade_date)
             if row is not None:
@@ -2677,6 +2793,7 @@ def compute_n3_hint_frequency8_source_payload_hash(payload: Mapping[str, Any]) -
         "actual_until_hhmm": payload.get("actual_until_hhmm"),
         "index_board_1m_rows": payload.get("index_board_1m_rows") or [],
         "hint_proof_kind": payload.get("hint_proof_kind"),
+        "mootdx_batch_attempt": payload.get("mootdx_batch_attempt"),
     }
     return hashlib.sha256(
         json.dumps(payload_for_hash, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -2702,7 +2819,7 @@ def _build_source_payload(*, args: Any, scope: Mapping[str, Any], fetched: Mappi
     index_rows = [row for row in rows if str(row.get("asset_kind") or "") == "index"]
     board_rows = [row for row in rows if str(row.get("asset_kind") or "") == "board"]
     stock_excluded = int(scope.get("stock_hint_excluded_count") or scope.get("stock_excluded_count") or 0)
-    return {
+    payload = {
         "proof_kind": MIDDAY_BRIDGE_HINT_PROOF_KIND,
         "hint_proof_kind": MIDDAY_BRIDGE_HINT_PROOF_KIND,
         "source_mode": HINT_SOURCE_MODE,
@@ -2736,6 +2853,24 @@ def _build_source_payload(*, args: Any, scope: Mapping[str, Any], fetched: Mappi
         "database_written": False,
         "writes_outbox": False,
     }
+    endpoint_attempt = fetched.get("mootdx_batch_attempt")
+    if isinstance(endpoint_attempt, Mapping):
+        provenance = dict(endpoint_attempt)
+        winning = next(
+            (
+                dict(attempt)
+                for attempt in provenance.get("attempts") or []
+                if attempt.get("attempt_id") == provenance.get("winning_attempt_id")
+            ),
+            {},
+        )
+        payload["mootdx_batch_attempt"] = provenance
+        for row in payload["index_board_1m_rows"]:
+            row["attempt_id"] = winning.get("attempt_id")
+            row["endpoint_id"] = winning.get("endpoint_id")
+            row["endpoint_host"] = winning.get("endpoint_host")
+            row["endpoint_port"] = winning.get("endpoint_port")
+    return payload
 
 
 def _fetch_report_from_payload(*, scope: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -2752,6 +2887,7 @@ def _fetch_report_from_payload(*, scope: Mapping[str, Any], payload: Mapping[str
         "source_time_alignment_status": payload.get("source_time_alignment_status"),
         "source_time_lagging_identity_samples": payload.get("source_time_lagging_identity_samples"),
         "normalization_trace": payload.get("normalization_trace"),
+        "mootdx_batch_attempt": payload.get("mootdx_batch_attempt"),
         "source_scope_policy": scope.get("source_scope_policy") or HINT_SOURCE_SCOPE_POLICY,
         "validation_result": {"valid": True, "blocked_reasons": []},
         "market_data_pulled": True,
@@ -3363,17 +3499,6 @@ def _project_default_dsn() -> str:
         except ImportError:
             return ""
     return str(DEFAULT_DSN or "")
-
-
-def _default_mootdx_client() -> Any:
-    try:
-        from mootdx.quotes import Quotes
-    except Exception:  # pragma: no cover - optional runtime dependency.
-        return None
-    try:
-        return Quotes.factory(market="std")
-    except Exception:  # pragma: no cover - optional runtime dependency.
-        return None
 
 
 def _connect_db(config: Mapping[str, Any]) -> Any:

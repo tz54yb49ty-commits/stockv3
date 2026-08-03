@@ -1,13 +1,13 @@
 {
   "artifact_type": "n2_web_policy_default_draft",
-  "generated_at": "2026-06-18T03:45:37.205816+00:00",
+  "generated_at": "2026-07-14T08:56:05.543398+00:00",
   "source": "8782_console",
   "created_by": "8782_console",
-  "created_at": "2026-06-18T03:45:37.205816+00:00",
+  "created_at": "2026-07-14T08:56:05.543398+00:00",
   "policy_id": "n2_default_policy",
-  "policy_version": "v15",
-  "policy_hash": "faa5efc5ff631173d9ed9fe977b67718fae7d635883dedd838419e5fd287c17b",
-  "previous_policy_hash": "faa5efc5ff631173d9ed9fe977b67718fae7d635883dedd838419e5fd287c17b",
+  "policy_version": "v18",
+  "policy_hash": "248db10bb3e2cc6e0118af89910152c38db4017c53ce49cc609ad866cf18bb41",
+  "previous_policy_hash": "248db10bb3e2cc6e0118af89910152c38db4017c53ce49cc609ad866cf18bb41",
   "policy_diff_summary": {
     "index": {
       "changed": false,
@@ -26,8 +26,8 @@
     "stock": {
       "changed": false,
       "changed_keys": [],
-      "before_key_count": 25,
-      "after_key_count": 25,
+      "before_key_count": 27,
+      "after_key_count": 27,
       "summary": "unchanged"
     }
   },
@@ -109,8 +109,13 @@
       "exclude_bj": true,
       "require_official_daily_proof": true,
       "require_financial_quality_passed": false,
+      "allowed_monitor_types": [
+        "source_universe_preview"
+      ],
+      "allow_financial_key_fields_missing": false,
       "directions": [
-        "buy"
+        "buy",
+        "sell"
       ],
       "condition_keys": [
         "*"
@@ -212,7 +217,8 @@
       "enabled": true,
       "source": "condition_pool",
       "directions": [
-        "buy"
+        "buy",
+        "sell"
       ],
       "include_condition_families": [
         "ordinary",
@@ -232,6 +238,10 @@
       "include_codes": [],
       "exclude_codes": [],
       "max_total_mv_wan": null,
+      "allowed_monitor_types": [
+        "source_universe_preview"
+      ],
+      "require_financial_key_field": true,
       "min_score": null,
       "recommendation_levels": []
     }
@@ -309,7 +319,8 @@
       "enabled": true,
       "source": "condition_pool",
       "directions": [
-        "buy"
+        "buy",
+        "sell"
       ],
       "include_condition_families": [
         "ordinary",
@@ -329,6 +340,10 @@
       "include_codes": [],
       "exclude_codes": [],
       "max_total_mv_wan": null,
+      "allowed_monitor_types": [
+        "source_universe_preview"
+      ],
+      "require_financial_key_field": true,
       "min_score": null,
       "recommendation_levels": []
     }

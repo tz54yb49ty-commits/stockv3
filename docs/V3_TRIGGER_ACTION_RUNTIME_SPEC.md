@@ -514,7 +514,7 @@ trigger_mark_candidate=normal / 30m_volume / 30m_shrink
 
 N5 decides the final `action_mark` when action confirmation passes its 120m / 30m / 5m / 1m rules. The final mark is derived from N3 action-confirmation metric fields, not from N4 `trigger_mark_candidate`. Missing `previous_day_same_window_amount` downgrades the mark to `normal` without blocking `ActionExecuted`. Those rules and their N3 metric ownership are frozen in `docs/V3_N3_N4_N5_ACTION_CONFIRMATION_RULE_SPEC.md`. Existing N4 code or historical reports that expose an `action_mark` field must be treated as `trigger_mark_candidate` until explicitly aligned.
 
-N4/N5 must not compute the 120m / 30m / 5m / 1m confirmation metrics by reading raw minute facts. For N5 `ActionExecuted`, N3T must publish standard action-confirmation metric facts from closed C1 1m K. N5 may evaluate final confirmation only from those N3T facts and a live N4 `TriggerMatched` event; opaque `action_confirmation` payload fields are trace-only until a separate alignment contract replaces them.
+N4/N5 must not compute the 120m / 30m / 5m / 1m confirmation metrics by reading raw minute facts. For N5 `ActionExecuted`, N3T must publish standard action-confirmation metric facts from closed C1 1m K. The action-confirmation episode must have an immutable `episode_entry` created by a live N4 `TriggerMatched`; after that entry exists, a later `TriggerStateChanged(trigger_live=true)` may refresh the same episode's `current_active_source` and become the top-level `source_trigger_event_*` of `ActionExecuted`. The original `TriggerMatched` remains frozen in `action_entry_trigger_matched_ref`, and the `final_market_proof` must be the matching `N3T_C1_CLOSED` fact. Opaque `action_confirmation` payload fields are trace-only until a separate alignment contract replaces them.
 
 `BUY_HINT` and `SELL_HINT` remain formal realtime buy/sell condition keys, but they are not formal N4/N5 runtime `signal_type` values. N4/N5 must not downgrade them to display-only semantics, and must not promote them into user hint policy either. Whether they are shown as a hint label, alert-only card, push, voice/TTS, sim display, or trade intent is decided only by N6/user policy.
 
@@ -661,6 +661,13 @@ as per-minute trigger facts.
 TriggerMatched = outcome event; positive input for N5 action confirmation
 TriggerStateChanged = state event; current trigger-state broadcast; never written to common_trigger_match
 ```
+
+For N5, `TriggerMatched` alone creates the action-confirmation episode and
+`ActionEligible`. A later `TriggerStateChanged(trigger_live=true)` does not
+create another episode or `ActionEligible`; it refreshes the current live
+episode and may become its `current_active_source`. It can lead to
+`ActionExecuted` only when the immutable `TriggerMatched` entry remains
+available and a matching `N3T_C1_CLOSED` final proof passes.
 
 `TriggerPendingMarketData` is legacy-only.  New runtime no-match, missing
 market-data, and insufficient-proof candidates are dropped by default and must

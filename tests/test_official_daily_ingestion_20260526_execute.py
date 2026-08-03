@@ -115,6 +115,44 @@ class FakeOfficialDailyAdapter:
         return list(self.bundle["board"])
 
 
+class FakePinnedMootdxSource:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def fetch_index_daily_bars(self, **kwargs):
+        self.calls.append("index")
+        return [
+            {
+                "code": symbol.code,
+                "exchange": symbol.exchange,
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "vol": 100,
+                "amount": 1000,
+            }
+            for symbol in kwargs["indexes"]
+        ]
+
+    def fetch_board_daily_bars(self, **kwargs):
+        self.calls.append("board")
+        return [
+            {
+                "board_code": symbol.board_code,
+                "board_name": symbol.board_name,
+                "board_type": symbol.board_type,
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "vol": 100,
+                "amount": 1000,
+            }
+            for symbol in kwargs["boards"]
+        ]
+
+
 class RecordingCursor:
     def __init__(self) -> None:
         self.statements: list[str] = []
@@ -183,6 +221,27 @@ class RunnerHarness:
 
 
 class OfficialDaily20260526ExecuteTests(unittest.TestCase):
+    def test_v1_adapter_reuses_one_injected_mootdx_source_for_index_and_board(self) -> None:
+        scope = expected_scope()
+        source = FakePinnedMootdxSource()
+        adapter = DefaultOfficialDaily20260526SourceAdapter(
+            tushare_token="fake",
+            mootdx_source=source,
+        )
+
+        index_rows = adapter.fetch_index_daily(
+            trade_date=TRADE_DATE,
+            expected_scope=scope["index"],
+        )
+        board_rows = adapter.fetch_board_daily(
+            trade_date=TRADE_DATE,
+            expected_scope=scope["board"],
+        )
+
+        self.assertEqual(source.calls, ["index", "board"])
+        self.assertEqual(len(index_rows), len(scope["index"]))
+        self.assertEqual(len(board_rows), len(scope["board"]))
+
     def test_missing_required_flags_block(self) -> None:
         cases = [
             (False, True, True, True, "--execute"),

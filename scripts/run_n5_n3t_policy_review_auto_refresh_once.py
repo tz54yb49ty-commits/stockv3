@@ -26,6 +26,14 @@ from review_n5_n3t_fastlane_trading_day_monitor import (
 
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+SAFE_VALUE_ERROR_CODES = frozenset(
+    {
+        "ASHARE_V3_POSTGRES_DSN_missing",
+        "active_worker_policy_review_path_missing",
+        "active_worker_policy_review_path_policy_mismatch",
+        "expected_json_object",
+    }
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -223,6 +231,13 @@ def _compact_report(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_failure_code(exc: Exception) -> str:
+    message = str(exc)
+    if isinstance(exc, ValueError) and message in SAFE_VALUE_ERROR_CODES:
+        return message
+    return type(exc).__name__
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
     try:
@@ -237,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = {
             "result": "BLOCKED",
             "final_verdict": "BLOCKED_N5_N3T_POLICY_REVIEW_AUTO_REFRESH_CONTRACT",
-            "blocked_reason": f"policy_review_auto_refresh_failed:{type(exc).__name__}",
+            "blocked_reason": f"policy_review_auto_refresh_failed:{_safe_failure_code(exc)}",
             "policy_review_written": False,
         }
 

@@ -1,6 +1,10 @@
 import unittest
 import json
 from pathlib import Path
+import tempfile
+import inspect
+
+from ashare_v3.market import closed_30m_replay_execute
 
 from ashare_v3.market.closed_30m_replay_execute import (
     ALLOWED_WRITE_TABLES,
@@ -19,8 +23,10 @@ from ashare_v3.market.closed_30m_replay_execute import (
     build_replay_delta_records,
     ensure_clean_c2_target,
     ensure_c2_execute_contract,
+    prepare_mootdx_c2_replay_batch,
     summarize_execute_rows,
 )
+from ashare_v3.mootdx_client import EndpointConfig, MootdxEndpointManager
 
 
 C2_RUN_ID = (
@@ -32,7 +38,55 @@ CONDITION_RUN_ID = "condition_layer_20260522_to_20260525_20260525102249_execute"
 TODAY_MINUTE_RUN_ID = f"today_minute_bar_1m_20260525_until_1411__{SUBSCRIPTION_RUN_ID}"
 
 
+class TdxConnectionError(Exception):
+    pass
+
+
 class Closed30mReplayExecuteTest(unittest.TestCase):
+    def test_local_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        subscription = sample_subscription("stock", "stock:SH:600000", "SH", "600000")
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = fake_endpoint_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def bars(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise KeyError("local C2 contract bug")
+
+            prepared, outcome = prepare_mootdx_c2_replay_batch(
+                c2_run_id=C2_RUN_ID,
+                trade_date="20260525",
+                subscriptions=[subscription],
+                manager=manager,
+                probe=passing_minute_probe,
+                client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(prepared, [])
+        self.assertEqual(outcome.attempts[0]["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(outcome.attempts[0]["retry_allowed"])
+
+    def test_production_entrypoint_delegates_default_transport_to_shared_batch_factory(self) -> None:
+        signature = inspect.signature(closed_30m_replay_execute.run_closed_30m_replay_execute)
+        self.assertIsNone(signature.parameters["endpoint_client_factory"].default)
+        source = inspect.getsource(closed_30m_replay_execute)
+        self.assertNotIn("create_mootdx_client", source)
+
+    def test_c2_transaction_persists_attempts_in_run_and_quality(self) -> None:
+        source = inspect.getsource(closed_30m_replay_execute.write_c2_execute_transaction)
+        self.assertIn('"mootdx_batch_attempt": dict(batch_attempt)', source)
+        self.assertIn("traced_quality_items", source)
+
+    def test_closed_replay_adapter_requires_manager_pinned_client(self) -> None:
+        with self.assertRaisesRegex(Closed30mReplayExecuteError, "manager-selected pinned client"):
+            MootdxClosed30mReplayAdapter()
+
     def test_execute_requires_double_confirmation(self) -> None:
         with self.assertRaisesRegex(Closed30mReplayExecuteError, "--execute"):
             ensure_c2_execute_contract(
@@ -146,6 +200,109 @@ class Closed30mReplayExecuteTest(unittest.TestCase):
                 ("index_bars", "881001", 8, 512),
             ],
         )
+
+    def test_multi_object_partial_c2_attempt_replays_secondary_from_first(self) -> None:
+        subscriptions = [
+            sample_subscription("stock", "stock:SH:600000", "SH", "600000"),
+            sample_subscription("stock", "stock:SH:600001", "SH", "600001"),
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_c2_replay_batch(
+                c2_run_id=C2_RUN_ID,
+                trade_date="20260525",
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_minute_probe,
+                client_factory=lambda selection: PartialC2Client(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(len(prepared), 2)
+        self.assertTrue(
+            all(row["endpoint_id"] == "secondary" for item in prepared for row in item["replay_rows"])
+        )
+
+    def test_observe_c2_partial_failure_has_no_secondary_business_fetch(self) -> None:
+        subscriptions = [
+            sample_subscription("stock", "stock:SH:600000", "SH", "600000"),
+            sample_subscription("stock", "stock:SH:600001", "SH", "600001"),
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_c2_replay_batch(
+                c2_run_id=C2_RUN_ID,
+                trade_date="20260525",
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=passing_minute_probe,
+                client_factory=lambda selection: PartialC2Client(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(prepared, [])
+
+    def test_one_empty_c2_object_stays_primary_as_missing_quality(self) -> None:
+        subscriptions = [
+            sample_subscription("stock", "stock:SH:600000", "SH", "600000"),
+            sample_subscription("stock", "stock:SH:600001", "SH", "600001"),
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_c2_replay_batch(
+                c2_run_id=C2_RUN_ID,
+                trade_date="20260525",
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_minute_probe,
+                client_factory=lambda selection: EmptyThenNonemptyC2Client(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(prepared[0]["replay_rows"], [])
+        self.assertEqual(prepared[0]["fetch_error"], "empty_required_object")
+        self.assertIsNone(prepared[1]["fetch_error"])
+
+    def test_three_empty_c2_objects_replay_secondary_from_first(self) -> None:
+        subscriptions = [
+            sample_subscription("stock", f"stock:SH:60000{index}", "SH", f"60000{index}")
+            for index in range(3)
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_c2_replay_batch(
+                c2_run_id=C2_RUN_ID,
+                trade_date="20260525",
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_minute_probe,
+                client_factory=lambda selection: EmptyPrimaryC2Client(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("primary", "600002"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+                ("secondary", "600002"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertTrue(all(item["replay_rows"] for item in prepared))
 
     def test_delta_rows_only_include_missing_or_changed_rows(self) -> None:
         subscription = sample_subscription("stock", "stock:SH:600000", "SH", "600000")
@@ -368,6 +525,89 @@ class FakeMootdxClient:
         del start
         self.calls.append(("index_bars", symbol, frequency, offset))
         return []
+
+
+class PartialC2Client:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and symbol == "600001":
+            raise TdxConnectionError("primary failed after first C2 object")
+        return [
+            {
+                "year": 2026,
+                "month": 5,
+                "day": 25,
+                "hour": 9,
+                "minute": 31,
+                "open": 10,
+                "high": 10.1,
+                "low": 9.9,
+                "close": 10.05,
+                "vol": 100,
+                "amount": 1000,
+            }
+        ]
+
+    def index_bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        return self.bars(symbol=symbol, **kwargs)
+
+
+class EmptyThenNonemptyC2Client(PartialC2Client):
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        if symbol == "600000":
+            return []
+        return c2_raw_minute_rows()
+
+
+class EmptyPrimaryC2Client(PartialC2Client):
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if self.endpoint_id == "primary" else c2_raw_minute_rows()
+
+
+def c2_raw_minute_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "year": 2026,
+            "month": 5,
+            "day": 25,
+            "hour": 9,
+            "minute": 31,
+            "open": 10,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.05,
+            "vol": 100,
+            "amount": 1000,
+        }
+    ]
+
+
+def fake_endpoint_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    rows = (
+        EndpointConfig("primary", "115.238.56.198", 7709, 10, True, False, "x", "x", "protocol_passed"),
+        EndpointConfig("secondary", "180.153.18.170", 7709, 20, True, False, "x", "x", "protocol_passed"),
+    )
+    return MootdxEndpointManager(
+        endpoint_pool_version="test",
+        transport="mootdx",
+        endpoints=rows,
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def passing_minute_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {"checks": {"minute_scope_sentinels": True}}
 
 
 def sample_subscription(asset_kind: str, identity_key: str, exchange: str, code: str) -> dict[str, object]:

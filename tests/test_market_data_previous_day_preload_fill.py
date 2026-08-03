@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from ashare_v3.market.previous_day_preload_fill import (
     PreviousDayMinutePreloadFillError,
@@ -7,10 +8,29 @@ from ashare_v3.market.previous_day_preload_fill import (
     ensure_metadata_only_fill_target,
     format_fill_facts_execute_report,
     prefix_fill_quality_items,
+    require_pinned_previous_day_fill_adapter,
+)
+from scripts.run_previous_day_minute_preload_fill_facts import (
+    LEGACY_FILL_CLI_RETIRED,
+    RETIREMENT_REASON,
+    main as retired_fill_main,
 )
 
 
 class PreviousDayMinutePreloadFillTest(unittest.TestCase):
+    def test_legacy_fill_cli_is_explicitly_retired_before_db_or_adapter(self) -> None:
+        self.assertTrue(LEGACY_FILL_CLI_RETIRED)
+        self.assertIn("manager-pinned", RETIREMENT_REASON)
+        with patch("sys.argv", ["run_previous_day_minute_preload_fill_facts.py"]):
+            self.assertEqual(retired_fill_main(), 2)
+
+    def test_fill_requires_manager_selected_pinned_adapter_before_execute(self) -> None:
+        with self.assertRaisesRegex(PreviousDayMinutePreloadFillError, "manager-selected pinned adapter"):
+            require_pinned_previous_day_fill_adapter(None)
+
+        pinned_adapter = object()
+        self.assertIs(require_pinned_previous_day_fill_adapter(pinned_adapter), pinned_adapter)
+
     def test_fill_contract_requires_double_confirmation(self) -> None:
         with self.assertRaises(PreviousDayMinutePreloadFillError):
             ensure_fill_facts_contract(

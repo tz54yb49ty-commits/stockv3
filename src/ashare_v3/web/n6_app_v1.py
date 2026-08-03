@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-import re
 from typing import Any
 from urllib.parse import quote, urlencode
-from zoneinfo import ZoneInfo
 
 from ashare_v3.web.n6_ui_v1 import (
     cash_summary_item,
@@ -22,20 +19,19 @@ from ashare_v3.web.n6_ui_v1 import (
 
 APP_SCOPE = "n6_multi_user_app"
 APP_SAFETY_LABELS = (
-    "投影只读 · 虚拟交易不连接真实券商 · 不执行真实下单 · 不构成投资建议",
+    "只读模式 · 不下单 · 不更新持仓 · 不构成投资建议",
     "本页仅展示已审核的系统投影和证据链，不代表交易建议",
 )
 APP_FUTURE_MODULE_NOTICE = "该入口为未来功能预留，当前不会生成方案、订单、交易或持仓变化"
 APP_DISCLAIMER = ["非实际业绩", "非投资建议", "不代表未来结果"]
-AI_AGENT_PUBLIC_DISCLAIMER = [
-    "仅为模拟账户和实验性 AI 决策展示",
-    "不连接真实券商，不执行真实下单",
-    "非投资建议，不代表未来结果",
-]
 APP_ALLOWED_SIGNAL_SOURCES = [
     "reviewed N6 projections",
     "reviewed signal cards",
-    "principal-scoped N6 monitor preferences",
+    "n6_display_stock_condition_cache",
+    "n6_display_index_condition_cache",
+    "n6_display_board_condition_cache",
+    "n6_display_index_membership_cache",
+    "n6_display_board_membership_cache",
 ]
 APP_FORBIDDEN_SIGNAL_SOURCES = [
     "raw K",
@@ -48,131 +44,14 @@ APP_FORBIDDEN_SIGNAL_SOURCES = [
     "minute_target_scope",
     "unreviewed outbox / raw facts",
 ]
-SIGNAL_SSE_CONTRACT_VERSION = "n6-b-track-signal-sse-v1"
-SIGNAL_SSE_ALLOWED_SOURCES = (
-    "user_projection_run",
-    "user_signal_projection",
-    "user_signal_card",
-)
-POSTGRES_SIGNED_BIGINT_MAX = 9223372036854775807
-APP_SIGNAL_BIGINT_ID_FIELDS = (
-    "monitor_id",
-    "principal_id",
-    "user_id",
-    "realtime_scope_id",
-    "source_display_basis_id",
-    "user_signal_projection_id",
-    "user_signal_card_id",
-    "source_condition_display_basis_id",
-    "proposal_id",
-    "source_signal_projection_id",
-    "source_virtual_position_id",
-    "virtual_account_id",
-    "virtual_position_id",
-    "virtual_position_lot_id",
-    "virtual_order_id",
-    "virtual_trade_id",
-    "source_virtual_trade_id",
-    "virtual_cash_snapshot_id",
-    "virtual_cash_ledger_id",
-    "virtual_quote_snapshot_id",
-    "fill_quote_snapshot_id",
-    "stop_loss_source_quote_snapshot_id",
-    "ai_user_id",
-    "ai_context_snapshot_id",
-    "ai_decision_run_id",
-    "ai_decision_id",
-    "ai_daily_summary_id",
-    "ai_strategy_evaluation_id",
-    "source_virtual_trade_proposal_id",
-    "strategy_id",
-    "selection_revision_id",
-    "strategy_match_projection_id",
-    "strategy_observation_projection_id",
-    "strategy_match_change_id",
-)
-PORTFOLIO_TIMEZONE = ZoneInfo("Asia/Shanghai")
-PORTFOLIO_FRESH_SECONDS = Decimal("120")
-PORTFOLIO_ALLOWED_SOURCES = [
-    "common_trade_calendar",
-    "n6_principal",
-    "n6_virtual_account",
-    "n6_virtual_position",
-    "n6_virtual_position_lot",
-    "v_n6_virtual_quote_latest",
-]
-PORTFOLIO_FORBIDDEN_SOURCES = [
-    "N1-N5 raw facts",
-    "existing N3 facts",
-    "external market data",
-    "Mootdx from web request",
-]
-
-
-def canonical_bigint_id(
-    value: Any,
-    *,
-    field_name: str,
-    required: bool = False,
-) -> str | None:
-    if field_name not in APP_SIGNAL_BIGINT_ID_FIELDS:
-        raise ValueError("unsupported_bigint_id_field")
-    if value is None:
-        if required:
-            raise ValueError(f"missing_{field_name}")
-        return None
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ValueError(f"invalid_{field_name}")
-    if isinstance(value, int):
-        parsed = value
-    elif isinstance(value, Decimal):
-        if not value.is_finite() or value != value.to_integral_value():
-            raise ValueError(f"invalid_{field_name}")
-        parsed = int(value)
-    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
-        parsed = int(value)
-    else:
-        raise ValueError(f"invalid_{field_name}")
-    if parsed < 1 or parsed > POSTGRES_SIGNED_BIGINT_MAX:
-        raise ValueError(f"invalid_{field_name}")
-    return str(parsed)
-
-
-APP_SIGNAL_FROZEN_PROJECTION_FIELDS = (
-    "condition_projection_context",
-    "condition_projection_context_status",
-    "condition_projection_context_trace",
-    "projection_message_contract_version",
-    "projection_message_contract_hash",
-    "projection_message_status",
-    "projection_message_not_ready_reasons",
-    "trigger_price",
-    "trigger_pct",
-    "trigger_pct_status",
-    "action_price",
-    "action_pct",
-    "action_pct_status",
-    "target_price",
-    "buy_expected_return_pct",
-    "up_secondary_expected_return_pct",
-    "sell_expected_return_pct",
-    "up_reference_period",
-    "down_reference_period",
-    "primary_trigger_period",
-    "all_trigger_periods",
-    "score",
-    "pe_core",
-    "industry_status",
-    "industry_provenance",
-)
 APP_V2_SAFETY_LABELS = (
-    "投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped",
+    "只读模式 · 监控偏好可保存 · 不下单 · 不构成投资建议 · principal scoped",
 )
 APP_V2_MESSAGE_DASHBOARD_SAFETY_LABELS = (
-    "投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped",
+    "只读模式 · 不下单 · 不更新持仓 · 不构成投资建议 · principal scoped",
 )
 APP_V2_BUY_MESSAGES_SAFETY_LABELS = (
-    "投影只读 · 不连接真实券商 · 不执行真实下单 · 不构成投资建议 · principal scoped",
+    "只读模式 · 不下单 · 不写虚拟账户 · 不生成订单 · 不构成投资建议 · principal scoped",
 )
 APP_V2_MESSAGE_EMPTY_STATES = {
     "no_effective_monitor": "当前没有有效监控对象，请先从筛选中心加入监控",
@@ -188,6 +67,8 @@ APP_V2_ALLOWED_SOURCES = [
     "v_n6_stock_condition_display_basis",
     "v_n6_index_condition_display_basis",
     "v_n6_board_condition_display_basis",
+    "n6_index_membership_display_cache",
+    "n6_board_membership_display_cache",
     "v_n6_index_membership_fact",
     "v_n6_board_membership_fact",
 ]
@@ -204,11 +85,6 @@ APP_V2_FORBIDDEN_SOURCES = [
     "n6_stock_display_cache",
     "n6_index_display_cache",
     "n6_board_display_cache",
-    "n6_display_stock_condition_cache",
-    "n6_display_index_condition_cache",
-    "n6_display_board_condition_cache",
-    "n6_display_index_membership_cache",
-    "n6_display_board_membership_cache",
     "stock_condition_display_basis",
     "index_condition_display_basis",
     "board_condition_display_basis",
@@ -238,10 +114,8 @@ APP_PAGE_LABELS = {
     "home": "B轨首页",
     "dashboard": "B轨首页",
     "account": "我的账户",
-    "realtime-scope": "实时监控范围",
-    "strategy-center": "策略中心",
-    "trade-log": "买卖日志",
     "watchlist": "关注池",
+    "realtime-scope": "实时监控范围",
     "signals": "我的监控消息列表",
     "messages": "我的监控消息总览",
     "buy-messages": "买入消息",
@@ -251,17 +125,14 @@ APP_PAGE_LABELS = {
     "proposals": "方案",
     "portfolio": "组合",
     "pnl": "收益",
-    "ai-agent": "AI模拟投资员",
     "ai-users": "AI助手",
     "leaderboard": "排行榜",
 }
 APP_NAV_LABELS = {
     "dashboard": "首页",
-    "account": "虚拟账户",
-    "realtime-scope": "实时监控范围",
-    "strategy-center": "策略中心",
-    "trade-log": "买卖日志",
+    "account": "账户",
     "watchlist": "关注池",
+    "realtime-scope": "实时监控范围",
     "signals": "消息列表",
     "messages": "卡片消息",
     "buy-messages": "买入消息",
@@ -271,7 +142,6 @@ APP_NAV_LABELS = {
     "proposals": "方案",
     "portfolio": "组合",
     "pnl": "收益",
-    "ai-agent": "AI投资员",
     "ai-users": "AI助手",
     "leaderboard": "排行榜",
 }
@@ -287,7 +157,6 @@ APP_COMPONENT_LABELS = {
     "B Track Signal Detail": "消息详情",
     "B Track Watchlist": "关注池",
     "B Track Realtime Scope": "实时监控范围",
-    "B Track Strategy Center": "策略中心",
     "B Track V2 Filter Center": "筛选中心",
     "B Track V2 Stock Filter": "个股筛选",
     "B Track V2 Board Filter": "板块筛选",
@@ -298,7 +167,6 @@ APP_COMPONENT_LABELS = {
     "B Track V2 Index Linked Stocks": "指数关联个股",
     "B Track V2 My Monitor": "我的监控对象",
     "B Track Status Monitor": "状态监控",
-    "B Track AI Agent": "AI模拟投资员",
     "B Track AI Users": "AI助手",
     "B Track Proposals": "方案",
     "B Track Portfolio": "组合",
@@ -382,14 +250,14 @@ APP_WATCHLIST_STATUS_LABELS = {
     "state_changed": "状态变化",
 }
 CONDITION_CACHE_SOURCE_BY_ASSET = {
-    "stock": "v_n6_stock_condition_display_basis",
-    "index": "v_n6_index_condition_display_basis",
-    "board": "v_n6_board_condition_display_basis",
+    "stock": "n6_display_stock_condition_cache",
+    "index": "n6_display_index_condition_cache",
+    "board": "n6_display_board_condition_cache",
 }
 V2_FILTER_SOURCE_BY_ASSET = {
-    "stock": "v_n6_stock_condition_display_basis",
-    "index": "v_n6_index_condition_display_basis",
-    "board": "v_n6_board_condition_display_basis",
+    "stock": "n6_display_stock_condition_cache",
+    "index": "n6_display_index_condition_cache",
+    "board": "n6_display_board_condition_cache",
 }
 V2_FILTER_READ_SOURCE_BY_ASSET = {
     "stock": "v_n6_stock_condition_display_basis",
@@ -397,8 +265,8 @@ V2_FILTER_READ_SOURCE_BY_ASSET = {
     "board": "v_n6_board_condition_display_basis",
 }
 V2_MEMBERSHIP_SOURCE_BY_KIND = {
-    "index": "v_n6_index_membership_fact",
-    "board": "v_n6_board_membership_fact",
+    "index": "n6_display_index_membership_cache",
+    "board": "n6_display_board_membership_cache",
 }
 V2_MEMBERSHIP_READ_SOURCE_BY_KIND = {
     "index": "v_n6_index_membership_fact",
@@ -456,6 +324,7 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "industry_code",
         "industry_name",
         "buy_expected_return_pct",
+        "up_secondary_expected_return_pct",
         "buy_target_price",
         "up_secondary_target_price",
         "up_sell_reference_period",
@@ -487,6 +356,7 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "identity_key",
         "display_name",
         "buy_expected_return_pct",
+        "up_secondary_expected_return_pct",
         "buy_target_price",
         "up_secondary_target_price",
         "up_sell_reference_period",
@@ -504,6 +374,7 @@ V2_FILTER_VISIBLE_FIELDS_BY_ASSET = {
         "identity_key",
         "display_name",
         "buy_expected_return_pct",
+        "up_secondary_expected_return_pct",
         "buy_target_price",
         "up_secondary_target_price",
         "up_sell_reference_period",
@@ -600,24 +471,23 @@ V2_PERIOD_GRADE_OPTIONS = (
     {"value": "flat", "label": "震荡"},
 )
 MEMBERSHIP_CACHE_SOURCE_BY_ASSET = {
-    "stock": "v_n6_board_membership_fact",
-    "index": "v_n6_index_membership_fact",
-    "board": "v_n6_board_membership_fact",
+    "stock": "n6_display_board_membership_cache",
+    "index": "n6_display_index_membership_cache",
+    "board": "n6_display_board_membership_cache",
 }
 
 
 def app_nav_context(active: str) -> dict[str, Any]:
     links = [
         {"key": "dashboard", "label": APP_NAV_LABELS["dashboard"], "href": "/n6/app/dashboard"},
+        {"key": "watchlist", "label": APP_NAV_LABELS["watchlist"], "href": "/n6/app/watchlist"},
+        {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
         {"key": "filter-center", "label": APP_NAV_LABELS["filter-center"], "href": "/n6/app/filter-center"},
         {"key": "my-monitor", "label": APP_NAV_LABELS["my-monitor"], "href": "/n6/app/my-monitor"},
-        {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
-        {"key": "strategy-center", "label": APP_NAV_LABELS["strategy-center"], "href": "/n6/app/strategy-center"},
         {"key": "signals", "label": APP_NAV_LABELS["signals"], "href": "/n6/app/signals"},
         {"key": "messages", "label": APP_NAV_LABELS["messages"], "href": "/n6/app/messages"},
+        {"key": "buy-messages", "label": APP_NAV_LABELS["buy-messages"], "href": "/n6/app/buy-messages"},
         {"key": "account", "label": APP_NAV_LABELS["account"], "href": "/n6/app/account"},
-        {"key": "trade-log", "label": APP_NAV_LABELS["trade-log"], "href": "/n6/app/trade-log"},
-        {"key": "ai-agent", "label": APP_NAV_LABELS["ai-agent"], "href": "/n6/app/ai-agent"},
     ]
     return {"active": "dashboard" if active == "home" else active, "links": links}
 
@@ -713,11 +583,7 @@ def app_principal_model(principal: dict[str, Any], *, user: dict[str, Any]) -> d
     if principal_type == "admin":
         permissions.append("read:system_audit_link")
     return {
-        "principal_id": canonical_bigint_id(
-            principal.get("principal_id"),
-            field_name="principal_id",
-            required=True,
-        ),
+        "principal_id": principal.get("principal_id"),
         "principal_type": principal_type,
         "display_name": principal.get("display_name")
         or principal.get("principal_label")
@@ -776,12 +642,9 @@ def app_dashboard_user_operation_guide() -> dict[str, Any]:
     quick_links = [
         {"label": "进入筛选中心", "href": "/n6/app/filter-center"},
         {"label": "查看监控对象", "href": "/n6/app/my-monitor"},
-        {"label": "管理实时范围", "href": "/n6/app/realtime-scope"},
+        {"label": "维护实时监控范围", "href": "/n6/app/realtime-scope"},
         {"label": "查看消息列表", "href": "/n6/app/signals"},
         {"label": "查看卡片消息", "href": "/n6/app/messages"},
-        {"label": "查看虚拟账户", "href": "/n6/app/account"},
-        {"label": "查看持仓组合", "href": "/n6/app/portfolio"},
-        {"label": "查看买卖日志", "href": "/n6/app/trade-log"},
     ]
     steps = [
         {
@@ -800,13 +663,20 @@ def app_dashboard_user_operation_guide() -> dict[str, Any]:
         },
         {
             "number": "03",
-            "title": "消息列表",
-            "summary": "消息列表=N6 projection/card 按当前用户范围过滤后的表格消息",
-            "description": "只读取已冻结的 N6 投影字段，并匹配当前用户的有效监控对象。",
-            "href": "/n6/app/signals",
+            "title": "实时监控范围",
+            "summary": "实时监控范围=当前用户自己的当前交易日实时消息默认范围",
+            "description": "用于当前交易日实时消息可见性；不会污染历史日期查询。",
+            "href": "/n6/app/realtime-scope",
         },
         {
             "number": "04",
+            "title": "消息列表",
+            "summary": "消息列表=共享消息池按当前用户范围过滤后的表格消息",
+            "description": "消息池是共享的，但展示前必须匹配当前用户的监控对象或实时监控范围。",
+            "href": "/n6/app/signals",
+        },
+        {
+            "number": "05",
             "title": "卡片消息",
             "summary": "卡片消息=共享卡片池按当前用户范围过滤后的卡片展示",
             "description": "卡片消息和消息列表使用同一套用户可见性规则，只是展示形式不同。",
@@ -830,7 +700,7 @@ def app_dashboard_user_operation_guide() -> dict[str, Any]:
         "boundary_notes": [
             "筛选中心共享，监控对象和实时监控范围按当前用户隔离。",
             "消息池和卡片池共享，但展示前按当前用户范围过滤。",
-            "监控投影只读；本人监控范围可管理；交易申请状态以当前 feature flag 为准。",
+            "本系统只读展示监控证据，不下单，不更新持仓，不构成投资建议。",
         ],
     }
 
@@ -1003,136 +873,27 @@ def app_account_model(
     account: dict[str, Any] | None,
     cash_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    virtual_account = virtual_account_item(account)
+    cash = cash_summary_item(cash_snapshot)
+    virtual_account.update(
+        {
+            "available_cash": cash["available_cash"],
+            "frozen_cash": cash["frozen_cash"],
+            "total_cash": cash["total_cash"],
+            "status": virtual_account.get("virtual_account_status"),
+            "updated_at": virtual_account.get("updated_at"),
+        }
+    )
     component = "B Track Account"
-    account_ready = bool(account)
-    virtual_account = None
-    if account:
-        virtual_account = {
-            "virtual_account_id": str(account.get("virtual_account_id") or ""),
-            "account_name": _first_text(account, "account_name", default="虚拟账户"),
-            "account_status": _first_text(account, "account_status", default="active"),
-            "account_type": _first_text(account, "account_type", default="virtual_t1"),
-            "settlement_rule": _first_text(account, "settlement_rule", default="T+1"),
-            "currency": _first_text(account, "currency", default="CNY"),
-        }
-    cash_summary = None
-    if cash_snapshot:
-        cash_summary = {
-            "available_cash": number_or_none(cash_snapshot.get("available_cash")),
-            "frozen_cash": number_or_none(cash_snapshot.get("frozen_cash")),
-            "total_cash": number_or_none(cash_snapshot.get("total_cash")),
-            "available_cash_display": _money_text(cash_snapshot.get("available_cash")),
-            "frozen_cash_display": _money_text(cash_snapshot.get("frozen_cash")),
-            "total_cash_display": _money_text(cash_snapshot.get("total_cash")),
-            "snapshot_time": display_datetime(cash_snapshot.get("snapshot_time") or cash_snapshot.get("updated_at")),
-        }
     return {
-        "ok": True,
+        "ok": account is not None,
         "component": component,
         "component_label": _component_label(component),
         "principal": app_principal_model(principal, user=user),
-        "status": "ready" if account_ready else "not_ready",
-        "status_label": _state_label("ready" if account_ready else "not_ready"),
-        "locked": not account_ready,
-        "reason": "" if account_ready else "当前 principal 尚未创建虚拟账户",
         "virtual_account": virtual_account,
-        "cash_summary": cash_summary,
+        "cash_summary": cash,
         "readonly": True,
         "safety_banner": list(APP_SAFETY_LABELS),
-        "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-def app_trade_proposals_model(
-    principal: dict[str, Any],
-    *,
-    user: dict[str, Any],
-    result: dict[str, Any],
-    write_enabled: bool = False,
-) -> dict[str, Any]:
-    items = []
-    for row in result.get("items") or []:
-        items.append(
-            {
-                "proposal_id": canonical_bigint_id(row.get("proposal_id"), field_name="proposal_id", required=True),
-                "source_type": _first_text(row, "source_type"),
-                "source_id": _first_text(row, "source_id"),
-                "asset_kind": _first_text(row, "asset_kind"),
-                "identity_key": _first_text(row, "identity_key"),
-                "proposal_side": _first_text(row, "proposal_side"),
-                "signal_reference_kind": _first_text(row, "signal_reference_kind"),
-                "signal_reference_price": number_or_none(row.get("signal_reference_price")),
-                "proposal_status": _first_text(row, "proposal_status"),
-                "confirmation_generation_token": _first_text(
-                    row, "confirmation_generation_token"
-                ),
-                "expires_at": display_datetime(row.get("expires_at")),
-                "confirmed_at": display_datetime(row.get("confirmed_at")),
-                "created_at": display_datetime(row.get("created_at")),
-                "failure_reason": _first_text(row, "failure_reason"),
-            }
-        )
-    return {
-        "ok": True,
-        "component": "B Track Virtual Trade Proposals V3",
-        "principal": app_principal_model(principal, user=user),
-        "tables_ready": bool(result.get("tables_ready")),
-        "items": items,
-        "controls": {
-            "create_route_registered": True,
-            "confirm_route_registered": True,
-            "write_route_enabled": bool(write_enabled),
-            "client_price_allowed": False,
-            "client_quantity_allowed": False,
-            "client_account_allowed": False,
-        },
-        "readonly": not bool(write_enabled),
-        "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-def app_virtual_trades_model(
-    principal: dict[str, Any],
-    *,
-    user: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    items = []
-    for row in result.get("items") or []:
-        items.append(
-            {
-                "virtual_trade_id": canonical_bigint_id(
-                    row.get("virtual_trade_id"), field_name="virtual_trade_id", required=True
-                ),
-                "virtual_order_id": canonical_bigint_id(
-                    row.get("virtual_order_id"), field_name="virtual_order_id", required=True
-                ),
-                "virtual_account_id": canonical_bigint_id(
-                    row.get("virtual_account_id"), field_name="virtual_account_id", required=True
-                ),
-                "identity_key": _first_text(row, "identity_key"),
-                "trade_side": _first_text(row, "trade_side"),
-                "filled_quantity": number_or_none(row.get("filled_quantity")),
-                "filled_price": number_or_none(row.get("filled_price")),
-                "gross_amount": number_or_none(row.get("gross_amount")),
-                "total_fee_amount": number_or_none(row.get("total_fee_amount")),
-                "net_amount": number_or_none(row.get("net_amount")),
-                "trade_status": _first_text(row, "trade_status"),
-                "trade_time": display_datetime(row.get("trade_time")),
-                "signal_reference_kind": _first_text(row, "signal_reference_kind"),
-                "signal_reference_price": number_or_none(row.get("signal_reference_price")),
-                "fill_quote_snapshot_id": canonical_bigint_id(
-                    row.get("fill_quote_snapshot_id"), field_name="fill_quote_snapshot_id"
-                ),
-            }
-        )
-    return {
-        "ok": True,
-        "component": "B Track Virtual Trade Log V3",
-        "principal": app_principal_model(principal, user=user),
-        "tables_ready": bool(result.get("tables_ready")),
-        "items": items,
-        "readonly": True,
         "side_effects": dict(APP_SIDE_EFFECTS),
     }
 
@@ -1210,11 +971,6 @@ def app_signals_model(
             selected_trade_date=str(filters.get("trade_date") or ""),
             selected_asset_kind=selected_asset_kind,
         ),
-        "api_stream_href": _message_api_href(
-            "/api/n6/app/v1/signals/stream",
-            selected_trade_date=str(filters.get("trade_date") or ""),
-            selected_asset_kind=selected_asset_kind,
-        ),
         "available_trade_dates": list(metadata.get("available_trade_dates") or []),
         "date_policy_blocker": str(metadata.get("date_policy_blocker") or ""),
         "date_policy_message": str(metadata.get("date_policy_message") or ""),
@@ -1261,7 +1017,7 @@ def app_v2_message_dashboard_source_policy() -> dict[str, Any]:
         "monitor_effective_active_required": True,
         "asset_kind_match_required": True,
         "identity_key_match_required": True,
-        "direction_match_required": True,
+        "direction_match_required": False,
         "trade_date_match_required": True,
         "current_batch_reads_only_views": True,
         "n6_projection_only": True,
@@ -1340,11 +1096,6 @@ def app_v2_message_dashboard_model(
             selected_trade_date=selected_trade_date,
             selected_asset_kind=selected_asset_kind,
         ),
-        "api_stream_href": _message_api_href(
-            "/api/n6/app/v1/signals/stream",
-            selected_trade_date=selected_trade_date,
-            selected_asset_kind=selected_asset_kind,
-        ),
         "available_trade_dates": list(metadata["available_trade_dates"]),
         "date_policy_blocker": str(metadata.get("date_policy_blocker") or ""),
         "date_policy_message": str(metadata.get("date_policy_message") or ""),
@@ -1396,24 +1147,6 @@ def app_v2_message_card_item(row: dict[str, Any]) -> dict[str, Any]:
         "condition_key": item.get("condition_key"),
         "triggered_periods": item.get("triggered_periods"),
         "primary_trigger_period": item.get("primary_trigger_period"),
-        "target_price": item.get("target_price"),
-        "current_price": item.get("current_price"),
-        "expected_return_pct": item.get("expected_return_pct"),
-        "buy_return": item.get("buy_return"),
-        "secondary_return": item.get("secondary_return"),
-        "sell_return": item.get("sell_return"),
-        "trigger_price": item.get("trigger_price"),
-        "trigger_pct": item.get("trigger_pct"),
-        "action_price": item.get("action_price"),
-        "action_pct": item.get("action_pct"),
-        "industry_code": item.get("industry_code"),
-        "industry_name": item.get("industry_name"),
-        "industry_status": item.get("industry_status"),
-        "score": item.get("score"),
-        "pe_core": item.get("pe_core"),
-        "up_ref": item.get("up_ref"),
-        "down_ref": item.get("down_ref"),
-        "projection_message_status": item.get("projection_message_status"),
         "action_state_label": item.get("action_state_label"),
         "action_mark": item.get("action_mark"),
         "blocked_reason_label": item.get("blocked_reason_label"),
@@ -1945,7 +1678,6 @@ def app_realtime_scope_model(
     *,
     user: dict[str, Any],
     result: dict[str, Any],
-    write_enabled: bool = False,
 ) -> dict[str, Any]:
     items = [app_realtime_scope_item(row) for row in result.get("items") or []]
     component = "B Track Realtime Scope"
@@ -1960,519 +1692,15 @@ def app_realtime_scope_model(
             "default_seed_count": sum(1 for item in items if item.get("is_default_seed")),
         },
         "controls": {
-            "write_route_registered": True,
-            "write_route_enabled": bool(write_enabled),
-            "add_enabled": bool(write_enabled),
-            "delete_enabled": bool(write_enabled),
+            "add_enabled": True,
+            "delete_enabled": True,
             "source": "user_realtime_monitor_scope",
             "scope_notice": "仅影响当前交易日实时消息可见性，不代表交易意图",
         },
-        "readonly": not bool(write_enabled),
+        "readonly": False,
         "safety_banner": list(APP_SAFETY_LABELS),
         "source_policy": app_signal_source_policy(),
         "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-def _strategy_selection_model(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    revision_id = canonical_bigint_id(
-        value.get("selection_revision_id"),
-        field_name="selection_revision_id",
-        required=True,
-    )
-    revision_no = value.get("revision_no")
-    if isinstance(revision_no, bool) or not isinstance(revision_no, int) or revision_no < 1:
-        raise ValueError("invalid_strategy_revision_no")
-    selected_packages = []
-    for item in value.get("selected_packages") or []:
-        if not isinstance(item, dict):
-            raise ValueError("invalid_strategy_selected_packages")
-        package_key = _first_text(item, "package_key")
-        package_version = _first_text(item, "package_version")
-        if package_key not in {"package_1", "package_2"} or not re.fullmatch(
-            r"v[1-9][0-9]*", package_version
-        ):
-            raise ValueError("invalid_strategy_selected_packages")
-        selected_packages.append(
-            {"package_key": package_key, "package_version": package_version}
-        )
-    selected = [str(item) for item in value.get("selected_package_keys") or []]
-    if not selected and selected_packages:
-        selected = [item["package_key"] for item in selected_packages]
-    if not selected or any(item not in {"package_1", "package_2"} for item in selected):
-        raise ValueError("invalid_strategy_selected_packages")
-    if selected_packages and selected != [
-        item["package_key"] for item in selected_packages
-    ]:
-        raise ValueError("conflicting_strategy_selected_packages")
-    return {
-        "selection_revision_id": revision_id,
-        "revision_no": revision_no,
-        "selection_status": _first_text(value, "selection_status"),
-        "replay_status": _first_text(value, "replay_status"),
-        "effective_trade_date": _first_text(value, "effective_trade_date"),
-        "selected_package_keys": selected,
-        "selected_packages": selected_packages,
-    }
-
-
-_STRATEGY_SURFACE_KINDS = {"qualified_match", "observation"}
-_STRATEGY_COHERENCE_LEVELS = {
-    "STRONG",
-    "MEDIUM",
-    "WEAK",
-    "EXPIRED",
-    "LEGACY_WHOLE_TRADE_DATE",
-}
-_STRATEGY_OBSERVATION_REASONS = {"weak_span", "stale_after_confirmation"}
-
-
-def _strategy_confluence_model(
-    row: dict[str, Any], signal: dict[str, Any]
-) -> dict[str, Any]:
-    top_level = row.get("confluence")
-    legacy = signal.pop("strategy_center_temporal_confluence", None)
-    if top_level is not None and not isinstance(top_level, dict):
-        raise ValueError("invalid_strategy_confluence")
-    if legacy is not None and not isinstance(legacy, dict):
-        raise ValueError("invalid_strategy_confluence")
-    if isinstance(top_level, dict) and isinstance(legacy, dict) and top_level != legacy:
-        raise ValueError("conflicting_strategy_confluence")
-    confluence = dict(top_level or legacy or {})
-    strategy_version = str(confluence.get("strategy_version") or "")
-    if not strategy_version:
-        strategy_version = {
-            "v1": "N6_STRATEGY_CENTER_V1",
-            "v2": "N6_STRATEGY_CENTER_TEMPORAL_CONFLUENCE_V2",
-        }.get(str(row.get("strategy_version") or ""), "")
-        if strategy_version:
-            confluence["strategy_version"] = strategy_version
-    if strategy_version not in {
-        "N6_STRATEGY_CENTER_V1",
-        "N6_STRATEGY_CENTER_TEMPORAL_CONFLUENCE_V2",
-    }:
-        raise ValueError("invalid_strategy_version")
-    policy_hash = _first_text(row, "evaluator_policy_hash", default="")
-    confluence_policy_hash = str(
-        confluence.get("evaluator_policy_hash") or ""
-    )
-    if policy_hash:
-        if confluence_policy_hash and confluence_policy_hash != policy_hash:
-            raise ValueError("conflicting_strategy_confluence")
-        confluence["evaluator_policy_hash"] = policy_hash
-        confluence_policy_hash = policy_hash
-    if not re.fullmatch(r"[0-9a-f]{64}", confluence_policy_hash):
-        raise ValueError("invalid_strategy_evaluator_policy_hash")
-    for key in ("direction", "coherence_level", "freshness_status"):
-        row_value = row.get(key)
-        confluence_value = confluence.get(key)
-        if row_value not in (None, ""):
-            if confluence_value not in (None, "") and confluence_value != row_value:
-                raise ValueError("conflicting_strategy_confluence")
-            confluence[key] = row_value
-    direction = str(confluence.get("direction") or "")
-    if direction and direction not in {"buy", "sell"}:
-        raise ValueError("invalid_strategy_confluence_direction")
-    coherence_level = str(confluence.get("coherence_level") or "")
-    if coherence_level and coherence_level not in _STRATEGY_COHERENCE_LEVELS:
-        raise ValueError("invalid_strategy_coherence_level")
-    package_evidence = row.get("package_evidence")
-    if package_evidence is None:
-        package_evidence = confluence.get("package_evidence")
-    if package_evidence is None:
-        package_evidence = confluence.get("package_confluence")
-    if package_evidence is not None:
-        if not isinstance(package_evidence, list) or any(
-            not isinstance(item, dict) for item in package_evidence
-        ):
-            raise ValueError("invalid_strategy_package_evidence")
-        confluence["package_evidence"] = [dict(item) for item in package_evidence]
-        confluence.pop("package_confluence", None)
-    market_heat_evidence = confluence.get("market_heat_evidence")
-    if market_heat_evidence is not None:
-        if not isinstance(market_heat_evidence, list) or any(
-            not isinstance(item, dict) for item in market_heat_evidence
-        ):
-            raise ValueError("invalid_strategy_market_heat_evidence")
-        confluence["market_heat_evidence"] = [
-            dict(item) for item in market_heat_evidence
-        ]
-    return confluence
-
-
-def _strategy_surface_item_model(
-    row: dict[str, Any], *, expected_surface: str
-) -> dict[str, Any]:
-    if expected_surface not in _STRATEGY_SURFACE_KINDS:
-        raise ValueError("invalid_strategy_surface_kind")
-    surface_kind = str(row.get("surface_kind") or expected_surface)
-    if surface_kind != expected_surface:
-        raise ValueError("invalid_strategy_surface_kind")
-    signal = dict(row.get("signal") or {})
-    confluence = _strategy_confluence_model(row, signal)
-    if "strategy_center_temporal_confluence" in signal:
-        raise ValueError("strategy_signal_dto_polluted")
-
-    if expected_surface == "qualified_match":
-        projection_field = "strategy_match_projection_id"
-        packages = row.get("matched_packages") or []
-        boards = row.get("matched_boards") or []
-        observation_reason = ""
-    else:
-        projection_field = "strategy_observation_projection_id"
-        packages = row.get("observed_packages")
-        if packages is None:
-            packages = row.get("matched_packages") or []
-        boards = row.get("observed_boards")
-        if boards is None:
-            boards = row.get("matched_boards") or []
-        observation_reason = _first_text(row, "observation_reason")
-        if not observation_reason:
-            observation_reason = (
-                "weak_span"
-                if confluence.get("coherence_level") == "WEAK"
-                else "stale_after_confirmation"
-                if confluence.get("freshness_status") == "stale"
-                else ""
-            )
-        if observation_reason not in _STRATEGY_OBSERVATION_REASONS:
-            raise ValueError("invalid_strategy_observation_reason")
-
-    projection_value = row.get(projection_field)
-    if projection_value is None and expected_surface == "observation":
-        projection_value = row.get("strategy_weak_observation_projection_id")
-    projection_id = canonical_bigint_id(
-        projection_value,
-        field_name=projection_field,
-        required=True,
-    )
-    matched_packages = [str(item) for item in packages]
-    if not matched_packages or any(
-        item not in {"package_1", "package_2"} for item in matched_packages
-    ):
-        raise ValueError("invalid_strategy_matched_packages")
-
-    item = {
-        "surface_kind": surface_kind,
-        "projection_id": projection_id,
-        projection_field: projection_id,
-        "trade_date": _first_text(row, "trade_date"),
-        "stock_identity_key": _first_text(row, "stock_identity_key"),
-        "action_episode_key": _first_text(row, "action_episode_key"),
-        "coherence_episode_key": _first_text(row, "coherence_episode_key"),
-        "action_state": _first_text(row, "action_state"),
-        "matched_packages": matched_packages,
-        "scope_sources": [str(item) for item in row.get("scope_sources") or []],
-        "indices": [dict(item) for item in row.get("indices") or []],
-        "matched_boards": [dict(item) for item in boards],
-        "signal": signal,
-        "confluence": confluence,
-        "package_evidence": [
-            dict(item) for item in confluence.get("package_evidence") or []
-        ],
-        "state_timeline": [
-            dict(item) for item in row.get("state_timeline") or []
-        ],
-        "mapping_quality": _first_text(row, "mapping_quality"),
-        "matched_at": _first_text(row, "matched_at"),
-        "observed_at": _first_text(row, "observed_at"),
-        "updated_at": _first_text(row, "updated_at"),
-    }
-    if expected_surface == "observation":
-        item["observation_reason"] = observation_reason
-    return item
-
-
-def _strategy_surface_watermark(
-    state: dict[str, Any], *, surface_kind: str, fallback: int
-) -> str:
-    watermarks = state.get("watermarks")
-    if not isinstance(watermarks, dict):
-        watermarks = {}
-    aliases = (
-        ("qualified_match", "match", "matches")
-        if surface_kind == "qualified_match"
-        else ("observation", "observations")
-    )
-    value: Any = None
-    for key in aliases:
-        if key in watermarks:
-            value = watermarks[key]
-            break
-    if value is None:
-        field = (
-            "match_watermark"
-            if surface_kind == "qualified_match"
-            else "observation_watermark"
-        )
-        value = state.get(field)
-    if value is None:
-        value = fallback
-    return str(int(value or 0))
-
-
-def _strategy_selection_requires_v2_migration(
-    selection: dict[str, Any] | None,
-) -> bool:
-    if selection is None:
-        return False
-    selected_packages = selection.get("selected_packages") or []
-    return not selected_packages or any(
-        item.get("package_version") != "v2" for item in selected_packages
-    )
-
-
-def app_strategy_center_model(
-    principal: dict[str, Any],
-    *,
-    user: dict[str, Any],
-    state: dict[str, Any],
-    write_enabled: bool,
-) -> dict[str, Any]:
-    packages = []
-    for row in state.get("packages") or []:
-        if not isinstance(row, dict):
-            continue
-        package_key = _first_text(row, "package_key")
-        if package_key not in {"package_1", "package_2"}:
-            continue
-        packages.append(
-            {
-                "package_key": package_key,
-                "package_version": _first_text(row, "package_version"),
-                "display_name": _first_text(row, "display_name"),
-                "rule_kind": _first_text(row, "rule_kind"),
-                "allowed_board_types": [
-                    str(item) for item in row.get("allowed_board_types") or []
-                ],
-                "default_selected": bool(row.get("default_selected")),
-                "policy_hash": _first_text(row, "policy_hash"),
-                "rule": dict(row.get("rule_json") or {}),
-            }
-        )
-    packages.sort(key=lambda row: row["package_key"])
-
-    active_selection = _strategy_selection_model(state.get("active_selection"))
-    pending_selection = _strategy_selection_model(state.get("pending_selection"))
-    package_versions = {
-        row["package_key"]: row["package_version"] for row in packages
-    }
-    for selection in (active_selection, pending_selection):
-        if selection is not None and not selection["selected_packages"]:
-            selection["selected_packages"] = [
-                {
-                    "package_key": package_key,
-                    "package_version": package_versions.get(package_key, ""),
-                }
-                for package_key in selection["selected_package_keys"]
-            ]
-    migration_required = _strategy_selection_requires_v2_migration(active_selection)
-    raw_matches = [
-        row for row in state.get("matches") or [] if isinstance(row, dict)
-    ]
-    raw_observations = [
-        row for row in state.get("observations") or [] if isinstance(row, dict)
-    ]
-    legacy_v1_suppressed_count = (
-        len(raw_matches) + len(raw_observations) if migration_required else 0
-    )
-    matches = []
-    observations = []
-    if not migration_required:
-        matches = [
-            _strategy_surface_item_model(row, expected_surface="qualified_match")
-            for row in raw_matches
-        ]
-        observations = [
-            _strategy_surface_item_model(row, expected_surface="observation")
-            for row in raw_observations
-        ]
-    if migration_required:
-        quality_status = "migration_required"
-    elif pending_selection is not None:
-        quality_status = "rebuilding"
-    elif active_selection is None:
-        quality_status = "not_ready"
-    elif active_selection.get("replay_status") != "passed":
-        quality_status = "pending"
-    else:
-        quality_status = "ready"
-    scope = dict(state.get("scope") or {})
-    combined_watermark = int(state.get("watermark") or 0)
-    match_watermark = _strategy_surface_watermark(
-        state, surface_kind="qualified_match", fallback=combined_watermark
-    )
-    observation_watermark = _strategy_surface_watermark(
-        state, surface_kind="observation", fallback=combined_watermark
-    )
-    combined_watermark = max(
-        combined_watermark, int(match_watermark), int(observation_watermark)
-    )
-    raw_quality = state.get("quality")
-    if not isinstance(raw_quality, dict):
-        raw_quality = {}
-    match_quality = raw_quality.get("qualified_match")
-    if not isinstance(match_quality, dict):
-        match_quality = {"status": quality_status}
-    observation_quality = raw_quality.get("observation")
-    if not isinstance(observation_quality, dict):
-        observation_quality = {"status": quality_status}
-    counts = {
-        "qualified_match": len(matches),
-        "observation": len(observations),
-        "total": len(matches) + len(observations),
-    }
-    watermarks = {
-        "qualified_match": match_watermark,
-        "observation": observation_watermark,
-        "combined": str(combined_watermark),
-    }
-    return {
-        "ok": True,
-        "contract_version": "n6-strategy-center-api-v2",
-        "principal": app_principal_model(principal, user=user),
-        "trade_date": _first_text(state, "trade_date"),
-        "packages": packages,
-        "active_selection": active_selection,
-        "pending_selection": pending_selection,
-        "migration_required": migration_required,
-        "legacy_v1_suppressed_count": legacy_v1_suppressed_count,
-        "scope": {
-            "mode": _first_text(scope, "mode"),
-            "stock_count": int(scope.get("stock_count") or 0),
-            "monitor_count": int(scope.get("monitor_count") or 0),
-            "realtime_scope_count": int(scope.get("realtime_scope_count") or 0),
-            "virtual_position_count": int(scope.get("virtual_position_count") or 0),
-            "multi_source_count": int(scope.get("multi_source_count") or 0),
-        },
-        "matches": matches,
-        "observations": observations,
-        "match_count": len(matches),
-        "observation_count": len(observations),
-        "counts": counts,
-        "watermark": str(combined_watermark),
-        "watermarks": watermarks,
-        "surfaces": {
-            "qualified_match": {
-                "count": len(matches),
-                "watermark": match_watermark,
-                "quality": dict(match_quality),
-            },
-            "observation": {
-                "count": len(observations),
-                "watermark": observation_watermark,
-                "quality": dict(observation_quality),
-            },
-        },
-        "quality": {
-            "status": quality_status,
-            "qualified_match": dict(match_quality),
-            "observation": dict(observation_quality),
-            "canonical_signal_dto": True,
-            "confluence_separate": True,
-            "display_only": True,
-            "auto_buy_enabled": False,
-            "proposal_enabled": False,
-            "executor_enabled": False,
-        },
-        "selection_write_enabled": bool(write_enabled),
-        "full_refresh_seconds": 45,
-        "safety_labels": list(APP_SAFETY_LABELS),
-    }
-
-
-def app_strategy_center_change_batch_model(result: dict[str, Any]) -> dict[str, Any]:
-    events = []
-    previous_id = 0
-    for row in result.get("events") or []:
-        if not isinstance(row, dict) or row.get("event") not in {"upsert", "remove", "reset"}:
-            raise ValueError("invalid_strategy_change_event")
-        change_id = int(
-            canonical_bigint_id(
-                row.get("change_id"),
-                field_name="strategy_match_change_id",
-                required=True,
-            )
-        )
-        if change_id <= previous_id:
-            raise ValueError("non_monotonic_strategy_change_event")
-        previous_id = change_id
-        data = dict(row.get("data") or {})
-        surface_kind = str(row.get("surface_kind") or "")
-        if not surface_kind:
-            surface_kind = (
-                "observation"
-                if row.get("strategy_observation_projection_id") is not None
-                else "qualified_match"
-            )
-        if surface_kind not in _STRATEGY_SURFACE_KINDS:
-            raise ValueError("invalid_strategy_change_surface")
-        if data.get("strategy_match_projection_id") is not None:
-            data["strategy_match_projection_id"] = canonical_bigint_id(
-                data["strategy_match_projection_id"],
-                field_name="strategy_match_projection_id",
-                required=True,
-            )
-        if data.get("strategy_observation_projection_id") is not None:
-            data["strategy_observation_projection_id"] = canonical_bigint_id(
-                data["strategy_observation_projection_id"],
-                field_name="strategy_observation_projection_id",
-                required=True,
-            )
-        if isinstance(data.get("signal"), dict):
-            signal = dict(data["signal"])
-            confluence = _strategy_confluence_model(data, signal)
-            data["signal"] = signal
-            data["confluence"] = confluence
-        events.append(
-            {
-                "change_id": str(change_id),
-                "event": str(row["event"]),
-                "surface_kind": surface_kind,
-                "trade_date": _first_text(row, "trade_date"),
-                "selection_revision_id": canonical_bigint_id(
-                    row.get("selection_revision_id"),
-                    field_name="selection_revision_id",
-                    required=True,
-                ),
-                "strategy_match_projection_id": canonical_bigint_id(
-                    row.get("strategy_match_projection_id"),
-                    field_name="strategy_match_projection_id",
-                ),
-                "strategy_observation_projection_id": canonical_bigint_id(
-                    row.get("strategy_observation_projection_id"),
-                    field_name="strategy_observation_projection_id",
-                ),
-                "source_event_id": _first_text(row, "source_event_id"),
-                "data": data,
-                "payload_hash": _first_text(row, "payload_hash"),
-                "created_at": _first_text(row, "created_at"),
-            }
-        )
-    watermark = int(result.get("watermark") or 0)
-    if events and watermark < int(events[-1]["change_id"]):
-        raise ValueError("invalid_strategy_change_watermark")
-    return {
-        "events": events,
-        "watermark": str(watermark),
-        "has_more": bool(result.get("has_more")),
-    }
-
-
-def app_strategy_center_selection_result_model(
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    selection = _strategy_selection_model(result)
-    if selection is None:
-        raise ValueError("invalid_strategy_selection_result")
-    return {
-        "ok": True,
-        "selection": selection,
-        "replay_required": selection["replay_status"] != "passed",
-        "display_only": True,
-        "auto_buy_enabled": False,
     }
 
 
@@ -2510,560 +1738,6 @@ def app_status_monitor_model(
         "readonly": True,
         "safety_banner": list(APP_SAFETY_LABELS),
         "source_policy": app_signal_source_policy(),
-        "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-AI_AGENT_PUBLIC_PRIVATE_KEYS = frozenset(
-    {
-        "chain_of_thought",
-        "credential",
-        "credentials",
-        "dsn",
-        "owner_user_id",
-        "password",
-        "pgpass",
-        "principal_id",
-        "prompt",
-        "raw_prompt",
-        "reasoning",
-        "session",
-        "session_hash",
-        "session_token",
-        "system_prompt",
-        "token",
-        "user_id",
-    }
-)
-
-
-def _ai_agent_public_bigint(value: Any, field_name: str) -> str | None:
-    try:
-        return canonical_bigint_id(value, field_name=field_name)
-    except ValueError:
-        return None
-
-
-def _ai_agent_public_json(value: Any, *, depth: int = 0) -> Any:
-    """Return bounded public evidence without operational or identity secrets."""
-    if depth > 4:
-        return None
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    if isinstance(value, (float, Decimal)):
-        return number_or_none(value)
-    if isinstance(value, str):
-        return value[:2000]
-    if isinstance(value, (list, tuple)):
-        return [
-            item
-            for item in (
-                _ai_agent_public_json(entry, depth=depth + 1)
-                for entry in list(value)[:50]
-            )
-            if item is not None
-        ]
-    if isinstance(value, dict):
-        public: dict[str, Any] = {}
-        for raw_key, entry in list(value.items())[:100]:
-            key = str(raw_key or "").strip()
-            normalized_key = key.lower()
-            if (
-                not key
-                or normalized_key in AI_AGENT_PUBLIC_PRIVATE_KEYS
-                or any(
-                    fragment in normalized_key
-                    for fragment in (
-                        "api_key",
-                        "chain_of_thought",
-                        "credential",
-                        "dsn",
-                        "password",
-                        "private_key",
-                        "prompt",
-                        "reasoning",
-                        "secret",
-                        "session",
-                        "token",
-                    )
-                )
-            ):
-                continue
-            cleaned = _ai_agent_public_json(entry, depth=depth + 1)
-            if cleaned is not None:
-                public[key] = cleaned
-        return public
-    return str(value)[:2000]
-
-
-def _ai_agent_public_position(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "virtual_position_id": _ai_agent_public_bigint(
-            row.get("virtual_position_id"), "virtual_position_id"
-        ),
-        "identity_key": _first_text(row, "identity_key"),
-        "stock_code": _first_text(row, "stock_code", "display_code"),
-        "display_name": _first_text(row, "display_name", "stock_name"),
-        "quantity": number_or_none(row.get("quantity")),
-        "sellable_quantity": number_or_none(
-            row.get("sellable_quantity")
-            if row.get("sellable_quantity") is not None
-            else row.get("available_quantity")
-        ),
-        "t1_locked_quantity": number_or_none(
-            row.get("t1_locked_quantity")
-            if row.get("t1_locked_quantity") is not None
-            else row.get("locked_quantity")
-        ),
-        "average_cost": number_or_none(row.get("average_cost")),
-        "current_price": number_or_none(row.get("current_price")),
-        "market_value": number_or_none(row.get("market_value")),
-        "unrealized_pnl": number_or_none(row.get("unrealized_pnl")),
-        "unrealized_return_pct": number_or_none(row.get("unrealized_return_pct")),
-        "quote_status": _first_text(row, "quote_status", "quality_status"),
-        "target_price": number_or_none(
-            row.get("target_price")
-            if row.get("target_price") is not None
-            else row.get("locked_target_price")
-        ),
-        "target_price_status": _first_text(row, "target_price_status"),
-        "stop_loss_price": number_or_none(row.get("stop_loss_price")),
-        "stop_loss_status": _first_text(row, "stop_loss_status"),
-        "holding_episode_no": row.get("holding_episode_no"),
-        "first_open_trade_date": _first_text(row, "first_open_trade_date"),
-        "updated_at": display_datetime(row.get("updated_at") or row.get("quote_minute")),
-    }
-
-
-def _ai_agent_public_trade(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "virtual_trade_id": _ai_agent_public_bigint(
-            row.get("virtual_trade_id"), "virtual_trade_id"
-        ),
-        "ai_decision_id": _ai_agent_public_bigint(
-            row.get("ai_decision_id") or row.get("source_ai_decision_id"),
-            "ai_decision_id",
-        ),
-        "trade_time": display_datetime(row.get("trade_time") or row.get("created_at")),
-        "identity_key": _first_text(row, "identity_key"),
-        "display_name": _first_text(row, "display_name", "stock_name"),
-        "trade_side": _first_text(row, "trade_side", "proposal_side"),
-        "filled_quantity": number_or_none(row.get("filled_quantity")),
-        "filled_price": number_or_none(row.get("filled_price")),
-        "gross_amount": number_or_none(row.get("gross_amount")),
-        "total_fee_amount": number_or_none(row.get("total_fee_amount")),
-        "net_amount": number_or_none(
-            row.get("net_amount")
-            if row.get("net_amount") is not None
-            else row.get("gross_amount")
-        ),
-        "trade_status": _first_text(row, "trade_status"),
-        "reason_summary": _first_text(row, "reason_summary"),
-    }
-
-
-def app_ai_agent_public_decision_item(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ai_decision_id": _ai_agent_public_bigint(
-            row.get("ai_decision_id") or row.get("decision_id"), "ai_decision_id"
-        ),
-        "trade_date": _first_text(row, "trade_date", "for_trade_date"),
-        "event_time": display_datetime(
-            row.get("event_time") or row.get("decided_at") or row.get("created_at")
-        ),
-        "decision_type": _first_text(row, "decision_type"),
-        "identity_key": _first_text(row, "identity_key"),
-        "display_name": _first_text(row, "display_name", "stock_name"),
-        "confidence": number_or_none(row.get("confidence")),
-        "reason_summary": _first_text(row, "reason_summary"),
-        "evidence": _ai_agent_public_json(row.get("evidence") or []),
-        "counter_evidence": _ai_agent_public_json(row.get("counter_evidence") or []),
-        "risk_status": _first_text(row, "risk_status"),
-        "risk_reason": _first_text(row, "risk_reason"),
-        "risk_assessment": _ai_agent_public_json(row.get("risk_assessment") or {}),
-        "proposal_status": _first_text(
-            row, "proposal_status", default="—"
-        ),
-        "execution_status": _first_text(
-            row, "execution_status", "decision_status"
-        ),
-        "source_signal_projection_id": _ai_agent_public_bigint(
-            row.get("source_signal_projection_id"), "source_signal_projection_id"
-        ),
-        "source_virtual_position_id": _ai_agent_public_bigint(
-            row.get("source_virtual_position_id"), "source_virtual_position_id"
-        ),
-        "source_virtual_trade_proposal_id": _ai_agent_public_bigint(
-            row.get("source_virtual_trade_proposal_id"),
-            "source_virtual_trade_proposal_id",
-        ),
-        "ai_decision_run_id": _ai_agent_public_bigint(
-            row.get("ai_decision_run_id") or row.get("decision_run_id"),
-            "ai_decision_run_id",
-        ),
-        "ai_context_snapshot_id": _ai_agent_public_bigint(
-            row.get("ai_context_snapshot_id") or row.get("context_snapshot_id"),
-            "ai_context_snapshot_id",
-        ),
-        "strategy_version": _first_text(row, "strategy_version"),
-    }
-
-
-def _ai_agent_public_daily_summary(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ai_daily_summary_id": _ai_agent_public_bigint(
-            row.get("ai_daily_summary_id") or row.get("daily_summary_id"),
-            "ai_daily_summary_id",
-        ),
-        "trade_date": _first_text(row, "trade_date", "summary_date"),
-        "summary_text": _first_text(row, "summary_text", "daily_summary"),
-        "decision_count": int(row.get("decision_count") or 0),
-        "trade_count": int(row.get("trade_count") or 0),
-        "net_return_pct": number_or_none(row.get("net_return_pct")),
-        "max_drawdown_pct": number_or_none(row.get("max_drawdown_pct")),
-        "turnover_pct": number_or_none(row.get("turnover_pct")),
-        "risk_adjusted_score": number_or_none(row.get("risk_adjusted_score")),
-        "total_asset_value": number_or_none(row.get("total_asset_value")),
-        "current_cash": number_or_none(row.get("current_cash")),
-        "position_market_value": number_or_none(row.get("position_market_value")),
-        "daily_net_pnl": number_or_none(row.get("daily_net_pnl")),
-        "success_reasons": _ai_agent_public_json(
-            row.get("success_reasons") or []
-        ),
-        "lessons": _ai_agent_public_json(
-            row.get("lessons") or row.get("trade_review") or []
-        ),
-        "next_day_watch_plan": _ai_agent_public_json(
-            row.get("next_day_watch_plan") or row.get("next_trade_focus") or []
-        ),
-        "strategy_version": _first_text(row, "strategy_version"),
-        "strategy_hash": _first_text(row, "strategy_hash"),
-        "knowledge_bundle_version": _first_text(
-            row, "knowledge_bundle_version"
-        ),
-        "knowledge_bundle_hash": _first_text(
-            row, "knowledge_bundle_hash"
-        ),
-        "generated_at": display_datetime(row.get("generated_at") or row.get("created_at")),
-    }
-
-
-def app_ai_agent_public_model(result: dict[str, Any] | None) -> dict[str, Any]:
-    source = result if isinstance(result, dict) else {}
-    profile_source = source.get("profile") if isinstance(source.get("profile"), dict) else {}
-    account_source = source.get("account") if isinstance(source.get("account"), dict) else {}
-    strategy_source = (
-        source.get("strategy") if isinstance(source.get("strategy"), dict) else {}
-    )
-    runtime_source = (
-        source.get("runtime") if isinstance(source.get("runtime"), dict) else {}
-    )
-    performance_source = (
-        source.get("performance") if isinstance(source.get("performance"), dict) else {}
-    )
-    ai_user_id = _ai_agent_public_bigint(
-        profile_source.get("ai_user_id"), "ai_user_id"
-    )
-    profile_status = _first_text(
-        profile_source,
-        "ai_status",
-        "status",
-        default="not_registered" if ai_user_id is None else "disabled",
-    )
-    profile_mode = _first_text(
-        profile_source,
-        "agent_mode",
-        "mode",
-        default=_first_text(runtime_source, "run_mode"),
-    )
-    runtime_run_status = _first_text(runtime_source, "run_status")
-    pause_reason = _first_text(
-        profile_source,
-        "pause_reason",
-        default=(
-            runtime_run_status
-            if runtime_run_status not in {"—", "passed", "recorded"}
-            else "—"
-        ),
-    )
-    if profile_status == "sandbox_only":
-        if profile_mode == "disabled":
-            profile_mode = "shadow"
-        if pause_reason == "ai_user_inactive":
-            pause_reason = {
-                "started": "agent_run_in_progress",
-                "rejected": "agent_run_rejected",
-                "failed": "agent_run_failed",
-            }.get(
-                runtime_run_status,
-                (
-                    "—"
-                    if runtime_run_status in {"—", "passed", "recorded"}
-                    else "agent_run_unavailable"
-                ),
-            )
-    last_success_at = (
-        display_datetime(
-            profile_source.get("last_success_at")
-            or runtime_source.get("last_finished_at")
-        )
-        if runtime_run_status in {"passed", "recorded"}
-        else "—"
-    )
-    profile = {
-        "ai_user_id": ai_user_id,
-        "display_name": _first_text(
-            profile_source,
-            "ai_name",
-            "display_name",
-            "principal_label",
-            default="AI模拟投资员",
-        ),
-        "status": profile_status,
-        "mode": profile_mode,
-        "model_label": _first_text(
-            profile_source,
-            "model_label",
-            "model_adapter",
-            default=_first_text(runtime_source, "model_adapter"),
-        ),
-        "model_version": _first_text(
-            profile_source,
-            "model_version",
-            default=_first_text(runtime_source, "model_version"),
-        ),
-        "strategy_version": _first_text(
-            profile_source,
-            "strategy_version",
-            default=_first_text(strategy_source, "policy_version"),
-        ),
-        "last_success_at": last_success_at,
-        "pause_reason": pause_reason,
-    }
-    account = {
-        "virtual_account_id": _ai_agent_public_bigint(
-            account_source.get("virtual_account_id"), "virtual_account_id"
-        ),
-        "account_name": _first_text(
-            account_source, "account_name", default="AI独立模拟账户"
-        ),
-        "account_status": _first_text(account_source, "account_status", "status"),
-        "currency": _first_text(
-            account_source, "currency", "base_currency", default="CNY"
-        ),
-        "initial_cash": number_or_none(account_source.get("initial_cash")),
-        "cash_balance": number_or_none(
-            account_source.get("cash_balance")
-            if account_source.get("cash_balance") is not None
-            else account_source.get("total_cash")
-            if account_source.get("total_cash") is not None
-            else account_source.get("available_cash")
-        ),
-        "available_cash": number_or_none(account_source.get("available_cash")),
-        "frozen_cash": number_or_none(account_source.get("frozen_cash")),
-        "market_value": number_or_none(
-            account_source.get("market_value")
-            if account_source.get("market_value") is not None
-            else account_source.get("position_market_value")
-        ),
-        "total_equity": number_or_none(
-            account_source.get("total_equity")
-            if account_source.get("total_equity") is not None
-            else account_source.get("total_asset_value")
-        ),
-        "net_pnl": number_or_none(account_source.get("net_pnl")),
-        "total_return_pct": number_or_none(
-            account_source.get("total_return_pct")
-            if account_source.get("total_return_pct") is not None
-            else performance_source.get("net_return_pct")
-        ),
-        "max_drawdown_pct": number_or_none(
-            account_source.get("max_drawdown_pct")
-            if account_source.get("max_drawdown_pct") is not None
-            else performance_source.get("max_drawdown_pct")
-        ),
-        "valuation_status": _first_text(
-            account_source, "valuation_status", default="not_ready"
-        ),
-        "not_ready_position_count": int(
-            account_source.get("not_ready_position_count") or 0
-        ),
-        "as_of": display_datetime(
-            account_source.get("as_of")
-            or account_source.get("snapshot_time")
-            or account_source.get("updated_at")
-        ),
-    }
-    performance = {
-        "trade_date": _first_text(performance_source, "trade_date", "summary_date"),
-        "total_asset_value": number_or_none(
-            performance_source.get("total_asset_value")
-        ),
-        "current_cash": number_or_none(performance_source.get("current_cash")),
-        "position_market_value": number_or_none(
-            performance_source.get("position_market_value")
-        ),
-        "daily_net_pnl": number_or_none(performance_source.get("daily_net_pnl")),
-        "net_return_pct": number_or_none(performance_source.get("net_return_pct")),
-        "max_drawdown_pct": number_or_none(
-            performance_source.get("max_drawdown_pct")
-        ),
-        "turnover_pct": number_or_none(performance_source.get("turnover_pct")),
-        "risk_adjusted_score": number_or_none(
-            performance_source.get("risk_adjusted_score")
-        ),
-        "total_trade_count": int(performance_source.get("total_trade_count") or 0),
-        "winning_trade_count": int(
-            performance_source.get("winning_trade_count") or 0
-        ),
-        "as_of": display_datetime(
-            performance_source.get("as_of")
-            or performance_source.get("calculated_at")
-        ),
-    }
-    strategy = {
-        "strategy_id": _ai_agent_public_bigint(
-            strategy_source.get("strategy_id"), "strategy_id"
-        ),
-        "strategy_name": _first_text(strategy_source, "strategy_name"),
-        "policy_version": _first_text(strategy_source, "policy_version"),
-        "policy_hash": _first_text(strategy_source, "policy_hash"),
-        "status": _first_text(strategy_source, "status"),
-        "risk_labels": _ai_agent_public_json(
-            strategy_source.get("risk_labels") or []
-        ),
-    }
-    runtime = {
-        "latest_run_id": _ai_agent_public_bigint(
-            runtime_source.get("latest_run_id"), "ai_decision_run_id"
-        ),
-        "run_mode": _first_text(runtime_source, "run_mode"),
-        "run_status": _first_text(runtime_source, "run_status"),
-        "model_adapter": _first_text(runtime_source, "model_adapter"),
-        "model_version": _first_text(runtime_source, "model_version"),
-        "last_started_at": display_datetime(runtime_source.get("last_started_at")),
-        "last_finished_at": display_datetime(runtime_source.get("last_finished_at")),
-    }
-    positions = [
-        _ai_agent_public_position(row)
-        for row in (source.get("positions") or [])
-        if isinstance(row, dict)
-    ]
-    trades = [
-        _ai_agent_public_trade(row)
-        for row in (source.get("trades") or [])
-        if isinstance(row, dict)
-    ]
-    decisions = [
-        app_ai_agent_public_decision_item(row)
-        for row in (source.get("decisions") or [])
-        if isinstance(row, dict)
-    ]
-    daily_summaries = [
-        _ai_agent_public_daily_summary(row)
-        for row in (source.get("daily_summaries") or [])
-        if isinstance(row, dict)
-    ]
-    return {
-        "ok": bool(source.get("ok", True)),
-        "component": "B Track AI Agent",
-        "component_label": _component_label("B Track AI Agent"),
-        "contract_version": _first_text(
-            source, "contract_version", default="n6-ai-agent-public-v1"
-        ),
-        "status": profile["status"],
-        "profile": profile,
-        "account": account,
-        "positions": positions,
-        "trades": trades,
-        "decisions": decisions,
-        "daily_summaries": daily_summaries,
-        "performance": performance,
-        "strategy": strategy,
-        "runtime": runtime,
-        "public_scope": "shared_ai_virtual_account",
-        "readonly": True,
-        "empty_state": (
-            ""
-            if ai_user_id is not None
-            else "AI身份和独立模拟账户尚未初始化，当前没有可展示记录。"
-        ),
-        "controls": {
-            "proposal_enabled": False,
-            "confirm_enabled": False,
-            "pause_enabled": False,
-            "strategy_edit_enabled": False,
-            "account_edit_enabled": False,
-            "real_trade_enabled": False,
-        },
-        "disclaimer": list(AI_AGENT_PUBLIC_DISCLAIMER),
-        "safety_banner": list(APP_SAFETY_LABELS),
-        "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-def app_ai_agent_public_section_model(
-    payload: dict[str, Any],
-    section: str,
-) -> dict[str, Any]:
-    section_key = "daily_summaries" if section == "daily-summaries" else section
-    allowed = {
-        "overview",
-        "positions",
-        "trades",
-        "decisions",
-        "daily_summaries",
-        "performance",
-    }
-    if section_key not in allowed:
-        raise ValueError("invalid_ai_agent_section")
-    common = {
-        "ok": payload["ok"],
-        "component": payload["component"],
-        "component_label": payload["component_label"],
-        "contract_version": payload["contract_version"],
-        "public_scope": payload["public_scope"],
-        "readonly": True,
-        "disclaimer": list(payload["disclaimer"]),
-    }
-    if section_key == "overview":
-        return {
-            **common,
-            "section": "overview",
-            "profile": payload["profile"],
-            "account": payload["account"],
-            "strategy": payload["strategy"],
-            "runtime": payload["runtime"],
-            "empty_state": payload["empty_state"],
-            "controls": payload["controls"],
-        }
-    return {
-        **common,
-        "section": section,
-        section_key: payload[section_key],
-    }
-
-
-def app_ai_agent_public_decision_detail_model(
-    result: dict[str, Any] | None,
-) -> dict[str, Any]:
-    source = result if isinstance(result, dict) else {}
-    row = source.get("decision") or source.get("item")
-    decision = (
-        app_ai_agent_public_decision_item(row)
-        if isinstance(row, dict)
-        else None
-    )
-    return {
-        "ok": decision is not None,
-        "component": "B Track AI Agent Decision Detail",
-        "contract_version": _first_text(
-            source, "contract_version", default="n6-ai-agent-public-v1"
-        ),
-        "public_scope": "shared_ai_virtual_account",
-        "readonly": True,
-        "decision": decision,
-        "disclaimer": list(AI_AGENT_PUBLIC_DISCLAIMER),
         "side_effects": dict(APP_SIDE_EFFECTS),
     }
 
@@ -3236,54 +1910,16 @@ def _status_monitor_current_status(signal: dict[str, Any]) -> str:
 
 def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item = signal_list_item(row)
-    item["user_signal_projection_id"] = canonical_bigint_id(
-        row.get("user_signal_projection_id"),
-        field_name="user_signal_projection_id",
-        required=True,
-    )
-    card_payload = _json_object(row.get("card_payload_json"))
-    display_payload = _json_object(row.get("display_payload_json"))
-    for field in APP_SIGNAL_FROZEN_PROJECTION_FIELDS:
-        value = card_payload.get(field)
-        if value is None:
-            value = display_payload.get(field)
-        if value is None:
-            value = item.get(field)
-        if value is None:
-            value = row.get(field)
-        item[field] = value
-    item["user_signal_card_id"] = canonical_bigint_id(
-        row.get("user_signal_card_id"),
-        field_name="user_signal_card_id",
-    )
+    item["user_signal_card_id"] = row.get("user_signal_card_id")
     item["user_projection_run_id"] = _first_text(row, "user_projection_run_id", "projection_run_id")
     item["proposal_eligibility"] = proposal_eligibility_model(row)
     item["display_code"] = _first_text(row, "display_code", "code")
     item["display_name"] = _first_text(row, "display_name", "name")
-    industry_provenance = _json_object(item.get("industry_provenance"))
-    item["industry_code"] = _first_available_text(
-        row.get("board_code"),
-        industry_provenance.get("board_code"),
-    ) or "—"
-    item["industry_name"] = _first_available_text(
-        row.get("board_name"),
-        industry_provenance.get("board_name"),
-    ) or "—"
+    item["industry_code"] = _first_text(row, "industry_code", default="—")
+    item["industry_name"] = _first_text(row, "industry_name", default="—")
     item["source_run_id"] = _first_text(row, "source_run_id", "source_action_run_id")
     item["projection_run_id"] = _first_text(row, "projection_run_id", "user_projection_run_id")
     item["quality_status"] = _first_text(row, "quality_status", default="reviewed")
-    item["buy_return"] = number_or_none(item.get("buy_expected_return_pct"))
-    item["secondary_return"] = number_or_none(item.get("up_secondary_expected_return_pct"))
-    item["sell_return"] = number_or_none(item.get("sell_expected_return_pct"))
-    item["up_ref"] = _first_text(item, "up_reference_period")
-    item["down_ref"] = _first_text(item, "down_reference_period")
-    item["trigger_periods"] = item.get("all_trigger_periods")
-    item["buy_target"] = number_or_none(item.get("target_price"))
-    item["reference_price"] = (
-        number_or_none(item.get("action_price"))
-        if item.get("action_state") == "executed"
-        else number_or_none(item.get("trigger_price"))
-    )
     item["event_time"] = display_datetime(row.get("event_time") or row.get("trigger_time"))
     item["asset_kind_label"] = _asset_kind_label(item.get("asset_kind"))
     item["direction_label"] = _direction_label(item.get("direction"))
@@ -3295,81 +1931,6 @@ def app_signal_item(row: dict[str, Any]) -> dict[str, Any]:
     item["tags"] = app_signal_tags(item, row)
     item["detail_page"] = app_signal_detail_policy(row)
     return item
-
-
-def app_signal_sse_data_model(row: dict[str, Any]) -> dict[str, Any]:
-    projection_id = canonical_bigint_id(
-        row.get("user_signal_projection_id"),
-        field_name="user_signal_projection_id",
-        required=True,
-    )
-    card_id = canonical_bigint_id(
-        row.get("user_signal_card_id"),
-        field_name="user_signal_card_id",
-    )
-    event_type = _first_text(row, "event_type", "source_action_event_type")
-    action_state = _first_text(row, "action_state")
-    blocked_reason = _first_text(row, "blocked_reason")
-    signal = {
-        "user_signal_projection_id": projection_id,
-        "user_signal_card_id": card_id,
-        "user_projection_run_id": _first_text(row, "user_projection_run_id", "projection_run_id"),
-        "trade_date": _first_text(row, "trade_date"),
-        "event_time": display_datetime(row.get("event_time") or row.get("created_at")),
-        "event_type": event_type,
-        "asset_kind": _first_text(row, "asset_kind"),
-        "asset_kind_label": _asset_kind_label(row.get("asset_kind")),
-        "identity_key": _first_text(row, "identity_key"),
-        "display_code": _first_text(row, "display_code", "code"),
-        "display_name": _first_text(row, "display_name", "name"),
-        "industry_code": _first_text(row, "industry_code", "board_code"),
-        "industry_name": _first_text(row, "industry_name", "board_name"),
-        "direction": _first_text(row, "direction"),
-        "direction_label": _direction_label(row.get("direction")),
-        "condition_key": _first_text(row, "condition_key"),
-        "condition_rendering_policy": "reviewed_n6_projection_only",
-        "triggered_periods": row.get("triggered_periods"),
-        "primary_trigger_period": _first_text(row, "primary_trigger_period"),
-        "target_price": number_or_none(row.get("target_price")),
-        "buy_target": number_or_none(row.get("target_price")),
-        "current_price": number_or_none(row.get("current_price")),
-        "trigger_price": number_or_none(row.get("trigger_price")),
-        "action_price": number_or_none(row.get("action_price")),
-        "expected_return_pct": number_or_none(row.get("expected_return_pct")),
-        "buy_return": number_or_none(row.get("buy_expected_return_pct")),
-        "secondary_return": number_or_none(row.get("up_secondary_expected_return_pct")),
-        "sell_return": number_or_none(row.get("sell_expected_return_pct")),
-        "up_ref": _first_text(row, "up_reference_period"),
-        "down_ref": _first_text(row, "down_reference_period"),
-        "score": number_or_none(row.get("score")),
-        "pe_core": number_or_none(row.get("pe_core")),
-        "trigger_pct": number_or_none(row.get("trigger_pct")),
-        "action_pct": number_or_none(row.get("action_pct")),
-        "projection_message_status": _first_text(row, "projection_message_status", default="not_ready"),
-        "action_state": action_state,
-        "action_state_label": _state_label(action_state),
-        "action_mark": _first_text(row, "action_mark"),
-        "blocked_reason": blocked_reason,
-        "blocked_reason_label": _blocked_reason_label(blocked_reason),
-        "quality_status": _first_text(row, "quality_status", default="reviewed"),
-        "source_run_id": _first_text(row, "source_run_id", "source_action_run_id"),
-        "projection_run_id": _first_text(row, "projection_run_id", "user_projection_run_id"),
-    }
-    card = None
-    if card_id is not None:
-        card = {
-            "user_signal_card_id": card_id,
-            "title": _first_text(row, "title", default=_event_label(event_type)),
-            "summary": _first_text(row, "message", default=signal["display_name"] or signal["identity_key"]),
-            "event_label": _event_label(event_type),
-            "authority_source": "user_signal_projection",
-            "detail_href": f"/api/n6/app/v1/signals/{projection_id}",
-        }
-    return {
-        "contract_version": SIGNAL_SSE_CONTRACT_VERSION,
-        "signal": signal,
-        "card": card,
-    }
 
 
 def app_signal_source_policy() -> dict[str, Any]:
@@ -3415,20 +1976,10 @@ def app_v2_filter_model(
     include_linked_stock_actions: bool = False,
     show_all: bool = False,
     default_limit: int = 200,
-    write_enabled: bool = False,
-    bulk_write_enabled: bool = False,
 ) -> dict[str, Any]:
     cache_ready = bool(result.get("cache_ready"))
     source_items = result.get("items") or []
-    visible_fields = V2_FILTER_VISIBLE_FIELDS_BY_ASSET.get(asset_kind, ())
-    rows = [
-        {
-            field: _app_v2_filter_json_value(row.get(field))
-            for field in visible_fields
-            if field in row
-        }
-        for row in source_items
-    ]
+    rows = [_app_v2_filter_passthrough_row(row) for row in source_items]
     schema = _app_v2_filter_schema(rows)
     rows = _app_v2_filter_schema_rows(rows, schema)
     columns = _app_v2_filter_columns(
@@ -3450,12 +2001,6 @@ def app_v2_filter_model(
         current_sort=sort_key,
         current_dir=sort_dir,
         show_all=show_all,
-    )
-    api_items = _app_v2_sort_filter_rows(
-        [app_v2_filter_item(row, asset_kind=asset_kind) for row in source_items],
-        columns=columns,
-        sort_key=sort_key,
-        sort_dir=sort_dir,
     )
     grid_rows = [
         _app_v2_filter_grid_row(
@@ -3525,7 +2070,7 @@ def app_v2_filter_model(
         "component_label": _component_label(component),
         "asset_kind": asset_kind,
         "anchor_id": V2_FILTER_ANCHOR_BY_ASSET.get(asset_kind, f"{asset_kind}-filter"),
-        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "v_n6_stock_condition_display_basis"),
+        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "n6_display_stock_condition_cache"),
         "read_source_table": V2_FILTER_READ_SOURCE_BY_ASSET.get(
             asset_kind,
             "v_n6_stock_condition_display_basis",
@@ -3599,58 +2144,13 @@ def app_v2_filter_model(
         "rows": rows,
         "grid_rows": grid_rows,
         "items": grid_rows,
-        "_api_items": api_items,
         "source_context": source_context,
         "linked_stock_filter": linked_stock_filter,
-        "controls": app_v2_filter_controls(
-            asset_kind,
-            write_enabled=write_enabled,
-            bulk_write_enabled=bulk_write_enabled,
-        ),
+        "controls": app_v2_filter_controls(asset_kind),
         "readonly": True,
         "safety_banner": list(APP_V2_SAFETY_LABELS),
         "source_policy": app_v2_source_policy(),
         "side_effects": dict(APP_SIDE_EFFECTS),
-    }
-
-
-def app_v2_filter_api_model(model: dict[str, Any], *, asset_kind: str) -> dict[str, Any]:
-    visible_rows = [dict(row) for row in model.get("rows") or []]
-    visible_items = [dict(row) for row in model.get("_api_items") or []]
-    if not visible_items:
-        visible_items = [app_v2_filter_item(row, asset_kind=asset_kind) for row in visible_rows]
-    return {
-        "ok": bool(model.get("ok")),
-        "component": model.get("component"),
-        "component_label": model.get("component_label"),
-        "principal": model.get("principal"),
-        "status": model.get("status"),
-        "status_label": model.get("status_label"),
-        "empty_state": model.get("empty_state"),
-        "filters": model.get("filters") or {},
-        "available_for_trade_dates": model.get("available_for_trade_dates") or [],
-        "selected_for_trade_date": model.get("selected_for_trade_date") or "",
-        "source_context": model.get("source_context") or {},
-        "expected_return_filter": model.get("expected_return_filter") or {},
-        "level_up_recommendation_filter": model.get("level_up_recommendation_filter") or {},
-        "default_monitor_direction": model.get("default_monitor_direction") or "buy",
-        "default_monitor_direction_label": model.get("default_monitor_direction_label") or "",
-        "read_source_table": model.get("read_source_table") or "",
-        "source_table": model.get("source_table") or "",
-        "membership_read_source_table": model.get("membership_read_source_table") or "",
-        "total_count": int(model.get("total_count") or 0),
-        "filtered_count": int(model.get("filtered_count") or 0),
-        "returned_count": len(visible_rows),
-        "schema": model.get("schema") or [],
-        "columns": model.get("columns") or [],
-        "rows": visible_rows,
-        "grid_rows": model.get("grid_rows") or [],
-        "items": visible_items,
-        "controls": model.get("controls") or {},
-        "readonly": True,
-        "safety_banner": model.get("safety_banner") or [],
-        "source_policy": model.get("source_policy") or {},
-        "side_effects": model.get("side_effects") or dict(APP_SIDE_EFFECTS),
     }
 
 
@@ -4220,16 +2720,17 @@ def _app_v2_filter_grid_row(
         "for_trade_date": _first_text(row, "for_trade_date"),
         "display_code": display_code,
         "display_name": display_name,
-        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "v_n6_stock_condition_display_basis"),
+        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "n6_display_stock_condition_cache"),
         "readonly": True,
-        "add_monitor_enabled": False,
-        "monitor_direction_policy": "buy_only" if asset_kind == "stock" else "buy_sell",
-        "realtime_current_filter_only": True,
-        "single_item_actions_only": True,
-        "add_monitor_label": "只读查看",
-        "add_monitor_short_label": "只读",
+        "add_monitor_enabled": True,
+        "add_monitor_label": V2_ADD_MONITOR_LABEL_BY_ASSET.get(asset_kind, "加入监控（暂未开放）"),
+        "add_monitor_short_label": V2_ADD_MONITOR_SHORT_LABEL_BY_ASSET.get(asset_kind, "监控"),
+        "add_realtime_scope_label": "加入实时监控范围",
+        "add_realtime_scope_short_label": "实时",
         "investment_advice": False,
+        "row": row,
         "cells": _app_v2_filter_display_cells(row, columns),
+        "all_fields": _app_v2_all_fields(row),
     }
     if include_linked_stock_actions and asset_kind in V2_LINKED_STOCK_ROUTE_BY_KIND:
         parent_key = _first_text(
@@ -4278,10 +2779,7 @@ def _app_v2_filter_item(
     common_item = {
         "asset_kind": asset_kind,
         "asset_kind_label": _asset_kind_label(asset_kind),
-        "source_display_basis_id": canonical_bigint_id(
-            row.get("source_display_basis_id"),
-            field_name="source_display_basis_id",
-        ),
+        "source_display_basis_id": _first_text(row, "source_display_basis_id"),
         "run_id": _first_text(row, "run_id", "source_run_id"),
         "source_run_id": _first_text(row, "source_run_id", "run_id"),
         "for_trade_date": _first_text(row, "for_trade_date"),
@@ -4325,11 +2823,13 @@ def _app_v2_filter_item(
         "last_signal_state_label": _state_label(last_signal_state),
         "projection_run_id": _first_text(row, "projection_run_id"),
         "cache_run_id": _first_text(row, "cache_run_id"),
-        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "v_n6_stock_condition_display_basis"),
+        "source_table": V2_FILTER_SOURCE_BY_ASSET.get(asset_kind, "n6_display_stock_condition_cache"),
         "readonly": True,
-        "add_monitor_enabled": False,
-        "add_monitor_label": "只读查看",
-        "add_monitor_short_label": "只读",
+        "add_monitor_enabled": True,
+        "add_monitor_label": V2_ADD_MONITOR_LABEL_BY_ASSET.get(asset_kind, "加入监控（暂未开放）"),
+        "add_monitor_short_label": V2_ADD_MONITOR_SHORT_LABEL_BY_ASSET.get(asset_kind, "监控"),
+        "add_realtime_scope_label": "加入实时监控范围",
+        "add_realtime_scope_short_label": "实时",
         "investment_advice": False,
     }
     if include_linked_stock_actions and asset_kind in V2_LINKED_STOCK_ROUTE_BY_KIND:
@@ -4347,6 +2847,8 @@ def _app_v2_filter_item(
                 "linked_stocks_all_members_label": "全部成分股",
             }
         )
+    if row.get("_include_all_fields"):
+        common_item["all_fields"] = _app_v2_all_fields(row)
     if asset_kind == "stock":
         return {
             **common_item,
@@ -4384,31 +2886,22 @@ def _app_v2_filter_item(
     }
 
 
-def app_v2_filter_controls(
-    asset_kind: str,
-    *,
-    write_enabled: bool = False,
-    bulk_write_enabled: bool = False,
-) -> dict[str, Any]:
-    bulk_active = bool(write_enabled and bulk_write_enabled)
+def app_v2_filter_controls(asset_kind: str) -> dict[str, Any]:
     return {
-        "add_monitor_enabled": bool(write_enabled),
-        "add_monitor_label": "加入监控对象" if write_enabled else "写入功能未启用",
-        "add_realtime_scope_enabled": bool(write_enabled),
-        "add_realtime_scope_label": "加入实时监控范围" if write_enabled else "写入功能未启用",
+        "add_monitor_enabled": True,
+        "add_monitor_label": V2_ADD_MONITOR_LABEL_BY_ASSET.get(asset_kind, "加入监控（暂未开放）"),
+        "add_selected_label": V2_ADD_SELECTED_LABEL_BY_ASSET.get(asset_kind, "加入已选"),
+        "bulk_add_label": V2_BULK_ADD_LABEL_BY_ASSET.get(asset_kind, "将当前筛选结果加入监控"),
+        "add_realtime_scope_enabled": True,
+        "add_realtime_selected_label": "加入已选到实时监控范围",
+        "bulk_realtime_scope_label": "将当前筛选结果加入实时监控范围",
         "write_route_registered": True,
-        "write_route_enabled": bool(write_enabled),
-        "single_item_actions_only": not bulk_active,
-        "bulk_add_enabled": bulk_active,
-        "bulk_preview_required": True,
-        "bulk_max_identity_count": 10000,
-        "monitor_direction_policy": "buy_only" if asset_kind == "stock" else "buy_sell",
-        "realtime_current_filter_only": True,
+        "write_route_enabled": True,
         "pause_monitor_enabled": False,
-        "remove_monitor_enabled": False,
+        "remove_monitor_enabled": True,
         "members_lookup_enabled": asset_kind in {"board", "index"},
         "members_lookup_label": "查看成分股",
-        "write_scope_notice": "筛选数据只读；仅获授权时可保存本人监控范围",
+        "write_scope_notice": "当前仅保存监控范围，不代表交易建议",
     }
 
 
@@ -4423,7 +2916,7 @@ def app_v2_filter_members_model(
     cache_ready = bool(result.get("cache_ready"))
     component = "B Track V2 Board Members" if membership_kind == "board" else "B Track V2 Index Members"
     status = "data_not_ready" if not cache_ready else "ready"
-    source_table = V2_MEMBERSHIP_SOURCE_BY_KIND.get(membership_kind, "v_n6_board_membership_fact")
+    source_table = V2_MEMBERSHIP_SOURCE_BY_KIND.get(membership_kind, "n6_display_board_membership_cache")
     return {
         "ok": True,
         "component": component,
@@ -4499,7 +2992,7 @@ def app_v2_filter_linked_stocks_model(
         "read_source_table": V2_FILTER_READ_SOURCE_BY_ASSET["stock"],
         "membership_source_table": V2_MEMBERSHIP_SOURCE_BY_KIND.get(
             membership_kind,
-            "v_n6_board_membership_fact",
+            "n6_display_board_membership_cache",
         ),
         "membership_read_source_table": V2_MEMBERSHIP_READ_SOURCE_BY_KIND.get(
             membership_kind,
@@ -4522,9 +3015,9 @@ def app_v2_filter_linked_stocks_model(
             "all_members_view_label": "查看全部成分股",
             "all_members_write_label": "全部成分股加入监控（暂未开放）",
             "all_members_write_enabled": False,
-            "write_route_registered": False,
-            "write_route_enabled": False,
-            "write_scope_notice": "当前页面仅展示已批准的 N6 只读数据",
+            "write_route_registered": True,
+            "write_route_enabled": True,
+            "write_scope_notice": "当前仅保存监控范围，不代表交易建议",
         },
         "readonly": True,
         "safety_banner": list(APP_V2_SAFETY_LABELS),
@@ -4561,7 +3054,7 @@ def app_v2_linked_stock_item(row: dict[str, Any], *, membership_kind: str) -> di
         "stock_filter_status_label": "符合个股筛选" if in_stock_filter else "未进入个股筛选",
         "membership_source_table": V2_MEMBERSHIP_SOURCE_BY_KIND.get(
             membership_kind,
-            "v_n6_board_membership_fact",
+            "n6_display_board_membership_cache",
         ),
         "membership_read_source_table": V2_MEMBERSHIP_READ_SOURCE_BY_KIND.get(
             membership_kind,
@@ -4585,7 +3078,7 @@ def app_v2_membership_item(row: dict[str, Any], *, membership_kind: str) -> dict
         "stock_name": _first_text(row, "stock_name"),
         "source_version": _first_text(row, "source_version"),
         "source_batch_id": _first_text(row, "source_batch_id"),
-        "source_table": V2_MEMBERSHIP_SOURCE_BY_KIND.get(membership_kind, "v_n6_board_membership_fact"),
+        "source_table": V2_MEMBERSHIP_SOURCE_BY_KIND.get(membership_kind, "n6_display_board_membership_cache"),
         "readonly": True,
     }
     if membership_kind == "board":
@@ -4614,8 +3107,6 @@ def app_v2_filter_center_model(
     selected_asset_kind: str = "index",
     filters: dict[str, Any] | None = None,
     show_all: bool = False,
-    write_enabled: bool = False,
-    bulk_write_enabled: bool = False,
 ) -> dict[str, Any]:
     component = "B Track V2 Filter Center"
     filters = filters or {}
@@ -4631,8 +3122,6 @@ def app_v2_filter_center_model(
             include_linked_stock_actions=True,
             show_all=show_all if selected_asset_kind == "index" else False,
             default_limit=V2_FILTER_DEFAULT_LIMIT_BY_ASSET["index"],
-            write_enabled=write_enabled,
-            bulk_write_enabled=bulk_write_enabled,
         ),
         "boards": app_v2_filter_model(
             principal,
@@ -4644,8 +3133,6 @@ def app_v2_filter_center_model(
             include_linked_stock_actions=True,
             show_all=show_all if selected_asset_kind == "board" else False,
             default_limit=V2_FILTER_DEFAULT_LIMIT_BY_ASSET["board"],
-            write_enabled=write_enabled,
-            bulk_write_enabled=bulk_write_enabled,
         ),
         "stocks": app_v2_filter_model(
             principal,
@@ -4657,12 +3144,8 @@ def app_v2_filter_center_model(
             include_linked_stock_actions=True,
             show_all=show_all if selected_asset_kind == "stock" else False,
             default_limit=V2_FILTER_DEFAULT_LIMIT_BY_ASSET["stock"],
-            write_enabled=write_enabled,
-            bulk_write_enabled=bulk_write_enabled,
         ),
     }
-    for section in all_sections.values():
-        section.pop("_api_items", None)
     selected_section_key = V2_FILTER_PAGE_BY_ASSET[selected_asset_kind]
     sections = {selected_section_key: all_sections[selected_section_key]}
     subinterface_pairs: list[tuple[str, str]] = []
@@ -4715,7 +3198,6 @@ def app_v2_monitor_model(
     user: dict[str, Any],
     result: dict[str, Any],
     selected_asset_kind: str | None = None,
-    write_enabled: bool = False,
 ) -> dict[str, Any]:
     component = "B Track V2 My Monitor"
     selected_asset_kind = selected_asset_kind if selected_asset_kind in V2_MONITOR_TITLE_BY_ASSET else None
@@ -4817,16 +3299,14 @@ def app_v2_monitor_model(
         "notice": "当前仅保存监控范围，不代表交易建议",
         "controls": {
             "write_route_registered": True,
-            "write_route_enabled": bool(write_enabled),
-            "add_monitor_enabled": bool(write_enabled),
-            "single_item_actions_only": True,
-            "bulk_add_enabled": False,
+            "write_route_enabled": True,
+            "add_monitor_enabled": True,
             "pause_monitor_enabled": False,
             "pause_monitor_label": "暂停监控（暂未开放）",
-            "remove_monitor_enabled": bool(write_enabled),
-            "remove_monitor_label": "移除" if write_enabled else "写入功能未启用",
+            "remove_monitor_enabled": True,
+            "remove_monitor_label": "删除",
         },
-        "readonly": not bool(write_enabled),
+        "readonly": True,
         "safety_banner": list(APP_V2_SAFETY_LABELS),
         "source_policy": app_v2_source_policy(),
         "side_effects": dict(APP_SIDE_EFFECTS),
@@ -5151,16 +3631,8 @@ def app_v2_monitor_item(row: dict[str, Any]) -> dict[str, Any]:
         is_valid=is_valid,
     )
     return {
-        "monitor_id": canonical_bigint_id(
-            row.get("monitor_id"),
-            field_name="monitor_id",
-            required=True,
-        ),
-        "principal_id": canonical_bigint_id(
-            row.get("principal_id"),
-            field_name="principal_id",
-            required=True,
-        ),
+        "monitor_id": _first_text(row, "monitor_id"),
+        "principal_id": _first_text(row, "principal_id"),
         "principal_type": _first_text(row, "principal_type"),
         "asset_kind": asset_kind,
         "asset_kind_label": _asset_kind_label(asset_kind),
@@ -5244,10 +3716,7 @@ def app_evidence_chain(row: dict[str, Any]) -> dict[str, Any]:
         "N2_display_basis": {
             "source": condition_cache,
             "membership_source": membership_cache,
-            "display_basis_id": canonical_bigint_id(
-                row.get("source_condition_display_basis_id"),
-                field_name="source_condition_display_basis_id",
-            ),
+            "display_basis_id": row.get("source_condition_display_basis_id"),
             "display_run_id": _first_text(row, "source_condition_display_run_id", default="—"),
             "condition_key": _first_text(row, "condition_key", "original_condition_key"),
             "readonly_explanation_only": True,
@@ -5284,15 +3753,8 @@ def app_evidence_chain(row: dict[str, Any]) -> dict[str, Any]:
         "N6_projection": {
             "source": "reviewed N6 projections",
             "projection_run_id": _first_text(row, "user_projection_run_id", "projection_run_id"),
-            "user_signal_projection_id": canonical_bigint_id(
-                row.get("user_signal_projection_id"),
-                field_name="user_signal_projection_id",
-                required=True,
-            ),
-            "user_signal_card_id": canonical_bigint_id(
-                row.get("user_signal_card_id"),
-                field_name="user_signal_card_id",
-            ),
+            "user_signal_projection_id": row.get("user_signal_projection_id"),
+            "user_signal_card_id": row.get("user_signal_card_id"),
             "quality_status": _first_text(row, "quality_status", default="reviewed"),
         },
     }
@@ -5374,6 +3836,14 @@ def _field_value_text(value: Any) -> str:
     return str(value)
 
 
+def _app_v2_all_fields(row: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"name": key, "value": _field_value_text(value)}
+        for key, value in row.items()
+        if not str(key).startswith("_")
+    ]
+
+
 def _list_text(row: dict[str, Any], key: str) -> list[str]:
     value = row.get(key)
     if value is None:
@@ -5422,7 +3892,7 @@ def _money_text(value: Any) -> str:
     number = number_or_none(value)
     if number is None:
         return "—"
-    return f"{number:,.2f}"
+    return f"{number:.2f}"
 
 
 def app_empty_planned_model(
@@ -5531,35 +4001,14 @@ def app_portfolio_model(
     *,
     user: dict[str, Any],
     positions: list[dict[str, Any]],
-    now: datetime | None = None,
-    proposal_write_enabled: bool = False,
 ) -> dict[str, Any]:
-    current_time = _portfolio_aware_datetime(now) or datetime.now(PORTFOLIO_TIMEZONE)
-    items = [
-        app_position_item(
-            row,
-            now=current_time,
-            proposal_write_enabled=proposal_write_enabled,
-        )
-        for row in positions
-    ]
-    payload = app_empty_planned_model(
+    return app_empty_planned_model(
         principal,
         user=user,
         component="B Track Portfolio",
-        status="readonly" if items else "empty",
-        items=items,
+        status="empty",
+        items=[app_position_item(row) for row in positions],
     )
-    payload.update(
-        {
-            "locked": False,
-            "planned": False,
-            "empty_state": "当前没有持仓",
-            "proposal_write_enabled": proposal_write_enabled,
-            "source_policy": portfolio_source_policy(),
-        }
-    )
-    return payload
 
 
 def app_pnl_model(
@@ -5586,253 +4035,18 @@ def app_leaderboard_model(principal: dict[str, Any], *, user: dict[str, Any]) ->
     return payload
 
 
-def portfolio_source_policy() -> dict[str, Any]:
+def app_position_item(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "allowed_sources": list(PORTFOLIO_ALLOWED_SOURCES),
-        "forbidden_sources": list(PORTFOLIO_FORBIDDEN_SOURCES),
-        "n2_n5_raw_facts_read": False,
-        "n3_facts_read": False,
-        "external_market_read": False,
-        "mootdx_called": False,
-    }
-
-
-def _portfolio_aware_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    candidate = value
-    if not isinstance(candidate, datetime):
-        text = str(candidate).strip()
-        if not text:
-            return None
-        try:
-            candidate = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if candidate.tzinfo is None or candidate.utcoffset() is None:
-        return None
-    return candidate.astimezone(PORTFOLIO_TIMEZONE)
-
-
-def _portfolio_datetime_text(value: Any) -> str | None:
-    candidate = _portfolio_aware_datetime(value)
-    return candidate.isoformat() if candidate is not None else None
-
-
-def _portfolio_is_trading_session(value: datetime) -> bool:
-    local = value.astimezone(PORTFOLIO_TIMEZONE)
-    current = (local.hour, local.minute)
-    return local.weekday() < 5 and ((9, 30) <= current <= (11, 30) or (13, 0) <= current <= (15, 0))
-
-
-def _portfolio_position_exchange(row: dict[str, Any]) -> str:
-    explicit = str(row.get("position_exchange") or "").strip().upper()
-    if explicit:
-        return explicit
-    identity_parts = str(row.get("identity_key") or "").split(":")
-    return identity_parts[1].upper() if len(identity_parts) == 3 else ""
-
-
-def _portfolio_quote_quality_passed(row: dict[str, Any]) -> bool:
-    position_exchange = _portfolio_position_exchange(row)
-    quote_exchange = str(row.get("quote_exchange") or "").strip().upper()
-    quality_status = str(row.get("quality_status") or "").strip().lower()
-    current_price = _decimal_or_none(row.get("current_price"))
-    return (
-        position_exchange in {"SH", "SZ"}
-        and quote_exchange == position_exchange
-        and quality_status == "passed"
-        and current_price is not None
-        and current_price.is_finite()
-        and current_price > Decimal("0")
-    )
-
-
-def _portfolio_quote_status(row: dict[str, Any], *, now: datetime) -> str:
-    if not _portfolio_quote_quality_passed(row):
-        return "not_ready"
-    if _portfolio_aware_datetime(row.get("quote_minute")) is None:
-        return "not_ready"
-    if not _portfolio_is_trading_session(now):
-        return "market_closed"
-    fetched_at = _portfolio_aware_datetime(row.get("fetched_at"))
-    if fetched_at is None:
-        return "stale"
-    age_seconds = Decimal(str((now - fetched_at).total_seconds()))
-    return "fresh" if Decimal("0") <= age_seconds <= PORTFOLIO_FRESH_SECONDS else "stale"
-
-
-def _portfolio_decimal_text(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _portfolio_nonnegative_decimal(value: Any) -> Decimal | None:
-    candidate = _decimal_or_none(value)
-    return candidate if candidate is not None and candidate.is_finite() and candidate >= 0 else None
-
-
-def _portfolio_positive_price(value: Any) -> Decimal | None:
-    candidate = _decimal_or_none(value)
-    return candidate if candidate is not None and candidate.is_finite() and candidate > 0 else None
-
-
-def _portfolio_date_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if hasattr(value, "isoformat"):
-        return str(value.isoformat())
-    text = str(value).strip()
-    return text if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text) else None
-
-
-def _portfolio_positive_episode(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 and str(value).strip() == str(parsed) else None
-
-
-def app_position_item(
-    row: dict[str, Any],
-    *,
-    now: datetime,
-    proposal_write_enabled: bool = False,
-) -> dict[str, Any]:
-    quote_status = _portfolio_quote_status(row, now=now)
-    quantity = _portfolio_nonnegative_decimal(row.get("quantity"))
-    sellable_quantity = _portfolio_nonnegative_decimal(row.get("sellable_quantity"))
-    t1_locked_quantity = _portfolio_nonnegative_decimal(row.get("t1_locked_quantity"))
-    lot_quantity_total = _portfolio_nonnegative_decimal(row.get("lot_quantity_total"))
-    average_cost = _portfolio_positive_price(row.get("average_cost"))
-    source_price = _decimal_or_none(row.get("current_price"))
-    usable_price = source_price if quote_status in {"fresh", "market_closed"} else None
-    market_value = quantity * usable_price if quantity is not None and usable_price is not None else None
-    unrealized_pnl = (
-        (usable_price - average_cost) * quantity
-        if usable_price is not None and average_cost is not None and quantity is not None
-        else None
-    )
-    unrealized_return_pct = (
-        ((usable_price - average_cost) / average_cost * Decimal("100")).quantize(
-            Decimal("0.0001"), rounding=ROUND_HALF_UP
-        )
-        if usable_price is not None and average_cost is not None and average_cost > 0
-        else None
-    )
-    identity_key = str(row.get("identity_key") or "")
-    identity_parts = identity_key.split(":")
-    virtual_position_id = canonical_bigint_id(
-        row.get("virtual_position_id"),
-        field_name="virtual_position_id",
-    )
-    holding_episode_no = _portfolio_positive_episode(row.get("holding_episode_no"))
-    lot_scope_ready = bool(
-        quantity is not None
-        and quantity > 0
-        and lot_quantity_total == quantity
-        and sellable_quantity is not None
-        and t1_locked_quantity is not None
-        and sellable_quantity + t1_locked_quantity == lot_quantity_total
-        and holding_episode_no is not None
-        and _portfolio_date_text(row.get("current_trade_date")) is not None
-    )
-    position_open = str(row.get("position_status") or "") == "open_virtual"
-    manual_sell_available = bool(
-        proposal_write_enabled
-        and virtual_position_id
-        and position_open
-        and lot_scope_ready
-        and sellable_quantity is not None
-        and sellable_quantity > 0
-    )
-    if not proposal_write_enabled:
-        manual_sell_disabled_reason = "交易申请未启用"
-    elif not position_open:
-        manual_sell_disabled_reason = "持仓状态不可卖"
-    elif not lot_scope_ready:
-        manual_sell_disabled_reason = "交易日或持仓批次数量未就绪"
-    elif sellable_quantity == 0 and t1_locked_quantity and t1_locked_quantity > 0:
-        manual_sell_disabled_reason = "T+1 锁定，当前无可卖数量"
-    elif sellable_quantity == 0:
-        manual_sell_disabled_reason = "当前无可卖数量"
-    else:
-        manual_sell_disabled_reason = None
-
-    target_price = _portfolio_positive_price(row.get("target_price"))
-    target_price_status = str(row.get("target_price_status") or "not_ready")
-    if target_price_status not in {"not_ready", "frozen"} or (
-        target_price_status == "frozen" and target_price is None
-    ):
-        target_price_status = "not_ready"
-        target_price = None
-    elif target_price_status == "not_ready":
-        target_price = None
-
-    stop_loss_price = _portfolio_positive_price(row.get("stop_loss_price"))
-    stop_loss_status = str(row.get("stop_loss_status") or "not_ready")
-    stop_loss_effective_trade_date = _portfolio_date_text(row.get("stop_loss_effective_trade_date"))
-    stop_loss_source_quote_snapshot_id = canonical_bigint_id(
-        row.get("stop_loss_source_quote_snapshot_id"),
-        field_name="stop_loss_source_quote_snapshot_id",
-    )
-    stop_loss_frozen_at = _portfolio_datetime_text(row.get("stop_loss_frozen_at"))
-    if stop_loss_status not in {"not_ready", "provisional_first_day", "frozen", "disabled"}:
-        stop_loss_status = "not_ready"
-        stop_loss_price = None
-    elif stop_loss_status in {"not_ready", "disabled"}:
-        stop_loss_price = None
-    elif stop_loss_price is None:
-        stop_loss_status = "not_ready"
-    elif stop_loss_status == "frozen" and (
-        stop_loss_effective_trade_date is None
-        or stop_loss_source_quote_snapshot_id is None
-        or stop_loss_frozen_at is None
-    ):
-        stop_loss_status = "not_ready"
-        stop_loss_price = None
-    return {
-        "virtual_position_id": virtual_position_id,
-        "identity_key": identity_key,
-        "stock_code": str(row.get("stock_code") or (identity_parts[2] if len(identity_parts) == 3 else "")),
-        "quantity": _portfolio_decimal_text(quantity),
-        "sellable_quantity": _portfolio_decimal_text(sellable_quantity),
-        "t1_locked_quantity": _portfolio_decimal_text(t1_locked_quantity),
-        "lot_quantity_total": _portfolio_decimal_text(lot_quantity_total),
-        "average_cost": _portfolio_decimal_text(average_cost),
-        "current_price": _portfolio_decimal_text(usable_price),
-        "quote_minute": _portfolio_datetime_text(row.get("quote_minute")),
-        "fetched_at": _portfolio_datetime_text(row.get("fetched_at")),
-        "quote_status": quote_status,
-        "quality_reason": str(row.get("quality_reason") or "").strip() or None,
-        "market_value": _portfolio_decimal_text(market_value),
-        "unrealized_pnl": _portfolio_decimal_text(unrealized_pnl),
-        "unrealized_return_pct": _portfolio_decimal_text(unrealized_return_pct),
-        "position_status": str(row.get("position_status") or "not_ready"),
-        "holding_episode_no": holding_episode_no,
-        "first_open_trade_date": _portfolio_date_text(row.get("first_open_trade_date")),
-        "current_trade_date": _portfolio_date_text(row.get("current_trade_date")),
-        "target_price": _portfolio_decimal_text(target_price),
-        "target_price_status": target_price_status,
-        "stop_loss_price": _portfolio_decimal_text(stop_loss_price),
-        "stop_loss_status": stop_loss_status,
-        "stop_loss_effective_trade_date": stop_loss_effective_trade_date,
-        "stop_loss_source_quote_snapshot_id": stop_loss_source_quote_snapshot_id,
-        "stop_loss_frozen_at": stop_loss_frozen_at,
-        "stop_loss_policy_version": str(row.get("stop_loss_policy_version") or "").strip() or None,
-        "stop_loss_policy_hash": str(row.get("stop_loss_policy_hash") or "").strip() or None,
-        "lot_scope_ready": lot_scope_ready,
-        "manual_sell_available": manual_sell_available,
-        "manual_sell_disabled_reason": manual_sell_disabled_reason,
+        "virtual_position_id": row.get("virtual_position_id"),
+        "virtual_account_id": row.get("virtual_account_id"),
+        "asset_kind": row.get("asset_kind") or "—",
+        "identity_key": row.get("identity_key") or "—",
+        "position_status": row.get("position_status") or "—",
+        "quantity": number_or_none(row.get("quantity")),
+        "available_quantity": number_or_none(row.get("available_quantity")),
+        "locked_quantity": number_or_none(row.get("locked_quantity")),
+        "average_cost": number_or_none(row.get("average_cost")),
+        "updated_at": display_datetime(row.get("updated_at")),
     }
 
 
@@ -5867,14 +4081,6 @@ def app_page_model(
         "nav": app_nav_context(page_key),
         "data": data,
         "source_policy": data.get("source_policy") or app_signal_source_policy(),
-        "disclaimer": (
-            []
-            if data.get("locked")
-            else AI_AGENT_PUBLIC_DISCLAIMER
-            if page_key == "ai-agent"
-            else APP_DISCLAIMER
-            if page_key in {"pnl", "leaderboard"}
-            else []
-        ),
+        "disclaimer": [] if data.get("locked") else (APP_DISCLAIMER if page_key in {"pnl", "leaderboard"} else []),
         "side_effects": dict(APP_SIDE_EFFECTS),
     }

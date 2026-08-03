@@ -1,25 +1,252 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ashare_v3.market.action_confirmation_projection_plan import (
     ALLOWED_FUTURE_EXECUTE_WRITE_TABLES,
     FORBIDDEN_WRITE_TABLES,
+    add_price_amount_flags,
+    body_high,
+    body_low,
     build_action_confirmation_projection_dry_run_report,
     build_action_confirmation_projection_readiness_report,
+    build_metric_candidate_row,
     build_metric_candidate_rows_from_sources,
     build_preflight_report,
     simulate_metric_ready_db_check,
     write_report_files,
 )
+from ashare_v3.market.c1_scoped_artifact import canonical_ashare_1m_labels, resolve_fixed_period_windows
 
 
 class MarketDataActionConfirmationProjectionPlanTest(unittest.TestCase):
+    def test_fixed_period_body_and_strict_amount_comparison(self) -> None:
+        rows = [
+            {"open": 10.0, "close": 11.0},
+            {"open": 100.0, "close": 1.0},
+            {"open": 12.0, "close": 9.0},
+        ]
+        metric = {
+            "current_price": 10.0,
+            "is_first_5m_of_day": False,
+            "is_first_1m_of_day": False,
+            "current_5m_virtual_amount": 100.0,
+            "previous_5m_full_amount": 100.0,
+            "current_1m_amount": 50.0,
+            "previous_1m_amount": 50.0,
+        }
+
+        add_price_amount_flags(metric)
+
+        self.assertEqual(body_high(rows), 10.0)
+        self.assertEqual(body_low(rows), 9.0)
+        self.assertFalse(metric["buy_5m_amount_pass"])
+        self.assertFalse(metric["sell_5m_amount_pass"])
+        self.assertFalse(metric["buy_1m_amount_pass"])
+        self.assertFalse(metric["sell_1m_amount_pass"])
+
     def _minute_iso(self, date: str, index: int) -> str:
         base = datetime(int(date[:4]), int(date[4:6]), int(date[6:]), 9, 31, tzinfo=timezone(timedelta(hours=8)))
         return (base + timedelta(minutes=index - 1)).isoformat()
+
+    def _fixed_row(
+        self,
+        *,
+        date: str,
+        ordinal: int,
+        physical_label: str,
+        raw_label: str | None = None,
+        open_value: float | None = None,
+        close_value: float | None = None,
+        amount: float | None = None,
+    ) -> dict[str, object]:
+        return {
+            "bar_id": ordinal,
+            "identity_key": "index:SH:000688",
+            "bar_time": f"{date[:4]}-{date[4:6]}-{date[6:]}T{physical_label}:00+08:00",
+            "physical_c1_label": physical_label,
+            "raw_source_label": raw_label or physical_label,
+            "open": 1700.0 if open_value is None else open_value,
+            "close": 1700.0 if close_value is None else close_value,
+            "amount": 100.0 if amount is None else amount,
+            "source_row_ref": f"fixture:{date}:{ordinal}:{raw_label or physical_label}",
+        }
+
+    def _intraday_fixed_rows(self, date: str, end_label: str) -> list[dict[str, object]]:
+        labels = [
+            label
+            for label in canonical_ashare_1m_labels(date)
+            if label != "09:30" and label <= end_label
+        ]
+        return [
+            self._fixed_row(date=date, ordinal=ordinal, physical_label=label)
+            for ordinal, label in enumerate(labels, start=1)
+        ]
+
+    def _candidate(
+        self,
+        *,
+        today_rows: list[dict[str, object]],
+        previous_rows: list[dict[str, object]],
+        current_price: float = 1724.515,
+    ) -> dict[str, object]:
+        return build_metric_candidate_row(
+            asset_kind="index",
+            projection_run_id="projection",
+            projection_schema_version="n3.action_confirmation_metric.v1",
+            for_trade_date="20260720",
+            source_condition_run_id="condition",
+            source_subscription_run_id="subscription",
+            source_snapshot_run_id="snapshot",
+            source_today_minute_run_id="today",
+            source_previous_day_minute_run_id="previous",
+            snapshot_row={
+                "source_snapshot_id": 501,
+                "identity_key": "index:SH:000688",
+                "exchange": "SH",
+                "code": "000688",
+                "display_code": "000688.SH",
+                "name": "STAR 50",
+                "trade_date": "20260720",
+                "snapshot_time": "2026-07-20T14:50:30+08:00",
+                "current_price": current_price,
+            },
+            today_rows=today_rows,
+            previous_day_rows=previous_rows,
+        )
+
+    def test_projection_planner_uses_canonical_fixed_periods_for_000688_20260720_1450(self) -> None:
+        today_rows = self._intraday_fixed_rows("20260720", "14:50")
+        rows_by_label = {str(row["physical_c1_label"]): row for row in today_rows}
+        rows_by_label["09:31"].update(open=1764.593, close=1754.868)
+        rows_by_label["13:00"].update(open=1713.161, close=1712.121)
+        rows_by_label["14:01"].update(open=1663.027)
+        rows_by_label["14:30"].update(close=1662.847)
+        rows_by_label["14:41"].update(open=1664.568, amount=1_000_000_000)
+        rows_by_label["14:42"].update(amount=1_000_000_000)
+        rows_by_label["14:43"].update(amount=1_000_000_000)
+        rows_by_label["14:44"].update(amount=1_000_000_000)
+        rows_by_label["14:45"].update(close=1695.061, amount=1_425_289_024)
+        rows_by_label["14:46"].update(amount=1_490_729_216)
+        rows_by_label["14:47"].update(amount=1_000_000_000)
+        rows_by_label["14:48"].update(amount=1_000_000_000)
+        rows_by_label["14:49"].update(open=1709.527, close=1701.758, amount=1_090_295_296)
+        rows_by_label["14:50"].update(open=1711.055, close=1724.515, amount=1_901_952_384)
+        previous_rows = self._intraday_fixed_rows("20260717", "14:59")[-30:]
+
+        with patch(
+            "ashare_v3.market.action_confirmation_projection_plan.resolve_fixed_period_windows",
+            wraps=resolve_fixed_period_windows,
+        ) as resolver:
+            row = self._candidate(today_rows=today_rows, previous_rows=previous_rows)
+
+        resolver.assert_called_once()
+        self.assertEqual(row["previous_120m_body_high"], 1764.593)
+        windows = resolve_fixed_period_windows(current_rows=today_rows, previous_rows=previous_rows)
+        for size in (5, 30, 120):
+            previous_ids = {item["bar_id"] for item in windows["previous_period_rows"][size]}
+            current_ids = {item["bar_id"] for item in windows["current_period_rows"][size]}
+            self.assertTrue(previous_ids)
+            self.assertTrue(current_ids)
+            self.assertTrue(previous_ids.isdisjoint(current_ids))
+            self.assertLess(max(previous_ids), min(current_ids))
+
+    def test_projection_planner_normalizes_intraday_and_postclose_lunch_layouts(self) -> None:
+        intraday_rows = self._intraday_fixed_rows("20260720", "13:01")
+        for ordinal, row in enumerate(intraday_rows, start=1):
+            row.update(open=1000.0 + ordinal, close=1000.5 + ordinal, amount=100.0 * ordinal)
+        postclose_rows = [
+            *[dict(row) for row in intraday_rows],
+            self._fixed_row(
+                date="20260720",
+                ordinal=120,
+                physical_label="13:00",
+                raw_label="11:30",
+                open_value=1120.0,
+                close_value=1120.5,
+                amount=12_000.0,
+            ),
+        ]
+        previous_rows = self._intraday_fixed_rows("20260717", "14:59")
+
+        intraday = self._candidate(today_rows=intraday_rows, previous_rows=previous_rows, current_price=1200.0)
+        postclose = self._candidate(today_rows=postclose_rows, previous_rows=previous_rows, current_price=1200.0)
+
+        comparable_fields = (
+            "previous_120m_body_high",
+            "previous_120m_body_low",
+            "previous_30m_body_high",
+            "previous_30m_body_low",
+            "previous_5m_body_high",
+            "previous_5m_body_low",
+            "previous_1m_body_high",
+            "previous_1m_body_low",
+            "current_5m_virtual_amount",
+            "current_30m_virtual_amount",
+            "previous_1m_period_source",
+            "previous_5m_period_source",
+            "previous_30m_period_source",
+            "previous_120m_period_source",
+        )
+        self.assertEqual(
+            {field: intraday[field] for field in comparable_fields},
+            {field: postclose[field] for field in comparable_fields},
+        )
+
+    def test_projection_planner_fails_closed_for_missing_or_duplicate_ordinal(self) -> None:
+        previous_rows = self._intraday_fixed_rows("20260717", "14:59")
+        missing_rows = [
+            self._fixed_row(date="20260720", ordinal=1, physical_label="09:31"),
+            self._fixed_row(date="20260720", ordinal=3, physical_label="09:33"),
+        ]
+        missing = self._candidate(today_rows=missing_rows, previous_rows=previous_rows)
+        self.assertFalse(missing["metric_ready"])
+        self.assertEqual(missing["previous_1m_period_source"], "not_available")
+        self.assertEqual(missing["previous_120m_period_source"], "not_available")
+
+        duplicate_rows = [
+            self._fixed_row(date="20260720", ordinal=1, physical_label="09:31"),
+            self._fixed_row(date="20260720", ordinal=2, physical_label="09:31"),
+        ]
+        duplicate = self._candidate(today_rows=duplicate_rows, previous_rows=previous_rows)
+        self.assertFalse(duplicate["metric_ready"])
+        self.assertEqual(duplicate["metric_quality_status"], "blocked")
+
+    def test_projection_planner_blocks_not_available_previous_period_source(self) -> None:
+        current_rows = [self._fixed_row(date="20260720", ordinal=1, physical_label="09:31")]
+        partial_previous_rows = self._intraday_fixed_rows("20260717", "13:29")[-30:]
+
+        row = self._candidate(today_rows=current_rows, previous_rows=partial_previous_rows)
+
+        self.assertFalse(row["metric_ready"])
+        self.assertEqual(row["metric_quality_status"], "blocked")
+        self.assertEqual(row["previous_120m_period_source"], "not_available")
+        self.assertEqual(
+            row["raw_json"]["blocked_reason"],
+            "BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE",
+        )
+
+    def test_first_bucket_uses_only_last_complete_previous_day_fixed_period(self) -> None:
+        current_rows = [self._fixed_row(date="20260720", ordinal=1, physical_label="09:31")]
+        previous_through_1305 = self._intraday_fixed_rows("20260717", "13:05")
+        resolved = resolve_fixed_period_windows(
+            current_rows=current_rows,
+            previous_rows=previous_through_1305,
+        )
+
+        previous_120m_ids = [row["bar_id"] for row in resolved["previous_period_rows"][120]]
+        self.assertEqual(previous_120m_ids, list(range(1, 121)))
+        self.assertEqual(resolved["previous_period_sources"][120], "previous_trade_date_last_period")
+
+        incomplete_previous = resolve_fixed_period_windows(
+            current_rows=current_rows,
+            previous_rows=previous_through_1305[:119],
+        )
+        self.assertEqual(incomplete_previous["previous_period_rows"][120], [])
+        self.assertEqual(incomplete_previous["previous_period_sources"][120], "not_available")
 
     def _base_report(
         self,

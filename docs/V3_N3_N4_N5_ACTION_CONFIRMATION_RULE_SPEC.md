@@ -347,6 +347,46 @@ not infer `triggered_periods`, `all_trigger_periods`, or
 
 The first-period boundary policy is canonical and must be produced by N3 as explicit facts.
 
+Period windows are fixed, non-overlapping A-share trading-minute buckets. They
+must not be rolling `N`-row windows. A period real body is always:
+
+```text
+open = first row open in the fixed bucket
+close = last row close in the fixed bucket
+body_high = max(open, close)
+body_low = min(open, close)
+```
+
+For current-day action-confirmation calculation, N3 uses one physical-label
+axis. It starts at `09:31`, excludes physical `09:30` and `11:30`, and orders
+the lunch boundary as:
+
+```text
+... -> 11:28 -> 11:29 -> 13:00 -> 13:01 -> ...
+```
+
+Intraday and post-close mootdx rows must normalize to this same current-day
+axis before fixed-period calculation. When both post-close boundary candidates
+exist, raw `13:00` is the retained physical `13:00` row and raw `15:00` is the
+retained physical `14:59` row; the discarded duplicate remains source-level
+audit evidence, not another calculation minute.
+
+Previous-period and previous-day same-window sources are intentionally
+separate. A previous trading day's complete period keeps preload close-label
+ordinals `121-240`, including the complete afternoon `120m` period. A
+previous-day same-window amount is selected by the current axis's physical
+labels and must not reuse preload ordinals. Therefore the fixed 5m window that
+contains the lunch boundary is:
+
+```text
+11:26, 11:27, 11:28, 11:29, 13:00
+```
+
+N3 must retain every selected raw source label in trace. Missing physical
+labels, duplicate labels outside the explicit close-boundary preference, or an
+ambiguous mixed layout fail closed; they must not be repaired with a rolling
+window.
+
 1m:
 
 ```text

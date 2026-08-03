@@ -4,6 +4,7 @@ from ashare_v3.action.dry_run import (
     build_action_tracking_state_plan,
     build_action_candidates_from_outbox_rows,
     derive_final_action_mark_from_n5_metric,
+    evaluate_action_confirmation_metric,
     validate_blocked_reason,
     summarize_action_candidates,
     summarize_action_tracking_state_plan,
@@ -561,10 +562,11 @@ class ActionDryRunTest(unittest.TestCase):
     def test_numeric_metric_fields_drive_buy_confirmation_subconditions(self) -> None:
         base = numeric_metric_fact(signal_type="B_BUY")
         cases = {
-            "previous_120m_body_high": ("previous_120m_body_high", "10.01", "price_confirmation_failed"),
-            "previous_5m_body_high": ("previous_5m_body_high", "10.01", "price_confirmation_failed"),
+            "previous_120m_body_high": ("previous_120m_body_high", "10.00", "price_confirmation_failed"),
+            "previous_30m_body_high": ("previous_30m_body_high", "10.00", "price_confirmation_failed"),
+            "previous_5m_body_high": ("previous_5m_body_high", "10.00", "price_confirmation_failed"),
             "previous_5m_full_amount": ("previous_5m_full_amount", "1001", "amount_confirmation_failed"),
-            "previous_1m_body_high": ("previous_1m_body_high", "10.01", "price_confirmation_failed"),
+            "previous_1m_body_high": ("previous_1m_body_high", "10.00", "price_confirmation_failed"),
             "previous_1m_amount": ("previous_1m_amount", "1001", "amount_confirmation_failed"),
         }
         for case_name, (field, failing_value, blocked_reason) in cases.items():
@@ -592,10 +594,11 @@ class ActionDryRunTest(unittest.TestCase):
     def test_numeric_metric_fields_drive_sell_confirmation_subconditions(self) -> None:
         base = numeric_metric_fact(signal_type="S_SELL", direction="sell")
         cases = {
-            "previous_120m_body_low": ("previous_120m_body_low", "9.99", "price_confirmation_failed"),
-            "previous_5m_body_low": ("previous_5m_body_low", "9.99", "price_confirmation_failed"),
+            "previous_120m_body_low": ("previous_120m_body_low", "10.00", "price_confirmation_failed"),
+            "previous_30m_body_low": ("previous_30m_body_low", "10.00", "price_confirmation_failed"),
+            "previous_5m_body_low": ("previous_5m_body_low", "10.00", "price_confirmation_failed"),
             "previous_5m_full_amount": ("previous_5m_full_amount", "999", "amount_confirmation_failed"),
-            "previous_1m_body_low": ("previous_1m_body_low", "9.99", "price_confirmation_failed"),
+            "previous_1m_body_low": ("previous_1m_body_low", "10.00", "price_confirmation_failed"),
             "previous_1m_amount": ("previous_1m_amount", "999", "amount_confirmation_failed"),
         }
         for case_name, (field, failing_value, blocked_reason) in cases.items():
@@ -649,10 +652,10 @@ class ActionDryRunTest(unittest.TestCase):
                 self.assertIsNone(candidate.get("blocked_reason"))
                 self.assertEqual(candidate["final_action_mark"], mark)
 
-    def test_30m_price_confirmation_only_affects_action_mark_not_action_execution(self) -> None:
+    def test_30m_price_confirmation_failure_blocks_action_execution_symmetrically(self) -> None:
         cases = (
-            ("B_BUY", "buy", {"previous_30m_body_high": "10.01"}),
-            ("S_SELL", "sell", {"previous_30m_body_low": "9.99"}),
+            ("B_BUY", "buy", {"previous_30m_body_high": "10.00"}),
+            ("S_SELL", "sell", {"previous_30m_body_low": "10.00"}),
         )
         for signal_type, direction, overrides in cases:
             with self.subTest(signal_type=signal_type):
@@ -660,7 +663,7 @@ class ActionDryRunTest(unittest.TestCase):
                 candidate = build_action_candidates_from_outbox_rows(
                     [
                         sample_outbox_row(
-                            event_id=f"evt_{signal_type}_30m_price_mark_only",
+                            event_id=f"evt_{signal_type}_30m_price_failed",
                             signal_type=signal_type,
                             direction=direction,
                             condition_key="BUY:D" if direction == "buy" else "SELL:D",
@@ -670,11 +673,101 @@ class ActionDryRunTest(unittest.TestCase):
                     action_confirmation_metric_facts={("stock", "702"): metric},
                 )[0]
 
-                self.assertEqual(candidate["planned_output_event_type"], "ActionExecuted")
-                self.assertEqual(candidate["action_state"], "executed")
+                self.assertEqual(candidate["planned_output_event_type"], "ActionBlocked")
+                self.assertEqual(candidate["action_state"], "blocked")
+                self.assertEqual(candidate["confirmation_status"], "failed")
+                self.assertEqual(candidate["blocked_reason"], "price_confirmation_failed")
+                self.assertIsNone(candidate["final_action_mark"])
+
+    def test_000688_1450_120m_failure_emits_no_action_executed(self) -> None:
+        row = sample_outbox_row(
+            event_id="evt_index_000688_1450_120m_failed",
+            signal_type="B_BUY",
+            direction="buy",
+            condition_key="BUY:D",
+            asset_kind="index",
+            identity_key="index:SH:000688",
+            source_action_confirmation_metric_id=6881450,
+        )
+        row["trade_date"] = "20260720"
+        row["event_time"] = "2026-07-20T14:50:00+08:00"
+        row["payload_json"]["trigger_time"] = "2026-07-20T14:50:00+08:00"
+        metric = numeric_metric_fact(signal_type="B_BUY")
+        metric.update(
+            {
+                "asset_kind": "index",
+                "identity_key": "index:SH:000688",
+                "action_confirmation_metric_id": 6881450,
+                "metric_time": "2026-07-20T14:50:00+08:00",
+                "metric_minute_label": "14:50",
+                "previous_120m_body_high": "10.00",
+            }
+        )
+
+        candidates = build_action_candidates_from_outbox_rows(
+            [row],
+            action_confirmation_metric_facts={("index", "6881450"): metric},
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["confirmation_status"], "failed")
+        self.assertEqual(candidates[0]["blocked_reason"], "price_confirmation_failed")
+        self.assertEqual(
+            sum(candidate["planned_output_event_type"] == "ActionExecuted" for candidate in candidates),
+            0,
+        )
+
+    def test_30m_and_120m_amount_flags_are_not_action_execution_requirements(self) -> None:
+        expected_by_signal = {
+            "B_BUY": {
+                "buy_120m_price_pass",
+                "buy_30m_price_pass",
+                "buy_5m_price_pass",
+                "buy_5m_amount_pass",
+                "buy_1m_price_pass",
+                "buy_1m_amount_pass",
+            },
+            "S_SELL": {
+                "sell_120m_price_pass",
+                "sell_30m_price_pass",
+                "sell_5m_price_pass",
+                "sell_5m_amount_pass",
+                "sell_1m_price_pass",
+                "sell_1m_amount_pass",
+            },
+        }
+        for signal_type, direction in (("B_BUY", "buy"), ("S_SELL", "sell")):
+            with self.subTest(signal_type=signal_type):
+                metric = numeric_metric_fact(signal_type=signal_type, direction=direction)
+                metric.update(
+                    {
+                        f"{direction}_120m_amount_pass": False,
+                        f"{direction}_30m_amount_pass": False,
+                    }
+                )
+                candidate = build_action_candidates_from_outbox_rows(
+                    [
+                        sample_outbox_row(
+                            event_id=f"evt_{signal_type}_no_long_period_amount_gate",
+                            signal_type=signal_type,
+                            direction=direction,
+                            condition_key="BUY:D" if direction == "buy" else "SELL:D",
+                            source_action_confirmation_metric_id=702,
+                        )
+                    ],
+                    action_confirmation_metric_facts={("stock", "702"): metric},
+                )[0]
+
+                evaluation = evaluate_action_confirmation_metric(
+                    signal_type=signal_type,
+                    source_action_confirmation_metric_id="702",
+                    metric_fact=metric,
+                    metric_required=True,
+                )
+                required_flags = evaluation["action_execution_required_flags"]
+                self.assertEqual(set(required_flags), expected_by_signal[signal_type])
                 self.assertEqual(candidate["confirmation_status"], "passed")
-                self.assertEqual(candidate["final_action_mark"], "normal")
-                self.assertEqual(candidate["action_mark_reason"], f"{direction}_30m_price_not_confirmed")
+                self.assertEqual(candidate["planned_output_event_type"], "ActionExecuted")
 
     def test_hint_and_ordinary_trigger_matched_share_unified_metric_confirmation_path(self) -> None:
         rows = [
@@ -796,6 +889,8 @@ class ActionDryRunTest(unittest.TestCase):
             {
                 "is_first_1m_of_day": True,
                 "is_first_5m_of_day": True,
+                "previous_1m_period_source": "previous_trade_date_last_period",
+                "previous_5m_period_source": "previous_trade_date_last_period",
                 "first_1m_amount_default_pass": True,
                 "first_5m_amount_default_pass": True,
                 "previous_1m_body_high": "10.01",

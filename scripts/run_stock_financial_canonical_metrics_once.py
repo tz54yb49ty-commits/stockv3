@@ -26,6 +26,7 @@ from ashare_v3.ingestion.common import require_yyyymmdd  # noqa: E402
 def default_dependencies() -> dict[str, Any]:
     return {
         "build_snapshot_from_cache": metrics.build_snapshot_from_cache,
+        "load_active_source_metadata": metrics.load_active_source_metadata,
         "connect": lambda dsn: psycopg.connect(dsn, connect_timeout=10),
         "write_artifacts": metrics.write_artifacts,
     }
@@ -166,6 +167,11 @@ def main(argv: list[str] | None = None, *, dependencies: dict[str, Any] | None =
             dry_run=dry_run,
             postgres_commit_enabled=args.postgres_commit_enabled,
         )
+        active_source_metadata = deps["load_active_source_metadata"](
+            dsn=args.dsn,
+            source_trade_date=source_trade_date,
+        )
+        snapshot = {**snapshot, "active_source_metadata": active_source_metadata}
         commit_plan = metrics.build_commit_plan(snapshot=snapshot, dry_run=dry_run)
         conn = deps["connect"](args.dsn)
         commit_result = metrics.execute_commit_transaction(

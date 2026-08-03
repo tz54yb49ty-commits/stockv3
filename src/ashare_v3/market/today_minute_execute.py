@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -28,6 +27,15 @@ from ashare_v3.market.migration_execute import fetch_n1_n2_active_snapshot, stab
 from ashare_v3.market.minute_label_normalization import (
     MinuteLabelNormalizationError,
     normalize_c1_physical_intraday_1m_labels,
+)
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    MootdxBatchObjectTracker,
+    MootdxEndpointTransportError,
+    build_mootdx_minute_semantic_probe,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+    with_batch_attempt_provenance,
 )
 from ashare_v3.market.preload_plan import MINUTE_FACT_TABLES, normalize_db_row
 from ashare_v3.market.previous_day_preload_execute import (
@@ -50,6 +58,7 @@ from ashare_v3.market.today_minute_plan import (
     today_minute_subscriptions,
 )
 from ashare_v3.market.repositories import ASSET_FACT_TABLES
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
 
 
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -132,8 +141,9 @@ class MootdxTodayMinuteAdapter:
         }
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise TodayMinuteExecuteError(
+                "MootdxTodayMinuteAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_minute_bars(self, subscription: Mapping[str, Any], trade_date: str) -> list[dict[str, Any]]:
         asset_kind = str(subscription.get("asset_kind") or "")
@@ -228,6 +238,9 @@ def run_today_minute_bar_1m_execute(
     execute: bool = False,
     user_confirmed: bool = False,
     adapter: Any | None = None,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_every: int = 100,
 ) -> dict[str, Any]:
@@ -260,50 +273,82 @@ def run_today_minute_bar_1m_execute(
     ensure_subscription_counts_match_plan(subscriptions, plan)
 
     source_run_row = fetch_market_data_run_row_by_id(dsn, source_run_id)
-    insert_today_minute_run(
-        dsn,
-        plan=plan,
-        source_run_row=source_run_row,
-        started_at=started_at,
-        c0_plan_path=c0_plan_path,
-    )
+    outcome: MootdxBatchAttemptOutcome[Any] | None = None
+    atomic_committed = False
+    if adapter is None:
+        prepared, outcome = prepare_mootdx_today_minute_batch(
+            plan=plan,
+            subscriptions=subscriptions,
+            manager=endpoint_manager or MootdxEndpointManager.from_toml(),
+            probe=endpoint_probe
+            or build_mootdx_minute_semantic_probe(
+                subscriptions=subscriptions,
+                trade_date=str(plan["for_trade_date"]),
+                adapter_factory=lambda client: MootdxTodayMinuteAdapter(
+                    client=client,
+                    intraday_trade_date=str(plan["for_trade_date"]),
+                ),
+            ),
+            client_factory=endpoint_client_factory,
+        )
+        object_results, data_snapshot, post_checks, quality_items = commit_today_minute_attempt_transaction(
+            dsn=dsn,
+            plan=plan,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            c0_plan_path=c0_plan_path,
+            prepared=prepared,
+            failed_results=failed_today_minute_batch_results(plan, subscriptions, outcome),
+            outcome=outcome,
+            pre_backup=pre_backup,
+        )
+        atomic_committed = True
+    else:
+        insert_today_minute_run(
+            dsn,
+            plan=plan,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            c0_plan_path=c0_plan_path,
+        )
+        object_results = execute_subscription_today_minutes(
+            dsn=dsn,
+            plan=plan,
+            subscriptions=subscriptions,
+            adapter=adapter,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
 
-    resolved_adapter = adapter or MootdxTodayMinuteAdapter()
-    object_results = execute_subscription_today_minutes(
-        dsn=dsn,
-        plan=plan,
-        subscriptions=subscriptions,
-        adapter=resolved_adapter,
-        progress_callback=progress_callback,
-        progress_every=progress_every,
-    )
-
-    data_snapshot = capture_today_minute_execute_backup(
-        dsn,
-        phase="after_n3_c1_data_before_quality",
-        today_minute_run_id=resolved_run_id,
-        source_run_id=source_run_id,
-        for_trade_date=str(plan["for_trade_date"]),
-    )
-    post_checks = build_post_execute_checks(
-        plan=plan,
-        pre_backup=pre_backup,
-        data_snapshot=data_snapshot,
-        object_results=object_results,
-    )
-    quality_items = build_post_execute_quality_items(
-        plan=plan,
-        post_checks=post_checks,
-        object_results=object_results,
-    )
+    if not atomic_committed:
+        data_snapshot = capture_today_minute_execute_backup(
+            dsn,
+            phase="after_n3_c1_data_before_quality",
+            today_minute_run_id=resolved_run_id,
+            source_run_id=source_run_id,
+            for_trade_date=str(plan["for_trade_date"]),
+        )
+        post_checks = build_post_execute_checks(
+            plan=plan,
+            pre_backup=pre_backup,
+            data_snapshot=data_snapshot,
+            object_results=object_results,
+        )
+        quality_items = build_post_execute_quality_items(
+            plan=plan,
+            post_checks=post_checks,
+            object_results=object_results,
+        )
     quality_counts = count_quality_severities(quality_items)
-    write_today_minute_quality_and_finalize_run(
-        dsn,
-        plan=plan,
-        quality_items=quality_items,
-        object_results=object_results,
-        status="passed" if quality_counts["P0"] == 0 else "failed",
-    )
+    if not atomic_committed:
+        write_today_minute_quality_and_finalize_run(
+            dsn,
+            plan=plan,
+            quality_items=quality_items,
+            object_results=object_results,
+            status="passed" if quality_counts["P0"] == 0 else "failed",
+            batch_attempt=outcome.to_provenance() if outcome is not None else None,
+        )
 
     post_backup = capture_today_minute_execute_backup(
         dsn,
@@ -370,6 +415,251 @@ def run_today_minute_bar_1m_execute(
     write_json(json_report_path, report)
     write_text(markdown_report_path, format_today_minute_execute_report(report))
     return report
+
+
+def prepare_mootdx_today_minute_batch(
+    *,
+    plan: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    manager: MootdxEndpointManager,
+    probe: Callable[..., Mapping[str, Any]],
+    client_factory: Callable[[EndpointSelection], Any] | None = None,
+) -> tuple[list[dict[str, Any]], MootdxBatchAttemptOutcome[Any]]:
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=str(plan["today_minute_run_id"]),
+        probe=probe,
+        client_factory=client_factory,
+        required_checks=("minute_scope_sentinels",),
+        fetch_batch=lambda client, selection: _prepare_today_minute_attempt(
+            plan=plan,
+            subscriptions=subscriptions,
+            adapter=MootdxTodayMinuteAdapter(client=client),
+            object_tracker=MootdxBatchObjectTracker(manager, selection),
+        ),
+    )
+    prepared = list(outcome.result or [])
+    for item in prepared:
+        item["mootdx_batch_attempt"] = outcome.to_provenance()
+        item["minute_records"] = [
+            with_batch_attempt_provenance(record, outcome)
+            for record in item["minute_records"]
+        ]
+    return prepared, outcome
+
+
+def _prepare_today_minute_attempt(
+    *,
+    plan: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    adapter: Any,
+    object_tracker: MootdxBatchObjectTracker,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for subscription in subscriptions:
+        try:
+            normalized_rows = adapter.fetch_minute_bars(subscription, str(plan["for_trade_date"]))
+        except Exception as exc:  # noqa: BLE001 - preserve local program and contract errors.
+            if is_endpoint_transport_exception(exc):
+                raise MootdxEndpointTransportError(str(exc)) from exc
+            raise
+        filtered_rows = filter_closed_today_minute_rows(
+            normalized_rows,
+            trade_date=str(plan["for_trade_date"]),
+            latest_closed_minute=parse_latest_closed_minute(plan),
+        )
+        minute_records = build_today_minute_fact_records(
+            plan=plan,
+            subscription=subscription,
+            normalized_rows=filtered_rows,
+            adapter_name=adapter_name_for_subscription(plan, subscription),
+            adapter=adapter,
+        )
+        expected_count = int(plan.get("expected_bar_count_per_object") or 0)
+        object_result = object_tracker.record(
+            identity_key=str(subscription.get("identity_key") or ""),
+            value=minute_records,
+            empty=len(minute_records) == 0,
+        )
+        passed = object_result.status == "passed" and len(minute_records) == expected_count
+        prepared.append(
+            {
+                "subscription": dict(subscription),
+                "minute_records": minute_records if passed else [],
+                "status": "passed" if passed else "failed",
+                "expected_bar_count": expected_count,
+                "actual_bar_count": len(minute_records),
+                "error_message": (
+                    None
+                    if passed
+                    else f"object minute rows incomplete: expected={expected_count} actual={len(minute_records)}"
+                ),
+            }
+        )
+    return prepared
+
+
+def write_prepared_today_minute_batch(
+    *,
+    dsn: str,
+    prepared: Sequence[Mapping[str, Any]],
+    connection_factory: Callable[[str], Any] | None = None,
+    run_context: tuple[Mapping[str, Any], Mapping[str, Any], str, str] | None = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    connect = connection_factory or (
+        lambda value: audited_n3_market_execute_connect(value, connect_timeout=10, row_factory=dict_row)
+    )
+    with connect(dsn) as conn:
+        with conn.transaction():
+            if run_context is not None:
+                plan, source_run_row, started_at, c0_plan_path = run_context
+                with conn.cursor() as cur:
+                    _insert_today_minute_run(
+                        cur,
+                        plan=plan,
+                        source_run_row=source_run_row,
+                        started_at=started_at,
+                        c0_plan_path=c0_plan_path,
+                        batch_attempt=prepared[0].get("mootdx_batch_attempt") if prepared else None,
+                    )
+            results.extend(_write_prepared_today_minute_batch_on_connection(conn, prepared))
+    return results
+
+
+def _write_prepared_today_minute_batch_on_connection(
+    conn: Any,
+    prepared: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in prepared:
+        subscription = dict(item["subscription"])
+        minute_records = list(item["minute_records"])
+        provenance = (
+            {"mootdx_batch_attempt": item["mootdx_batch_attempt"]}
+            if item.get("mootdx_batch_attempt")
+            else None
+        )
+        if item.get("status", "passed") != "passed":
+            results.append(
+                build_object_result(
+                    subscription=subscription,
+                    status="failed",
+                    quality_status="failed",
+                    expected_bar_count=int(item["expected_bar_count"]),
+                    actual_bar_count=int(item["actual_bar_count"]),
+                    minute_rows_written=0,
+                    error_message=str(item["error_message"]),
+                    quality_visible=provenance,
+                )
+            )
+            continue
+        with conn.cursor() as cur:
+            written = bulk_upsert_minute_bars(cur, str(subscription["asset_kind"]), minute_records)
+        results.append(
+            build_object_result(
+                subscription=subscription,
+                status="passed",
+                quality_status="passed",
+                expected_bar_count=len(minute_records),
+                actual_bar_count=len(minute_records),
+                minute_rows_written=written,
+                error_message=None,
+                quality_visible=provenance,
+            )
+        )
+    return results
+
+
+def commit_today_minute_attempt_transaction(
+    *,
+    dsn: str,
+    plan: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    c0_plan_path: str,
+    prepared: Sequence[Mapping[str, Any]],
+    failed_results: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+    pre_backup: Mapping[str, Any],
+    connection_factory: Callable[[str], Any] | None = None,
+    data_snapshot_builder: Callable[[Any], Mapping[str, Any]] | None = None,
+    finalizer: Callable[..., None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    connect = connection_factory or (
+        lambda value: audited_n3_market_execute_connect(value, connect_timeout=10, row_factory=dict_row)
+    )
+    provenance = outcome.to_provenance()
+    with connect(dsn) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _insert_today_minute_run(
+                    cur,
+                    plan=plan,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    c0_plan_path=c0_plan_path,
+                    batch_attempt=provenance,
+                )
+            object_results = (
+                _write_prepared_today_minute_batch_on_connection(conn, prepared)
+                if outcome.status == "passed"
+                else [dict(row) for row in failed_results]
+            )
+            with conn.cursor() as cur:
+                data_snapshot = dict(
+                    data_snapshot_builder(cur)
+                    if data_snapshot_builder is not None
+                    else _capture_today_minute_execute_backup_with_cursor(
+                        cur,
+                        phase="after_n3_c1_data_before_quality",
+                        today_minute_run_id=str(plan["today_minute_run_id"]),
+                        source_run_id=str(plan["source_market_data_run_id"]),
+                        for_trade_date=str(plan["for_trade_date"]),
+                    )
+                )
+                post_checks = build_post_execute_checks(
+                    plan=plan,
+                    pre_backup=pre_backup,
+                    data_snapshot=data_snapshot,
+                    object_results=object_results,
+                )
+                quality_items = build_post_execute_quality_items(
+                    plan=plan,
+                    post_checks=post_checks,
+                    object_results=object_results,
+                )
+                quality_counts = count_quality_severities(quality_items)
+                (finalizer or _finalize_today_minute_run_with_cursor)(
+                    cur,
+                    plan=plan,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status="passed" if quality_counts["P0"] == 0 else "failed",
+                    batch_attempt=provenance,
+                )
+    return object_results, data_snapshot, post_checks, quality_items
+
+
+def failed_today_minute_batch_results(
+    plan: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+) -> list[dict[str, Any]]:
+    expected_count = int(plan.get("expected_bar_count_per_object") or 0)
+    return [
+        build_object_result(
+            subscription=subscription,
+            status="failed",
+            quality_status="failed",
+            expected_bar_count=expected_count,
+            actual_bar_count=0,
+            minute_rows_written=0,
+            error_message="atomic Mootdx today-minute batch failed; all attempt rows discarded",
+            quality_visible={"mootdx_batch_attempt": outcome.to_provenance()},
+        )
+        for subscription in subscriptions
+    ]
 
 
 def ensure_executable_plan(
@@ -712,51 +1002,71 @@ def insert_today_minute_run(
     source_run_row: Mapping[str, Any],
     started_at: str,
     c0_plan_path: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
-    counts = plan.get("today_minute_object_count_by_asset_kind") or {}
-    subscription_count = sum(int(counts.get(asset_kind) or 0) for asset_kind in ASSET_KINDS)
-    object_count = subscription_count
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO common_market_data_run (
-                      run_id, source_condition_run_id, for_trade_date, source_trade_date,
-                      prev_trade_date, mode, status, p0_count, p1_count, p2_count,
-                      source_scope_row_count, candidate_row_count, subscription_row_count,
-                      subscription_object_count, dedup_ratio, generated_by,
-                      market_data_pulled, market_data_fact_written,
-                      downstream_layers_touched, worker_started, started_at, raw_json
-                    )
-                    VALUES (%s, %s, %s, %s, %s, 'execute', 'running', 0, 0, 0,
-                            %s, %s, %s, %s, %s, 'N3-C1-today-minute-execute',
-                            false, false, false, false, %s, %s)
-                    """,
-                    (
-                        plan["today_minute_run_id"],
-                        plan["source_condition_run_id"],
-                        plan["for_trade_date"],
-                        plan["source_trade_date"],
-                        plan["prev_trade_date"],
-                        int(source_run_row.get("source_scope_row_count") or 0),
-                        int(source_run_row.get("candidate_row_count") or 0),
-                        subscription_count,
-                        object_count,
-                        source_run_row.get("dedup_ratio"),
-                        started_at,
-                        Jsonb(
-                            {
-                                "stage": "N3-C1",
-                                "source_run_id": plan["source_market_data_run_id"],
-                                "today_minute_run_id": plan["today_minute_run_id"],
-                                "c0_plan_path": c0_plan_path,
-                                "writes_outbox": False,
-                                "run_once_only": True,
-                            }
-                        ),
-                    ),
+                _insert_today_minute_run(
+                    cur,
+                    plan=plan,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    c0_plan_path=c0_plan_path,
+                    batch_attempt=batch_attempt,
                 )
+
+
+def _insert_today_minute_run(
+    cur: Any,
+    *,
+    plan: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    c0_plan_path: str,
+    batch_attempt: Mapping[str, Any] | None,
+) -> None:
+    counts = plan.get("today_minute_object_count_by_asset_kind") or {}
+    subscription_count = sum(int(counts.get(asset_kind) or 0) for asset_kind in ASSET_KINDS)
+    cur.execute(
+        """
+        INSERT INTO common_market_data_run (
+          run_id, source_condition_run_id, for_trade_date, source_trade_date,
+          prev_trade_date, mode, status, p0_count, p1_count, p2_count,
+          source_scope_row_count, candidate_row_count, subscription_row_count,
+          subscription_object_count, dedup_ratio, generated_by,
+          market_data_pulled, market_data_fact_written,
+          downstream_layers_touched, worker_started, started_at, raw_json
+        )
+        VALUES (%s, %s, %s, %s, %s, 'execute', 'running', 0, 0, 0,
+                %s, %s, %s, %s, %s, 'N3-C1-today-minute-execute',
+                false, false, false, false, %s, %s)
+        """,
+        (
+            plan["today_minute_run_id"],
+            plan["source_condition_run_id"],
+            plan["for_trade_date"],
+            plan["source_trade_date"],
+            plan["prev_trade_date"],
+            int(source_run_row.get("source_scope_row_count") or 0),
+            int(source_run_row.get("candidate_row_count") or 0),
+            subscription_count,
+            subscription_count,
+            source_run_row.get("dedup_ratio"),
+            started_at,
+            Jsonb(
+                {
+                    "stage": "N3-C1",
+                    "source_run_id": plan["source_market_data_run_id"],
+                    "today_minute_run_id": plan["today_minute_run_id"],
+                    "c0_plan_path": c0_plan_path,
+                    "writes_outbox": False,
+                    "run_once_only": True,
+                    "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+                }
+            ),
+        ),
+    )
 
 
 def fetch_market_data_run_row_by_id(dsn: str, run_id: str) -> dict[str, Any]:
@@ -779,13 +1089,44 @@ def write_today_minute_quality_and_finalize_run(
     quality_items: Sequence[Mapping[str, Any]],
     object_results: Sequence[Mapping[str, Any]],
     status: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
     quality_counts = count_quality_severities(quality_items)
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                insert_quality_items(cur, plan=plan, quality_items=quality_items)
-                cur.execute(
+                _finalize_today_minute_run_with_cursor(
+                    cur,
+                    plan=plan,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status=status,
+                    batch_attempt=batch_attempt,
+                )
+
+
+def _finalize_today_minute_run_with_cursor(
+    cur: Any,
+    *,
+    plan: Mapping[str, Any],
+    quality_items: Sequence[Mapping[str, Any]],
+    object_results: Sequence[Mapping[str, Any]],
+    status: str,
+    batch_attempt: Mapping[str, Any] | None,
+) -> None:
+    quality_counts = count_quality_severities(quality_items)
+    traced_quality_items = [
+        {
+            **dict(item),
+            "details": {
+                **dict(item.get("details") or {}),
+                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+            },
+        }
+        for item in quality_items
+    ]
+    insert_quality_items(cur, plan=plan, quality_items=traced_quality_items)
+    cur.execute(
                     """
                     UPDATE common_market_data_run
                     SET status = %s,
@@ -815,11 +1156,12 @@ def write_today_minute_quality_and_finalize_run(
                                 "writes_outbox": False,
                                 "write_result": summarize_write_result(object_results, quality_items),
                                 "actual_asset_counts": summarize_actual_asset_counts(object_results),
+                                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
                             }
                         ),
                         plan["today_minute_run_id"],
                     ),
-                )
+    )
 
 
 def insert_quality_items(
@@ -892,34 +1234,51 @@ def capture_today_minute_execute_backup(
         options="-c default_transaction_read_only=on",
         row_factory=dict_row,
     ) as conn, conn.cursor() as cur:
-        return {
-            "phase": phase,
-            "captured_at": utc_now_iso(),
-            "source_run_id": source_run_id,
-            "today_minute_run_id": today_minute_run_id,
-            "for_trade_date": for_trade_date,
-            "active_snapshot": fetch_n1_n2_active_snapshot(cur),
-            "today_minute_run_exists": market_data_run_exists(cur, today_minute_run_id),
-            "today_minute_run_row": fetch_market_data_run_row(cur, today_minute_run_id),
-            "source_run_row": fetch_market_data_run_row(cur, source_run_id),
-            "target_today_minute_run_row_counts": fetch_today_minute_run_row_counts(cur, today_minute_run_id),
-            "target_today_minute_run_row_counts_by_asset": fetch_today_minute_run_counts_by_asset(
-                cur,
-                today_minute_run_id,
-                for_trade_date,
-            ),
-            "duplicate_minute_key_count_by_asset": fetch_duplicate_minute_key_counts(
-                cur,
-                today_minute_run_id,
-                for_trade_date,
-            ),
-            "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(
-                cur,
-                today_minute_run_id,
-            ),
-            "outbox_rows_for_run": fetch_outbox_count(cur, today_minute_run_id),
-            "inbox_rows_for_run": fetch_inbox_count(cur, today_minute_run_id),
-        }
+        return _capture_today_minute_execute_backup_with_cursor(
+            cur,
+            phase=phase,
+            today_minute_run_id=today_minute_run_id,
+            source_run_id=source_run_id,
+            for_trade_date=for_trade_date,
+        )
+
+
+def _capture_today_minute_execute_backup_with_cursor(
+    cur: Any,
+    *,
+    phase: str,
+    today_minute_run_id: str,
+    source_run_id: str,
+    for_trade_date: str,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "captured_at": utc_now_iso(),
+        "source_run_id": source_run_id,
+        "today_minute_run_id": today_minute_run_id,
+        "for_trade_date": for_trade_date,
+        "active_snapshot": fetch_n1_n2_active_snapshot(cur),
+        "today_minute_run_exists": market_data_run_exists(cur, today_minute_run_id),
+        "today_minute_run_row": fetch_market_data_run_row(cur, today_minute_run_id),
+        "source_run_row": fetch_market_data_run_row(cur, source_run_id),
+        "target_today_minute_run_row_counts": fetch_today_minute_run_row_counts(cur, today_minute_run_id),
+        "target_today_minute_run_row_counts_by_asset": fetch_today_minute_run_counts_by_asset(
+            cur,
+            today_minute_run_id,
+            for_trade_date,
+        ),
+        "duplicate_minute_key_count_by_asset": fetch_duplicate_minute_key_counts(
+            cur,
+            today_minute_run_id,
+            for_trade_date,
+        ),
+        "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(
+            cur,
+            today_minute_run_id,
+        ),
+        "outbox_rows_for_run": fetch_outbox_count(cur, today_minute_run_id),
+        "inbox_rows_for_run": fetch_inbox_count(cur, today_minute_run_id),
+    }
 
 
 def market_data_run_exists(cur: Any, run_id: str) -> bool:

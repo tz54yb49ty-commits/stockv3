@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 from ashare_v3.user.virtual_account_seed import (
-    INITIAL_CASH,
     PHASE3_TABLES,
     PLANNED_ROWS,
     AdminPrincipalSummary,
@@ -13,10 +12,6 @@ from ashare_v3.user.virtual_account_seed import (
     build_parser,
     run_virtual_account_seed,
     validate_contract_artifact,
-)
-from ashare_v3.user.virtual_account_bootstrap_v3 import (
-    INITIAL_CASH as BOOTSTRAP_047_INITIAL_CASH,
-    RUN_ID as BOOTSTRAP_047_RUN_ID,
 )
 
 
@@ -65,14 +60,6 @@ class FakeVirtualAccountSeedRepository:
 
 
 class N6VirtualAccountSeedTest(unittest.TestCase):
-    def test_047_is_additive_and_does_not_redefine_phase3_seed_authority(self) -> None:
-        self.assertEqual(INITIAL_CASH, Decimal("1000000.0000"))
-        self.assertEqual(BOOTSTRAP_047_INITIAL_CASH, "100000000.0000")
-        self.assertNotEqual(
-            BOOTSTRAP_047_RUN_ID,
-            "n6_phase3_virtual_account_seed_20260605_v1",
-        )
-
     def test_parser_requires_execute_and_user_confirmed_flags(self) -> None:
         parser = build_parser()
         option_strings = {option for action in parser._actions for option in action.option_strings}

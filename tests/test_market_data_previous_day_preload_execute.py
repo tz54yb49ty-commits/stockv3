@@ -13,14 +13,227 @@ from ashare_v3.market.previous_day_preload_execute import (
     build_post_execute_quality_items,
     build_post_execute_checks,
     bulk_upsert_minute_bars,
+    commit_previous_day_attempt_transaction,
     ensure_clean_preload_target,
     ensure_execute_authorized,
     normalize_minute_bar_records,
+    prepare_mootdx_previous_day_batch,
+    write_prepared_previous_day_batch,
 )
+from ashare_v3.market.mootdx_batch_attempt import MootdxBatchAttemptOutcome
+from ashare_v3.mootdx_client import EndpointConfig, MootdxEndpointManager
 from scripts.check_event_contract import run_check
 
 
+class TdxConnectionError(Exception):
+    pass
+
+
 class PreviousDayMinutePreloadExecuteTest(unittest.TestCase):
+    def test_local_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        contract = {**sample_contract(), "expected_bar_count_per_object": 1}
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = fake_endpoint_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def bars(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise AssertionError("local preload invariant bug")
+
+            prepared, outcome = prepare_mootdx_previous_day_batch(
+                contract=contract,
+                subscriptions=[sample_subscription("600000", 11)],
+                manager=manager,
+                probe=passing_probe,
+                client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(prepared, [])
+        self.assertEqual(outcome.attempts[0]["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(outcome.attempts[0]["retry_allowed"])
+
+    def test_previous_day_adapter_requires_manager_pinned_client(self) -> None:
+        with self.assertRaisesRegex(PreviousDayMinutePreloadExecuteError, "manager-selected pinned client"):
+            MootdxPreviousDayMinuteAdapter()
+
+    def test_multi_object_partial_previous_day_attempt_replays_secondary_from_first(self) -> None:
+        contract = {**sample_contract(), "expected_bar_count_per_object": 1}
+        subscriptions = [sample_subscription("600000", 11), sample_subscription("600001", 12)]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_previous_day_batch(
+                contract=contract,
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_probe,
+                client_factory=lambda selection: PartialMootdxClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(len(prepared), 2)
+        self.assertTrue(
+            all(row["raw_json"]["endpoint_id"] == "secondary" for item in prepared for row in item["minute_records"])
+        )
+
+    def test_observe_previous_day_partial_failure_has_no_secondary_business_fetch(self) -> None:
+        contract = {**sample_contract(), "expected_bar_count_per_object": 1}
+        subscriptions = [sample_subscription("600000", 11), sample_subscription("600001", 12)]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_previous_day_batch(
+                contract=contract,
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=passing_probe,
+                client_factory=lambda selection: PartialMootdxClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(prepared, [])
+
+    def test_one_empty_previous_day_object_stays_on_primary_as_failed_status(self) -> None:
+        contract = {**sample_contract(), "expected_bar_count_per_object": 1}
+        subscriptions = [sample_subscription("600000", 11), sample_subscription("600001", 12)]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_previous_day_batch(
+                contract=contract,
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_probe,
+                client_factory=lambda selection: EmptyThenNonemptyPreviousDayClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(prepared[0]["minute_records"], [])
+        self.assertEqual(prepared[0]["status_record"]["status"], "failed")
+        self.assertEqual(prepared[1]["status_record"]["status"], "passed")
+
+    def test_three_empty_previous_day_objects_replay_secondary_from_first(self) -> None:
+        contract = {**sample_contract(), "expected_bar_count_per_object": 1}
+        subscriptions = [sample_subscription(f"60000{index}", 11 + index) for index in range(3)]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_previous_day_batch(
+                contract=contract,
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_probe,
+                client_factory=lambda selection: EmptyPrimaryPreviousDayClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("primary", "600002"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+                ("secondary", "600002"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertTrue(all(item["status_record"]["status"] == "passed" for item in prepared))
+
+    def test_previous_day_winning_batch_write_failure_rolls_back_outer_transaction(self) -> None:
+        conn = AtomicBatchConnection(fail_on_executemany=2)
+        prepared = [
+            {
+                "subscription": sample_subscription("600000", 11),
+                "minute_records": [{"raw_json": {}}],
+                "status_record": sample_status_record("stock:SH:600000"),
+            },
+            {
+                "subscription": sample_subscription("600001", 12),
+                "minute_records": [{"raw_json": {}}],
+                "status_record": sample_status_record("stock:SH:600001"),
+            },
+        ]
+
+        with self.assertRaises(RuntimeError):
+            write_prepared_previous_day_batch(
+                dsn="unused",
+                prepared=prepared,
+                connection_factory=lambda dsn: conn,
+            )
+
+        self.assertEqual(conn.transaction_commits, 0)
+        self.assertEqual(conn.transaction_rollbacks, 1)
+
+    def test_preload_run_insert_and_winning_facts_share_outer_transaction(self) -> None:
+        conn = AtomicBatchConnection(fail_on_executemany=99)
+        status_record = sample_status_record("stock:SH:600000")
+        status_record["raw_json"] = {
+            "mootdx_batch_attempt": {"winning_attempt_id": "attempt-1", "attempts": []}
+        }
+
+        results = write_prepared_previous_day_batch(
+            dsn="unused",
+            prepared=[
+                {
+                    "subscription": sample_subscription("600000", 11),
+                    "minute_records": [],
+                    "status_record": status_record,
+                }
+            ],
+            connection_factory=lambda dsn: conn,
+            run_context=(sample_contract(), {}, "2026-05-25T01:00:00+00:00"),
+        )
+
+        self.assertEqual(conn.transaction_commits, 1)
+        self.assertEqual(conn.transaction_rollbacks, 0)
+        self.assertEqual(results[0]["mootdx_batch_attempt"]["winning_attempt_id"], "attempt-1")
+        run_raw_json = getattr(conn.execute_values[0][-1], "obj", conn.execute_values[0][-1])
+        self.assertEqual(run_raw_json["mootdx_batch_attempt"]["winning_attempt_id"], "attempt-1")
+
+    def test_preload_finalizer_failure_rolls_back_run_facts_and_quality(self) -> None:
+        conn = AtomicBatchConnection(fail_on_executemany=99)
+        outcome = MootdxBatchAttemptOutcome(
+            batch_id="batch",
+            status="failed",
+            result=None,
+            winning_attempt_id=None,
+            attempts=({"attempt_id": "attempt-1", "status": "failed"},),
+        )
+        snapshot = sample_preload_backup()
+        snapshot["active_snapshot"] = {}
+
+        with self.assertRaisesRegex(RuntimeError, "finalizer failed"):
+            commit_previous_day_attempt_transaction(
+                dsn="unused",
+                contract=sample_contract(),
+                source_run_row={},
+                started_at="2026-05-25T01:00:00+00:00",
+                prepared=[],
+                failed_results=[],
+                outcome=outcome,
+                pre_backup={**sample_preload_backup(), "active_snapshot": {}},
+                connection_factory=lambda dsn: conn,
+                data_snapshot_builder=lambda cur: snapshot,
+                finalizer=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("finalizer failed")),
+            )
+
+        self.assertEqual(conn.transaction_commits, 0)
+        self.assertEqual(conn.transaction_rollbacks, 1)
+
     def test_execute_requires_execute_flag_before_adapter_or_db_path(self) -> None:
         with self.assertRaisesRegex(PreviousDayMinutePreloadExecuteError, "--execute"):
             ensure_execute_authorized(execute=False, user_confirmed=True)
@@ -281,6 +494,141 @@ class FakeMootdxClient:
     def index_bars(self, *, symbol: str, frequency: int, start: int, offset: int) -> list[dict[str, object]]:
         self.calls.append(("index_bars", symbol, frequency))
         return [minute_row()]
+
+
+class PartialMootdxClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and symbol == "600001":
+            raise TdxConnectionError("second object failed")
+        return [minute_row()]
+
+    def index_bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        return self.bars(symbol=symbol, **kwargs)
+
+
+class EmptyThenNonemptyPreviousDayClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if symbol == "600000" else [minute_row()]
+
+    def index_bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        return self.bars(symbol=symbol, **kwargs)
+
+
+class EmptyPrimaryPreviousDayClient(EmptyThenNonemptyPreviousDayClient):
+    def bars(self, *, symbol: str, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if self.endpoint_id == "primary" else [minute_row()]
+
+
+def sample_subscription(code: str, subscription_id: int) -> dict[str, object]:
+    return {
+        "subscription_id": subscription_id,
+        "pull_plan_id": 22,
+        "asset_kind": "stock",
+        "identity_key": f"stock:SH:{code}",
+        "exchange": "SH",
+        "code": code,
+        "display_code": f"{code}.SH",
+        "name": code,
+        "source_scope_ids": [1],
+        "source_condition_pool_ids": [101],
+    }
+
+
+def fake_endpoint_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    rows = (
+        EndpointConfig("primary", "115.238.56.198", 7709, 10, True, False, "x", "x", "protocol_passed"),
+        EndpointConfig("secondary", "180.153.18.170", 7709, 20, True, False, "x", "x", "protocol_passed"),
+    )
+    return MootdxEndpointManager(
+        endpoint_pool_version="test",
+        transport="mootdx",
+        endpoints=rows,
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def passing_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {"checks": {"minute_scope_sentinels": True}}
+
+
+def sample_status_record(identity_key: str) -> dict[str, object]:
+    return {
+        "asset_kind": "stock",
+        "run_id": "run",
+        "subscription_id": 1,
+        "source_condition_run_id": "condition",
+        "for_trade_date": "20260525",
+        "trade_date": "20260522",
+        "identity_key": identity_key,
+        "exchange": "SH",
+        "code": identity_key.rsplit(":", 1)[-1],
+        "display_code": identity_key.rsplit(":", 1)[-1],
+        "name": "x",
+        "expected_bar_count": 1,
+        "actual_bar_count": 1,
+        "missing_bar_count": 0,
+        "status": "passed",
+        "quality_status": "passed",
+        "source_adapter": "mootdx",
+        "source_version": "test",
+        "source_scope_ids": [],
+        "source_condition_pool_ids": [],
+        "error_message": None,
+        "raw_json": {},
+    }
+
+
+class AtomicBatchConnection:
+    def __init__(self, *, fail_on_executemany: int) -> None:
+        self.fail_on_executemany = fail_on_executemany
+        self.executemany_calls = 0
+        self.transaction_commits = 0
+        self.transaction_rollbacks = 0
+        self.execute_values = []
+
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return None
+    def transaction(self): return AtomicBatchTransaction(self)
+    def cursor(self): return AtomicBatchCursor(self)
+
+
+class AtomicBatchTransaction:
+    def __init__(self, conn): self.conn = conn
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None: self.conn.transaction_commits += 1
+        else: self.conn.transaction_rollbacks += 1
+        return False
+
+
+class AtomicBatchCursor:
+    def __init__(self, conn): self.conn = conn
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return None
+    def executemany(self, sql, values):
+        self.conn.executemany_calls += 1
+        if self.conn.executemany_calls == self.conn.fail_on_executemany:
+            raise RuntimeError("simulated batch write failure")
+    def execute(self, sql, values):
+        self.conn.execute_values.append(values)
+        return None
+    def fetchone(self): return {"preload_status_id": 1}
 
 
 class FakeCursor:

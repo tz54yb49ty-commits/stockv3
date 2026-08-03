@@ -21,16 +21,21 @@ execution_trace:
       - string
     affected_resources:
       - string
+    policy_id: string | null
+    runtime_execution_requested: boolean
     data_flow: string
     risk_level: low | medium | high | critical
 
   kernel_decision:
     state: ACCEPT | REJECT | BLOCK | ESCALATE
     reason: string
+    policy_id: string | null
 
   gate_decision:
     state: ACCEPT | REJECT | BLOCK | ESCALATE
     reason: string
+    named_policy_evaluated: boolean
+    named_policy_passed: boolean
 
   binding_decision:
     state: ACCEPT | REJECT | BLOCK | ESCALATE
@@ -40,6 +45,7 @@ execution_trace:
 
   affected_files:
     - string
+
   affected_resources:
     - string
 
@@ -64,7 +70,7 @@ Detailed rules:
 3. If any decision is `REJECT` or `BLOCK`, its `reason` field is mandatory.
 4. If any decision is `ESCALATE`, the trace must identify the layer or gate that owns the next decision.
 5. A task may not proceed if its trace entry cannot be produced.
-6. A runtime `ACCEPT` must record the exact `policy_id`, `affected_resources`,
+6. A runtime `ACCEPT` must record the exact `policy_id`, affected resources,
    named-policy evaluation result, primary/replay attempt counts, and fresh
    evidence hashes used by Kernel and Runtime Gate. A generic reason string is
    not a substitute for these fields. A bounded-evaluator `ACCEPT` must also
@@ -80,11 +86,15 @@ Detailed rules:
    `n6_user_web_immutable_release_bounded_rebind_v1`, and
    `n6_strategy_center_schema_migration_maintenance_window_v1`, and
    `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`, and
+   `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`, and
    `n6_strategy_center_post_081_v2_catalog_migration_window_v1`, and
    `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`, and
-   `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`, and
+   `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`, and
    `n6_strategy_center_pre_canary_web_write_quiesce_v1`, and
-   `n6_strategy_center_shadow_activation_grant_v1`; any other
+   `n6_immutable_release_install_bounded_v1`, and
+   `n6_immutable_release_install_pre_rename_validator_recovery_v1`, and
+   `n6_immutable_release_install_preflight_git_violation_recovery_v1`, and
+   `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`; any other
    runtime policy id must trace `REJECT` and `STOP`.
 8. A Web bounded-rebind `ACCEPT` must additionally record the exact label/plist,
    source and target Release identities and hashes, lineage verdict, frozen
@@ -127,6 +137,24 @@ Detailed rules:
     evaluator, virtual-executor, N1-N5, queue, business, broker, or trading
     effect. Periodic virtual-executor PID/runs observations must be separated
     from configuration drift.
+11A. A post-083 V2 Web rebind `ACCEPT` must additionally record committed
+    081/082/083/084 and schema/catalog evidence; the exact legacy source name;
+    its short/full commit closure, tree, archive, git-ls-tree, manifest,
+    filesystem, path/blob/mode, ownership, missing/extra/symlink/file-hardlink,
+    immutable-attestation and current-Web verdicts; one-time rollback-only
+    source use; the formal target name/commit and every immutable hash;
+    source-delta, lineage, schema, V2 Web/API/UI/SSE, observation, direction,
+    and trading-minute-freshness verdicts; Web PID/PPID/argv/cwd/plist/
+    environment/ownership; strategy write `1` before, target, after, and
+    rollback; the independent evaluator-quiesce artifact and evaluator job/PID
+    absence with zero operations; virtual-executor
+    `StartInterval=5`, plist/Release/runner/role-ACL/object-boundary hashes,
+    disjointness, and zero operations; primary/rollback attempt counts and
+    timestamps; readiness/routes/stability; and whether rollback occurred.
+    Legacy-source reuse/mutation/target use and every database, migration,
+    evaluator/executor, N1-N5, queue, business, broker, or trading effect must
+    trace `REJECT` and `STOP`. Periodic executor PID/runs observations must be
+    separated from configuration drift.
 12. A post-081 V2 catalog migration `ACCEPT` must additionally record the exact
     phase and migration id; committed predecessor migrations and absent target/
     later migration; immutable Release and SQL hashes; strategy write `0`;
@@ -164,20 +192,15 @@ Detailed rules:
     transaction, same request id, `DO`, psql interpolation, dynamic SQL, secret
     leakage, second mutation attempt, activation, Web write, compensation call,
     drift, extra scope/table, or retry must trace `REJECT` and `STOP`.
-
-14. A remaining-users pending-V2 `ACCEPT` must record exactly one supplied
-    principal/user scope, current N6 authority `for_trade_date`, active-V1
-    predecessor and predecessor+1 CAS, unchanged package keys, and the
-    independently attested immutable owner-isolated selection function. It
-    must record strategy write `1`, no Web PUT, evaluator observation without
-    operation, one transaction, one advisory lock, one official function call,
-    one mutation attempt, zero retry, pending/pending postflight, unchanged
-    other users and projection/change watermarks, and zero forbidden effects.
-    Missing owner-function proof is `scope_expansion_required=owner_selection_function`
-    and `REJECT`; the session-token Web function and manual SQL are never valid
-    substitutes. Any all-users/multi-scope request, date/hash/predecessor/key
-    drift, activation, extra table, evaluator/executor operation, retry,
-    business/trading, or N1-N5 effect must trace `REJECT` and `STOP`.
+14. An evaluator-quiesce-for-Web-rebind `ACCEPT` must record post-083 and
+    strategy-write=`1` evidence; exact evaluator label/plist/path/runner/
+    Release/role/ACL/launchd ownership and before/after hashes; the single
+    bootout attempt; PID/job absence timestamps; zero bootstrap/kickstart/
+    kill/retry/automatic restore; frozen unchanged Web and virtual-executor
+    configuration/ACL/object-boundary evidence; and proof of zero database,
+    migration, evaluator execution, N1-N5, business, broker, or trading effect.
+    Normal virtual-executor PID/runs cycling must be recorded separately from
+    true configuration drift.
 
 ## 4. Trace Integrity Rules
 
@@ -208,6 +231,8 @@ gate_decision
 binding_decision
 final_status
 affected_files
+affected_resources
+policy_id
 layer_role
 risk_level
 ```
@@ -222,25 +247,181 @@ Replay requirements:
 
 ## 6. Golden Rule
 
+An `n6_immutable_release_install_bounded_v1` trace records the exact target and
+staging paths, source commit/tree/archive/manifest/filesystem/attestation
+hashes, owner/mode/ACL/xattr checks, pre-existing target absence, staging
+uniqueness, validation and atomic rename timestamps, created-path cleanup and
+the exact root-mode enable/restore timestamps plus proof that root owner/group/
+ACL/xattr stayed frozen, group/other write was never enabled, final mode is
+`0555`, and no existing Release, service, LaunchAgent, database, evaluator,
+executor or business/trading object was touched.
+
+An `n6_immutable_release_install_pre_rename_validator_recovery_v1` trace
+records the exact BLOCKED attestation and sidecar paths/hashes, failure
+status/stage/type/message/interpreter, zero prior rename/fallback/retry/
+cleanup attempts, absent target, restored root, exact source hashes, existing-
+Release fingerprints, and preserved staging-v1 path/device/inode/owner/mode/
+count/ACL/xattr fingerprints. It must separately record the exact new
+validator artifact directories, capability attestation and sidecar
+paths/hashes/modes, `/usr/bin/xattr` binary hash,
+protocol hash, generation/probe timestamps and complete capability verdict.
+The trace must prove capability PASS preceded both Release-root chmod and
+staging-v2 creation; capability failure must show both mutation attempts were
+zero, root remained `0555`, capability evidence was sealed, and exact recovery
+failure artifacts were written/sealed in FINALIZE before STOP. It must also record the sidecar-to-attestation hash equality, literal
+validator executable hash, attestation-embedded executable/protocol equality,
+no-duplicate-key verdict and before/after capability-artifact hashes.
+
+Recovery execution trace fields include the exact staging-v2 path, every
+materialization and full blob/path/mode/ACL/xattr-name/value validation
+timestamp, exact xattr path/name/raw-value counts and canonical fingerprint,
+including the release-content-manifest 6243-file/45-directory/6288-closure
+reconciliation, the sole Release-root mode window, one atomic rename attempt,
+the exact release-root dirfd identity, renameatx_np flags/result, exact
+staging/target `501:20` ownership, final target/root modes and the immutable
+recovery attestation hash. The root
+restore timestamp must precede target postflight and recovery-attestation
+writes. Every PASS or STOP must prove staging-v1 was not reused, modified,
+renamed, deleted or cleaned; no fallback or second recovery occurred; and Git,
+tests, ports, services, LaunchAgents, databases, evaluators/executors,
+migrations, N1-N6 and business/trading objects were untouched. The prior
+BLOCKED attestation is never overwritten. A pre-rename failure after staging-v2 creation must
+additionally trace recursive `0444/0555` sealing, staging identity/metadata
+fingerprints and zero writable residue before the Release root is restored. A
+post-rename postflight failure must trace the immutable target fingerprint and
+zero target modification/deletion attempts.
+
+The trace must also bind the exact new recovery output directory, validation,
+install-attestation and SHA-sidecar paths/hashes/modes/write counts and their
+prior absence. It must prove the first output-path creation timestamp follows
+Release-root restoration or confirmation at `0555` and the final sealed/
+postflight boundary of the selected recovery outcome branch, including
+capability failure; all output-path existence
+checks during the root window, staging work, rename and Release postflight
+must remain absent. It records rejected unknown request keys and proves no ordinary
+rename, overwrite-capable rename or unbound output write occurred.
+For each output failure point (root/directory creation, three writes and final
+seal), STOP traces the exclusive/no-follow create result, recursive
+`0444/0555` failure sealing, partial identity/hash evidence and zero writable
+output residue.
+
+An `n6_immutable_release_install_preflight_git_violation_recovery_v1` trace
+binds the unique JSONL path, session/turn/message/tool-call identities, exact
+turn line and byte interval, stable segment/prefix SHA-256 values, and
+raw-line/arguments/output hashes for the sole Git call. It records the ordered
+tool timeline, exact three read-only Git subcommands, zero mutating
+Git/worktree operations and every zero pre-mutation counter. A current
+whole-file JSONL hash is append-drifting and is never authority.
+
+The later execution trace records zero Git and zero tests, direct raw-byte
+verification of independently frozen current `AGENTS.md` and Kernel policy
+block, direct filesystem preflight, capability-first ordering, fresh
+staging-v2, full xattr raw-value validation, the sole root-mode window and
+sole exclusive rename. Every outcome proves staging-v1 was untouched and no
+prior-policy reuse, fallback, retry, cleanup, runtime, service, database,
+evaluator/executor, migration, N1-N6 or trading action occurred. This
+governance definition trace cannot contain recovery execution actions.
+
+An `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1` trace
+records the frozen source base/endpoint/rollback commits and trees, exact
+eight-path allowlist, source combined/rollback patch hashes, eight endpoint
+blob ids, and both exact label/original-plist path/SHA pairs. Source commits
+are marked `evidence_only=true` and never appear as final execution targets.
+
+Before any bootout, the execution trace freezes the policy commit, its frozen
+parent, two final promotion commits and final rollback. It records direct
+parent edges, policy/final/rollback trees, final combined/rollback patch
+hashes, exact final changed paths and all eight final blob comparisons. It
+then records tracked/index clean proof, worker/child idle proof, both exact
+bootouts, state-driven job/PID/child absence, the sole ff-only merge argv and
+result, both original-plist bootstraps and postflight. Failure records only
+the frozen rollback target with `rollback_execution_attempt_count=0`. The
+trace also proves zero kickstart/manual execute/retry/push/checkout/rebase/
+cherry-pick/plist-write/other-LaunchAgent/DB/message/queue/historical-event/
+N2/N3/N5/N6/trading operations. This governance definition trace cannot
+contain policy execution actions.
+
+An `n6_immutable_release_install_eacces_retry_v1` trace additionally records
+the immutable prior-failure trace hash and `EACCES` errno, prior staging path
+and validation hash, absent prior target/attestation, the distinct new staging
+and target paths, both mode windows, and one rename timestamp. It must prove
+the prior staging was never reused, modified or deleted and that both final
+target and Release root are `0555`.
+
+An `n6_immutable_release_install_host_eacces_remediation_v1` trace records the
+host-trace path/hash and the two `EACCES` destinations, orphaned staging
+validation hash, fresh path pair, both owner-write windows, one rename and
+proof that no runtime/database/business object was touched.
+
+An `n6_immutable_release_privileged_atomic_install_v1` trace records the
+attested helper path/SHA/signature, root UID verification, release-root dirfd,
+staging/target names, all three rename flags, one invocation, before/after
+filesystem attestations and proof that no shell, metadata, runtime, database
+or business operation occurred.
+
+An `n6_immutable_release_privileged_materialize_and_install_v1` trace records
+the V2 helper SHA/signature, exact d85df632 commit/tree/archive/manifest/
+filesystem hashes and 6240-file/45-directory counts, orphan evidence, new
+staging/target basenames, archive path/link/mode/count validation, one
+renameatx_np invocation, immutable d85df632-named target attestation and
+retained staging on failure.
+
+An `n6_immutable_release_privileged_materialize_and_install_f67_v1` trace
+records the dedicated helper source/binary SHA and signature, exact f67
+commit/tree/archive/git-ls-tree/manifest/filesystem/bundle hashes, 6240/45 and
+PAX 1/108 counts, distinct orphan evidence, fresh staging/target basenames,
+safe extraction and sealed-mode results, the sole `renameatx_np` invocation,
+target `0555` postflight and immutable f67 attestation. It also records zero
+Release-runtime, service, database, evaluator, N1-N6 and trading operations.
+
 No execution without a complete trace entry.
 
-Date-authority traces must record the three reviewed display-view batch
+Strategy Center Gate3+ traces record the three reviewed N6 display-basis batch
 identities (`for_trade_date`, `source_trade_date`, `source_run_id`, row count),
-projection/card watermarks and membership as-of provenance. They must not use a
-`common_trade_calendar` or N1-N5 raw-table authority. Post-canary write-restore
-traces additionally record flag `0 -> 1`, canary result, 12 evaluator ticks,
-pending count, exact Web plist/Release hashes and the single rebind budget.
+projection/card watermarks, membership as-of provenance, exact dynamic
+principal/user/revision, evaluation time, run id, input watermark and plan
+hash. They must never record calendar or N1-N5 raw-table authority.
 
-Second-level resumable-rebind traces must retain the original failed
-BOUNDED_REBIND event/evidence, the full three-SHA supersession chain,
-`72b1d50` control-plane commit/tree, d85/ee2b/write-0 source, f464 target and
-bundle upgrade hashes. WEB_TARGET traces record immutable installation and the
-exact Web-only rebind while proving Evaluator job absent/runner 0 and zero
-Evaluator operations. EVALUATOR_TARGET must trace
-`blocked_pending_canary` until WEB_TARGET passed and a separate current-date
-bounded-canary PASS is appended; pre-canary planning, lease, or bootstrap must
-trace `REJECT`.
+`n6_strategy_center_pre_canary_web_write_quiesce_v1` traces record the
+unchanged d85 Release identity, exact
+Web before/target plist hashes, the sole flag `1 -> 0` delta, bootout/job
+absence/bootstrap/readiness/stability timestamps, evaluator absence, zero
+virtual-executor operations, and conditional rollback-to-flag-`1` evidence.
 
-Pre-canary write-quiesce traces remain historical Gate3+ authority and record
-the exact flag-only `1 -> 0` delta on the unchanged Release plus zero
-Evaluator, Virtual Executor, database, canary, N1-N5 and trading operations.
+Scheduled evaluator traces additionally record at least twelve ticks,
+pending-first/active-round-robin cursor progression, single-scope transaction
+identity, deadline/backoff/overlap/restart evidence and cross-user write count.
+Write-restore traces record exact Web flag `0 -> 1` and rollback-to-zero
+evidence. Each remaining-user trace records one predecessor CAS and unchanged
+other-user/projection/change hashes. V1-retirement traces record all-active-V2,
+pending-zero, seven completed remaining-user gates, full replay/isolation/
+projection/SSE hashes and the catalog-only mutation.
+
+Strategy Center decommission traces apply the retirement lifecycle registry
+first. A retired policy trace records `policy_status=RETIRED`,
+`decision=REJECT`, and `final_status=STOP` without evaluating its historical
+`ACCEPT` fields; the historical policy and trace evidence remain immutable.
+
+An `n6_strategy_center_decommission_web_runtime_v1` `ACCEPT` trace records the
+frozen source and immutable target Release identities/hashes, attested
+Strategy Center route/UI/SSE/function/runtime-reference removal, non-Strategy
+N6 non-regression, exact Web label/plist/environment, write flag `0` before,
+after, and rollback, evaluator job/PID absence before/after and zero restore,
+one primary bootout/bootstrap, readiness/stability timestamps, conditional
+rollback counts, frozen virtual-executor boundary, and zero database,
+other-service, heartbeat, N1-N5, business, broker, or trading operations. If
+the optional evaluator artifact archive runs, the trace also records its new
+path, allowed plist/state/log/history inventory, manifest/hash, read-only mode,
+and proof it began only after Web stability.
+
+An `n6_strategy_center_decommission_schema_archive_v1` `ACCEPT` trace records
+the prior Web-decommission proof, exact transaction/advisory-lock identity,
+fresh owner-only archive schema, exact six tables, every owned sequence/index,
+Web/worker/`PUBLIC` `USAGE` revocation, exclusive trigger/function inventory
+and removals, and each table's before/after row count, content hash, DDL, ACL,
+and dependencies. It records protected-object invariance, zero drop/truncate/
+row DML/retry/extra transaction, rollback SQL hash and retention deadline, and
+`physical_deletion_automatically_scheduled=false`.
+
+Physical deletion after 30 days and canary-heartbeat pause/removal trace
+`REJECT/STOP` unless a future independent explicit policy and request exist.

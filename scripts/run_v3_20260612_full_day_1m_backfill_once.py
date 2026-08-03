@@ -13,10 +13,17 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Mapping, Sequence
 
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchObjectTracker,
+    build_mootdx_minute_semantic_probe,
+    run_mootdx_batch_attempt,
+)
 from ashare_v3.market.today_minute_execute import MootdxTodayMinuteAdapter
 from ashare_v3.market import v3_full_day_replay_plan as plan
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
 
 try:
     from check_condition_source_ready import DEFAULT_DSN
@@ -26,6 +33,41 @@ except ModuleNotFoundError:  # pragma: no cover
 
 DEFAULT_REPORT_JSON = "docs/V3_20260612_N3_FULL_DAY_1M_BACKFILL_EXECUTE_REPORT.json"
 DEFAULT_REPORT_MD = "docs/V3_20260612_N3_FULL_DAY_1M_BACKFILL_EXECUTE_REPORT.md"
+MINUTE_PROBE_REQUIRED_CHECKS = ("minute_scope_sentinels",)
+
+
+def winning_transport_provenance(
+    fetch_results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    for row in fetch_results:
+        batch = row.get("endpoint_attempt")
+        if not isinstance(batch, Mapping):
+            continue
+        winning_attempt_id = str(batch.get("winning_attempt_id") or "")
+        winning = next(
+            (
+                dict(attempt)
+                for attempt in batch.get("attempts") or []
+                if str(attempt.get("attempt_id") or "") == winning_attempt_id
+            ),
+            None,
+        )
+        if winning is None:
+            continue
+        return {
+            "batch_id": batch.get("batch_id"),
+            "winning_attempt_id": winning_attempt_id,
+            "attempt_id": winning.get("attempt_id"),
+            "endpoint_pool_version": winning.get("endpoint_pool_version"),
+            "endpoint_id": winning.get("endpoint_id"),
+            "endpoint_host": winning.get("endpoint_host"),
+            "endpoint_port": winning.get("endpoint_port"),
+            "transport": winning.get("transport"),
+            "source_transport": winning.get("source_transport") or winning.get("transport"),
+            "pool_probe_summary": winning.get("pool_probe_summary"),
+            "endpoint_probe_results": winning.get("endpoint_probe_results"),
+        }
+    return {}
 
 
 def _identity_groups(context_rows: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -58,13 +100,15 @@ def build_adapter_rows(
     retained_rows_by_identity: Mapping[str, Sequence[Mapping[str, Any]]],
     minute_trade_date: str,
     progress_every: int,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
+    adapter_factory: Callable[[Any], Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
-    adapter = MootdxTodayMinuteAdapter(offset=800)
-    adapter_rows: dict[str, list[dict[str, Any]]] = {}
     fetch_results: list[dict[str, Any]] = []
     unique_context = _dedupe_context_rows(context_rows)
-    total = len(unique_context)
-    for index, row in enumerate(unique_context, start=1):
+    missing_context: list[dict[str, Any]] = []
+    for row in unique_context:
         identity = str(row["identity_key"])
         retained_count = len(retained_rows_by_identity.get(identity) or [])
         if retained_count >= plan.FULL_DAY_EXPECTED_1M_BAR_COUNT:
@@ -78,13 +122,36 @@ def build_adapter_rows(
                 }
             )
             continue
-        if index == 1 or index == total or index % max(progress_every, 1) == 0:
-            print(f"full-day 1m adapter fetch {index}/{total} {row['asset_kind']} {identity}", flush=True)
-        try:
+        missing_context.append(row)
+
+    if not missing_context:
+        return {}, fetch_results
+
+    resolved_adapter_factory = adapter_factory or (
+        lambda client: MootdxTodayMinuteAdapter(
+            client=client,
+            offset=800,
+            intraday_trade_date=minute_trade_date,
+        )
+    )
+    manager = endpoint_manager or MootdxEndpointManager.from_toml()
+
+    def fetch_batch(client: Any, selection: EndpointSelection) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        adapter = resolved_adapter_factory(client)
+        tracker = MootdxBatchObjectTracker(manager, selection)
+        adapter_rows: dict[str, list[dict[str, Any]]] = {}
+        attempt_results: list[dict[str, Any]] = []
+        total = len(missing_context)
+        for index, row in enumerate(missing_context, start=1):
+            identity = str(row["identity_key"])
+            retained_count = len(retained_rows_by_identity.get(identity) or [])
+            if index == 1 or index == total or index % max(progress_every, 1) == 0:
+                print(f"full-day 1m adapter fetch {index}/{total} {row['asset_kind']} {identity}", flush=True)
             fetched = adapter.fetch_minute_bars(row, minute_trade_date)
+            classified = tracker.record(identity_key=identity, value=fetched, empty=not fetched)
             adapter_rows[identity] = fetched
             status = "passed" if len(fetched) >= plan.FULL_DAY_EXPECTED_1M_BAR_COUNT else "missing"
-            fetch_results.append(
+            attempt_results.append(
                 {
                     "asset_kind": row["asset_kind"],
                     "identity_key": identity,
@@ -92,20 +159,42 @@ def build_adapter_rows(
                     "retained_row_count": retained_count,
                     "row_count": len(fetched),
                     "status": status,
+                    "object_result_status": classified.status,
                 }
             )
-        except Exception as exc:  # noqa: BLE001 - adapter failure becomes pre-write blocker evidence.
+        return adapter_rows, attempt_results
+
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=f"full_day_1m_backfill:{minute_trade_date}",
+        probe=endpoint_probe
+        or build_mootdx_minute_semantic_probe(
+            subscriptions=missing_context,
+            trade_date=minute_trade_date,
+            adapter_factory=resolved_adapter_factory,
+        ),
+        fetch_batch=fetch_batch,
+        client_factory=endpoint_client_factory,
+        required_checks=MINUTE_PROBE_REQUIRED_CHECKS,
+    )
+    if outcome.status != "passed" or outcome.result is None:
+        for row in missing_context:
             fetch_results.append(
                 {
                     "asset_kind": row["asset_kind"],
-                    "identity_key": identity,
+                    "identity_key": row["identity_key"],
                     "source": "mootdx_full_day_backfill",
-                    "retained_row_count": retained_count,
+                    "retained_row_count": len(retained_rows_by_identity.get(str(row["identity_key"])) or []),
                     "row_count": 0,
                     "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "endpoint_attempt": outcome.to_provenance(),
                 }
             )
+        return {}, fetch_results
+
+    adapter_rows, attempt_results = outcome.result
+    provenance = outcome.to_provenance()
+    fetch_results.extend({**row, "endpoint_attempt": provenance} for row in attempt_results)
     return adapter_rows, fetch_results
 
 
@@ -153,6 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress_every=args.progress_every,
         )
         blocking_fetches = [row for row in fetch_results if row.get("status") == "failed"]
+        transport_provenance = winning_transport_provenance(fetch_results)
         if blocking_fetches:
             report = {
                 "stage": "V3_20260612_N3_FULL_DAY_1M_BACKFILL",
@@ -181,6 +271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for_trade_date=args.for_trade_date,
             minute_trade_date=minute_trade_date,
             is_previous_day_preload=args.previous_day_preload,
+            transport_provenance=transport_provenance,
         )
         write_result = plan.write_full_day_backfill_to_db(
             dsn=args.dsn,
@@ -193,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prev_trade_date=args.prev_trade_date,
             records_by_asset=records_by_asset,
             object_results=object_results,
+            transport_provenance=transport_provenance,
         )
         report: dict[str, Any] = {
             "stage": "V3_20260612_N3_FULL_DAY_1M_BACKFILL",
@@ -208,6 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "fetch_status_counts": dict(Counter(str(row.get("status")) for row in fetch_results)),
             "object_status_counts": dict(Counter(str(row.get("status")) for row in object_results)),
             "source_policy_counts": dict(Counter(str(row.get("source_policy")) for row in object_results)),
+            "transport_provenance": transport_provenance,
             "pre_counts": write_result["pre_counts"],
             "post_counts": write_result["post_counts"],
             "quality_item_count": len(write_result["quality_items"]),

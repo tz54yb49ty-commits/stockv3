@@ -21,7 +21,6 @@ from ashare_v3.market.migration_execute import stable_json_hash
 from ashare_v3.market.preload_execute_contract import read_json
 from ashare_v3.market.preload_plan import MINUTE_FACT_TABLES, PRELOAD_STATUS_TABLES, build_persisted_subscription_report, previous_day_subscriptions
 from ashare_v3.market.previous_day_preload_execute import (
-    MootdxPreviousDayMinuteAdapter,
     build_post_execute_checks,
     build_post_execute_quality_items,
     capture_preload_execute_backup,
@@ -75,6 +74,7 @@ def run_previous_day_minute_preload_fill_facts(
 ) -> dict[str, Any]:
     """Fill facts for the reviewed current-lineage metadata-only preload run."""
 
+    resolved_adapter = require_pinned_previous_day_fill_adapter(adapter)
     contract = read_json(contract_path)
     ensure_fill_facts_contract(
         contract,
@@ -111,7 +111,6 @@ def run_previous_day_minute_preload_fill_facts(
     subscriptions = previous_day_subscriptions(subscription_report)
     ensure_subscription_counts_match_contract(subscriptions, contract)
 
-    resolved_adapter = adapter or MootdxPreviousDayMinuteAdapter()
     object_results = execute_subscription_preloads(
         dsn=dsn,
         contract=contract,
@@ -217,6 +216,14 @@ def run_previous_day_minute_preload_fill_facts(
     write_json(json_report_path, report)
     write_text(markdown_report_path, format_fill_facts_execute_report(report))
     return report
+
+
+def require_pinned_previous_day_fill_adapter(adapter: Any | None) -> Any:
+    if adapter is None:
+        raise PreviousDayMinutePreloadFillError(
+            "previous-day fill requires a manager-selected pinned adapter"
+        )
+    return adapter
 
 
 def ensure_fill_facts_contract(

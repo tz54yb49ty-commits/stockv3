@@ -12,6 +12,7 @@ from ashare_v3.trigger.provisional_projection_execute import (
     build_provisional_rollback_sql,
     build_provisional_projection_execute_plan,
     fetch_projection_rows,
+    insert_provisional_trigger_state,
     normalize_provisional_projection_row,
     run_provisional_projection_once,
     to_jsonable,
@@ -56,6 +57,21 @@ ORDINARY_TRIGGER_RUN_ID = (
     "__atomic_rule_v1_period_rollover_guard_v1"
 )
 SOURCE_CONDITION_RUN_ID = "condition_layer_20260522_to_20260525_20260525102249_execute"
+CANONICAL_STATE_FIELDS = (
+    "trigger_live",
+    "trigger_mark_candidate",
+    "primary_trigger_period",
+    "all_trigger_periods",
+    "projection_30m_flag",
+    "projection_30m_type",
+)
+
+
+def assert_canonical_state_columns(test_case: unittest.TestCase, state: dict[str, object]) -> None:
+    raw_json = state["raw_json"]
+    for field in CANONICAL_STATE_FIELDS:
+        test_case.assertIn(field, state)
+        test_case.assertEqual(state[field], raw_json[field])
 
 
 def empty_target_counts() -> dict[str, int]:
@@ -953,6 +969,8 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
         self.assertEqual(payload_by_condition["SELL_HINT"]["signal_type"], "S_SELL")
         self.assertEqual(payload_by_condition["SELL_HINT"]["trigger_type"], "SELL")
         self.assertTrue(payload_by_condition["SELL_HINT"]["n5_entry_allowed"])
+        for state in writes["common_trigger_state"]:
+            assert_canonical_state_columns(self, state)
 
     def test_no_matched_plans_passes_without_state_match_or_outbox(self) -> None:
         plan = build_plan(
@@ -989,6 +1007,7 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
         self.assertFalse(payload["projection_30m_flag"])
         self.assertFalse(payload["n4_boundary"]["enters_n5"])
         self.assertFalse(payload["n5_entry_allowed"])
+        assert_canonical_state_columns(self, writes["common_trigger_state"][0])
 
     def test_matched_unchanged_lifecycle_writes_no_duplicate_trigger_matched(self) -> None:
         initial = build_plan(
@@ -1034,6 +1053,7 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
         self.assertTrue(payload["trigger_live"])
         self.assertFalse(payload["n4_boundary"]["enters_n5"])
         self.assertFalse(payload["n5_entry_allowed"])
+        assert_canonical_state_columns(self, plan["writes"]["common_trigger_state"][0])
 
     def test_matched_to_inactive_lifecycle_writes_state_changed_without_match(self) -> None:
         previous = previous_state_for_payload(
@@ -1063,6 +1083,27 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
             "matched_to_inactive",
         )
         self.assertFalse(payload["n5_entry_allowed"])
+        assert_canonical_state_columns(self, plan["writes"]["common_trigger_state"][0])
+
+    def test_hint_state_insert_includes_all_canonical_typed_columns(self) -> None:
+        class Cursor:
+            def execute(self, sql: str, params: dict[str, object]) -> None:
+                self.sql = sql
+                self.params = params
+
+            def fetchone(self) -> tuple[int]:
+                return (1,)
+
+        state = build_plan(
+            [context_row("index:SH:000016", "buy", "BUY_HINT", ["BUY_HINT"], asset_kind="index")],
+            [projection_row("index", "index:SH:000016", "ready", "up_volume_expanding")],
+        )["writes"]["common_trigger_state"][0]
+        cursor = Cursor()
+
+        self.assertEqual(insert_provisional_trigger_state(cursor, state), 1)
+        for field in CANONICAL_STATE_FIELDS:
+            self.assertIn(field, cursor.sql)
+            self.assertIn(field, cursor.params)
 
     def test_duplicate_target_run_blocks_without_upsert_or_overwrite(self) -> None:
         with self.assertRaises(ProvisionalProjectionExecuteBlocked) as raised:

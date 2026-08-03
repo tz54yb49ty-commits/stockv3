@@ -26,7 +26,16 @@ from psycopg.types.json import Jsonb
 
 from ashare_v3.condition.basis import count_quality_severities, quality_item
 from ashare_v3.ingestion.tushare_env import load_tushare_token
-from ashare_v3.market.fact_writer import write_market_snapshot_with_event
+from ashare_v3.market.fact_writer import write_market_quality_with_event, write_market_snapshot_with_event
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    MootdxBatchObjectTracker,
+    MootdxEndpointSemanticValidationError,
+    MootdxEndpointTransportError,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+    with_batch_attempt_provenance,
+)
 from ashare_v3.market.migration_execute import fetch_n1_n2_active_snapshot, stable_json_hash
 from ashare_v3.market.n3_source_time_policy import (
     N3SourceTimePolicyError,
@@ -41,6 +50,11 @@ from ashare_v3.market.realtime_snapshot_execute_readiness import DEFAULT_B1_READ
 from ashare_v3.market.realtime_snapshot_plan import REQUIRED_DATA_KIND, build_realtime_subscription_report, realtime_snapshot_subscriptions
 from ashare_v3.market.repositories import ASSET_FACT_TABLES, QualityRepository, SnapshotRepository
 from ashare_v3.market.subscription_plan import ADAPTER_NAMES, ASSET_KINDS
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
+from ashare_v3.quote_transport import (
+    quote_transport_scope_blocker,
+    resolve_quote_transport_name,
+)
 
 
 DEFAULT_N3_B1_PRE_BACKUP_PATH = "docs/N3_B1_realtime_daily_snapshot_execute_backup_before.json"
@@ -92,8 +106,9 @@ class MootdxRealtimeSnapshotAdapter:
     def __init__(self, *, client: Any | None = None, market: str = "std") -> None:
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise RealtimeSnapshotExecuteError(
+                "MootdxRealtimeSnapshotAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_snapshot(self, subscription: Mapping[str, Any], trade_date: str) -> dict[str, Any] | None:
         del trade_date
@@ -114,8 +129,9 @@ class BoardMarketDataAdapter:
     def __init__(self, *, client: Any | None = None, market: str = "std") -> None:
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise RealtimeSnapshotExecuteError(
+                "BoardMarketDataAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_snapshot(self, subscription: Mapping[str, Any], trade_date: str) -> dict[str, Any] | None:
         code = str(subscription.get("code") or "")
@@ -170,8 +186,9 @@ class IndexMarketDataAdapter:
     def __init__(self, *, client: Any | None = None, market: str = "std") -> None:
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise RealtimeSnapshotExecuteError(
+                "IndexMarketDataAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_snapshot(self, subscription: Mapping[str, Any], trade_date: str) -> dict[str, Any] | None:
         code = str(subscription.get("code") or "")
@@ -335,22 +352,25 @@ class AssetRoutingRealtimeSnapshotAdapter:
         board_adapter: Any | None = None,
         bj_index_adapter: Any | None = None,
     ) -> None:
-        self.default_adapter = default_adapter or MootdxRealtimeSnapshotAdapter()
-        self.index_adapter = index_adapter or IndexMarketDataAdapter()
-        self.board_adapter = board_adapter or BoardMarketDataAdapter()
+        if default_adapter is None or index_adapter is None or board_adapter is None:
+            raise RealtimeSnapshotExecuteError(
+                "AssetRoutingRealtimeSnapshotAdapter requires pinned stock/index/board adapters"
+            )
+        self.default_adapter = default_adapter
+        self.index_adapter = index_adapter
+        self.board_adapter = board_adapter
         self.bj_index_adapter = bj_index_adapter or TushareBjIndexSnapshotAdapter()
 
     def fetch_snapshot(self, subscription: Mapping[str, Any], trade_date: str) -> dict[str, Any] | None:
         return self.adapter_for_subscription(subscription).fetch_snapshot(subscription, trade_date)
 
     def adapter_for_subscription(self, subscription: Mapping[str, Any]) -> Any:
-        asset_kind = str(subscription.get("asset_kind") or "")
-        exchange = str(subscription.get("exchange") or "")
-        if asset_kind == "board" and exchange == "TDX":
+        route = _snapshot_provider_route(subscription)
+        if route == "mootdx_board":
             return self.board_adapter
-        if asset_kind == "index" and exchange == "BJ":
+        if route == "tushare_bj_index":
             return self.bj_index_adapter
-        if asset_kind == "index":
+        if route == "mootdx_index":
             return self.index_adapter
         return self.default_adapter
 
@@ -372,6 +392,9 @@ def run_realtime_daily_snapshot_execute(
     allow_outbox: bool = False,
     pre_open_source_policy: bool = False,
     adapter: Any | None = None,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_every: int = 100,
 ) -> dict[str, Any]:
@@ -409,9 +432,21 @@ def run_realtime_daily_snapshot_execute(
     ensure_subscription_counts_match_contract(subscriptions, contract)
 
     source_run_row = fetch_market_data_run_row_by_id(dsn, source_run_id)
-    resolved_adapter = adapter or AssetRoutingRealtimeSnapshotAdapter()
+    resolved_adapter = adapter
     prepared_snapshots: list[dict[str, Any]] | None = None
-    if bool(contract.get("writes_outbox")):
+    endpoint_outcome: MootdxBatchAttemptOutcome[Any] | None = None
+    if resolved_adapter is None:
+        prepared_snapshots, endpoint_outcome = prepare_mootdx_snapshot_batch(
+            contract=contract,
+            subscriptions=subscriptions,
+            manager=endpoint_manager or MootdxEndpointManager.from_toml(),
+            probe=endpoint_probe or build_default_mootdx_endpoint_probe(subscriptions),
+            client_factory=endpoint_client_factory,
+            snapshot_time=parse_datetime_like(started_at) or utc_now(),
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
+    elif bool(contract.get("writes_outbox")):
         prepared_snapshots = prepare_subscription_snapshots(
             contract=contract,
             subscriptions=subscriptions,
@@ -420,11 +455,14 @@ def run_realtime_daily_snapshot_execute(
             progress_callback=progress_callback,
             progress_every=progress_every,
         )
+    if prepared_snapshots is not None and bool(contract.get("writes_outbox")):
         precheck = build_run_level_atomic_source_time_precheck(
             contract=contract,
             prepared_snapshots=prepared_snapshots,
         )
-        if not precheck["passed"]:
+        if not precheck["passed"] and not (
+            endpoint_outcome is not None and endpoint_outcome.status == "failed"
+        ):
             object_results = no_write_object_results(prepared_snapshots)
             quality_items = build_run_level_atomic_precheck_quality_items(
                 contract=contract,
@@ -447,20 +485,45 @@ def run_realtime_daily_snapshot_execute(
             write_text(markdown_report_path, format_realtime_snapshot_execute_report(report))
             return report
 
-    insert_snapshot_run(
-        dsn,
-        contract=contract,
-        source_run_row=source_run_row,
-        started_at=started_at,
-    )
+    endpoint_failure_committed = False
+    atomic_committed = False
+    if endpoint_outcome is not None and endpoint_outcome.status == "failed":
+        object_results = write_failed_snapshot_attempt_transaction(
+            dsn=dsn,
+            contract=contract,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            prepared_snapshots=prepared_snapshots or [],
+            outcome=endpoint_outcome,
+        )
+        endpoint_failure_committed = True
+    elif endpoint_outcome is not None and endpoint_outcome.status == "passed":
+        object_results, data_snapshot, post_checks, quality_items = commit_snapshot_attempt_transaction(
+            dsn=dsn,
+            contract=contract,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            prepared_snapshots=prepared_snapshots or [],
+            outcome=endpoint_outcome,
+        )
+        atomic_committed = True
 
-    if prepared_snapshots is not None:
+    if not endpoint_failure_committed and not atomic_committed:
+        insert_snapshot_run(
+            dsn,
+            contract=contract,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            batch_attempt=endpoint_outcome.to_provenance() if endpoint_outcome is not None else None,
+        )
+
+    if not endpoint_failure_committed and not atomic_committed and prepared_snapshots is not None:
         object_results = write_prepared_subscription_snapshots(
             dsn=dsn,
             contract=contract,
             prepared_snapshots=prepared_snapshots,
         )
-    else:
+    elif not endpoint_failure_committed and not atomic_committed:
         object_results = execute_subscription_snapshots(
             dsn=dsn,
             contract=contract,
@@ -470,31 +533,34 @@ def run_realtime_daily_snapshot_execute(
             progress_every=progress_every,
         )
 
-    data_snapshot = capture_snapshot_execute_backup(
-        dsn,
-        phase="after_n3_b1_data_before_quality",
-        snapshot_run_id=resolved_snapshot_run_id,
-        source_run_id=source_run_id,
-        for_trade_date=str(contract["for_trade_date"]),
-    )
-    post_checks = build_post_execute_checks(
-        contract=contract,
-        data_snapshot=data_snapshot,
-        object_results=object_results,
-    )
-    quality_items = build_post_execute_quality_items(
-        contract=contract,
-        post_checks=post_checks,
-        object_results=object_results,
-    )
+    if not atomic_committed:
+        data_snapshot = capture_snapshot_execute_backup(
+            dsn,
+            phase="after_n3_b1_data_before_quality",
+            snapshot_run_id=resolved_snapshot_run_id,
+            source_run_id=source_run_id,
+            for_trade_date=str(contract["for_trade_date"]),
+        )
+        post_checks = build_post_execute_checks(
+            contract=contract,
+            data_snapshot=data_snapshot,
+            object_results=object_results,
+        )
+        quality_items = build_post_execute_quality_items(
+            contract=contract,
+            post_checks=post_checks,
+            object_results=object_results,
+        )
     quality_counts = count_quality_severities(quality_items)
-    write_snapshot_quality_and_finalize_run(
-        dsn,
-        contract=contract,
-        quality_items=quality_items,
-        object_results=object_results,
-        status="passed" if quality_counts["P0"] == 0 else "failed",
-    )
+    if not endpoint_failure_committed and not atomic_committed:
+        write_snapshot_quality_and_finalize_run(
+            dsn,
+            contract=contract,
+            quality_items=quality_items,
+            object_results=object_results,
+            status="passed" if quality_counts["P0"] == 0 else "failed",
+            batch_attempt=endpoint_outcome.to_provenance() if endpoint_outcome is not None else None,
+        )
 
     post_backup = capture_snapshot_execute_backup(
         dsn,
@@ -569,6 +635,245 @@ def run_realtime_daily_snapshot_execute(
     write_json(json_report_path, report)
     write_text(markdown_report_path, format_realtime_snapshot_execute_report(report))
     return report
+
+
+def prepare_mootdx_snapshot_batch(
+    *,
+    contract: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    manager: MootdxEndpointManager,
+    probe: Callable[..., Mapping[str, Any]],
+    client_factory: Callable[[EndpointSelection], Any] | None = None,
+    transport: str | None = None,
+    snapshot_time: datetime,
+    progress_callback: Callable[[str], None] | None = None,
+    progress_every: int = 100,
+) -> tuple[list[dict[str, Any]], MootdxBatchAttemptOutcome[Any]]:
+    resolved_transport = resolve_quote_transport_name(transport)
+    capability_blocker = quote_transport_scope_blocker(
+        resolved_transport,
+        subscriptions,
+    )
+    if capability_blocker is not None:
+        raise RealtimeSnapshotExecuteError(
+            f"{capability_blocker['blocker']}:"
+            + ",".join(capability_blocker["unsupported_identity_keys"])
+        )
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=str(contract["snapshot_run_id"]),
+        probe=probe,
+        client_factory=client_factory,
+        transport=resolved_transport,
+        fetch_batch=lambda client, selection: _prepare_complete_snapshot_attempt(
+            contract=contract,
+            subscriptions=subscriptions,
+            client=client,
+            snapshot_time=snapshot_time,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+            object_tracker=MootdxBatchObjectTracker(manager, selection),
+        ),
+    )
+    if outcome.status == "passed":
+        prepared = list(outcome.result or [])
+    else:
+        prepared = prepare_subscription_snapshots(
+            contract=contract,
+            subscriptions=subscriptions,
+            adapter=_FailedMootdxSnapshotBatchAdapter(),
+            snapshot_time=snapshot_time,
+        )
+    return [_trace_prepared_snapshot(row, outcome) for row in prepared], outcome
+
+
+def _prepare_complete_snapshot_attempt(
+    *,
+    contract: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    client: Any,
+    snapshot_time: datetime,
+    progress_callback: Callable[[str], None] | None,
+    progress_every: int,
+    object_tracker: MootdxBatchObjectTracker,
+) -> list[dict[str, Any]]:
+    adapter = AssetRoutingRealtimeSnapshotAdapter(
+        default_adapter=MootdxRealtimeSnapshotAdapter(client=client),
+        index_adapter=IndexMarketDataAdapter(client=client),
+        board_adapter=BoardMarketDataAdapter(client=client),
+    )
+    prepared: list[dict[str, Any]] = []
+    for subscription in subscriptions:
+        item = prepare_one_subscription_snapshot(
+            contract=contract,
+            subscription=subscription,
+            adapter=adapter,
+            snapshot_time=snapshot_time,
+        )
+        fetch_status = item.get("_attempt_fetch_status")
+        if fetch_status == "transport_error":
+            raise MootdxEndpointTransportError(
+                str((item.get("object_result") or {}).get("error_message"))
+            )
+        object_tracker.record(
+            identity_key=str(subscription.get("identity_key") or ""),
+            value=item,
+            empty=fetch_status == "empty_required_object",
+        )
+        prepared.append(item)
+    empty_objects = [row for row in prepared if row.get("_attempt_fetch_status") == "empty_required_object"]
+    blocking = [
+        row
+        for row in prepared
+        if row.get("write_kind") != "snapshot"
+        and row.get("_attempt_fetch_status") != "empty_required_object"
+    ]
+    if blocking:
+        raise MootdxEndpointSemanticValidationError(
+            f"atomic Mootdx snapshot attempt incomplete: {len(blocking)} subscription(s)"
+        )
+    if empty_objects:
+        return prepared
+    precheck = build_run_level_atomic_source_time_precheck(
+        contract=contract,
+        prepared_snapshots=prepared,
+    )
+    if not precheck["passed"]:
+        raise MootdxEndpointSemanticValidationError(
+            f"atomic Mootdx snapshot source-time precheck failed: {len(precheck['blockers'])} blocker(s)"
+        )
+    return prepared
+
+
+def build_default_mootdx_endpoint_probe(
+    subscriptions: Sequence[Mapping[str, Any]],
+) -> Callable[[Any, Callable[[str], Any]], Mapping[str, Any]]:
+    mootdx_subscriptions = [row for row in subscriptions if _uses_mootdx_snapshot_route(row)]
+    sentinels = {
+        asset_kind: sorted(
+            (row for row in mootdx_subscriptions if str(row.get("asset_kind") or "") == asset_kind),
+            key=lambda row: str(row.get("identity_key") or ""),
+        )[0]
+        for asset_kind in ASSET_KINDS
+        if any(str(row.get("asset_kind") or "") == asset_kind for row in mootdx_subscriptions)
+    }
+
+    def probe(endpoint: Any, make_client: Callable[[str], Any]) -> Mapping[str, Any]:
+        del endpoint
+        client = make_client("std")
+        quote_rows = normalize_snapshot_records(client.quotes(symbol="600000"))
+        quote_ok = bool(
+            quote_rows
+            and snapshot_has_effective_quote(quote_rows[0])
+            and _probe_row_identity_matches(quote_rows[0], expected_code="600000")
+        )
+        daily_rows = frame_to_records(client.bars(symbol="600000", frequency=9, start=0, offset=3))
+        daily_ok = _daily_probe_rows_valid(daily_rows, expected_code="600000", minimum_rows=3)
+        index_rows = frame_to_records(client.index_bars(symbol="000001", frequency=9, start=0, offset=3))
+        index_ok = _daily_probe_rows_valid(index_rows, expected_code="000001", minimum_rows=1)
+        sentinel_ok = all(_snapshot_sentinel_valid(client, row) for row in sentinels.values())
+        return {
+            "checks": {
+                "stock_quote": quote_ok,
+                "stock_daily_bars": daily_ok,
+                "index_daily_bars": index_ok,
+                "scope_sentinels": sentinel_ok,
+            }
+        }
+
+    return probe
+
+
+def _uses_mootdx_snapshot_route(subscription: Mapping[str, Any]) -> bool:
+    return _snapshot_provider_route(subscription).startswith("mootdx_")
+
+
+def _snapshot_provider_route(subscription: Mapping[str, Any]) -> str:
+    asset_kind = str(subscription.get("asset_kind") or "")
+    exchange = str(subscription.get("exchange") or "").upper()
+    if asset_kind == "board" and exchange == "TDX":
+        return "mootdx_board"
+    if asset_kind == "index" and exchange == "BJ":
+        return "tushare_bj_index"
+    if asset_kind == "index":
+        return "mootdx_index"
+    return "mootdx_default"
+
+
+def _probe_row_identity_matches(row: Mapping[str, Any], *, expected_code: str) -> bool:
+    raw_code = first_present(row, "code", "symbol")
+    raw_payload = row.get("raw_payload")
+    if raw_code is None and isinstance(raw_payload, Mapping):
+        raw_code = first_present(raw_payload, "code", "symbol")
+    return raw_code is not None and normalize_route_code(raw_code) == normalize_route_code(expected_code)
+
+
+def _daily_probe_rows_valid(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_code: str,
+    minimum_rows: int,
+) -> bool:
+    if len(rows) < minimum_rows:
+        return False
+    if any(not _probe_row_identity_matches(row, expected_code=expected_code) for row in rows):
+        return False
+    labels = [str(first_present(row, "datetime", "date", "trade_date") or "") for row in rows]
+    return (
+        all(labels)
+        and (labels == sorted(labels) or labels == sorted(labels, reverse=True))
+        and len(set(labels)) == len(labels)
+    )
+
+
+def _snapshot_sentinel_valid(client: Any, subscription: Mapping[str, Any]) -> bool:
+    asset_kind = str(subscription.get("asset_kind") or "")
+    code = str(subscription.get("code") or "")
+    if asset_kind == "stock":
+        rows = normalize_snapshot_records(client.quotes(symbol=code))
+    else:
+        rows = frame_to_records(client.index(symbol=code, frequency=9, start=0, offset=1))
+    if not rows or not snapshot_has_effective_quote(rows[-1]):
+        return False
+    return _probe_row_identity_matches(rows[-1], expected_code=code)
+
+
+def default_mootdx_endpoint_probe(endpoint: Any, make_client: Callable[[str], Any]) -> Mapping[str, Any]:
+    """Compatibility alias that fails closed without batch sentinel authority."""
+
+    del endpoint
+    del make_client
+    return {
+        "checks": {
+            "stock_quote": False,
+            "stock_daily_bars": False,
+            "index_daily_bars": False,
+            "scope_sentinels": False,
+        }
+    }
+
+
+def _trace_prepared_snapshot(
+    prepared: Mapping[str, Any],
+    outcome: MootdxBatchAttemptOutcome[Any],
+) -> dict[str, Any]:
+    copied = dict(prepared)
+    record_key = "snapshot_record" if copied.get("write_kind") == "snapshot" else "quality_record"
+    record = copied.get(record_key)
+    if isinstance(record, Mapping):
+        copied[record_key] = with_batch_attempt_provenance(record, outcome)
+    return copied
+
+
+class _FailedMootdxSnapshotBatchAdapter:
+    source_version = "mootdx.endpoint_batch.failed"
+    external_source = "mootdx"
+
+    def fetch_snapshot(self, subscription: Mapping[str, Any], trade_date: str) -> None:
+        del subscription, trade_date
+        raise MootdxEndpointTransportError(
+            "atomic Mootdx snapshot batch failed; all attempt rows discarded"
+        )
 
 
 def ensure_execute_authorized(*, execute: bool, user_confirmed: bool) -> None:
@@ -688,7 +993,9 @@ def prepare_one_subscription_snapshot(
     writes_outbox = bool(contract.get("writes_outbox"))
     try:
         raw_snapshot = adapter.fetch_snapshot(subscription, str(contract["for_trade_date"]))
-    except Exception as exc:  # noqa: BLE001 - adapter failures become quality evidence.
+    except Exception as exc:  # noqa: BLE001 - transport failures become quality evidence.
+        if not is_endpoint_transport_exception(exc):
+            raise
         error_message = f"{type(exc).__name__}: {exc}"
         quality_record = build_snapshot_quality_record(
             contract=contract,
@@ -706,6 +1013,7 @@ def prepare_one_subscription_snapshot(
             error_message=error_message,
         )
         return {
+            "_attempt_fetch_status": "transport_error",
             "write_kind": "quality",
             "quality_record": quality_record,
             "snapshot_record": None,
@@ -738,6 +1046,7 @@ def prepare_one_subscription_snapshot(
             error_message=None,
         )
         return {
+            "_attempt_fetch_status": "empty_required_object",
             "write_kind": "quality",
             "quality_record": quality_record,
             "snapshot_record": None,
@@ -1158,24 +1467,47 @@ def write_prepared_subscription_snapshots(
 ) -> list[dict[str, Any]]:
     results = []
     connect = connection_factory or open_connection
+    with connect(dsn) as conn:
+        with conn.transaction():
+            results.extend(
+                _write_prepared_subscription_snapshots_on_connection(
+                    conn,
+                    contract=contract,
+                    prepared_snapshots=prepared_snapshots,
+                )
+            )
+    return results
+
+
+def _write_prepared_subscription_snapshots_on_connection(
+    conn: Any,
+    *,
+    contract: Mapping[str, Any],
+    prepared_snapshots: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
     writes_outbox = bool(contract.get("writes_outbox"))
     for prepared in prepared_snapshots:
         if prepared.get("write_kind") == "snapshot":
             snapshot_record = prepared.get("snapshot_record")
             if not isinstance(snapshot_record, Mapping):
                 raise RealtimeSnapshotExecuteError("N3-B1 blocked: prepared snapshot record missing")
-            with connect(dsn) as conn:
-                if writes_outbox:
-                    write_market_snapshot_with_event(conn, snapshot_record)
-                else:
-                    write_market_snapshot_fact_only(conn, snapshot_record)
+            if writes_outbox:
+                write_market_snapshot_with_event(conn, snapshot_record)
+            else:
+                write_market_snapshot_fact_only(conn, snapshot_record)
         else:
             quality_record = prepared.get("quality_record")
             if not isinstance(quality_record, Mapping):
                 raise RealtimeSnapshotExecuteError("N3-B1 blocked: prepared quality record missing")
-            with connect(dsn) as conn:
+            if writes_outbox:
+                write_market_quality_with_event(conn, quality_record, event_type="MarketDataDelayed")
+            else:
                 write_market_quality_fact_only(conn, quality_record)
-        results.append(dict(prepared.get("object_result") or {}))
+        result = dict(prepared.get("object_result") or {})
+        if prepared.get("write_kind") != "snapshot" and writes_outbox:
+            result.update(event_type="MarketDataDelayed", outbox_rows_written=1)
+        results.append(result)
     return results
 
 
@@ -2127,14 +2459,32 @@ def insert_snapshot_run(
     contract: Mapping[str, Any],
     source_run_row: Mapping[str, Any],
     started_at: str,
+    batch_attempt: Mapping[str, Any] | None = None,
+) -> None:
+    with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _insert_snapshot_run_with_cursor(
+                    cur,
+                    contract=contract,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    batch_attempt=batch_attempt,
+                )
+
+
+def _insert_snapshot_run_with_cursor(
+    cur: Any,
+    *,
+    contract: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    batch_attempt: Mapping[str, Any] | None,
 ) -> None:
     expected_counts = contract.get("expected_asset_counts") or {}
     subscription_count = sum(int((expected_counts.get(asset) or {}).get("subscription_count") or 0) for asset in ASSET_KINDS)
     object_count = sum(int((expected_counts.get(asset) or {}).get("object_count") or 0) for asset in ASSET_KINDS)
-    with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute(
+    cur.execute(
                     """
                     INSERT INTO common_market_data_run (
                       run_id, source_condition_run_id, for_trade_date, source_trade_date,
@@ -2166,10 +2516,147 @@ def insert_snapshot_run(
                                 "source_run_id": contract["source_run_id"],
                                 "snapshot_run_id": contract["snapshot_run_id"],
                                 "writes_outbox": bool(contract.get("writes_outbox")),
+                                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
                             }
                         ),
                     ),
+    )
+
+
+def write_failed_snapshot_attempt_transaction(
+    *,
+    dsn: str,
+    contract: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    prepared_snapshots: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+    connection_factory: Callable[[str], Any] | None = None,
+) -> list[dict[str, Any]]:
+    connect = connection_factory or open_connection
+    provenance = outcome.to_provenance()
+    with connect(dsn) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _insert_snapshot_run_with_cursor(
+                    cur,
+                    contract=contract,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    batch_attempt=provenance,
                 )
+            results: list[dict[str, Any]] = []
+            for prepared in prepared_snapshots:
+                quality_record = prepared.get("quality_record")
+                if not isinstance(quality_record, Mapping):
+                    raise RealtimeSnapshotExecuteError("endpoint failure quality record missing")
+                if bool(contract.get("writes_outbox")):
+                    write_market_quality_with_event(
+                        conn,
+                        quality_record,
+                        event_type="MarketDataDelayed",
+                    )
+                else:
+                    write_market_quality_fact_only(conn, quality_record)
+                result = dict(prepared.get("object_result") or {})
+                if bool(contract.get("writes_outbox")):
+                    result.update(event_type="MarketDataDelayed", outbox_rows_written=1)
+                results.append(result)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE common_market_data_run
+                    SET status = 'failed',
+                        p0_count = 0,
+                        p1_count = %s,
+                        p2_count = 0,
+                        market_data_pulled = true,
+                        market_data_fact_written = false,
+                        downstream_layers_touched = false,
+                        worker_started = false,
+                        finished_at = now(),
+                        updated_at = now(),
+                        raw_json = %s
+                    WHERE run_id = %s
+                    """,
+                    (
+                        len(results),
+                        Jsonb({
+                            "stage": "N3-B1",
+                            "source_run_id": contract["source_run_id"],
+                            "snapshot_run_id": contract["snapshot_run_id"],
+                            "writes_outbox": bool(contract.get("writes_outbox")),
+                            "mootdx_batch_attempt": provenance,
+                            "endpoint_failure": True,
+                            "success_event_rows_written": 0,
+                        }),
+                        contract["snapshot_run_id"],
+                    ),
+                )
+    return results
+
+
+def commit_snapshot_attempt_transaction(
+    *,
+    dsn: str,
+    contract: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    prepared_snapshots: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+    connection_factory: Callable[[str], Any] | None = None,
+    data_snapshot_builder: Callable[[Any], Mapping[str, Any]] | None = None,
+    finalizer: Callable[..., None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    connect = connection_factory or open_connection
+    provenance = outcome.to_provenance()
+    with connect(dsn) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _insert_snapshot_run_with_cursor(
+                    cur,
+                    contract=contract,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    batch_attempt=provenance,
+                )
+            object_results = _write_prepared_subscription_snapshots_on_connection(
+                conn,
+                contract=contract,
+                prepared_snapshots=prepared_snapshots,
+            )
+            with conn.cursor() as cur:
+                data_snapshot = dict(
+                    data_snapshot_builder(cur)
+                    if data_snapshot_builder is not None
+                    else _capture_snapshot_execute_backup_with_cursor(
+                        cur,
+                        phase="after_n3_b1_data_before_quality",
+                        snapshot_run_id=str(contract["snapshot_run_id"]),
+                        source_run_id=str(contract["source_run_id"]),
+                        for_trade_date=str(contract["for_trade_date"]),
+                    )
+                )
+                post_checks = build_post_execute_checks(
+                    contract=contract,
+                    data_snapshot=data_snapshot,
+                    object_results=object_results,
+                )
+                quality_items = build_post_execute_quality_items(
+                    contract=contract,
+                    post_checks=post_checks,
+                    object_results=object_results,
+                )
+                quality_counts = count_quality_severities(quality_items)
+                (finalizer or _finalize_snapshot_run_with_cursor)(
+                    cur,
+                    contract=contract,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status="passed" if quality_counts["P0"] == 0 else "failed",
+                    batch_attempt=provenance,
+                )
+    return object_results, data_snapshot, post_checks, quality_items
 
 
 def write_snapshot_quality_and_finalize_run(
@@ -2179,13 +2666,44 @@ def write_snapshot_quality_and_finalize_run(
     quality_items: Sequence[Mapping[str, Any]],
     object_results: Sequence[Mapping[str, Any]],
     status: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
     quality_counts = count_quality_severities(quality_items)
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                insert_quality_items(cur, contract=contract, quality_items=quality_items)
-                cur.execute(
+                _finalize_snapshot_run_with_cursor(
+                    cur,
+                    contract=contract,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status=status,
+                    batch_attempt=batch_attempt,
+                )
+
+
+def _finalize_snapshot_run_with_cursor(
+    cur: Any,
+    *,
+    contract: Mapping[str, Any],
+    quality_items: Sequence[Mapping[str, Any]],
+    object_results: Sequence[Mapping[str, Any]],
+    status: str,
+    batch_attempt: Mapping[str, Any] | None,
+) -> None:
+    quality_counts = count_quality_severities(quality_items)
+    traced_quality_items = [
+        {
+            **dict(item),
+            "details": {
+                **dict(item.get("details") or {}),
+                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+            },
+        }
+        for item in quality_items
+    ]
+    insert_quality_items(cur, contract=contract, quality_items=traced_quality_items)
+    cur.execute(
                     """
                     UPDATE common_market_data_run
                     SET status = %s,
@@ -2215,11 +2733,12 @@ def write_snapshot_quality_and_finalize_run(
                                 "writes_outbox": bool(contract.get("writes_outbox")),
                                 "write_result": summarize_write_result(object_results, quality_items),
                                 "actual_asset_counts": summarize_actual_asset_counts(object_results),
+                                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
                             }
                         ),
                         contract["snapshot_run_id"],
                     ),
-                )
+    )
 
 
 def insert_quality_items(
@@ -2292,26 +2811,43 @@ def capture_snapshot_execute_backup(
         options="-c default_transaction_read_only=on",
         row_factory=dict_row,
     ) as conn, conn.cursor() as cur:
-        return {
-            "phase": phase,
-            "captured_at": utc_now_iso(),
-            "source_run_id": source_run_id,
-            "snapshot_run_id": snapshot_run_id,
-            "for_trade_date": for_trade_date,
-            "active_snapshot": fetch_n1_n2_active_snapshot(cur),
-            "snapshot_run_exists": market_data_run_exists(cur, snapshot_run_id),
-            "snapshot_run_row": fetch_market_data_run_row(cur, snapshot_run_id),
-            "source_run_row": fetch_market_data_run_row(cur, source_run_id),
-            "target_table_row_counts": fetch_table_row_counts(cur, REALTIME_SNAPSHOT_TABLES.values()),
-            "target_snapshot_run_row_counts": fetch_snapshot_run_row_counts(cur, snapshot_run_id, for_trade_date),
-            "target_snapshot_run_counts_by_asset": fetch_snapshot_run_counts_by_asset(cur, snapshot_run_id, for_trade_date),
-            "duplicate_snapshot_key_count_by_asset": fetch_duplicate_snapshot_key_counts(cur, snapshot_run_id, for_trade_date),
-            "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(cur, snapshot_run_id),
-            "snapshot_outbox_row_count": fetch_snapshot_outbox_count(cur, snapshot_run_id),
-            "snapshot_outbox_counts_by_type": fetch_snapshot_outbox_counts_by_type(cur, snapshot_run_id),
-            "downstream_inbox_row_count": fetch_downstream_inbox_count(cur, snapshot_run_id),
-            "checkpoint_ref_count": fetch_checkpoint_ref_count(cur, snapshot_run_id),
-        }
+        return _capture_snapshot_execute_backup_with_cursor(
+            cur,
+            phase=phase,
+            snapshot_run_id=snapshot_run_id,
+            source_run_id=source_run_id,
+            for_trade_date=for_trade_date,
+        )
+
+
+def _capture_snapshot_execute_backup_with_cursor(
+    cur: Any,
+    *,
+    phase: str,
+    snapshot_run_id: str,
+    source_run_id: str,
+    for_trade_date: str,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "captured_at": utc_now_iso(),
+        "source_run_id": source_run_id,
+        "snapshot_run_id": snapshot_run_id,
+        "for_trade_date": for_trade_date,
+        "active_snapshot": fetch_n1_n2_active_snapshot(cur),
+        "snapshot_run_exists": market_data_run_exists(cur, snapshot_run_id),
+        "snapshot_run_row": fetch_market_data_run_row(cur, snapshot_run_id),
+        "source_run_row": fetch_market_data_run_row(cur, source_run_id),
+        "target_table_row_counts": fetch_table_row_counts(cur, REALTIME_SNAPSHOT_TABLES.values()),
+        "target_snapshot_run_row_counts": fetch_snapshot_run_row_counts(cur, snapshot_run_id, for_trade_date),
+        "target_snapshot_run_counts_by_asset": fetch_snapshot_run_counts_by_asset(cur, snapshot_run_id, for_trade_date),
+        "duplicate_snapshot_key_count_by_asset": fetch_duplicate_snapshot_key_counts(cur, snapshot_run_id, for_trade_date),
+        "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(cur, snapshot_run_id),
+        "snapshot_outbox_row_count": fetch_snapshot_outbox_count(cur, snapshot_run_id),
+        "snapshot_outbox_counts_by_type": fetch_snapshot_outbox_counts_by_type(cur, snapshot_run_id),
+        "downstream_inbox_row_count": fetch_downstream_inbox_count(cur, snapshot_run_id),
+        "checkpoint_ref_count": fetch_checkpoint_ref_count(cur, snapshot_run_id),
+    }
 
 
 def market_data_run_exists(cur: Any, run_id: str) -> bool:

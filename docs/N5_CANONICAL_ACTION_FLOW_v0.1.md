@@ -87,10 +87,16 @@ TriggerStateChanged
 |---|---|---:|---|
 | `TriggerMatched` | Validate source allowlist, idempotency, canonical payload, live context, and minute-boundary rules | yes | Only positive action confirmation entry |
 | `TriggerPendingMarketData` | no-op / quality-only / state-gate context | no | Must not write final action fact or final `action_mark` |
-| `TriggerStateChanged(trigger_live=true)` | live/state gate or forwarding context | no | May unblock existing tracking only if a separate `TriggerMatched` exists |
+| `TriggerStateChanged(trigger_live=true)` | refresh the current episode's live/state context and current active source | no | May advance existing tracking only if its immutable `TriggerMatched` entry exists |
 | `TriggerStateChanged(trigger_live=false)` | stop further confirmation for the current trigger state | no | May mark pending/tracking action as `expired`; never deletes history |
 
-`TriggerMatched` is the only N5 action confirmation entry. `TriggerPendingMarketData` and `TriggerStateChanged` can never create a new confirmed action by themselves.
+`TriggerMatched` is the only N5 action-confirmation `episode_entry` and the
+only event that creates `ActionEligible`. `TriggerPendingMarketData` and
+`TriggerStateChanged` cannot independently create an episode. A later
+`TriggerStateChanged(trigger_live=true)` may refresh the same episode's
+`current_active_source` and become the top-level source of `ActionExecuted`,
+but only while the original `TriggerMatched` remains frozen in
+`action_entry_trigger_matched_ref`.
 
 When `trigger_live=false`, N5 must stop continuing 120m / 30m / 5m / 1m confirmation for that trigger state. It must not delete historical action facts, action events, user projection, TTS, sim, or audit evidence.
 
@@ -128,7 +134,10 @@ trigger_pct = (entry TriggerMatched trigger_price / entry N2 close - 1) * 100
 `TriggerStateChanged(trigger_live=true)` may refresh the current
 `source_n4_payload` and `latest_trigger_state_changed_ref`, but it must not
 replace the frozen action-entry price, context, or `trigger_pct`. An
-`ActionExecuted` event keeps that entry snapshot and additionally publishes:
+`ActionExecuted` event uses the latest event that created or refreshed A for
+its top-level `source_trigger_event_*` / `source_n4_payload`, keeps the
+original `TriggerMatched` entry snapshot in
+`action_entry_trigger_matched_ref`, and additionally publishes:
 
 ```text
 action_price = selected passing N3T_C1_CLOSED.current_price
@@ -296,7 +305,7 @@ N3P lineage fields may remain in N5 payloads as trace, including selected_metric
 Those fields are not final proof for ActionExecuted.
 N5 must fail closed with BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF when a N3P / realtime_action_confirmation_metric payload is used as ActionExecuted final proof.
 ActionEligible from TriggerMatched remains allowed.
-ActionExecuted requires an N3T action-confirmation metric row derived from closed C1 1m K plus a live N4 TriggerMatched event.
+ActionExecuted requires an episode originally entered by a live N4 TriggerMatched plus an N3T action-confirmation metric row derived from closed C1 1m K. A later same-episode TriggerStateChanged(trigger_live=true) may be the current active source, but it cannot replace the immutable TriggerMatched entry or execute without it.
 N3P-backed proof remains fail-closed even after N3T exists.
 ```
 
@@ -489,7 +498,7 @@ Opaque compatibility payloads:
 ```text
 payload.action_confirmation is not authoritative proof.
 payload.action_confirmation may be retained only as trace or historical compatibility evidence.
-ActionExecuted requires N3T action-confirmation metrics plus a live N4 TriggerMatched event.
+ActionExecuted requires a live episode with an immutable TriggerMatched entry plus matching N3T action-confirmation metrics. Its current active source may be a later same-episode TriggerStateChanged(trigger_live=true).
 N3T source_basis must be N3T_C1_CLOSED.
 If the metric row is N3P/B1/B2/realtime_action_confirmation_metric lineage, N5 must fail closed with BLOCKED_N3P_NOT_ACTION_CONFIRMATION_PROOF or BLOCKED_N3T_METRIC_REQUIRED.
 ```

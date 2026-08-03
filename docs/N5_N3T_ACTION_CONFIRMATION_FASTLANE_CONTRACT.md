@@ -523,13 +523,47 @@ lunch_break:
   n5_action_executed = write_enabled_bounded with matching N3T_C1_CLOSED metric
 
 post_close:
-  n5_action_intake = time_ordered drain by event_time ASC, source_run_id ASC
+  n5_action_intake = time_ordered drain by event_time ASC, source_run_id ASC, outbox_id ASC
   n3_c1_n3t_action_confirmation = time_ordered scoped drain
   n5_action_executed = time_ordered metric drain only with matching N3T_C1_CLOSED metric
 
 closed_day_or_non_trading:
   all lanes = fail_closed
 ```
+
+An eligible tracking ref whose first or next confirmation minute is later than
+the final canonical evaluable minute has no possible closed-minute proof for
+that trade date. During post-close discovery, N5 may select that ref without an
+N3T metric only to terminalize its pending tracking state as expired under the
+existing no-action/window-expired contract. This path must not emit
+`ActionExecuted`, must not reinterpret a trigger as market proof, and must not
+update N4 outbox status. A ref at or before the final evaluable minute remains
+on the normal matching-`N3T_C1_CLOSED` path.
+
+The post-close final-A marker is subordinate to canonical N4 intake. On the
+current open trading day, any unconsumed `TriggerMatched` or
+`TriggerStateChanged` forces the bounded N5 intake drain before a final scope
+snapshot, even when a previous marker says `done`. `TriggerMatched` may create
+`ActionEligible`; `TriggerStateChanged` only advances tracking, inbox, and
+checkpoint state and must not create `ActionEligible`. N5 consumption never
+updates N4 outbox status. Intake completion is owned by an N5
+`common_event_inbox.status=processed` row and checkpoint coverage; N4 outbox
+status is read-only and is not an eligibility or completion proof.
+
+When an active-set drain reopens an existing tracking grain from a later
+`TriggerMatched`, it keeps the existing tracking row's `(run_id, state_key)`
+identity and refreshes its source trigger run/state/event lineage to the newer
+event. This prevents a source-specific row and an active-set row from remaining
+simultaneously active for the same grain.
+
+Marker schema v2 records the consumer, maximum canonical N4 outbox id,
+canonical and inbox-covered event counts, unconsumed count, and checkpoint
+partition coverage. The first exact-cover empty observation writes
+`status=candidate`; only a second observation of the same intake watermark may
+write `status=done`. A late canonical N4 input atomically changes an existing
+marker to `status=superseded` before the N5 DB writer runs, so a writer failure
+leaves intake retryable. A legacy `done` marker without this intake watermark
+is untrusted and cannot suppress intake.
 
 Runner-side activation config resolver must fail closed before planning when a
 requested write is outside the current phase decision. For example, before

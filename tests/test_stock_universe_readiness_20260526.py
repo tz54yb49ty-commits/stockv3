@@ -5,14 +5,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ashare_v3.ingestion.stock_universe_readiness_20260526 import (
     DAILY_MISSING_ACTIVE_IDENTITIES,
+    DefaultMootdxStockDailyProbe,
     STALE_IDENTITY_KEY,
     SUPERSEDED_BY_IDENTITY_KEY,
     TRADE_DATE,
     build_readiness_report,
 )
+from ashare_v3.mootdx_client import EndpointConfig, MootdxEndpointManager
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +92,377 @@ def key_to_ts_code(identity_key: str) -> str:
     return f"{code}.{exchange}"
 
 
+class FakeFrame:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def to_dict(self, orient="records"):
+        if orient != "records":
+            raise AssertionError(orient)
+        return list(self.rows)
+
+
+class FakeMootdxClient:
+    def __init__(self, rows_by_symbol):
+        self.rows_by_symbol = rows_by_symbol
+        self.calls = []
+
+    def bars(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeFrame(self.rows_by_symbol.get(kwargs["symbol"], []))
+
+
+def make_endpoint_manager(cache_path):
+    def endpoint(endpoint_id, host, priority):
+        return EndpointConfig(
+            endpoint_id=endpoint_id,
+            host=host,
+            port=7709,
+            priority=priority,
+            enabled=True,
+            quarantined=False,
+            provenance_url="https://example.invalid/frozen",
+            provenance_commit="3b7ce97f2a6942cf9f39e25ee29c4e113bcfc69f",
+            local_validation_status="protocol_passed",
+        )
+
+    return MootdxEndpointManager(
+        endpoint_pool_version="test-pool-v1",
+        transport="mootdx",
+        endpoints=(
+            endpoint("primary", "115.238.56.198", 10),
+            endpoint("secondary", "180.153.18.170", 20),
+        ),
+        n1_failover_mode="observe",
+        n3_failover_mode="observe",
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def passing_endpoint_probe(endpoint, make_client):
+    del endpoint, make_client
+    return {
+        "checks": {
+            "stock_quote": True,
+            "stock_daily_bars": True,
+            "index_daily_bars": True,
+            "scope_sentinels": True,
+        }
+    }
+
+
 class StockUniverseReadiness20260526Tests(unittest.TestCase):
+    def test_default_probe_uses_shared_manager_and_freezes_endpoint_provenance(self) -> None:
+        candidates = [identity_row(key) for key in DAILY_MISSING_ACTIVE_IDENTITIES[:3]]
+        rows_by_symbol = {
+            row["code"]: [
+                {
+                    "datetime": "2026-05-26 00:00:00",
+                    "open": "10",
+                    "high": "11",
+                    "low": "9",
+                    "close": "10.5",
+                    "vol": "100",
+                    "amount": "1000",
+                }
+            ]
+            for row in candidates
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeMootdxClient(rows_by_symbol)
+            factory_calls = []
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=make_endpoint_manager(Path(tmp) / "health.json"),
+                endpoint_probe=passing_endpoint_probe,
+                client_factory=lambda selection, profile: factory_calls.append(
+                    (selection, profile)
+                )
+                or client,
+                attempt_id="readiness-attempt",
+            )
+
+            snapshot = probe.fetch_snapshot(candidates=candidates, trade_date=TRADE_DATE)
+
+        self.assertTrue(snapshot["source_available"])
+        self.assertEqual(len(factory_calls), 1)
+        self.assertEqual(factory_calls[0][0].server, ("115.238.56.198", 7709))
+        provenance = snapshot["mootdx_endpoint_provenance"]
+        self.assertEqual(provenance["endpoint_pool_version"], "test-pool-v1")
+        self.assertEqual(provenance["endpoint_id"], "primary")
+        self.assertEqual(provenance["attempt_id"], "readiness-attempt")
+        first = snapshot["presence_by_identity_key"][candidates[0]["identity_key"]]
+        self.assertEqual(
+            first["evidence"]["mootdx_endpoint_provenance"]["endpoint_id"],
+            "primary",
+        )
+
+    def test_readiness_observe_failure_records_secondary_without_business_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            factory_calls = []
+
+            def endpoint_probe(endpoint, make_client):
+                del make_client
+                return {
+                    "checks": {
+                        "stock_quote": True,
+                        "stock_daily_bars": True,
+                        "index_daily_bars": True,
+                        "scope_sentinels": endpoint.endpoint_id == "secondary",
+                    }
+                }
+
+            endpoint_manager_instance = make_endpoint_manager(Path(tmp) / "health.json")
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=endpoint_manager_instance,
+                endpoint_probe=endpoint_probe,
+                client_factory=lambda selection, profile: factory_calls.append(
+                    (selection, profile)
+                ),
+                attempt_id="readiness-observe",
+            )
+            snapshot = probe.fetch_snapshot(
+                candidates=[identity_row(DAILY_MISSING_ACTIVE_IDENTITIES[0])],
+                trade_date=TRADE_DATE,
+            )
+
+        self.assertFalse(snapshot["source_available"])
+        self.assertEqual(factory_calls, [])
+        self.assertEqual(
+            snapshot["mootdx_endpoint_provenance"]["would_switch_to"],
+            "secondary",
+        )
+
+    def test_readiness_three_empty_objects_discards_all_partial_presence(self) -> None:
+        candidates = [identity_row(key) for key in DAILY_MISSING_ACTIVE_IDENTITIES[:3]]
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=make_endpoint_manager(Path(tmp) / "health.json"),
+                endpoint_probe=passing_endpoint_probe,
+                client_factory=lambda selection, profile: FakeMootdxClient({}),
+                attempt_id="readiness-empty",
+            )
+            snapshot = probe.fetch_snapshot(candidates=candidates, trade_date=TRADE_DATE)
+
+        self.assertFalse(snapshot["source_available"])
+        self.assertEqual(snapshot["presence_by_identity_key"], {})
+        self.assertIn("complete readiness attempt discarded", snapshot["source_unavailable_reason"])
+
+    def test_readiness_repeated_empty_identity_does_not_open_circuit(self) -> None:
+        repeated = identity_row(DAILY_MISSING_ACTIVE_IDENTITIES[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=make_endpoint_manager(Path(tmp) / "health.json"),
+                endpoint_probe=passing_endpoint_probe,
+                client_factory=lambda selection, profile: FakeMootdxClient({}),
+                attempt_id="readiness-repeat-empty",
+            )
+            snapshot = probe.fetch_snapshot(
+                candidates=[dict(repeated) for _ in range(3)],
+                trade_date=TRADE_DATE,
+            )
+
+        self.assertTrue(snapshot["source_available"])
+        self.assertEqual(
+            snapshot["presence_by_identity_key"][repeated["identity_key"]]["present"],
+            False,
+        )
+
+    def test_readiness_tdxpy_flag_binds_preflight_fetch_and_provenance(self) -> None:
+        candidates = [identity_row(key) for key in DAILY_MISSING_ACTIVE_IDENTITIES[:3]]
+        rows_by_symbol = {
+            row["code"]: [
+                {
+                    "datetime": "2026-05-26 00:00:00",
+                    "open": "10",
+                    "high": "11",
+                    "low": "9",
+                    "close": "10.5",
+                    "vol": "100",
+                    "amount": "1000",
+                }
+            ]
+            for row in candidates
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeMootdxClient(rows_by_symbol)
+            factory_calls = []
+
+            def transport_factory(selection, profile, *, transport):
+                factory_calls.append(
+                    (
+                        transport,
+                        selection.transport,
+                        selection.selection_reason,
+                        selection.endpoint_id,
+                        profile,
+                    )
+                )
+                return client
+
+            def endpoint_probe(endpoint, make_client):
+                self.assertIs(make_client("std"), client)
+                return {
+                    "checks": {
+                        "stock_quote": True,
+                        "stock_daily_bars": True,
+                        "index_daily_bars": True,
+                        "scope_sentinels": True,
+                    }
+                }
+
+            endpoint_manager_instance = make_endpoint_manager(Path(tmp) / "health.json")
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=endpoint_manager_instance,
+                endpoint_probe=endpoint_probe,
+                transport_factory=transport_factory,
+                quote_transport="tdxpy",
+                attempt_id="readiness-tdxpy",
+            )
+            with patch.object(
+                endpoint_manager_instance,
+                "record_required_object_result",
+                wraps=endpoint_manager_instance.record_required_object_result,
+            ) as record_result:
+                snapshot = probe.fetch_snapshot(
+                    candidates=candidates,
+                    trade_date=TRADE_DATE,
+                )
+
+        self.assertTrue(snapshot["source_available"])
+        self.assertEqual(
+            [call[:4] for call in factory_calls],
+            [
+                ("tdxpy", "tdxpy", "mandatory_protocol_preflight_probe", "primary"),
+                ("tdxpy", "tdxpy", "mandatory_protocol_preflight_probe", "secondary"),
+                ("tdxpy", "tdxpy", "stable_priority_primary_healthy", "primary"),
+            ],
+        )
+        self.assertEqual(
+            snapshot["mootdx_endpoint_provenance"]["transport"],
+            "tdxpy",
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["transport"] == "tdxpy"
+                for call in record_result.call_args_list
+            )
+        )
+        self.assertEqual(
+            [
+                row["endpoint_id"]
+                for row in snapshot["mootdx_endpoint_provenance"][
+                    "endpoint_probe_results"
+                ]
+            ],
+            ["primary", "secondary"],
+        )
+        self.assertEqual(snapshot["source"], "mootdx.stock_daily.readonly")
+
+    def test_readiness_tdxpy_failure_records_actual_transport(self) -> None:
+        class FailingClient:
+            def bars(self, **kwargs):
+                raise TimeoutError("fake tdxpy failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            endpoint_manager_instance = make_endpoint_manager(Path(tmp) / "health.json")
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=endpoint_manager_instance,
+                endpoint_probe=passing_endpoint_probe,
+                transport_factory=lambda selection, profile, *, transport: FailingClient(),
+                quote_transport="tdxpy",
+            )
+            with patch.object(
+                endpoint_manager_instance,
+                "record_transport_failure",
+                wraps=endpoint_manager_instance.record_transport_failure,
+            ) as record_failure:
+                snapshot = probe.fetch_snapshot(
+                    candidates=[identity_row(DAILY_MISSING_ACTIVE_IDENTITIES[0])],
+                    trade_date=TRADE_DATE,
+                )
+
+        self.assertFalse(snapshot["source_available"])
+        self.assertEqual(record_failure.call_count, 1)
+        self.assertEqual(record_failure.call_args.kwargs["transport"], "tdxpy")
+
+    def test_readiness_closes_business_client_once_after_success(self) -> None:
+        class ClosingClient(FakeMootdxClient):
+            def __init__(self, rows_by_symbol):
+                super().__init__(rows_by_symbol)
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+
+        candidate = identity_row(DAILY_MISSING_ACTIVE_IDENTITIES[0])
+        client = ClosingClient(
+            {
+                candidate["code"]: [
+                    {
+                        "datetime": "2026-05-26 00:00:00",
+                        "open": "10",
+                        "high": "11",
+                        "low": "9",
+                        "close": "10.5",
+                    }
+                ]
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=make_endpoint_manager(Path(tmp) / "health.json"),
+                endpoint_probe=passing_endpoint_probe,
+                client_factory=lambda selection, profile: client,
+            )
+            snapshot = probe.fetch_snapshot(
+                candidates=[candidate],
+                trade_date=TRADE_DATE,
+            )
+            probe.close()
+
+        self.assertTrue(snapshot["source_available"])
+        self.assertEqual(client.close_count, 1)
+
+    def test_readiness_close_failure_discards_snapshot_and_traces_error(self) -> None:
+        class CloseFailClient(FakeMootdxClient):
+            def close(self):
+                raise RuntimeError("fake close failure")
+
+        candidate = identity_row(DAILY_MISSING_ACTIVE_IDENTITIES[0])
+        client = CloseFailClient(
+            {
+                candidate["code"]: [
+                    {
+                        "datetime": "2026-05-26 00:00:00",
+                        "open": "10",
+                        "high": "11",
+                        "low": "9",
+                        "close": "10.5",
+                    }
+                ]
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = DefaultMootdxStockDailyProbe(
+                endpoint_manager=make_endpoint_manager(Path(tmp) / "health.json"),
+                endpoint_probe=passing_endpoint_probe,
+                client_factory=lambda selection, profile: client,
+            )
+            snapshot = probe.fetch_snapshot(
+                candidates=[candidate],
+                trade_date=TRADE_DATE,
+            )
+
+        self.assertFalse(snapshot["source_available"])
+        self.assertEqual(snapshot["presence_by_identity_key"], {})
+        self.assertIn("close failed", snapshot["source_unavailable_reason"])
+        self.assertEqual(
+            snapshot["mootdx_endpoint_provenance"]["business_client_close_error"],
+            "RuntimeError",
+        )
+
     def test_report_blocks_unresolved_source_gaps_and_marks_stale_identity(self) -> None:
         tdx_snapshot = {
             "source_available": True,
