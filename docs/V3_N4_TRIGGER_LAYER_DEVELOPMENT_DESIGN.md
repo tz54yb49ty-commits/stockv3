@@ -200,6 +200,58 @@ decide final action_mark
 emit opaque action_confirmation as proof for N5
 ```
 
+### 3.4 Ordinary lifecycle deactivation evidence
+
+An existing ordinary `matched` state must emit exactly one
+`TriggerStateChanged(trigger_live=false, current_status=inactive)` after every
+previously active formal period no longer satisfies its persistent
+price/amount/chain predicate. The event writes trigger state and outbox only;
+it must not write `common_trigger_match` or create an N5 entry.
+
+N2 period-escalation `not_ready` / `not_seen` evidence for W/M/Q/Y may block a
+new activation or period upgrade, but it must not by itself keep an unrelated
+already-live period active. This deactivation exception is allowed only when:
+
+```text
+selected N3 metric is ready and all declared quality/trace fields pass
+pending reasons are empty
+all blockers are exact period_escalation_prerequisite_not_ready/not_seen reasons
+previous active-period formal proof remains canonical and uniquely identified
+current formal detail is canonical no_op with unchanged baseline/source trace
+the persistent target transition, amount predicate, or required chain is false
+```
+
+No fresh transition edge is not deactivation proof. If the persistent predicate
+is still true, or if any detail, baseline, source, date, unit, hash, or quality
+proof is missing or conflicting, N4 must retain the live state and fail closed.
+
+The inactive state uses the canonical current marker
+`trigger_mark_candidate=normal`; the previous active marker remains available as
+`previous_trigger_mark_candidate`. Its projection fields are always
+`projection_30m_flag=false` and `projection_30m_type=none`. This preserves an
+earlier HINT marker (`30m_volume` / `30m_shrink`) without writing an invalid
+current marker.
+
+### 3.5 Provisional canonical state columns
+
+Ordinary and HINT provisional state writes must persist the existing canonical
+typed columns together with `raw_json`:
+
+```text
+trigger_live
+trigger_mark_candidate
+primary_trigger_period
+all_trigger_periods
+projection_30m_flag
+projection_30m_type
+```
+
+Each typed value is derived from the same canonical state payload written to
+`raw_json`; `all_trigger_periods` is stored as JSONB. The typed and JSON values
+must be identical for matched, matched-changed, inactive, and pending state
+rows. This is a persistence contract only: it does not change the event
+envelope, schema, lifecycle authority, or N5 entry boundary.
+
 ## 4. 本地 context snapshot
 
 建议物理分表：

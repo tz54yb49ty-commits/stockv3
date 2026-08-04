@@ -1,3 +1,4 @@
+import copy
 import unittest
 
 from ashare_v3.trigger.provisional_trigger_lifecycle import (
@@ -79,6 +80,165 @@ def previous_state(current: dict[str, object], *, status: str = "matched") -> di
             "all_trigger_periods": current["all_trigger_periods"],
         },
     }
+
+
+def formal_period_detail(
+    *,
+    period: str,
+    direction: str,
+    classification: str,
+    current_transition: str,
+) -> dict[str, object]:
+    amount_fields = {
+        "D": "today_virt_amount",
+        "W": "weekly_avg_with_today",
+        "M": "monthly_avg_with_today",
+        "Q": "quarterly_avg_with_today",
+        "Y": "yearly_avg_with_today",
+    }
+    target_transition = "volume_up" if direction == "buy" else "low_volume_down"
+    return {
+        "period": period,
+        "classification": classification,
+        "reason": None if classification == "triggered" else "transition_or_chain_not_triggered",
+        "current_transition": current_transition,
+        "previous_transition": "flat",
+        "current_price_or_close": 10.0,
+        "current_amount_metric": 200.0,
+        "transition_amount_field": amount_fields[period],
+        "transition_amount_value": 200.0,
+        "used_for_period": period,
+        "compare_to": f"previous_avg_amount[{period}]",
+        "previous_amount_source_field": f"previous_avg_amount_{period}",
+        "previous_amount_baseline": 100.0,
+        "trigger_previous_entity_high": 9.0,
+        "trigger_previous_entity_low": 11.0,
+        "transition_amount_pass": True,
+        "trigger_amount_chain_pass": "not_applicable" if period == "Y" else True,
+        "amount_unit_status": {"status": "matched"},
+        "amount_source_status": {"status": "matched"},
+        "amount_metric": amount_fields[period],
+        "amount_rule": "price_break_plus_current_period_avg_with_today_vs_previous_avg_amount",
+        "source_field_trace": {"period": period, "target_transition": target_transition},
+        "baseline_period_key_current": f"current:{period}",
+        "baseline_period_key_previous": f"previous:{period}",
+        "baseline_source_trade_date": "20260624",
+        "for_trade_date": "20260625",
+        "projection_for_trade_date": "20260625",
+        "stale_period_baseline": False,
+        "stale_period_baseline_reason": None,
+    }
+
+
+def scoped_deactivation_case(
+    *,
+    period: str = "D",
+    direction: str = "buy",
+    asset_kind: str = "stock",
+) -> tuple[dict[str, object], dict[str, object]]:
+    condition_prefix = "BUY" if direction == "buy" else "SELL"
+    signal_type = "B_BUY" if direction == "buy" else "S_SELL"
+    target_transition = "volume_up" if direction == "buy" else "low_volume_down"
+    period_escalation_trace = {
+        "policy_version": "N4-ordinary-period-escalation-v2",
+        "policy_hash": "3a0aa136ff3393c7",
+        "context_hash": "fixture-period-escalation-context-hash",
+        "periods": {
+            blocked_period: {
+                "reason": f"period_escalation_prerequisite_not_ready:{blocked_period}",
+                "gate_pass": False,
+                "evidence_ready": False,
+                "gate_status": "not_ready",
+                "source_entry": {
+                    "status": "not_ready",
+                    "entry_hash": f"fixture-entry-hash-{blocked_period}",
+                    "window_key": f"fixture-window-{blocked_period}",
+                    "window_start": "20260101",
+                    "observation_end": "20260624",
+                },
+            }
+            for blocked_period in ("Q", "Y")
+        },
+    }
+    current = plan(
+        condition_key=f"{condition_prefix}:Y,Q,M,W,D",
+        signal_type=signal_type,
+        trigger_type=condition_prefix,
+        status="no_op",
+        trigger_period=period,
+        primary_trigger_period=period,
+        all_trigger_periods=[period],
+    )
+    current.update(
+        {
+            "asset_kind": asset_kind,
+            "identity_key": f"{asset_kind}:fixture:{period}:{direction}",
+            "direction": direction,
+            "metric_ready": True,
+            "data_quality_status": "passed",
+            "metric_quality_status": "passed",
+            "triggered_periods": [],
+            "all_trigger_periods": [],
+            "primary_trigger_period": None,
+            "period_escalation_trace": copy.deepcopy(period_escalation_trace),
+            "ordinary_period_escalation_policy_version": "N4-ordinary-period-escalation-v2",
+            "ordinary_period_escalation_policy_hash": "3a0aa136ff3393c7",
+            "rule_proof": {
+                "selected_metric": {"metric_ready": True},
+                "period_evaluation_details": [
+                    formal_period_detail(
+                        period=period,
+                        direction=direction,
+                        classification="no_op",
+                        current_transition="other",
+                    )
+                ],
+            },
+            "rule_eval_result": {
+                "outcome_classification": "quality_blocked",
+                "pending_reasons": [],
+                "quality_reasons": [
+                    "period_escalation_prerequisite_not_ready:Q",
+                    "period_escalation_prerequisite_not_ready:Y",
+                ],
+                "blocked_reason": "period_escalation_prerequisite_not_ready:Q",
+            },
+        }
+    )
+    matched = plan(
+        condition_key=f"{condition_prefix}:Y,Q,M,W,D",
+        signal_type=signal_type,
+        trigger_type=condition_prefix,
+        trigger_period=period,
+        triggered_periods=[period],
+        primary_trigger_period=period,
+        all_trigger_periods=[period],
+    )
+    matched.update(
+        {
+            "asset_kind": asset_kind,
+            "identity_key": current["identity_key"],
+            "direction": direction,
+        }
+    )
+    prior = previous_state(matched)
+    prior["raw_json"]["rule_proof"] = {
+        "selected_metric": {"metric_ready": True},
+        "period_evaluation_details": [
+            formal_period_detail(
+                period=period,
+                direction=direction,
+                classification="triggered",
+                current_transition=target_transition,
+            )
+        ],
+    }
+    prior["raw_json"]["period_escalation_trace"] = copy.deepcopy(period_escalation_trace)
+    prior["raw_json"]["ordinary_period_escalation_policy_version"] = (
+        "N4-ordinary-period-escalation-v2"
+    )
+    prior["raw_json"]["ordinary_period_escalation_policy_hash"] = "3a0aa136ff3393c7"
+    return current, prior
 
 
 class ProvisionalTriggerLifecycleTest(unittest.TestCase):
@@ -188,6 +348,10 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         self.assertEqual(outputs[0]["output_event_type"], TRIGGER_STATE_CHANGED_EVENT_TYPE)
         self.assertEqual(outputs[0]["current_status"], "inactive")
         self.assertFalse(outputs[0]["trigger_live"])
+        self.assertEqual(outputs[0]["trigger_mark_candidate"], "normal")
+        self.assertEqual(outputs[0]["previous_trigger_mark_candidate"], "30m_volume")
+        self.assertFalse(outputs[0]["projection_30m_flag"])
+        self.assertEqual(outputs[0]["projection_30m_type"], "none")
         self.assertFalse(outputs[0]["writes_trigger_match"])
         self.assertEqual(outputs[0]["state_change_reason"], "deactivated")
         self.assertEqual(outputs[0]["lifecycle_output_reason"], "matched_to_inactive")
@@ -218,6 +382,115 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         outputs = build_lifecycle_output_plans([current], previous_states=[prior])
 
         self.assertEqual(outputs, [])
+
+    def test_scoped_deactivation_accepts_strict_formal_proof_across_periods_and_assets(self) -> None:
+        cases = (
+            ("D", "buy", "stock"),
+            ("W", "sell", "index"),
+            ("M", "buy", "board"),
+            ("Q", "sell", "stock"),
+            ("Y", "buy", "index"),
+        )
+        for period, direction, asset_kind in cases:
+            with self.subTest(period=period, direction=direction, asset_kind=asset_kind):
+                current, prior = scoped_deactivation_case(
+                    period=period,
+                    direction=direction,
+                    asset_kind=asset_kind,
+                )
+
+                outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(outputs[0]["output_event_type"], TRIGGER_STATE_CHANGED_EVENT_TYPE)
+                self.assertEqual(outputs[0]["current_status"], "inactive")
+                self.assertFalse(outputs[0]["trigger_live"])
+                self.assertEqual(outputs[0]["trigger_mark_candidate"], "normal")
+                self.assertEqual(outputs[0]["previous_trigger_mark_candidate"], "30m_volume")
+                self.assertFalse(outputs[0]["writes_trigger_match"])
+                self.assertFalse(outputs[0]["n5_entry_allowed"])
+
+    def test_scoped_deactivation_keeps_live_state_when_persistent_predicate_is_true(self) -> None:
+        current, prior = scoped_deactivation_case()
+        current_detail = current["rule_proof"]["period_evaluation_details"][0]
+        current_detail["current_transition"] = "volume_up"
+
+        outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+        self.assertEqual(outputs, [])
+
+    def test_scoped_deactivation_accepts_canonical_not_seen_blocker(self) -> None:
+        current, prior = scoped_deactivation_case()
+        reason = "period_escalation_prerequisite_not_seen:Q"
+        current["rule_eval_result"]["quality_reasons"] = [reason]
+        current["rule_eval_result"]["blocked_reason"] = reason
+        q_trace = current["period_escalation_trace"]["periods"]["Q"]
+        q_trace.update(
+            {
+                "reason": reason,
+                "gate_status": "not_seen",
+            }
+        )
+        q_trace["source_entry"]["status"] = "not_seen"
+
+        outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0]["current_status"], "inactive")
+
+    def test_scoped_deactivation_fails_closed_for_noncanonical_or_drifted_proof(self) -> None:
+        def unknown_blocker(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_eval_result"]["quality_reasons"] = ["source_hash_conflicting"]
+            current["rule_eval_result"]["blocked_reason"] = "source_hash_conflicting"
+
+        def pending_reason(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_eval_result"]["pending_reasons"] = ["metric_pending"]
+
+        def baseline_drift(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_proof"]["period_evaluation_details"][0]["previous_amount_baseline"] = 101.0
+
+        def missing_previous_detail(current: dict[str, object], prior: dict[str, object]) -> None:
+            prior["raw_json"]["rule_proof"]["period_evaluation_details"] = []
+
+        def duplicate_current_detail(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_proof"]["period_evaluation_details"].append(
+                copy.deepcopy(current["rule_proof"]["period_evaluation_details"][0])
+            )
+
+        def source_status_mismatch(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_proof"]["period_evaluation_details"][0]["amount_source_status"] = {
+                "status": "not_allowed"
+            }
+
+        def context_hash_drift(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["period_escalation_trace"]["context_hash"] = "drifted-context-hash"
+
+        def period_window_drift(current: dict[str, object], prior: dict[str, object]) -> None:
+            current["rule_proof"]["period_evaluation_details"][0][
+                "baseline_period_key_current"
+            ] = "drifted-window"
+
+        def unknown_previous_period(current: dict[str, object], prior: dict[str, object]) -> None:
+            prior["raw_json"]["triggered_periods"] = ["Z"]
+
+        for name, mutate in (
+            ("unknown_blocker", unknown_blocker),
+            ("pending_reason", pending_reason),
+            ("baseline_drift", baseline_drift),
+            ("missing_previous_detail", missing_previous_detail),
+            ("duplicate_current_detail", duplicate_current_detail),
+            ("source_status_mismatch", source_status_mismatch),
+            ("context_hash_drift", context_hash_drift),
+            ("period_window_drift", period_window_drift),
+            ("unknown_previous_period", unknown_previous_period),
+        ):
+            with self.subTest(name=name):
+                current, prior = scoped_deactivation_case()
+                mutate(current, prior)
+
+                outputs = build_lifecycle_output_plans([current], previous_states=[prior])
+
+                self.assertEqual(outputs, [])
 
     def test_inactive_to_inactive_drops_plan(self) -> None:
         outputs = build_lifecycle_output_plans([plan(status="no_op")], previous_states=[])

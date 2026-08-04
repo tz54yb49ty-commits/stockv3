@@ -780,6 +780,7 @@ def build_ordinary_trigger_state_row(
     plan: Mapping[str, Any],
     created_at: datetime,
 ) -> dict[str, Any]:
+    raw_json = build_ordinary_raw_json(plan)
     return {
         "run_id": trigger_run_id,
         "source_condition_run_id": plan.get("source_condition_run_id"),
@@ -800,7 +801,13 @@ def build_ordinary_trigger_state_row(
         "last_matched_at": parse_event_time(plan.get("selected_metric_time")) if plan.get("current_status") != "inactive" else None,
         "cleared_at": parse_event_time(plan.get("selected_metric_time")) if plan.get("current_status") == "inactive" else None,
         "dedup_key": plan.get("dedup_key"),
-        "raw_json": build_ordinary_raw_json(plan),
+        "trigger_live": raw_json.get("trigger_live"),
+        "trigger_mark_candidate": raw_json.get("trigger_mark_candidate"),
+        "primary_trigger_period": raw_json.get("primary_trigger_period"),
+        "all_trigger_periods": list(raw_json.get("all_trigger_periods") or []),
+        "projection_30m_flag": raw_json.get("projection_30m_flag"),
+        "projection_30m_type": raw_json.get("projection_30m_type"),
+        "raw_json": raw_json,
         "created_at": created_at,
         "updated_at": created_at,
     }
@@ -1569,18 +1576,26 @@ def insert_ordinary_trigger_state(cur: Any, row: Mapping[str, Any]) -> int:
           asset_kind, identity_key, direction, signal_type, condition_key,
           trigger_period, trigger_bucket, current_status, last_source_event_id,
           data_quality_status, context_hash, match_count, first_matched_at,
-          last_matched_at, cleared_at, raw_json, created_at, updated_at
+          last_matched_at, cleared_at, trigger_live, trigger_mark_candidate,
+          primary_trigger_period, all_trigger_periods, projection_30m_flag,
+          projection_30m_type, raw_json, created_at, updated_at
         )
         VALUES (
           %(run_id)s, %(source_condition_run_id)s, %(for_trade_date)s,
           %(asset_kind)s, %(identity_key)s, %(direction)s, %(signal_type)s, %(condition_key)s,
           %(trigger_period)s, %(trigger_bucket)s, %(current_status)s, %(last_source_event_id)s,
           %(data_quality_status)s, %(context_hash)s, %(match_count)s, %(first_matched_at)s,
-          %(last_matched_at)s, %(cleared_at)s, %(raw_json)s, %(created_at)s, %(updated_at)s
+          %(last_matched_at)s, %(cleared_at)s, %(trigger_live)s, %(trigger_mark_candidate)s,
+          %(primary_trigger_period)s, %(all_trigger_periods)s, %(projection_30m_flag)s,
+          %(projection_30m_type)s, %(raw_json)s, %(created_at)s, %(updated_at)s
         )
         RETURNING trigger_state_id
         """,
-        {**dict(row), "raw_json": Jsonb(to_jsonable(row.get("raw_json") or {}))},
+        {
+            **dict(row),
+            "all_trigger_periods": Jsonb(to_jsonable(row.get("all_trigger_periods") or [])),
+            "raw_json": Jsonb(to_jsonable(row.get("raw_json") or {})),
+        },
     )
     fetched = cur.fetchone()
     if isinstance(fetched, Mapping):
