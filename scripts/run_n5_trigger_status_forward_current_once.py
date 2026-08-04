@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from ashare_v3.runtime.intraday_worker_lineage import (
     load_intraday_worker_lineage_config,
 )
 from scripts.run_n5_trigger_status_forward_once import (
+    N5TriggerStatusForwardWriteAmbiguous,
     run_n5_trigger_status_forward_once,
 )
 
@@ -97,16 +99,19 @@ def run_n5_trigger_status_forward_current_once(
             args.singleton_lock_path,
             metadata={"policy_id": POLICY_ID, "consumer_name": CONSUMER_NAME},
         ):
-            prior_blocker = _prior_commit_unknown(Path(args.json_report_path))
-            if prior_blocker:
+            unresolved_incident = _unresolved_incident(Path(args.json_report_path))
+            if unresolved_incident:
                 return _finalize(
                     report,
                     result="BLOCKED",
                     verdict="BLOCKED_PRIOR_COMMIT_UNKNOWN",
-                    reason=prior_blocker,
+                    reason=str(unresolved_incident["reason"]),
                     args=args,
                     report_writer=report_writer,
+                    failure_phase="write",
                     requires_post_check=True,
+                    incident_id=str(unresolved_incident["incident_id"]),
+                    incident_path=str(unresolved_incident["incident_path"]),
                 )
 
             try:
@@ -216,24 +221,33 @@ def run_n5_trigger_status_forward_current_once(
 
             try:
                 core_result = dict(core_runner(core_argv))
+            except N5TriggerStatusForwardWriteAmbiguous as exc:
+                incident = _write_commit_unknown_incident(
+                    Path(args.json_report_path),
+                    report,
+                    reason=str(exc),
+                )
+                return _finalize(
+                    report,
+                    result="COMMIT_UNKNOWN",
+                    verdict="BLOCKED_COMMIT_UNKNOWN",
+                    reason=str(exc),
+                    args=args,
+                    report_writer=report_writer,
+                    failure_phase="write",
+                    requires_post_check=True,
+                    incident_id=str(incident["incident_id"]),
+                    incident_path=str(incident["incident_path"]),
+                )
             except Exception as exc:
-                if args.execute:
-                    return _finalize(
-                        report,
-                        result="COMMIT_UNKNOWN",
-                        verdict="BLOCKED_COMMIT_UNKNOWN",
-                        reason=f"{type(exc).__name__}:{exc}",
-                        args=args,
-                        report_writer=report_writer,
-                        requires_post_check=True,
-                    )
                 return _finalize(
                     report,
                     result="BLOCKED",
-                    verdict="BLOCKED_CORE_RUNNER_ERROR",
+                    verdict="BLOCKED_CORE_PLAN_READ",
                     reason=f"{type(exc).__name__}:{exc}",
                     args=args,
                     report_writer=report_writer,
+                    failure_phase="plan",
                 )
 
             core_error = _validate_core_result(
@@ -254,13 +268,19 @@ def run_n5_trigger_status_forward_current_once(
                     report_writer=report_writer,
                 )
             if str(core_result.get("verdict") or "").startswith("BLOCKED"):
+                failure_phase = str(core_result.get("failure_phase") or "plan")
                 return _finalize(
                     report,
                     result="BLOCKED",
-                    verdict="BLOCKED_CORE_RUNNER",
+                    verdict=(
+                        "BLOCKED_CORE_PLAN_READ"
+                        if failure_phase == "plan"
+                        else "BLOCKED_CORE_RUNNER"
+                    ),
                     reason=str(core_result.get("blocked_reason") or "core_runner_blocked"),
                     args=args,
                     report_writer=report_writer,
+                    failure_phase=failure_phase,
                 )
             written = int((core_result.get("write_result") or {}).get("common_event_outbox") or 0)
             return _finalize(
@@ -406,18 +426,86 @@ def _validate_core_result(
     return ""
 
 
-def _prior_commit_unknown(path: Path) -> str:
-    if not path.exists():
-        return ""
+def _incident_directory(report_path: Path) -> Path:
+    return report_path.with_name(f"{report_path.stem}.incidents")
+
+
+def _unresolved_incident(report_path: Path) -> dict[str, str] | None:
+    incident_directory = _incident_directory(report_path)
+    if not incident_directory.exists():
+        return None
+    for incident_path in sorted(incident_directory.glob("*.json")):
+        try:
+            payload = json.loads(incident_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "incident_id": incident_path.stem,
+                "incident_path": str(incident_path),
+                "reason": f"incident_unreadable:{type(exc).__name__}",
+            }
+        if bool(payload.get("requires_post_check")):
+            return {
+                "incident_id": str(payload.get("incident_id") or incident_path.stem),
+                "incident_path": str(incident_path),
+                "reason": "unresolved_write_incident",
+            }
+    return None
+
+
+def _write_commit_unknown_incident(
+    report_path: Path,
+    report: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    created_at = datetime.now(ASIA_SHANGHAI)
+    incident_id = (
+        "n5_trigger_status_write_ambiguity_"
+        f"{created_at.strftime('%Y%m%dT%H%M%S%f%z')}_{uuid.uuid4().hex}"
+    )
+    incident_directory = _incident_directory(report_path)
+    incident_directory.mkdir(parents=True, exist_ok=True)
+    incident_path = incident_directory / f"{incident_id}.json"
+    incident = {
+        "incident_version": "n5-trigger-status-write-ambiguity-v1",
+        "incident_id": incident_id,
+        "incident_path": str(incident_path),
+        "rolling_report_path": str(report_path),
+        "policy_id": POLICY_ID,
+        "layer_role": "N5_action",
+        "created_at": created_at.isoformat(),
+        "failure_phase": "write",
+        "requires_post_check": True,
+        "reason": reason,
+        "local_trade_date": str(report.get("local_trade_date") or ""),
+        "action_run_id": str(report.get("action_run_id") or ""),
+        "source_eligible_action_run_id": str(
+            report.get("source_eligible_action_run_id") or ""
+        ),
+        "core_argv": list(report.get("core_argv") or []),
+        "execute_requested": bool(report.get("execute_requested")),
+    }
+    encoded = (
+        json.dumps(incident, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+        + "\n"
+    ).encode("utf-8")
+    tmp_path = incident_directory / f".{incident_id}.tmp.{os.getpid()}"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return f"prior_report_unreadable:{type(exc).__name__}"
-    if bool(payload.get("requires_post_check")):
-        return "prior_report_requires_post_check"
-    if str(payload.get("verdict") or "") == "BLOCKED_COMMIT_UNKNOWN":
-        return "prior_report_commit_unknown"
-    return ""
+        with tmp_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, 0o444)
+        os.link(tmp_path, incident_path)
+        directory_fd = os.open(incident_directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return incident
 
 
 def _base_report(args: argparse.Namespace, now: datetime, trade_date: str) -> dict[str, Any]:
@@ -434,6 +522,10 @@ def _base_report(args: argparse.Namespace, now: datetime, trade_date: str) -> di
             "max_runtime_seconds": float(args.max_runtime_seconds),
         },
         "allowed_event_types": sorted(ALLOWED_EVENT_TYPES),
+        "failure_phase": None,
+        "requires_post_check": False,
+        "incident_id": None,
+        "incident_path": None,
         "business_writes": {
             "common_event_outbox_status_messages_only": 0,
             "common_action_event": 0,
@@ -453,15 +545,21 @@ def _finalize(
     reason: str,
     args: argparse.Namespace,
     report_writer: Callable[[str | Path, Mapping[str, Any]], None],
+    failure_phase: str | None = None,
     requires_post_check: bool = False,
     written_count: int = 0,
+    incident_id: str | None = None,
+    incident_path: str | None = None,
 ) -> dict[str, Any]:
     report.update(
         {
             "result": result,
             "verdict": verdict,
             "reason": reason,
+            "failure_phase": failure_phase,
             "requires_post_check": bool(requires_post_check),
+            "incident_id": incident_id,
+            "incident_path": incident_path,
             "written_count": int(written_count),
             "finished_at": datetime.now(ASIA_SHANGHAI).isoformat(),
         }

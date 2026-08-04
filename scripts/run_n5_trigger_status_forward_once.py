@@ -37,6 +37,10 @@ class N5TriggerStatusForwardBlocked(RuntimeError):
     """Raised when the status-only runner must fail closed."""
 
 
+class N5TriggerStatusForwardWriteAmbiguous(RuntimeError):
+    """Raised only after the writer phase starts and commit state is unknown."""
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--for-trade-date", required=True)
@@ -71,7 +75,10 @@ def run_n5_trigger_status_forward_once(
         if dsn_required and not str(args.dsn or ""):
             raise N5TriggerStatusForwardBlocked("dsn_required")
         args.deadline_monotonic = started + args.max_runtime_seconds
-        plan = dict((plan_provider or _default_plan_provider)(args))
+        try:
+            plan = dict((plan_provider or _default_plan_provider)(args))
+        except Exception as exc:
+            return _plan_failure_manifest(args, invocation_id, exc)
         _validate_plan(args, plan)
         _check_runtime(args, started, now_monotonic)
         manifest = _manifest(args, invocation_id, plan, started, now_monotonic)
@@ -85,7 +92,12 @@ def run_n5_trigger_status_forward_once(
             0.001,
             args.max_runtime_seconds - (now_monotonic() - started),
         )
-        write_result = dict((writer or _default_execute_writer)(args, status_events))
+        try:
+            write_result = dict((writer or _default_execute_writer)(args, status_events))
+        except Exception as exc:
+            raise N5TriggerStatusForwardWriteAmbiguous(
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
         manifest["verdict"] = "N5_TRIGGER_STATUS_FORWARD_EXECUTE_PASS"
         manifest["write_result"] = write_result
         return manifest
@@ -93,10 +105,32 @@ def run_n5_trigger_status_forward_once(
         return {
             "verdict": "BLOCKED_N5_TRIGGER_STATUS_FORWARD",
             "blocked_reason": str(exc),
+            "failure_phase": "plan",
+            "requires_post_check": False,
             "invocation_id": invocation_id,
             "execute_requested": bool(args.execute),
             "writes_enabled": False,
+            "writer_called": False,
+            "write_result": _zero_write_result(),
         }
+
+
+def _plan_failure_manifest(
+    args: argparse.Namespace,
+    invocation_id: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "verdict": "BLOCKED_N5_TRIGGER_STATUS_FORWARD_PLAN_READ",
+        "blocked_reason": f"{type(exc).__name__}:{exc}",
+        "failure_phase": "plan",
+        "requires_post_check": False,
+        "invocation_id": invocation_id,
+        "execute_requested": bool(args.execute),
+        "writes_enabled": False,
+        "writer_called": False,
+        "write_result": _zero_write_result(),
+    }
 
 
 def _validate_args(args: argparse.Namespace, *, dsn_required: bool) -> None:
