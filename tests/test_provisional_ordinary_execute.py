@@ -11,6 +11,7 @@ from ashare_v3.trigger.provisional_ordinary_execute import (
     build_ordinary_rollback_sql,
     build_provisional_ordinary_execute_plan,
     fetch_previous_ordinary_trigger_states,
+    insert_ordinary_trigger_state,
     parse_n4p_ordinary_trigger_run_id,
     run_provisional_ordinary_once,
     select_previous_ordinary_trigger_states,
@@ -36,6 +37,21 @@ from tests.test_trigger_projection_matcher import (
 
 TRIGGER_RUN_ID = build_n4p_ordinary_trigger_run_id(for_trade_date="20260624", until_hhmm="1352")
 SOURCE_CONDITION_RUN_ID = "condition_layer_20260623_source_20260623_for_20260624_v1"
+CANONICAL_STATE_FIELDS = (
+    "trigger_live",
+    "trigger_mark_candidate",
+    "primary_trigger_period",
+    "all_trigger_periods",
+    "projection_30m_flag",
+    "projection_30m_type",
+)
+
+
+def assert_canonical_state_columns(test_case: unittest.TestCase, state: dict[str, object]) -> None:
+    raw_json = state["raw_json"]
+    for field in CANONICAL_STATE_FIELDS:
+        test_case.assertIn(field, state)
+        test_case.assertEqual(state[field], raw_json[field])
 
 
 def empty_target_counts() -> dict[str, int]:
@@ -1372,6 +1388,8 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         self.assertEqual({row["event_type"] for row in writes["common_event_outbox"]}, {"TriggerMatched"})
         self.assertNotIn("TriggerPendingMarketData", {row["event_type"] for row in writes["common_event_outbox"]})
         self.assertNotIn("TriggerStateChanged", {row["event_type"] for row in writes["common_event_outbox"]})
+        for state in writes["common_trigger_state"]:
+            assert_canonical_state_columns(self, state)
 
     def test_run_report_includes_ordinary_matcher_phase_timing_evidence(self) -> None:
         dry_run_plan = matched_lifecycle_candidate()
@@ -1466,6 +1484,7 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
         self.assertEqual(payload["current_status"], "matched")
         self.assertTrue(payload["trigger_live"])
         self.assertFalse(payload["n4_boundary"]["enters_n5"])
+        assert_canonical_state_columns(self, execute_plan["writes"]["common_trigger_state"][0])
 
     def test_same_day_matched_changed_keeps_raw_match_audit_and_dispatches_state_changed(self) -> None:
         context, metric = production_20260714_1322_negative_evidence_fixture(
@@ -2003,6 +2022,29 @@ class ProvisionalOrdinaryExecuteTest(unittest.TestCase):
             execute_plan["writes"]["common_trigger_state"][0]["raw_json"]["lifecycle_output_reason"],
             "matched_to_inactive",
         )
+        assert_canonical_state_columns(self, execute_plan["writes"]["common_trigger_state"][0])
+
+    def test_ordinary_state_insert_includes_all_canonical_typed_columns(self) -> None:
+        class Cursor:
+            def execute(self, sql: str, params: dict[str, object]) -> None:
+                self.sql = sql
+                self.params = params
+
+            def fetchone(self) -> tuple[int]:
+                return (1,)
+
+        state = build_plan(
+            ordinary_plans(
+                [context_row("stock:SH:600000", "buy", "BUY:D", ["BUY"])],
+                [n3p_metric_row("stock", "stock:SH:600000", direction="buy")],
+            )
+        )["writes"]["common_trigger_state"][0]
+        cursor = Cursor()
+
+        self.assertEqual(insert_ordinary_trigger_state(cursor, state), 1)
+        for field in CANONICAL_STATE_FIELDS:
+            self.assertIn(field, cursor.sql)
+            self.assertIn(field, cursor.params)
 
     def test_601985_equivalent_daily_deactivation_bypasses_only_q_y_escalation_blockers(self) -> None:
         context, initial_metric = production_20260714_1322_negative_evidence_fixture(

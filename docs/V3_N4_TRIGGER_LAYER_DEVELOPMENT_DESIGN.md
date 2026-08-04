@@ -232,6 +232,26 @@ The inactive state uses the canonical current marker
 earlier HINT marker (`30m_volume` / `30m_shrink`) without writing an invalid
 current marker.
 
+### 3.5 Provisional canonical state columns
+
+Ordinary and HINT provisional state writes must persist the existing canonical
+typed columns together with `raw_json`:
+
+```text
+trigger_live
+trigger_mark_candidate
+primary_trigger_period
+all_trigger_periods
+projection_30m_flag
+projection_30m_type
+```
+
+Each typed value is derived from the same canonical state payload written to
+`raw_json`; `all_trigger_periods` is stored as JSONB. The typed and JSON values
+must be identical for matched, matched-changed, inactive, and pending state
+rows. This is a persistence contract only: it does not change the event
+envelope, schema, lifecycle authority, or N5 entry boundary.
+
 ## 4. 本地 context snapshot
 
 建议物理分表：
