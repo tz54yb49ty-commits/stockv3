@@ -222,11 +222,32 @@ def run_n5_trigger_status_forward_current_once(
             try:
                 core_result = dict(core_runner(core_argv))
             except N5TriggerStatusForwardWriteAmbiguous as exc:
-                incident = _write_commit_unknown_incident(
-                    Path(args.json_report_path),
-                    report,
-                    reason=str(exc),
-                )
+                try:
+                    incident = _write_commit_unknown_incident(
+                        Path(args.json_report_path),
+                        report,
+                        reason=str(exc),
+                    )
+                except Exception as incident_exc:
+                    fallback_id = (
+                        "n5_trigger_status_write_ambiguity_fallback_"
+                        f"{local_trade_date}_{action_run_id}"
+                    )
+                    return _finalize(
+                        report,
+                        result="COMMIT_UNKNOWN",
+                        verdict="BLOCKED_COMMIT_UNKNOWN",
+                        reason=(
+                            f"{exc};incident_persistence_failed:"
+                            f"{type(incident_exc).__name__}:{incident_exc}"
+                        ),
+                        args=args,
+                        report_writer=report_writer,
+                        failure_phase="write",
+                        requires_post_check=True,
+                        incident_id=fallback_id,
+                        incident_path=str(args.json_report_path),
+                    )
                 return _finalize(
                     report,
                     result="COMMIT_UNKNOWN",
@@ -432,23 +453,41 @@ def _incident_directory(report_path: Path) -> Path:
 
 def _unresolved_incident(report_path: Path) -> dict[str, str] | None:
     incident_directory = _incident_directory(report_path)
-    if not incident_directory.exists():
+    if incident_directory.exists():
+        for incident_path in sorted(incident_directory.glob("*.json")):
+            try:
+                payload = json.loads(incident_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return {
+                    "incident_id": incident_path.stem,
+                    "incident_path": str(incident_path),
+                    "reason": f"incident_unreadable:{type(exc).__name__}",
+                }
+            if bool(payload.get("requires_post_check")):
+                return {
+                    "incident_id": str(payload.get("incident_id") or incident_path.stem),
+                    "incident_path": str(incident_path),
+                    "reason": "unresolved_write_incident",
+                }
+    try:
+        rolling_report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return None
-    for incident_path in sorted(incident_directory.glob("*.json")):
-        try:
-            payload = json.loads(incident_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            return {
-                "incident_id": incident_path.stem,
-                "incident_path": str(incident_path),
-                "reason": f"incident_unreadable:{type(exc).__name__}",
-            }
-        if bool(payload.get("requires_post_check")):
-            return {
-                "incident_id": str(payload.get("incident_id") or incident_path.stem),
-                "incident_path": str(incident_path),
-                "reason": "unresolved_write_incident",
-            }
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        str(rolling_report.get("failure_phase") or "") == "write"
+        and bool(rolling_report.get("requires_post_check"))
+    ):
+        return {
+            "incident_id": str(
+                rolling_report.get("incident_id") or "rolling_report_write_fallback"
+            ),
+            "incident_path": str(
+                rolling_report.get("incident_path") or report_path
+            ),
+            "reason": "unresolved_write_fallback_report",
+        }
     return None
 
 
@@ -465,6 +504,7 @@ def _write_commit_unknown_incident(
     )
     incident_directory = _incident_directory(report_path)
     incident_directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(incident_directory, 0o700)
     incident_path = incident_directory / f"{incident_id}.json"
     incident = {
         "incident_version": "n5-trigger-status-write-ambiguity-v1",

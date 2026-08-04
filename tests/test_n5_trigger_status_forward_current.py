@@ -285,6 +285,7 @@ class CurrentTriggerStatusForwardRunnerTest(unittest.TestCase):
         self.assertTrue(result["requires_post_check"])
         incident_path = Path(result["incident_path"])
         self.assertTrue(incident_path.is_file())
+        self.assertEqual(stat.S_IMODE(incident_path.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(incident_path.stat().st_mode), 0o444)
         first_bytes = incident_path.read_bytes()
 
@@ -296,6 +297,31 @@ class CurrentTriggerStatusForwardRunnerTest(unittest.TestCase):
         self.assertEqual(result["incident_path"], str(incident_path))
         self.assertEqual(called, [])
         self.assertEqual(incident_path.read_bytes(), first_bytes)
+
+    def test_incident_persistence_failure_uses_rolling_report_as_blocker(self) -> None:
+        with patch(
+            "scripts.run_n5_trigger_status_forward_current_once."
+            "_write_commit_unknown_incident",
+            side_effect=OSError("incident storage unavailable"),
+        ):
+            result = self.run_tick(
+                core=lambda _argv: (_ for _ in ()).throw(
+                    N5TriggerStatusForwardWriteAmbiguous("RuntimeError:socket lost")
+                ),
+                extra=("--execute", "--user-confirmed"),
+            )
+        self.assertEqual(result["verdict"], "BLOCKED_COMMIT_UNKNOWN")
+        self.assertEqual(result["failure_phase"], "write")
+        self.assertTrue(result["requires_post_check"])
+        self.assertEqual(result["incident_path"], str(self.report))
+
+        called = []
+        blocked = self.run_tick(core=lambda argv: called.append(argv))
+        self.assertEqual(blocked["verdict"], "BLOCKED_PRIOR_COMMIT_UNKNOWN")
+        self.assertEqual(blocked["failure_phase"], "write")
+        self.assertTrue(blocked["requires_post_check"])
+        self.assertEqual(blocked["incident_path"], str(self.report))
+        self.assertEqual(called, [])
 
     def test_legacy_rolling_report_is_not_an_unresolved_incident(self) -> None:
         self.report.write_text(
