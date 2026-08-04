@@ -1,13 +1,13 @@
 # A股监控系统 v3 当前任务看板
 
-更新日期：2026-07-22
+更新日期：2026-08-04
 范围：最小可落地任务看板。本文档不授权数据库写入、行情 execute、worker、语音、sim、前端或真实交易。
 
 ## P0 当前优先级
 
 ### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
 
-状态：`CURRENT_DAY_20260803_RECOVERY_AND_AUTHENTICATED_PAGE_ACCEPTANCE_PASS_SCHEDULER_GOVERNANCE`；
+状态：`20260804_TIMEOUT_RECOVERY_AND_881139_CLOSEOUT_PASS`；
 分类：`n6_btrack_delivery_l2_n6_business_v1`。089 schema migration 与
 `n6_trigger_status_projection_20260731_backfill_v1` 2296-row consumer 已有 PASS
 证据；目标 canonical commit/tree 为
@@ -40,8 +40,8 @@ runtime_control 合同登记
 -> N6_user 实现并独立激活 30 秒 status projection one-shot
 -> 连续 tick 与 60 秒收敛验收
 -> runtime_control 登记 `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
--> N5_action 修复 plan/write 失败分类并一次 rebind exact N5 label
--> N6_user 只读验收 881139 精确失效与 10 tick 稳定性
+-> N5_action 修复 plan/write 失败分类并一次 rebind exact N5 label（PASS）
+-> N6_user 只读验收 881139 精确失效与 10 tick 稳定性（PASS/CLOSED）
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -64,11 +64,17 @@ launchctl。实现、immutable Release 与激活必须继续拆成独立分层 g
 首版禁止 scheduler、LaunchAgent、SSE、worker；该历史首版边界保持不变，当前
 第二阶段只在新 policy 的两个 exact-label 例外内前向推进。
 
-20260804 现场调查确认 N5 label 自 20260803 15:06 起被一次只读 plan timeout
-误分类为 `COMMIT_UNKNOWN` 后持续跨日阻断；N6 自身健康。881139 只有一个活动
-episode，缺少的唯一链路是 N5 `TriggerStatusInvalidated`。当前 gate 仅登记
-`n5_trigger_status_scheduler_timeout_recovery_20260804_v1`，不连接数据库、不修改
-runner/Release/plist、不调用 launchctl；后续必须按 N5_action -> N6_user 分层执行。
+20260804 timeout recovery 已按 runtime_control -> N5_action -> N6_user 分层完成并
+收口。N5 修复提交为 `aed4a306c8bc520fa5679af58781a59253d8436a`；首个自然
+tick 只写 241 条状态消息（31 Updated / 210 Invalidated），第二 tick 为 0。
+`881139` 的精确 invalidation outbox id 为 `4114073`，N6 inbox 恰好消费一次，
+current episode 为 0；N6 在 21.411721 秒内到达 checkpoint/highwater
+`4114149/4114149`。N5/N6 各 10 tick 全 PASS，原 Signals/Cards/Decisions、非状态
+checkpoint 与 20260731 历史状态保持不变。已登录 Safari 只读验收为 145 行、8 列，
+无 `881139`、无 `trigger_pct`。冻结 RAG artifact 为
+`docs/N5_N6_TRIGGER_STATUS_20260804_TIMEOUT_RECOVERY_CLOSEOUT.json`。该登记是历史
+closeout 证据，不替代后续 live/process/DB 问题的实时只读核对，也不授权 rerun、
+数据库、Release、service 或业务层操作。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 

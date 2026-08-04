@@ -1,0 +1,109 @@
+{
+  "artifact_version": "n5-n6-trigger-status-20260804-timeout-recovery-closeout-v1",
+  "title": "20260804 N5 trigger-status timeout recovery and N6 881139 deletion closeout",
+  "policy_id": "n5_trigger_status_scheduler_timeout_recovery_20260804_v1",
+  "run_id": "n5_trigger_status_scheduler_timeout_recovery_20260804_v1",
+  "layer_role": "runtime_control",
+  "source_trade_date": "20260803",
+  "for_trade_date": "20260804",
+  "status": "PASS_CLOSED",
+  "result": "PASS",
+  "rerun_required": false,
+  "recommended_next_gate": "NONE_RUNTIME_ISSUE_CLOSED",
+  "summary": "The N5 plan timeout was reclassified safely, the exact N5 label was rebound once, natural ticks forwarded the missing 20260804 status events, N6 converged within 60 seconds, and board:TDX:881139 was removed exactly once without changing existing projections.",
+  "source": {
+    "base_contract_commit": "d0dc56809ce1a70810eb3081f87b7282ea16cc8c",
+    "n5_commit": "aed4a306c8bc520fa5679af58781a59253d8436a",
+    "n5_tree": "6e26dd8f3dd3ea8f6f219074f3fc13a58f801cd0",
+    "n5_tests_passed": 97
+  },
+  "reports": {
+    "n5_gate1": {
+      "original_path": "/private/tmp/n5-trigger-status-timeout-recovery-gate1-final.json",
+      "sha256": "693ace1f3c9b47a370e2fc887311b54939549e4f69f669dfc47740c166a7f9e4",
+      "result": "PASS"
+    },
+    "n6_gate2": {
+      "original_path": "/private/tmp/n6-trigger-status-20260804-gate2-readonly-final.json",
+      "sha256": "4bb99c3fa498005747a597dc33f518f420406363b1f15c06329596b142f23998",
+      "result": "PASS"
+    },
+    "release_publish_resume": {
+      "original_path": "/private/tmp/trigger-status-release-publish-resume-20260804-aed4a306.json",
+      "sha256": "8ed003cef9e99c4c331628fd185b91a4badeb10e0fde0fa12ff951c62b319a9f",
+      "result": "PASS"
+    }
+  },
+  "n5_recovery": {
+    "label": "com.ashare-v3.n5.trigger-status-forward-v1",
+    "release_commit": "aed4a306c8bc520fa5679af58781a59253d8436a",
+    "bootout_attempts": 1,
+    "bootstrap_attempts": 1,
+    "kickstart_attempts": 0,
+    "retry_attempts": 0,
+    "first_natural_tick_written": 241,
+    "TriggerStatusUpdated": 31,
+    "TriggerStatusInvalidated": 210,
+    "second_natural_tick_written": 0,
+    "forbidden_action_or_tracking_writes": 0
+  },
+  "exact_881139_invalidation": {
+    "identity_key": "board:TDX:881139",
+    "asset_code": "881139",
+    "outbox_id": 4114073,
+    "event_id": "evt_6f8fd9464fbfc0f4ecc385273d96ce94843557be",
+    "entry_trigger_event_id": "evt_f1966aa133433044ce03fef8515f5c25092af07e",
+    "source_trigger_event_id": "evt_b7e40a3c8d4e44149e6cc9451285b1cd97b9ad9f",
+    "n6_inbox_match_count": 1,
+    "n6_current_episode_match_count": 0,
+    "duplicate_inbox_count": 0,
+    "result": "PASS"
+  },
+  "n6_acceptance": {
+    "label": "com.ashare-v3.n6.trigger-status-projection-v1",
+    "selected": 241,
+    "updated": 31,
+    "invalidated": 210,
+    "checkpoint": 4114149,
+    "eligible_highwater": 4114149,
+    "lag": 0,
+    "convergence_seconds": 21.411721,
+    "convergence_target_seconds": 60,
+    "n5_ten_ticks_all_pass": true,
+    "n6_ten_ticks_all_pass": true,
+    "checkpoint_regression": false
+  },
+  "protected_projection_evidence": {
+    "signals_rows_before_after": [801, 801],
+    "signals_sha256": "9265b021f56b227153589e0371035b06960530c46125452248c94cf84a3ebe2e",
+    "cards_rows_before_after": [801, 801],
+    "cards_sha256": "f793029c32ef7db016f16033733f03b6ca46f98275a4638c1d45bf40331dfb7e",
+    "decisions_rows_before_after": [0, 0],
+    "decisions_sha256": "e8ca2bd51293d64a258fa06d61809d2630efb827bfde97f6fa9209b51bb32ba7",
+    "non_trigger_checkpoint_rows_before_after": [11596, 11596],
+    "non_trigger_checkpoint_sha256": "3c04eacbd96222ae771f36d40715ebfd7e9b345b5f4596ce1a6721a7d3f05bcd",
+    "historical_20260731_rows": 705,
+    "historical_20260731_checkpoint": 4107616
+  },
+  "authenticated_surface_acceptance": {
+    "operation": "GET/reload/read-only DOM",
+    "principal": "admin",
+    "visible_current_trigger_rows": 145,
+    "column_count": 8,
+    "asset_881139_present": false,
+    "trigger_pct_present": false,
+    "result": "PASS"
+  },
+  "registration_boundary": {
+    "historical_closeout_only": true,
+    "replaces_fresh_live_verification": false,
+    "database_connections": 0,
+    "database_writes": 0,
+    "runtime_execute": 0,
+    "release_or_plist_changes": 0,
+    "service_operations": 0,
+    "browser_operations": 0,
+    "n1_n6_business_changes": 0,
+    "real_trade_operations": 0
+  }
+}

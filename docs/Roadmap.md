@@ -1,21 +1,25 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-07-22
+更新日期：2026-08-04
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
 
 ### 2026-08-04 N5 trigger-status timeout recovery
 
-The N5 30-second status forwarder is fail-closed after the 20260803 15:06
-read-only planning timeout was misclassified as `COMMIT_UNKNOWN`. Fresh
-read-only evidence proves zero incident-window commit and a valid 20260804
-plan containing the exact invalidation for `board:TDX:881139`. The next route
-is the separately gated policy
-`n5_trigger_status_scheduler_timeout_recovery_20260804_v1`: runtime_control
-registration, N5-only phase-classification fix and immutable Release rebind,
-then N6 read-only natural-convergence acceptance. No schema/index change,
-manual DML, N6 code change, or existing projection change is planned.
+Status: `PASS / CLOSED`. The separately gated policy
+`n5_trigger_status_scheduler_timeout_recovery_20260804_v1` completed its
+runtime_control registration, N5-only phase-classification fix and immutable
+Release rebind, followed by N6 read-only natural-convergence acceptance. The
+first natural N5 tick emitted 241 status-only rows (31 updates and 210
+invalidations); N6 consumed them in 21.411721 seconds with checkpoint equal to
+highwater at 4114149. The exact `board:TDX:881139` invalidation entered the N6
+inbox once and its current episode count became zero. Ten N5 and ten N6 ticks
+passed without retry, post-check, duplicate write, or checkpoint regression.
+Existing Signals/Cards/Decisions and non-trigger checkpoints remained
+byte-fingerprint stable. No schema/index change, manual DML, N6 code change,
+or existing projection change was made. Frozen RAG evidence:
+`docs/N5_N6_TRIGGER_STATUS_20260804_TIMEOUT_RECOVERY_CLOSEOUT.json`.
 
 ### 2026-08-03 Trigger-status current-day convergence
 

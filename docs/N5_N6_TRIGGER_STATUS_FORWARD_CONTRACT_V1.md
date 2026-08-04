@@ -353,3 +353,42 @@ gate may build one immutable Release and perform one bootout/bootstrap of the
 exact N5 label, with no kickstart or retry. The first natural tick may emit only
 the two idempotent status message types. N6 is acceptance-only and remains a
 separate gate.
+
+### 4.4 20260804 Recovery Closeout Registration
+
+The separately gated recovery is closed with result `PASS`:
+
+```text
+policy_id=n5_trigger_status_scheduler_timeout_recovery_20260804_v1
+n5_commit=aed4a306c8bc520fa5679af58781a59253d8436a
+n5_tree=6e26dd8f3dd3ea8f6f219074f3fc13a58f801cd0
+n5_first_tick=241 (TriggerStatusUpdated=31, TriggerStatusInvalidated=210)
+n5_second_tick=0
+exact_881139_invalidation_outbox_id=4114073
+exact_881139_invalidation_event_id=evt_6f8fd9464fbfc0f4ecc385273d96ce94843557be
+n6_checkpoint=4114149
+n6_eligible_highwater=4114149
+n6_lag=0
+n6_convergence_seconds=21.411721
+n6_current_episode_881139=0
+```
+
+Ten natural N5 ticks and ten natural N6 ticks all passed. After the first
+recovery tick, subsequent ticks were idempotent zero-write/zero-select ticks;
+there was no post-check requirement or checkpoint regression. The 20260804
+Signals, Cards, Decisions, and non-trigger checkpoint fingerprints were
+unchanged, as were the accepted 20260731 history baseline. Authenticated
+GET/reload/read-only DOM acceptance showed 145 visible rows, the fixed eight
+columns, no `881139`, and no `trigger_pct`.
+
+The frozen RAG artifact is:
+
+```text
+docs/N5_N6_TRIGGER_STATUS_20260804_TIMEOUT_RECOVERY_CLOSEOUT.json
+```
+
+Its source report hashes are the evidence identity. This registration records
+the accepted historical closeout only. It does not authorize a rerun, database
+connection, Release/plist/service operation, browser action, N1-N6 write, or
+trade operation, and it does not replace fresh read-only verification for a
+future live-runtime status question.
