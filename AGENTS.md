@@ -65,6 +65,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
   - `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`
   - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
+  - `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -1491,6 +1492,25 @@ L2 trigger-status 30 秒隔离收敛 phase：
 - 禁止 migration、Web rebind、SSE、现有 Signals/Messages/Cards、N1-N4、Strategy
   Center、virtual executor、语音、mobile、sim、持仓、资金与任何交易操作。
 
+L2 trigger-status N5 调度超时恢复 phase：
+
+- `policy_id=n5_trigger_status_scheduler_timeout_recovery_20260804_v1` 仅处理
+  `com.ashare-v3.n5.trigger-status-forward-v1` 在 `20260803 15:06:15+08:00`
+  的只读 plan 查询超时误分类，以及由此跨日阻断 `20260804` 的单次恢复。
+- `runtime_control` 只登记合同并冻结首次日志、滚动报告、Release、label 与数据库
+  只读水位，不得修改代码、数据库、Release、plist 或服务。实现与 exact N5 label
+  rebind 必须在后续独立 `N5_action` gate 完成。
+- N5 修复只能区分 plan/write 失败阶段：plan 失败必须
+  `BLOCKED_CORE_PLAN_READ` 且 `requires_post_check=false`；只有 writer/commit
+  歧义可为 `BLOCKED_COMMIT_UNKNOWN` 且必须写不可覆盖 incident。滚动报告不得
+  覆盖该 incident。
+- 代码 diff 仅允许两个 N5 runner 与聚焦测试；禁止 schema、index、migration。
+  runtime 最多一次 exact N5 bootout/bootstrap，禁止 kickstart/retry，N6 label 与
+  N6 consumer 不得操作。
+- 第一个自然 tick 只可幂等新增 `TriggerStatusUpdated` /
+  `TriggerStatusInvalidated`。禁止 Action*、action fact/tracking、N4、现有
+  Signals/Messages/Cards、Web/SSE、Strategy Center、executor 与任何交易副作用。
+
 Git 与 Release 规则：
 
 - canonical branch/worktree 固定为
@@ -1665,6 +1685,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l2_n6_business_v1`
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
   - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
+  - `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP

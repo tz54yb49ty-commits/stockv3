@@ -419,6 +419,18 @@ Detailed rules:
     Signals/Messages/Cards, Strategy Center, executor, voice/mobile/sim and all
     trading paths remain unchanged. The governance session cannot activate or
     use either job.
+19d. Policy `n5_trigger_status_scheduler_timeout_recovery_20260804_v1` accepts
+    only the exact recovery object for the 20260803 15:06 N5 read-only plan
+    timeout and the resulting 20260804 blocker. It requires fresh zero-commit
+    proof, base `ba82b74c...`, the three-file diff allowlist, a passing current-
+    day plan, one immutable Release, and one bootout/bootstrap of exact label
+    `com.ashare-v3.n5.trigger-status-forward-v1`. Plan failures must return
+    `BLOCKED_CORE_PLAN_READ` with `requires_post_check=false`; writer/commit
+    ambiguity alone may return `BLOCKED_COMMIT_UNKNOWN` and must persist an
+    immutable incident not overwritten by rolling reports. Any schema/index/
+    migration, manual DML, Action* creation, N4/N6/service expansion, kickstart,
+    retry, or existing Signals/Messages/Cards/trading effect returns `REJECT`.
+    The `runtime_control` governance session cannot use this recovery phase.
 19a. The L2 `phase_id=trigger_status_web_immutable_release_rebind` accepts only
     the exact machine object under
     `n6_btrack_delivery_l2_n6_business_v1`, in a later independently authorized

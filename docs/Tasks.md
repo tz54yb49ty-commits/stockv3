@@ -39,6 +39,9 @@ runtime_control 合同登记
 -> N5_action 实现并独立激活 30 秒 status forward one-shot
 -> N6_user 实现并独立激活 30 秒 status projection one-shot
 -> 连续 tick 与 60 秒收敛验收
+-> runtime_control 登记 `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
+-> N5_action 修复 plan/write 失败分类并一次 rebind exact N5 label
+-> N6_user 只读验收 881139 精确失效与 10 tick 稳定性
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -60,6 +63,12 @@ runtime_control gate 不连接数据库、不构建 Release、不安装 plist、
 launchctl。实现、immutable Release 与激活必须继续拆成独立分层 gates。
 首版禁止 scheduler、LaunchAgent、SSE、worker；该历史首版边界保持不变，当前
 第二阶段只在新 policy 的两个 exact-label 例外内前向推进。
+
+20260804 现场调查确认 N5 label 自 20260803 15:06 起被一次只读 plan timeout
+误分类为 `COMMIT_UNKNOWN` 后持续跨日阻断；N6 自身健康。881139 只有一个活动
+episode，缺少的唯一链路是 N5 `TriggerStatusInvalidated`。当前 gate 仅登记
+`n5_trigger_status_scheduler_timeout_recovery_20260804_v1`，不连接数据库、不修改
+runner/Release/plist、不调用 launchctl；后续必须按 N5_action -> N6_user 分层执行。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 

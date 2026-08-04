@@ -320,3 +320,36 @@ existing Signals/Messages/Cards or their consumers/checkpoints, outbox status
 updates, N1-N4 writes, Strategy Center, executor, voice, mobile, sim, position,
 cash, proposal, order, broker, or real-trade effects. Rollback stops only the
 two exact labels and preserves already projected status data.
+
+### 4.3 N5 Scheduled Timeout Recovery
+
+The exact one-time recovery policy is:
+
+```text
+policy_id=n5_trigger_status_scheduler_timeout_recovery_20260804_v1
+label=com.ashare-v3.n5.trigger-status-forward-v1
+incident_started_at=2026-08-03T15:06:15.521903+08:00
+incident_reason=QueryCanceled:canceling statement due to statement timeout
+recovery_trade_date=20260804
+```
+
+Read-only evidence proves that the incident happened with no new N4 lifecycle
+input after the preceding zero-write PASS and no N5 status row in the incident
+window. The current-day offline plan remains valid and includes the exact
+`TriggerStatusInvalidated` for `board:TDX:881139`. This is a correction of a
+failure-phase classification, not retry authority derived from `systemError`.
+
+The N5 implementation must classify plan-provider failures before any writer
+call as `BLOCKED_CORE_PLAN_READ` with `requires_post_check=false`. Only an
+exception raised by the writer/commit phase may become
+`BLOCKED_COMMIT_UNKNOWN` with `requires_post_check=true`. A real write-phase
+ambiguity must create a separate immutable incident artifact; ordinary rolling
+reports may reference but never overwrite it.
+
+The implementation diff is limited to the two N5 status-forward runners and
+their focused test. No schema, index, migration, N6 code, Web/API, scheduler
+shape, or status payload changes are allowed. A later independent `N5_action`
+gate may build one immutable Release and perform one bootout/bootstrap of the
+exact N5 label, with no kickstart or retry. The first natural tick may emit only
+the two idempotent status message types. N6 is acceptance-only and remains a
+separate gate.

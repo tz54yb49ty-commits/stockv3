@@ -5,6 +5,18 @@
 
 ## 状态总览
 
+### 2026-08-04 N5 trigger-status timeout recovery
+
+The N5 30-second status forwarder is fail-closed after the 20260803 15:06
+read-only planning timeout was misclassified as `COMMIT_UNKNOWN`. Fresh
+read-only evidence proves zero incident-window commit and a valid 20260804
+plan containing the exact invalidation for `board:TDX:881139`. The next route
+is the separately gated policy
+`n5_trigger_status_scheduler_timeout_recovery_20260804_v1`: runtime_control
+registration, N5-only phase-classification fix and immutable Release rebind,
+then N6 read-only natural-convergence acceptance. No schema/index change,
+manual DML, N6 code change, or existing projection change is planned.
+
 ### 2026-08-03 Trigger-status current-day convergence
 
 20260803 bounded recovery and authenticated read-only page acceptance are PASS.

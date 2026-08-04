@@ -758,6 +758,96 @@
           ]
         }
       },
+      "scheduled_recovery_phases": {
+        "trigger_status_n5_scheduler_timeout_recovery_20260804": {
+          "phase_id": "trigger_status_n5_scheduler_timeout_recovery_20260804",
+          "policy_id": "n5_trigger_status_scheduler_timeout_recovery_20260804_v1",
+          "layer_role": "N5_action",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "incident_contract": {
+            "original_trade_date": "20260803",
+            "first_failed_tick_started_at": "2026-08-03T15:06:15.521903+08:00",
+            "first_failed_tick_finished_at": "2026-08-03T15:06:37.049276+08:00",
+            "original_verdict": "BLOCKED_COMMIT_UNKNOWN",
+            "original_reason": "QueryCanceled:canceling statement due to statement timeout",
+            "classification_correction": "read_only_plan_timeout_zero_commit",
+            "current_recovery_trade_date": "20260804",
+            "target_identity_key": "board:TDX:881139",
+            "target_source_trigger_event_id": "evt_b7e40a3c8d4e44149e6cc9451285b1cd97b9ad9f"
+          },
+          "zero_commit_proof": {
+            "previous_tick_verdict": "N5_TRIGGER_STATUS_FORWARD_CURRENT_EXECUTE_PASS",
+            "previous_tick_written_count": 0,
+            "n4_lifecycle_rows_created_in_incident_window": 0,
+            "n5_status_rows_created_in_incident_window": 0,
+            "last_status_row_created_at_before_incident": "2026-08-03T15:00:39.020501+08:00",
+            "plan_only_required_before_rebind": true,
+            "database_post_check_access": "SELECT_ONLY"
+          },
+          "implementation_contract": {
+            "base_commit": "ba82b74c3c99eed87f3f55bceb61e1a0d8acf33b",
+            "exact_diff_allowlist": [
+              "scripts/run_n5_trigger_status_forward_once.py",
+              "scripts/run_n5_trigger_status_forward_current_once.py",
+              "tests/test_n5_trigger_status_forward_current.py"
+            ],
+            "plan_failure_verdict": "BLOCKED_CORE_PLAN_READ",
+            "plan_failure_requires_post_check": false,
+            "write_failure_verdict": "BLOCKED_COMMIT_UNKNOWN",
+            "write_failure_requires_post_check": true,
+            "immutable_incident_file_required_for_write_ambiguity": true,
+            "rolling_report_must_not_overwrite_incident": true,
+            "schema_or_index_change_allowed": false
+          },
+          "runtime_contract": {
+            "label": "com.ashare-v3.n5.trigger-status-forward-v1",
+            "source_release_commit": "ba82b74c3c99eed87f3f55bceb61e1a0d8acf33b",
+            "runner": "scripts/run_n5_trigger_status_forward_current_once.py",
+            "consumer_name": "n5_trigger_status_forward_current_v1",
+            "start_interval_seconds": 30,
+            "run_at_load": false,
+            "keep_alive": false,
+            "singleton_required": true,
+            "immutable_release_required": true,
+            "bootout_attempts": 1,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "natural_tick_only": true,
+            "maximum_convergence_seconds": 60
+          },
+          "allowed_effects": [
+            "archive_exact_legacy_incident_evidence",
+            "build_one_immutable_trigger_status_release",
+            "rebind_exact_n5_trigger_status_label_once",
+            "insert_idempotent_TriggerStatusUpdated_to_common_event_outbox",
+            "insert_idempotent_TriggerStatusInvalidated_to_common_event_outbox",
+            "write_exact_n5_report_history_and_incident"
+          ],
+          "forbidden_effects": [
+            "manual_database_write_or_delete",
+            "migration_or_index_change",
+            "ActionEligible_or_ActionExecuted_creation",
+            "common_action_event_or_tracking_write",
+            "n4_write_or_outbox_status_update",
+            "n6_label_or_projection_operation",
+            "signal_message_or_card_projection_change",
+            "web_or_sse_or_other_service_operation",
+            "strategy_or_executor_or_trade",
+            "kickstart_or_retry"
+          ],
+          "reject_on": [
+            "incident_identity_or_zero_commit_proof_drift",
+            "base_or_diff_allowlist_drift",
+            "plan_only_failure",
+            "release_or_plist_drift",
+            "operation_count_drift",
+            "forbidden_effect_present"
+          ]
+        }
+      },
       "deployment_phases": {
         "trigger_status_web_immutable_release_rebind": {
           "phase_id": "trigger_status_web_immutable_release_rebind",

@@ -785,6 +785,19 @@ ambiguous ActionEligible authority, existing-poller/checkpoint changes,
 session can register and test the planner but cannot materialize the Release or
 activate either job.
 
+For policy `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`, L2 may
+compile one later independent `N5_action` recovery DAG only when the exact
+scheduled-recovery phase object matches the governance JSON. The DAG freezes
+the original 20260803 15:06 failure, proves the incident-window N4/N5 row delta
+is zero with SELECT-only evidence, changes only the two N5 status-forward
+runners and their focused test, builds one immutable Release, rebinds only
+`com.ashare-v3.n5.trigger-status-forward-v1`, and observes natural ticks. Plan
+failures must be non-ambiguous and retryable; only writer/commit exceptions may
+create an immutable unresolved incident. Compilation rejects missing zero-
+commit proof, schema/index/migration work, an expanded diff, N6 operations,
+kickstart/retry, manual DML, or existing projection/trading effects. The
+governance session may register this DAG but cannot compile or execute it.
+
 For `phase_id=trigger_status_web_immutable_release_rebind`, L2 may compile one
 later independent `runtime_control` Web deployment gate only when the complete
 phase object exactly matches
