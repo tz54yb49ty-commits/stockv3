@@ -868,6 +868,78 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
                 )
                 self.assertEqual("W" in plan["triggered_periods"], w_triggered)
 
+    def test_independent_daily_match_can_deactivate_with_unrelated_q_y_not_ready(self) -> None:
+        context, initial_metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SH:601985",
+            direction="buy",
+            condition_key="BUY:Y,Q,M,W,D",
+            formal_periods=("D",),
+            negative_statuses={"Q": "not_ready", "Y": "not_ready"},
+        )
+        initial = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[initial_metric],
+        )[0]
+        initial["for_trade_date"] = "20260714"
+        previous = {
+            "for_trade_date": "20260714",
+            "asset_kind": initial["asset_kind"],
+            "identity_key": initial["identity_key"],
+            "direction": initial["direction"],
+            "signal_type": initial["signal_type"],
+            "condition_key": initial["condition_key"],
+            "trigger_period": initial["trigger_period"],
+            "current_status": "matched",
+            "raw_json": copy.deepcopy(initial),
+        }
+
+        current_metric = copy.deepcopy(initial_metric)
+        current_metric["current_price"] = "9.00"
+        current = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[current_metric],
+        )[0]
+        current.update(
+            {
+                "for_trade_date": "20260714",
+                "plan_status": "no_op",
+                "output_event_type": None,
+                "current_status": "no_op",
+                "trigger_live": False,
+                "metric_ready": True,
+                "data_quality_status": "passed",
+                "metric_quality_status": "passed",
+            }
+        )
+        current["rule_eval_result"].update(
+            {
+                "outcome_classification": "quality_blocked",
+                "output_event_type": None,
+                "pending_reasons": [],
+                "quality_reasons": [
+                    "period_escalation_prerequisite_not_ready:Q",
+                    "period_escalation_prerequisite_not_ready:Y",
+                ],
+                "blocked_reason": "period_escalation_prerequisite_not_ready:Q",
+            }
+        )
+
+        outputs = build_lifecycle_output_plans([current], previous_states=[previous])
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0]["output_event_type"], "TriggerStateChanged")
+        self.assertEqual(outputs[0]["current_status"], "inactive")
+        self.assertFalse(outputs[0]["trigger_live"])
+        self.assertEqual(outputs[0]["trigger_mark_candidate"], "normal")
+        self.assertEqual(outputs[0]["previous_trigger_mark_candidate"], "normal")
+        self.assertFalse(outputs[0]["writes_trigger_match"])
+        self.assertFalse(outputs[0]["n5_entry_allowed"])
+
     def test_ready_not_seen_and_not_ready_are_valid_untriggered_audit_states(self) -> None:
         expected_gate_status = {
             "ready": "passed",
