@@ -2,13 +2,18 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import plistlib
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from contextlib import redirect_stdout
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -185,6 +190,227 @@ def _current_day_c1_rows_for_fixture(
             }
         )
     return rows
+
+
+def _object_cursor_batch_scope_payload(
+    *,
+    object_count: int,
+    for_trade_date: str = "20260717",
+    next_unchecked_minute_label: str = "09:31",
+    include_hint_ref: bool = False,
+) -> dict[str, object]:
+    scope_rows: list[dict[str, object]] = []
+    active_ref_count = 0
+    for index in range(object_count):
+        code = f"{600000 + index:06d}"
+        identity_key = f"stock:SH:{code}"
+        refs: list[dict[str, object]] = [
+            {
+                "for_trade_date": for_trade_date,
+                "state_key": f"state-{code}-buy",
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "source_trigger_event_id": f"trigger-{code}-buy",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_trigger_run_id": f"n4-run-{code}-buy",
+                "source_trigger_event_time": f"{for_trade_date[:4]}-{for_trade_date[4:6]}-{for_trade_date[6:]}T09:31:00+08:00",
+                "trigger_time": f"{for_trade_date[:4]}-{for_trade_date[4:6]}-{for_trade_date[6:]}T09:31:00+08:00",
+                "first_confirmation_minute_label": "09:31",
+                "next_unchecked_minute_label": next_unchecked_minute_label,
+                "scope_status": "active",
+            }
+        ]
+        if include_hint_ref:
+            refs.append(
+                {
+                    **refs[0],
+                    "state_key": f"state-{code}-hint",
+                    "condition_key": "BUY_HINT:M",
+                    "source_trigger_event_id": f"trigger-{code}-hint",
+                    "source_trigger_run_id": f"n4-run-{code}-hint",
+                }
+            )
+        active_ref_count += len(refs)
+        scope_rows.append(
+            {
+                "for_trade_date": for_trade_date,
+                "asset_kind": "stock",
+                "identity_key": identity_key,
+                "scope_status": "active",
+                "active_tracking_refs": refs,
+                "attention_event_refs": [],
+            }
+        )
+    return {
+        "artifact_type": "n5_active_scope_snapshot_v1",
+        "artifact_schema_version": "v1",
+        "producer_layer": "N5_action",
+        "for_trade_date": for_trade_date,
+        "scope_granularity": "object",
+        "scope_status": "active",
+        "scope_count": object_count,
+        "active_tracking_ref_count": active_ref_count,
+        "full_market_fallback_allowed": False,
+        "n3_scans_n5_internals": False,
+        "scope_rows": scope_rows,
+    }
+
+
+def _post_close_source_provider(
+    call_log: list[tuple[str, str, str, str]],
+    *,
+    failed_object_keys: set[tuple[str, str, str, str]] | None = None,
+    source_rows_by_object: Mapping[
+        tuple[str, str, str, str], Sequence[Mapping[str, object]]
+    ]
+    | None = None,
+):
+    failures = failed_object_keys or set()
+    source_rows = source_rows_by_object or {}
+
+    def adapter(**_kwargs):
+        return {}
+
+    def inline_batch_adapter(*, args, planned_artifacts):
+        source_artifacts = []
+        failed_candidates = []
+        for plan in planned_artifacts:
+            object_key = tuple(str(value) for value in plan.get("object_batch_key") or ())
+            call_log.append(object_key)
+            if object_key in failures:
+                failed_candidates.append(
+                    {
+                        "object_batch_key": list(object_key),
+                        "reason": "current_day_source_provider_fetch_failed",
+                    }
+                )
+                continue
+            source_run_hash = str(plan.get("source_run_hash") or "")
+            namespace = str(plan.get("namespace_token") or "")
+            rows = [dict(row) for row in source_rows.get(object_key, ())]
+            if not rows:
+                rows = [
+                    {
+                        "for_trade_date": object_key[0],
+                        "asset_kind": object_key[1],
+                        "identity_key": object_key[2],
+                        "direction": object_key[3],
+                        "scope_status": "active",
+                        "physical_c1_label": "14:59",
+                        "raw_source_label": "15:00",
+                        "open": 10.0,
+                        "high": 10.2,
+                        "low": 9.9,
+                        "close": 10.1,
+                        "amount": 1000.0,
+                    }
+                ]
+            payload = {
+                "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                "artifact_schema_version": "v1",
+                "producer_layer": "N3_market_data",
+                "for_trade_date": object_key[0],
+                "target_hhmm": "1459",
+                "target_minute_label": "14:59",
+                "source_run_hash": source_run_hash,
+                "source_run_namespace": namespace,
+                "source_provider": "fake_post_close_provider",
+                "source_adapter": "fake_post_close_provider",
+                "source_version": "test",
+                "direction": object_key[3],
+                "source_written_at": "2026-07-21T15:01:05+08:00",
+                "closed_minute_row_count": len(rows),
+                "closed_minute_rows": rows,
+                "market_data_pulled": True,
+                "database_written": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+            source_artifacts.append(
+                {
+                    "path": f"inline://post-close/{namespace}",
+                    "target_hhmm": "1459",
+                    "for_trade_date": object_key[0],
+                    "artifact_type": payload["artifact_type"],
+                    "source_run_hash": source_run_hash,
+                    "source_run_namespace": namespace,
+                    "row_count": len(rows),
+                    "sha256": hashlib.sha256(
+                        json.dumps(payload, sort_keys=True).encode("utf-8")
+                    ).hexdigest(),
+                    "payload": payload,
+                    "object_batch_key": list(object_key),
+                }
+            )
+        return {
+            "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+            "provider_name": "fake_post_close_provider",
+            "inline_payload_count": len(source_artifacts),
+            "source_row_count": len(source_artifacts),
+            "source_artifacts": source_artifacts,
+            "candidate_results": [],
+            "failed_candidate_count": len(failed_candidates),
+            "failed_candidates": failed_candidates,
+            "market_data_pulled": bool(planned_artifacts),
+            "database_written": False,
+            "runtime_execute": False,
+            "writes_canonical_minute_bar_1m": False,
+            "writes_n3_outbox": False,
+            "writes_common_event_outbox": False,
+            "touches_n4_n5_n6_outbox": False,
+            "updates_n4_outbox": False,
+            "scans_n5_db": False,
+            "touches_n6": False,
+            "full_market_fallback_used": False,
+        }
+
+    setattr(adapter, "inline_batch_adapter", inline_batch_adapter)
+    return adapter
+
+
+def _post_close_pipeline_manifest(
+    *,
+    proof_object_keys: Sequence[tuple[str, str, str, str]] = (),
+) -> dict[str, object]:
+    return {
+        "verdict": "N3_C1_N3T_FASTLANE_EXECUTE_PASS" if proof_object_keys else "N3_C1_N3T_FASTLANE_READINESS_WAITING",
+        "reason": "object_cursor_batch_chunk_incomplete",
+        "writes_enabled": bool(proof_object_keys),
+        "current_day_source_provider_result": {
+            "cached_source_count": len(proof_object_keys),
+            "source_artifacts": [],
+            "market_data_pulled": False,
+        },
+        "object_cursor_batch": {
+            "batch_artifacts": [
+                {
+                    "object_key": list(object_key),
+                    "target_minute_labels": ["14:59"],
+                    "proof_target_minute_labels": ["14:59"],
+                }
+                for object_key in proof_object_keys
+            ],
+            "failure_records": [],
+            "processed_candidate_count": len(proof_object_keys),
+        },
+        "lane_results": {
+            "c1_lane": {},
+            "n3t_lane": {},
+        },
+        "boundary": {
+            "pulls_market_data": False,
+            "writes_db": bool(proof_object_keys),
+            "writes_n3t_metric_db": bool(proof_object_keys),
+        },
+    }
 
 
 class N5N3TFastlaneContractTest(unittest.TestCase):
@@ -962,8 +1188,14 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertFalse(policy["n3_boundary"]["scans_common_action_tracking_state"])
         self.assertEqual(policy["n3_boundary"]["input_artifact_type"], "n5_active_scope_snapshot_v1")
         self.assertEqual(policy["lunch_break"]["source_gap_policy"], "session_boundary_source_gap_excluded_v1")
-        self.assertEqual(policy["post_close"]["drain_mode"], "post_close_final_a_pass_once")
-        self.assertEqual(policy["post_close"]["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+        self.assertEqual(
+            policy["post_close"]["drain_mode"],
+            "time_ordered_drain_then_post_close_final_a_pass_once",
+        )
+        self.assertEqual(
+            policy["post_close"]["backlog_order"],
+            ["event_time ASC", "source_run_id ASC", "outbox_id ASC"],
+        )
         self.assertTrue(policy["post_close"]["post_close_final_a_pass_once"])
         self.assertEqual(policy["post_close"]["target_close_boundary"], "session_close")
 
@@ -1019,10 +1251,14 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             trade_calendar_is_open=True,
         )
         self.assertEqual(post_close["phase"], "post_close")
-        self.assertFalse(post_close["n5_intake"]["action_eligible_write_allowed"])
-        self.assertFalse(post_close["post_close_drain"]["enabled"])
-        self.assertEqual(post_close["post_close_drain"]["superseded_by"], "post_close_final_a_pass")
-        self.assertEqual(post_close["post_close_drain"]["backlog_order"], ["event_time ASC", "source_run_id ASC"])
+        self.assertTrue(post_close["n5_intake"]["action_eligible_write_allowed"])
+        self.assertTrue(post_close["n5_intake"]["active_tracking_write_allowed"])
+        self.assertTrue(post_close["post_close_drain"]["enabled"])
+        self.assertTrue(post_close["post_close_drain"]["precedes_post_close_final_a_pass"])
+        self.assertEqual(
+            post_close["post_close_drain"]["backlog_order"],
+            ["event_time ASC", "source_run_id ASC", "outbox_id ASC"],
+        )
         self.assertTrue(post_close["post_close_final_a_pass"]["enabled"])
         self.assertFalse(post_close["post_close_final_a_pass"]["repeated_microbatch_allowed"])
         self.assertEqual(post_close["post_close_final_a_pass"]["target_close_boundary"], "session_close")
@@ -1142,11 +1378,84 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             closed_minute_available=True,
             matching_n3t_metric_available=False,
         )
-        self.assertEqual(post_close["worker_mode"], "post_close_final_a_scope_snapshot")
-        self.assertFalse(post_close["writes_enabled_allowed"])
+        self.assertEqual(post_close["worker_mode"], "time_ordered_drain")
+        self.assertTrue(post_close["writes_enabled_allowed"])
         self.assertTrue(post_close["artifact_writes_enabled_allowed"])
-        self.assertFalse(post_close["action_eligible_entry_allowed"])
-        self.assertTrue(post_close["scope_snapshot_only"])
+        self.assertTrue(post_close["action_eligible_entry_allowed"])
+        self.assertFalse(post_close["scope_snapshot_only"])
+        self.assertEqual(
+            post_close["backlog_order"],
+            ["event_time ASC", "source_run_id ASC", "outbox_id ASC"],
+        )
+
+        post_close_inactive_only = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            inactive_trigger_state_changed_available=True,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+        )
+        self.assertEqual(post_close_inactive_only["worker_mode"], "time_ordered_drain")
+        self.assertTrue(post_close_inactive_only["writes_enabled_allowed"])
+        self.assertFalse(post_close_inactive_only["action_eligible_entry_allowed"])
+        self.assertTrue(post_close_inactive_only["trigger_live_false_cleanup_allowed"])
+
+        post_close_active_only = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            inactive_trigger_state_changed_available=False,
+            active_trigger_state_changed_available=True,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+        )
+        self.assertEqual(post_close_active_only["worker_mode"], "time_ordered_drain")
+        self.assertTrue(post_close_active_only["writes_enabled_allowed"])
+        self.assertFalse(post_close_active_only["action_eligible_entry_allowed"])
+        self.assertTrue(post_close_active_only["trigger_live_true_attention_allowed"])
+
+        post_close_empty = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="post_close",
+            formal_trigger_matched_available=False,
+            inactive_trigger_state_changed_available=False,
+            active_trigger_state_changed_available=False,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+        )
+        self.assertEqual(post_close_empty["worker_mode"], "post_close_final_a_scope_snapshot")
+        self.assertFalse(post_close_empty["writes_enabled_allowed"])
+        self.assertTrue(post_close_empty["artifact_writes_enabled_allowed"])
+        self.assertTrue(post_close_empty["scope_snapshot_only"])
+
+        post_close_late_after_done = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="post_close",
+            formal_trigger_matched_available=True,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            post_close_final_a_pass_done=True,
+        )
+        self.assertEqual(post_close_late_after_done["worker_mode"], "time_ordered_drain")
+        self.assertTrue(post_close_late_after_done["supersedes_post_close_final_a_pass_done"])
+
+        post_close_intake_wrong_date = resolve_fastlane_active_worker_decision(
+            lane_key="n5_action_intake",
+            session_phase="post_close",
+            formal_trigger_matched_available=True,
+            closed_minute_available=True,
+            matching_n3t_metric_available=False,
+            for_trade_date_is_current_date=False,
+            trade_calendar_is_open=True,
+        )
+        self.assertEqual(
+            post_close_intake_wrong_date["worker_mode"],
+            "post_close_final_a_pass_noop",
+        )
+        self.assertFalse(
+            post_close_intake_wrong_date["writes_enabled_allowed"]
+        )
 
         post_close_executed_waiting = resolve_fastlane_active_worker_decision(
             lane_key="n5_action_executed",
@@ -1242,6 +1551,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                        "marker_schema_version": "v2",
                         "for_trade_date": "20260706",
                         "status": "done",
                         "completion_mode": "n5_executed_all_refs_evaluated",
@@ -1251,6 +1561,19 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "action_executed_count": 1,
                         "evaluation_only_count": 2,
                         "unprocessed_ref_count": 0,
+                        "n4_intake_boundary": {
+                            "for_trade_date": "20260706",
+                            "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                            "max_n4_canonical_outbox_id": 42,
+                            "canonical_event_count": 3,
+                            "inbox_covered_event_count": 3,
+                            "unconsumed_event_count": 0,
+                            "checkpoint_partition_count": 2,
+                            "checkpoint_covered_partition_count": 2,
+                            "checkpoint_coverage_complete": True,
+                            "exact_cover": True,
+                            "stable_observation_count": 2,
+                        },
                         "boundary": {
                             "n4_outbox_updated": False,
                             "n6_touched": False,
@@ -1288,6 +1611,203 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         )
         self.assertEqual(decision["worker_mode"], "post_close_final_a_pass_noop")
         self.assertEqual(decision["blocked_reason"], "post_close_final_a_pass_done")
+
+    def test_post_close_final_a_legacy_done_marker_without_intake_watermark_is_untrusted(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            resolve_fastlane_runtime_session_context,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "done.json"
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                        "for_trade_date": "20260706",
+                        "status": "done",
+                        "completion_mode": "empty_a_noop",
+                        "evaluated_ref_count": 0,
+                        "action_executed_count": 0,
+                        "evaluation_only_count": 0,
+                        "unprocessed_ref_count": 0,
+                        "boundary": {
+                            "n4_outbox_updated": False,
+                            "n6_touched": False,
+                            "canonical_minute_bar_1m_written": False,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            context = resolve_fastlane_runtime_session_context(
+                {
+                    "for_trade_date": "20260706",
+                    "session_context_policy": {
+                        "policy_type": "fastlane_runtime_clock_session_context_v1",
+                        "trade_calendar_is_open": True,
+                        "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                    },
+                }
+            )
+
+        self.assertFalse(context["post_close_final_a_pass_done"])
+        marker_context = context["post_close_final_a_pass_done_marker"]
+        self.assertTrue(marker_context["legacy_untrusted"])
+        self.assertFalse(marker_context["trusted_done"])
+
+    def test_post_close_final_a_partial_or_wrong_consumer_watermark_is_untrusted(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            resolve_fastlane_runtime_session_context,
+        )
+
+        boundary = {
+            "for_trade_date": "20260706",
+            "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+            "max_n4_canonical_outbox_id": 42,
+            "canonical_event_count": 3,
+            "inbox_covered_event_count": 3,
+            "unconsumed_event_count": 0,
+            "checkpoint_partition_count": 2,
+            "checkpoint_covered_partition_count": 2,
+            "checkpoint_coverage_complete": True,
+            "exact_cover": True,
+            "stable_observation_count": 2,
+        }
+        cases = {
+            "missing_max_outbox_watermark": {
+                key: value
+                for key, value in boundary.items()
+                if key != "max_n4_canonical_outbox_id"
+            },
+            "wrong_consumer": {
+                **boundary,
+                "consumer_name": "another_n5_consumer",
+            },
+        }
+
+        for name, intake_boundary in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                marker_path = Path(tmpdir) / "done.json"
+                marker_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                            "marker_schema_version": "v2",
+                            "for_trade_date": "20260706",
+                            "status": "done",
+                            "completion_mode": "empty_a_noop",
+                            "evaluated_ref_count": 0,
+                            "action_executed_count": 0,
+                            "evaluation_only_count": 0,
+                            "unprocessed_ref_count": 0,
+                            "n4_intake_boundary": intake_boundary,
+                            "boundary": {
+                                "n4_outbox_updated": False,
+                                "n6_touched": False,
+                                "canonical_minute_bar_1m_written": False,
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                context = resolve_fastlane_runtime_session_context(
+                    {
+                        "for_trade_date": "20260706",
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                            "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        },
+                    }
+                )
+
+            self.assertFalse(context["post_close_final_a_pass_done"])
+            self.assertTrue(
+                context["post_close_final_a_pass_done_marker"][
+                    "legacy_untrusted"
+                ]
+            )
+
+    def test_post_close_intake_boundary_provider_is_explicitly_read_only(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        class FakeCursor:
+            def __init__(self):
+                self.query = ""
+                self.params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, query, params):
+                self.query = str(query)
+                self.params = params
+
+            def fetchone(self):
+                return {
+                    "canonical_event_count": 10,
+                    "max_n4_canonical_outbox_id": 46,
+                    "inbox_covered_event_count": 10,
+                    "unconsumed_event_count": 0,
+                    "checkpoint_partition_count": 2,
+                    "checkpoint_covered_partition_count": 2,
+                }
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+                self.begin_statements = []
+                self.rollback_called = False
+                self.close_called = False
+
+            def execute(self, statement):
+                self.begin_statements.append(str(statement))
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def rollback(self):
+                self.rollback_called = True
+
+            def close(self):
+                self.close_called = True
+
+        connection = FakeConnection()
+        with patch.object(
+            runner.psycopg,
+            "connect",
+            return_value=connection,
+        ) as connect:
+            boundary = runner._default_post_close_intake_boundary_provider(
+                argparse.Namespace(
+                    dsn="postgresql:///test-only",
+                    for_trade_date="20260706",
+                    consumer_name="n5_live_tracking_poller_v2_fastlane",
+                )
+            )
+
+        self.assertEqual(connection.begin_statements, ["BEGIN READ ONLY"])
+        self.assertTrue(connection.rollback_called)
+        self.assertTrue(connection.close_called)
+        self.assertIn("common_event_inbox", connection.cursor_instance.query)
+        self.assertIn("i.status = 'processed'", connection.cursor_instance.query)
+        self.assertIn(
+            "common_event_consumer_checkpoint",
+            connection.cursor_instance.query,
+        )
+        self.assertEqual(boundary["canonical_event_count"], 10)
+        connect.assert_called_once()
+        self.assertEqual(
+            connect.call_args.kwargs["options"],
+            "-c default_transaction_read_only=on",
+        )
 
     def test_post_close_final_a_done_marker_invalid_fails_closed(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import resolve_fastlane_runtime_session_context
@@ -1910,7 +2430,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(manifest["fastlane"]["session_phase"], "trading")
         self.assertFalse(manifest["writes_enabled"])
 
-    def test_n5_post_close_empty_a_writes_final_done_marker_from_intake(self) -> None:
+    def test_n5_post_close_empty_a_requires_stable_intake_watermark_before_done_marker(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1931,6 +2451,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                                 "source_trigger_run_id": "post_close_final_a_scope_snapshot_20260706",
                                 "action_run_id": "n5_live_tracking_20260706__post_close_final_a__fastlane_v1",
                                 "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                                "n5_intake_event_kind": "post_close_final_a_scope_snapshot",
+                                "formal_trigger_matched_available": False,
+                                "inactive_trigger_state_changed_available": False,
+                                "active_trigger_state_changed_available": False,
                             }
                         },
                         "session_context_policy": {
@@ -1941,7 +2465,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "execute_policy": {
                             "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
                             "user_confirmed": True,
-                            "n5_action_intake": {"execute": False, "write_active_scope_artifact": True},
+                            "n5_action_intake": {"execute": True, "write_active_scope_artifact": True},
                             "n3_c1_n3t_action_confirmation": {"execute": False},
                             "n5_action_executed": {"execute": False},
                         },
@@ -1975,25 +2499,454 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                     },
                 }
 
-            manifest = run_n5_live_tracking_poller_once(
-                [
-                    "--activation-config",
-                    str(config_path),
-                    "--fastlane-phase",
-                    "intake",
-                    "--write-active-scope-artifact",
-                    "--user-confirmed",
-                ],
+            boundary = {
+                "for_trade_date": "20260706",
+                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                "max_n4_canonical_outbox_id": 44,
+                "canonical_event_count": 4,
+                "inbox_covered_event_count": 4,
+                "unconsumed_event_count": 0,
+                "checkpoint_partition_count": 2,
+                "checkpoint_covered_partition_count": 2,
+                "observed_at": "2026-07-06T15:03:00+08:00",
+            }
+            argv = [
+                "--activation-config",
+                str(config_path),
+                "--fastlane-phase",
+                "intake",
+                "--execute",
+                "--write-active-scope-artifact",
+                "--user-confirmed",
+            ]
+            first_manifest = run_n5_live_tracking_poller_once(
+                argv,
                 plan_provider=plan_provider,
+                post_close_intake_boundary_provider=lambda _args: boundary,
+            )
+            first_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            interrupted_boundary = {
+                **boundary,
+                "inbox_covered_event_count": 3,
+                "unconsumed_event_count": 1,
+                "checkpoint_covered_partition_count": 1,
+                "observed_at": "2026-07-06T15:03:03+08:00",
+            }
+            interrupted_manifest = run_n5_live_tracking_poller_once(
+                argv,
+                plan_provider=plan_provider,
+                post_close_intake_boundary_provider=lambda _args: interrupted_boundary,
+            )
+            interrupted_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            second_manifest = run_n5_live_tracking_poller_once(
+                argv,
+                plan_provider=plan_provider,
+                post_close_intake_boundary_provider=lambda _args: boundary,
+            )
+            second_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            manifest = run_n5_live_tracking_poller_once(
+                argv,
+                plan_provider=plan_provider,
+                post_close_intake_boundary_provider=lambda _args: boundary,
             )
 
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
 
+        self.assertEqual(first_manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
+        self.assertTrue(first_manifest["execute_requested"])
+        self.assertFalse(first_manifest["execute_effective"])
+        self.assertFalse(first_manifest["writes_enabled"])
+        self.assertEqual(
+            first_manifest["fastlane"]["execute_suppressed_reason"],
+            "post_close_final_a_scope_snapshot_artifact_only",
+        )
+        self.assertEqual(first_marker["status"], "candidate")
+        self.assertEqual(first_marker["n4_intake_boundary"]["stable_observation_count"], 1)
+        self.assertEqual(
+            interrupted_manifest["verdict"],
+            "BLOCKED_N5_LIVE_TRACKING_POLLER",
+        )
+        self.assertEqual(
+            interrupted_manifest["blocked_reason"],
+            "post_close_intake_boundary_changed_before_scope_snapshot",
+        )
+        self.assertEqual(interrupted_marker["status"], "superseded")
+        self.assertEqual(second_manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
+        self.assertEqual(second_marker["status"], "candidate")
+        self.assertEqual(
+            second_marker["n4_intake_boundary"]["stable_observation_count"],
+            1,
+        )
         self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_PLAN_ONLY")
         self.assertTrue(manifest["post_close_final_a_pass_done_marker_write_result"]["executed"])
         self.assertEqual(marker["artifact_type"], "n5_c1_n3t_post_close_final_a_pass_done_v1")
+        self.assertEqual(marker["status"], "done")
         self.assertEqual(marker["completion_mode"], "empty_a_noop")
         self.assertEqual(marker["unprocessed_ref_count"], 0)
+        self.assertEqual(marker["n4_intake_boundary"]["stable_observation_count"], 2)
+
+    def test_n5_post_close_late_backlog_supersedes_done_marker_before_writer(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "activation_config.json"
+            marker_path = root / "n5_c1_n3t_post_close_final_a_pass_done_v1.json"
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_c1_n3t_post_close_final_a_pass_done_v1",
+                        "marker_schema_version": "v2",
+                        "for_trade_date": "20260706",
+                        "status": "done",
+                        "completion_mode": "empty_a_noop",
+                        "active_scope_artifact_path": "scope.json",
+                        "active_scope_artifact_sha256": "hash",
+                        "evaluated_ref_count": 0,
+                        "action_executed_count": 0,
+                        "evaluation_only_count": 0,
+                        "unprocessed_ref_count": 0,
+                        "n4_intake_boundary": {
+                            "for_trade_date": "20260706",
+                            "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                            "max_n4_canonical_outbox_id": 44,
+                            "canonical_event_count": 4,
+                            "inbox_covered_event_count": 4,
+                            "unconsumed_event_count": 0,
+                            "checkpoint_partition_count": 2,
+                            "checkpoint_covered_partition_count": 2,
+                            "checkpoint_coverage_complete": True,
+                            "exact_cover": True,
+                            "stable_observation_count": 2,
+                        },
+                        "boundary": {
+                            "n4_outbox_updated": False,
+                            "n6_touched": False,
+                            "canonical_minute_bar_1m_written": False,
+                            "db_marker_table_written": False,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "lanes": _canonical_n5_action_intake_lanes(),
+                        "for_trade_date": "20260706",
+                        "post_close_final_a_pass_done_marker_path": str(marker_path),
+                        "runtime_inputs": {
+                            "n5_action_intake": {
+                                "source_trigger_run_id": "post_close_final_a_scope_snapshot_20260706",
+                                "action_run_id": "n5_live_tracking_20260706__post_close_final_a__fastlane_v1",
+                                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                                "n5_intake_event_kind": "post_close_final_a_scope_snapshot",
+                                "formal_trigger_matched_available": False,
+                                "inactive_trigger_state_changed_available": False,
+                                "active_trigger_state_changed_available": False,
+                            }
+                        },
+                        "session_context_policy": {
+                            "policy_type": "fastlane_runtime_clock_session_context_v1",
+                            "trade_calendar_is_open": True,
+                            "current_exchange_time_override": "2026-07-06T15:03:00+08:00",
+                        },
+                        "execute_policy": {
+                            "policy_type": "n5_n3t_fastlane_write_enabled_execute_policy_v1",
+                            "user_confirmed": True,
+                            "n5_action_intake": {
+                                "execute": True,
+                                "write_active_scope_artifact": False,
+                            },
+                            "n3_c1_n3t_action_confirmation": {"execute": False},
+                            "n5_action_executed": {"execute": False},
+                        },
+                        "active_worker_policy_review_ref": {
+                            "result": "PASS",
+                            "for_trade_date": "20260706",
+                            "active_worker_write_enabled_ready": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            base_payload = {
+                "trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:D",
+                "trigger_live": True,
+                "current_status": "matched",
+                "trigger_state_id": 101,
+                "trigger_match_id": 201,
+                "primary_trigger_period": "D",
+                "all_trigger_periods": ["D"],
+            }
+            prior_action_run_id = (
+                "n5_live_tracking_20260706__n4-run-a__fastlane_v1"
+            )
+            prior_match = {
+                "outbox_id": 40,
+                "event_id": "n4-match-prior",
+                "event_type": "TriggerMatched",
+                "event_schema_version": "v1",
+                "trade_date": "20260706",
+                "asset_kind": "stock",
+                "identity_key": "stock:SH:600000",
+                "event_time": "2026-07-06T14:59:59+08:00",
+                "source_layer": "N4_trigger",
+                "source_run_id": "n4-run-a",
+                "dedup_key": "n4:n4-match-prior",
+                "partition_key": "stock:SH:600000",
+                "status": "pending",
+                "payload_json": dict(base_payload),
+            }
+            consumed_events = [
+                {
+                    "outbox_id": 45,
+                    "event_id": "n4-tsc-false-late",
+                    "event_type": "TriggerStateChanged",
+                    "event_schema_version": "v1",
+                    "trade_date": "20260706",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:600000",
+                    "event_time": "2026-07-06T15:00:01+08:00",
+                    "source_layer": "N4_trigger",
+                    "source_run_id": "n4-run-a",
+                    "dedup_key": "n4:n4-tsc-false-late",
+                    "partition_key": "stock:SH:600000",
+                    "status": "pending",
+                    "payload_json": {
+                        **base_payload,
+                        "trigger_live": False,
+                        "current_status": "inactive",
+                    },
+                },
+                {
+                    "outbox_id": 46,
+                    "event_id": "n4-match-late",
+                    "event_type": "TriggerMatched",
+                    "event_schema_version": "v1",
+                    "trade_date": "20260706",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:600000",
+                    "event_time": "2026-07-06T15:00:02+08:00",
+                    "source_layer": "N4_trigger",
+                    "source_run_id": "n4-run-b",
+                    "dedup_key": "n4:n4-match-late",
+                    "partition_key": "stock:SH:600000",
+                    "status": "pending",
+                    "payload_json": dict(base_payload),
+                },
+            ]
+
+            def discovery_provider(args, _config):
+                self.assertEqual(
+                    args.source_trigger_run_id,
+                    "post_close_final_a_scope_snapshot_20260706",
+                )
+                self.assertEqual(
+                    args.action_run_id,
+                    "n5_live_tracking_20260706__post_close_final_a__fastlane_v1",
+                )
+                self.assertEqual(
+                    args.n5_intake_event_kind,
+                    "post_close_final_a_scope_snapshot",
+                )
+                return {
+                    "trigger_time": "2026-07-06T15:00:02+08:00",
+                    "action_run_id": "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+                    "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                    "n5_intake_event_kind": "active_set_a",
+                    "formal_trigger_matched_available": True,
+                    "inactive_trigger_state_changed_available": True,
+                    "active_trigger_state_changed_available": False,
+                }
+
+            plan_invocations = []
+
+            def plan_provider(args):
+                from ashare_v3.action.live_tracking_poller import (
+                    build_live_tracking_plan,
+                )
+
+                plan_invocations.append(args)
+                decision = args.fastlane_active_worker_decision
+                self.assertEqual(args.fastlane_session_phase, "post_close")
+                self.assertEqual(args.source_trigger_run_id, "")
+                self.assertEqual(
+                    args.action_run_id,
+                    "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+                )
+                self.assertEqual(args.n5_intake_event_kind, "active_set_a")
+                self.assertEqual(decision["worker_mode"], "time_ordered_drain")
+                self.assertEqual(
+                    decision["backlog_order"],
+                    ["event_time ASC", "source_run_id ASC", "outbox_id ASC"],
+                )
+                self.assertTrue(decision["action_eligible_entry_allowed"])
+                self.assertTrue(decision["trigger_live_false_cleanup_allowed"])
+                if len(plan_invocations) == 1:
+                    self.assertTrue(
+                        decision["supersedes_post_close_final_a_pass_done"]
+                    )
+                else:
+                    self.assertFalse(
+                        decision.get(
+                            "supersedes_post_close_final_a_pass_done",
+                            False,
+                        )
+                    )
+                prior = build_live_tracking_plan(
+                    n4_event_rows=[prior_match],
+                    active_tracking_rows=[],
+                    metric_rows=[],
+                    action_run_id=prior_action_run_id,
+                    source_trigger_run_id="n4-run-a",
+                    source_metric_run_id="",
+                    consumer_name=args.consumer_name,
+                    for_trade_date=args.for_trade_date,
+                )
+                plan = build_live_tracking_plan(
+                    n4_event_rows=consumed_events,
+                    active_tracking_rows=prior["tracking_updates"],
+                    metric_rows=[],
+                    action_run_id=args.action_run_id,
+                    source_trigger_run_id="",
+                    source_metric_run_id="",
+                    consumer_name=args.consumer_name,
+                    existing_action_event_keys={
+                        event["event_key"]
+                        for event in prior["action_events"]
+                    },
+                    for_trade_date=args.for_trade_date,
+                )
+                runner._restore_intake_plan_source_metadata(
+                    plan,
+                    consumed_events,
+                    active_tracking_rows=prior["tracking_updates"],
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in plan["action_events"]],
+                    ["ActionEligible"],
+                )
+                self.assertEqual(
+                    plan["action_events"][0]["payload_json"][
+                        "source_trigger_event_id"
+                    ],
+                    "n4-match-late",
+                )
+                self.assertEqual(
+                    plan["tracking_updates"][0]["run_id"],
+                    prior_action_run_id,
+                )
+                self.assertEqual(
+                    plan["tracking_updates"][0]["source_trigger_run_id"],
+                    "n4-run-b",
+                )
+                active_ref = plan["active_scope_snapshot_artifact"][
+                    "scope_rows"
+                ][0]["active_tracking_refs"][0]
+                self.assertEqual(active_ref["run_id"], prior_action_run_id)
+                self.assertEqual(
+                    active_ref["source_trigger_run_id"],
+                    "n4-run-b",
+                )
+                return plan
+
+            writer_observations = []
+
+            def writer(_args, plan):
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                writer_observations.append(marker)
+                self.assertEqual(marker["status"], "superseded")
+                self.assertTrue(
+                    marker["supersession"]["marker_superseded_before_db_writer"]
+                )
+                self.assertEqual(
+                    [row["event_id"] for row in plan["consumed_n4_events"]],
+                    ["n4-tsc-false-late", "n4-match-late"],
+                )
+                return {
+                    "executed": True,
+                    "common_action_tracking_state": 1,
+                    "common_event_outbox": 1,
+                    "common_event_inbox": 2,
+                    "common_event_consumer_checkpoint": 2,
+                    "n4_outbox_status_updated": False,
+                }
+
+            def failing_writer(_args, plan):
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                writer_observations.append(marker)
+                self.assertEqual(marker["status"], "superseded")
+                self.assertEqual(
+                    [row["event_id"] for row in plan["consumed_n4_events"]],
+                    ["n4-tsc-false-late", "n4-match-late"],
+                )
+                raise runner.N5LiveTrackingBlocked("simulated_intake_writer_failure")
+
+            argv = [
+                "--activation-config",
+                str(config_path),
+                "--fastlane-phase",
+                "intake",
+                "--execute",
+                "--user-confirmed",
+            ]
+            failed_manifest = runner.run_n5_live_tracking_poller_once(
+                argv,
+                activation_discovery_provider=discovery_provider,
+                plan_provider=plan_provider,
+                writer=failing_writer,
+            )
+            marker_after_failure = json.loads(
+                marker_path.read_text(encoding="utf-8")
+            )
+            manifest = runner.run_n5_live_tracking_poller_once(
+                [
+                    *argv,
+                ],
+                activation_discovery_provider=discovery_provider,
+                plan_provider=plan_provider,
+                writer=writer,
+            )
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(failed_manifest["verdict"], "BLOCKED_N5_LIVE_TRACKING_POLLER")
+        self.assertEqual(
+            failed_manifest["blocked_reason"],
+            "simulated_intake_writer_failure",
+        )
+        self.assertEqual(marker_after_failure["status"], "superseded")
+        self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_EXECUTE_PASS")
+        self.assertEqual(len(writer_observations), 2)
+        self.assertFalse(
+            manifest["post_close_final_a_pass_done_marker_supersede_result"][
+                "executed"
+            ]
+        )
+        self.assertEqual(
+            manifest["post_close_final_a_pass_done_marker_supersede_result"][
+                "reason"
+            ],
+            "marker_already_superseded",
+        )
+        self.assertEqual(marker["status"], "superseded")
+        self.assertEqual(
+            marker["supersession"]["source_event_ids"],
+            ["n4-match-late", "n4-tsc-false-late"],
+        )
+        self.assertFalse(manifest["write_result"]["n4_outbox_status_updated"])
+        self.assertFalse(manifest["boundary"]["n4_outbox_updated"])
+        self.assertFalse(
+            manifest["plan"]["inbox_checkpoint_intent"]["updates_n4_outbox"]
+        )
 
     def test_n5_post_close_executed_all_refs_evaluated_writes_done_marker(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
@@ -2070,34 +3023,60 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                     },
                 }
 
-            manifest = run_n5_live_tracking_poller_once(
-                [
-                    "--activation-config",
-                    str(config_path),
-                    "--fastlane-phase",
-                    "executed",
-                    "--execute",
-                    "--user-confirmed",
-                ],
+            boundary = {
+                "for_trade_date": "20260706",
+                "consumer_name": "n5_live_tracking_poller_v2_fastlane",
+                "max_n4_canonical_outbox_id": 44,
+                "canonical_event_count": 4,
+                "inbox_covered_event_count": 4,
+                "unconsumed_event_count": 0,
+                "checkpoint_partition_count": 2,
+                "checkpoint_covered_partition_count": 2,
+                "observed_at": "2026-07-06T15:03:00+08:00",
+            }
+            argv = [
+                "--activation-config",
+                str(config_path),
+                "--fastlane-phase",
+                "executed",
+                "--execute",
+                "--user-confirmed",
+            ]
+            writer_result = {
+                "executed": True,
+                "common_action_tracking_state": 1,
+                "common_event_outbox": 0,
+                "common_event_inbox": 0,
+                "common_event_consumer_checkpoint": 0,
+                "n4_outbox_status_updated": False,
+            }
+            first_manifest = run_n5_live_tracking_poller_once(
+                argv,
                 plan_provider=plan_provider,
-                writer=lambda _args, _plan: {
-                    "executed": True,
-                    "common_action_tracking_state": 1,
-                    "common_event_outbox": 0,
-                    "common_event_inbox": 0,
-                    "common_event_consumer_checkpoint": 0,
-                    "n4_outbox_status_updated": False,
-                },
+                writer=lambda _args, _plan: writer_result,
+                post_close_intake_boundary_provider=lambda _args: boundary,
+            )
+            first_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            manifest = run_n5_live_tracking_poller_once(
+                argv,
+                plan_provider=plan_provider,
+                writer=lambda _args, _plan: writer_result,
+                post_close_intake_boundary_provider=lambda _args: boundary,
             )
 
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
 
+        self.assertEqual(first_manifest["verdict"], "N5_LIVE_TRACKING_EVALUATION_PASS_NO_ACTIONEXECUTED")
+        self.assertEqual(first_marker["status"], "candidate")
+        self.assertEqual(first_marker["n4_intake_boundary"]["stable_observation_count"], 1)
         self.assertEqual(manifest["verdict"], "N5_LIVE_TRACKING_EVALUATION_PASS_NO_ACTIONEXECUTED")
         self.assertTrue(manifest["post_close_final_a_pass_done_marker_write_result"]["executed"])
+        self.assertEqual(marker["status"], "done")
         self.assertEqual(marker["completion_mode"], "n5_executed_all_refs_evaluated")
         self.assertEqual(marker["evaluated_ref_count"], 1)
         self.assertEqual(marker["evaluation_only_count"], 1)
         self.assertEqual(marker["unprocessed_ref_count"], 0)
+        self.assertEqual(marker["n4_intake_boundary"]["stable_observation_count"], 2)
 
     def test_n5_post_close_done_marker_uses_full_active_scope_refs(self) -> None:
         from run_n5_live_tracking_poller_once import run_n5_live_tracking_poller_once
@@ -3132,11 +4111,178 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(discovered["n5_intake_event_kind"], "active_set_a")
         self.assertEqual(discovered["action_run_id"], "n5_live_tracking_20260706__active_set_a__fastlane_v1")
         self.assertEqual(discovered["trigger_time"], "2026-07-06 13:52:00+08")
+        self.assertFalse(discovered["formal_trigger_matched_available"])
+        self.assertFalse(discovered["inactive_trigger_state_changed_available"])
+        self.assertTrue(discovered["active_trigger_state_changed_available"])
         self.assertEqual(len(cur.queries), 2)
         repair_query = cur.queries[1][0]
         self.assertIn("common_event_inbox", repair_query)
         self.assertIn("i.status = 'processed'", repair_query)
         self.assertIn("TriggerStateChanged", repair_query)
+
+    def test_n5_intake_discovery_returns_explicit_empty_active_set(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+
+        class FakeCursor:
+            def __init__(self):
+                self.rows = [
+                    {
+                        "first_trigger_time": None,
+                        "latest_trigger_time": None,
+                        "has_trigger_matched": False,
+                        "has_inactive_state_changed": False,
+                        "has_active_state_changed": False,
+                    },
+                    {
+                        "first_trigger_time": None,
+                        "latest_trigger_time": None,
+                        "has_active_state_changed": False,
+                    },
+                ]
+
+            def execute(self, _query, _params):
+                return None
+
+            def fetchone(self):
+                return self.rows.pop(0)
+
+        discovered = runner._discover_intake_runtime_inputs(
+            FakeCursor(),
+            argparse.Namespace(
+                for_trade_date="20260706",
+                consumer_name="n5_live_tracking_poller_v2_fastlane",
+            ),
+        )
+
+        self.assertEqual(discovered["n5_intake_event_kind"], "active_set_a")
+        self.assertEqual(
+            discovered["action_run_id"],
+            "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+        )
+        self.assertFalse(discovered["formal_trigger_matched_available"])
+        self.assertFalse(discovered["inactive_trigger_state_changed_available"])
+        self.assertFalse(discovered["active_trigger_state_changed_available"])
+
+    def test_post_close_active_set_adapter_preserves_contract_order_and_source_metadata(self) -> None:
+        import run_n5_live_tracking_poller_once as runner
+        from ashare_v3.action.live_tracking_poller import _sort_event_rows
+
+        state_key = "20260706|stock|stock:SH:600000|buy|B_BUY|BUY_MAIN"
+        prior_tracking_run_id = (
+            "n5_live_tracking_20260706__n4-run-a__fastlane_v1"
+        )
+        source_rows = [
+            {
+                "event_id": "event-z",
+                "event_time": "2026-07-06T15:00:00+08:00",
+                "source_run_id": "n4-run-z",
+                "outbox_id": 41,
+                "status": "pending",
+            },
+            {
+                "event_id": "event-a",
+                "event_time": "2026-07-06T15:00:00+08:00",
+                "source_run_id": "n4-run-a",
+                "outbox_id": 42,
+                "status": "delivered",
+            },
+        ]
+
+        prepared = runner._prepare_intake_contract_order_rows(source_rows)
+        planner_order = [
+            row["event_id"]
+            for row in _sort_event_rows(prepared)
+        ]
+        self.assertEqual(planner_order, ["event-a", "event-z"])
+        self.assertEqual([row["outbox_id"] for row in prepared], [1, 2])
+        self.assertTrue(all(row["status"] == "pending" for row in prepared))
+
+        plan = {
+            "consumed_n4_events": [dict(row) for row in prepared],
+            "tracking_updates": [
+                {
+                    "run_id": "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+                    "state_key": state_key,
+                    "source_trigger_event_id": "event-a",
+                    "source_trigger_run_id": "",
+                    "raw_json": {"source_trigger_run_id": ""},
+                }
+            ],
+            "action_events": [
+                {
+                    "payload_json": {
+                        "source_trigger_event_id": "event-a",
+                        "source_trigger_run_id": "",
+                    }
+                }
+            ],
+            "active_scope_snapshot_artifact": {
+                "scope_rows": [
+                    {
+                        "active_tracking_refs": [
+                            {
+                                "run_id": "n5_live_tracking_20260706__active_set_a__fastlane_v1",
+                                "state_key": state_key,
+                                "source_trigger_event_id": "event-a",
+                                "source_trigger_run_id": "",
+                            }
+                        ]
+                    }
+                ]
+            },
+        }
+        runner._restore_intake_plan_source_metadata(
+            plan,
+            source_rows,
+            active_tracking_rows=[
+                {
+                    "run_id": prior_tracking_run_id,
+                    "state_key": state_key,
+                }
+            ],
+        )
+
+        self.assertEqual(
+            [row["outbox_id"] for row in plan["consumed_n4_events"]],
+            [42, 41],
+        )
+        self.assertEqual(
+            [row["status"] for row in plan["consumed_n4_events"]],
+            ["delivered", "pending"],
+        )
+        self.assertEqual(
+            plan["tracking_updates"][0]["source_trigger_run_id"],
+            "n4-run-a",
+        )
+        self.assertEqual(
+            plan["tracking_updates"][0]["run_id"],
+            prior_tracking_run_id,
+        )
+        self.assertEqual(
+            plan["action_events"][0]["payload_json"]["source_trigger_run_id"],
+            "n4-run-a",
+        )
+        self.assertEqual(
+            plan["active_scope_snapshot_artifact"]["scope_rows"][0][
+                "active_tracking_refs"
+            ][0]["source_trigger_run_id"],
+            "n4-run-a",
+        )
+        active_ref = plan["active_scope_snapshot_artifact"]["scope_rows"][0][
+            "active_tracking_refs"
+        ][0]
+        self.assertEqual(active_ref["run_id"], prior_tracking_run_id)
+        self.assertEqual(active_ref["source_run_family"], "ordinary")
+        self.assertEqual(
+            active_ref["source_run_hash"],
+            runner._short_scope_hash("n4-run-a"),
+        )
+        self.assertEqual(
+            plan["active_scope_snapshot_artifact"]["scope_rows"][0][
+                "active_families"
+            ],
+            ["ordinary"],
+        )
 
     def test_n5_active_set_default_provider_passes_processed_tsc_true_repair_rows(self) -> None:
         import run_n5_live_tracking_poller_once as runner
@@ -4138,22 +5284,23 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         }
         metric_0951 = "n3t_action_confirmation_metric_20260709_until_0951__fastlane_sr_exact_raw_prevday_c1_amount_v1"
         metric_0952 = "n3t_action_confirmation_metric_20260709_until_0952__fastlane_sr_exact_raw_prevday_c1_amount_v1"
-        planned_metric_run_ids: list[str] = []
-
-        def fake_candidate_plan(_cur, _args, _candidate, source_metric_run_id):
-            planned_metric_run_ids.append(source_metric_run_id)
-            return {"summary": {"action_executed_count": 1}}
-
         with (
             patch.object(runner, "_candidate_source_run_hash", return_value="exact"),
-            patch.object(runner, "_discover_latest_ready_n3t_metric_run_id", return_value=""),
-            patch.object(runner, "_discover_ready_object_minute_n3t_metric_run_id", return_value=metric_0951),
+            patch.object(
+                runner,
+                "_discover_exact_ready_n3t_metric_run_ids",
+                return_value={0: metric_0951},
+            ),
+            patch.object(
+                runner,
+                "_build_executed_candidate_plan",
+                side_effect=AssertionError("exact-ready discovery must not build per-ref plans"),
+            ) as build_candidate_plan,
             patch.object(
                 runner,
                 "_discover_ready_object_minute_n3t_metric_run_ids",
                 return_value=[metric_0951, metric_0952],
             ),
-            patch.object(runner, "_build_executed_candidate_plan", side_effect=fake_candidate_plan),
         ):
             output = runner._discover_executed_runtime_input_from_candidates(
                 object(),
@@ -4162,8 +5309,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         self.assertEqual(output["source_metric_run_id"], metric_0951)
-        self.assertEqual(planned_metric_run_ids, [metric_0951])
         self.assertNotIn(",", output["source_metric_run_id"])
+        build_candidate_plan.assert_not_called()
 
     def test_n5_executed_discovery_selects_candidate_with_new_pending_evidence(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
@@ -4312,6 +5459,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(output["n5_intake_event_kind"], "active_set_a")
         self.assertEqual(output["action_run_id"], "n5_live_tracking_20260703__active_set_a__fastlane_v1")
         self.assertEqual(output["consumer_name"], "n5_live_tracking_poller_v2_fastlane")
+        self.assertFalse(output["formal_trigger_matched_available"])
+        self.assertTrue(output["inactive_trigger_state_changed_available"])
+        self.assertFalse(output["active_trigger_state_changed_available"])
         self.assertEqual(cursor.params, ("20260703", "n5_live_tracking_poller_v2_fastlane"))
 
     def test_n5_intake_default_discovery_skips_n5_consumed_n4_events(self) -> None:
@@ -4352,6 +5502,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(output["trigger_time"], "2026-07-03T09:33:00+08:00")
         self.assertEqual(output["n5_intake_event_kind"], "active_set_a")
         self.assertEqual(output["action_run_id"], "n5_live_tracking_20260703__active_set_a__fastlane_v1")
+        self.assertTrue(output["formal_trigger_matched_available"])
+        self.assertFalse(output["inactive_trigger_state_changed_available"])
+        self.assertFalse(output["active_trigger_state_changed_available"])
         self.assertIn("common_event_inbox", cursor.sql)
         self.assertIn("consumer_name", cursor.sql)
         self.assertEqual(cursor.params, ("20260703", "n5_live_tracking_poller_v2_fastlane"))
@@ -4385,6 +5538,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(rows, [{"event_id": "next-unconsumed"}])
         self.assertIn("common_event_inbox", cursor.sql)
         self.assertIn("consumer_name", cursor.sql)
+        self.assertIn("i.status = 'processed'", cursor.sql)
+        self.assertNotIn("o.status = 'pending'", cursor.sql)
         self.assertEqual(
             cursor.params,
             (
@@ -4395,6 +5550,103 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 300,
             ),
         )
+
+    def test_n5_intake_inbox_writer_retries_failed_rows_without_touching_n4_outbox(self) -> None:
+        from run_n5_live_tracking_poller_once import _insert_inbox_rows
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = None
+
+            def executemany(self, sql, params):
+                self.sql = str(sql)
+                self.params = list(params)
+
+        args = argparse.Namespace(
+            consumer_name="n5_live_tracking_poller_v2_fastlane",
+            action_run_id="n5_live_tracking_20260703__active_set_a__fastlane_v1",
+            source_metric_run_id="n3_metric_20260703",
+        )
+        cursor = FakeCursor()
+        inserted = _insert_inbox_rows(
+            cursor,
+            [
+                {
+                    "event_id": "n4-event-1",
+                    "event_type": "TriggerMatched",
+                    "event_schema_version": "v1",
+                    "source_layer": "N4_trigger",
+                    "source_run_id": "n4_run_1",
+                    "dedup_key": "n4-dedup-1",
+                    "partition_key": "stock:SH:600000",
+                    "payload_json": {"identity_key": "stock:SH:600000"},
+                }
+            ],
+            args,
+        )
+
+        self.assertEqual(inserted, 1)
+        self.assertIn("ON CONFLICT (consumer_name, event_id) DO UPDATE", cursor.sql)
+        self.assertIn("WHERE common_event_inbox.status <> 'processed'", cursor.sql)
+        self.assertNotIn("UPDATE common_event_outbox", cursor.sql)
+        self.assertEqual(len(cursor.params), 1)
+
+    def test_n5_tracking_upsert_refreshes_cross_run_source_lineage_on_newer_event(self) -> None:
+        from run_n5_live_tracking_poller_once import _upsert_tracking_states
+
+        class FakeCursor:
+            def __init__(self):
+                self.sql = ""
+                self.params = None
+
+            def executemany(self, sql, params):
+                self.sql = str(sql)
+                self.params = list(params)
+
+        cursor = FakeCursor()
+        count = _upsert_tracking_states(
+            cursor,
+            [
+                {
+                    "run_id": "n5-old-action-run",
+                    "state_key": "state-key-1",
+                    "source_trigger_run_id": "n4-new-run",
+                    "source_trigger_state_id": 2,
+                    "source_trigger_event_id": "n4-new-match",
+                    "source_trigger_event_type": "TriggerMatched",
+                    "source_trigger_match_id": 2,
+                    "trade_date": "20260703",
+                    "asset_kind": "stock",
+                    "identity_key": "stock:SH:600000",
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY_MAIN",
+                    "trigger_live": True,
+                    "current_status": "matched",
+                    "primary_trigger_period": "D",
+                    "all_trigger_periods": ["D"],
+                    "triggered_periods": ["D"],
+                    "latest_n4_event_id": "n4-new-match",
+                    "latest_n4_event_type": "TriggerMatched",
+                    "latest_n4_event_time": "2026-07-03T15:00:02+08:00",
+                    "action_state": "eligible",
+                    "confirmation_status": "pending",
+                    "tracking_status": "tracking",
+                    "planned_output_event_type": "ActionEligible",
+                    "raw_json": {
+                        "terminal_ref_reopen_allowed": True,
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn("ON CONFLICT (run_id, state_key)", cursor.sql)
+        self.assertIn("source_trigger_run_id = CASE", cursor.sql)
+        self.assertIn("THEN EXCLUDED.source_trigger_run_id", cursor.sql)
+        self.assertIn("source_trigger_state_id = CASE", cursor.sql)
+        self.assertEqual(len(cursor.params), 1)
 
     def test_n5_intake_fetch_active_tracking_includes_inactive_state_change_keys(self) -> None:
         from ashare_v3.action.dry_run import build_action_tracking_state_key
@@ -4753,7 +6005,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(manifest["active_scope_artifact_count"], 0)
 
     def test_active_launchd_plan_uses_activation_config_without_runtime_placeholders(self) -> None:
-        from ashare_v3.runtime_control.n5_n3t_fastlane import build_fastlane_active_launchd_plan
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+            build_fastlane_active_launchd_plan,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "activation_config.json"
@@ -4794,7 +6049,10 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         for key in plan["launchd_plist_keys"]:
             plist = plan[key]["plist"]
             self.assertEqual(_plist_placeholders(plist), [])
-            self.assertNotIn("ASHARE_V3_POSTGRES_DSN", plist["EnvironmentVariables"])
+            self.assertEqual(
+                plist["EnvironmentVariables"]["ASHARE_V3_POSTGRES_DSN"],
+                FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+            )
             self.assertEqual(plist["RunAtLoad"], False)
             self.assertEqual(plist["KeepAlive"], False)
             self.assertIn("StartInterval", plist)
@@ -8346,6 +9604,8 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             run_n3_c1_n3t_action_confirmation_fastlane_once,
         )
 
+        adapter_instances: list[object] = []
+
         class FakeMarketAdapter:
             source_version = "fake.scoped.market.provider.v1"
             external_source = "fake_mootdx"
@@ -8359,6 +9619,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 for index, label in enumerate(tuple(f"09:{minute:02d}" for minute in range(31, 44)), start=1):
 	                    rows.append(
 	                        {
+	                            "bar_time": datetime.fromisoformat(
+	                                f"2026-07-03T{label}:00+08:00"
+	                            ),
 	                            "physical_c1_label": label,
 	                            "raw_source_label": source_close_label_for_physical_start_label("20260703", label)["raw_source_label"],
 	                            "open": 12 + index / 10,
@@ -8370,6 +9633,24 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         }
                     )
                 return rows
+
+        class FakeSelection:
+            selectable = True
+            selection_reason = "test_primary_selected"
+
+        class FakeManager:
+            def __init__(self, probe_client: object) -> None:
+                self.probe_client = probe_client
+                self.calls: list[dict[str, object]] = []
+
+            def select_for_batch(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                probe_result = kwargs["probe"](
+                    None,
+                    lambda profile: self.probe_client,
+                )
+                self.calls[-1]["probe_result"] = probe_result
+                return FakeSelection()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -8448,25 +9729,124 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            fake_adapter = FakeMarketAdapter()
-            with patch("ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter", return_value=fake_adapter):
+            probe_client = object()
+            selected_client = object()
+            fake_manager = FakeManager(probe_client)
+
+            def build_adapter(*, client, intraday_trade_date, offset):
+                self.assertIn(client, (probe_client, selected_client))
+                self.assertEqual(intraday_trade_date, "20260703")
+                self.assertEqual(offset, 32)
+                adapter = FakeMarketAdapter()
+                adapter_instances.append(adapter)
+                return adapter
+
+            with (
+                patch(
+                    "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                    return_value=fake_manager,
+                ),
+                patch(
+                    "ashare_v3.mootdx_client.create_mootdx_client",
+                    return_value=selected_client,
+                ) as create_client,
+                patch(
+                    "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+                    side_effect=build_adapter,
+                ) as adapter_class,
+            ):
                 manifest = run_n3_c1_n3t_action_confirmation_fastlane_once(
                     ["--activation-config", str(config_path), "--execute", "--user-confirmed"]
                 )
 
             source_artifacts = sorted(current_source_dir.glob("*.json"))
-            source_payload = json.loads(source_artifacts[0].read_text(encoding="utf-8"))
+            source_payload = json.loads(
+                source_artifacts[0].read_text(encoding="utf-8")
+            )
 
-        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY")
-        self.assertEqual(len(fake_adapter.calls), 1)
-        self.assertEqual(fake_adapter.calls[0]["subscription"]["identity_key"], "stock:SZ:300803")
-        self.assertEqual(fake_adapter.calls[0]["subscription"]["code"], "300803")
-        self.assertEqual(source_payload["artifact_type"], "n3_c1_scoped_current_day_source_rows_v1")
+        self.assertEqual(
+            manifest["verdict"],
+            "N3_C1_N3T_FASTLANE_N3T_WRITER_HANDOFF_READY",
+            manifest,
+        )
+        self.assertEqual(len(fake_manager.calls), 1)
+        self.assertEqual(fake_manager.calls[0]["required_checks"], ("minute_scope_sentinels",))
+        self.assertTrue(
+            fake_manager.calls[0]["probe_result"]["checks"]["minute_scope_sentinels"]
+        )
+        self.assertEqual(adapter_class.call_count, 2)
+        self.assertEqual(create_client.call_count, 1)
+        worker_adapter = adapter_instances[-1]
+        self.assertEqual(len(worker_adapter.calls), 1)
+        self.assertEqual(worker_adapter.calls[0]["subscription"]["identity_key"], "stock:SZ:300803")
+        self.assertEqual(worker_adapter.calls[0]["subscription"]["code"], "300803")
+        self.assertEqual(
+            source_payload["artifact_type"],
+            "n3_c1_scoped_current_day_source_rows_v1",
+        )
         self.assertEqual(source_payload["closed_minute_row_count"], 13)
+        self.assertEqual(
+            source_payload["source_version"],
+            "mootdx.bars.today_minute.frequency8.offset32",
+        )
         self.assertTrue(source_payload["market_data_pulled"])
         self.assertFalse(source_payload["database_written"])
         self.assertFalse(source_payload["writes_canonical_minute_bar_1m"])
         self.assertFalse(source_payload["writes_n3_outbox"])
+
+    def test_configured_current_day_source_provider_fails_closed_when_endpoint_not_selectable(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeSelection:
+            selectable = False
+            selection_reason = "all_enabled_endpoints_unhealthy"
+
+        class FakeManager:
+            def select_for_batch(self, **kwargs):
+                return FakeSelection()
+
+        planned_artifacts = [
+            {
+                "for_trade_date": "20260720",
+                "target_hhmm": "1030",
+                "source_run_hash": "sourcehash",
+                "namespace_token": "20260720_1030_sourcehash",
+                "inline_pull_plan_payload": {
+                    "artifact_type": "n3_c1_scoped_current_day_pull_plan_v1",
+                    "for_trade_date": "20260720",
+                    "target_hhmm": "1030",
+                    "plan_status": "planned",
+                    "scope_count": 1,
+                    "full_market_fallback_used": False,
+                    "plan_rows": [
+                        {
+                            "for_trade_date": "20260720",
+                            "asset_kind": "stock",
+                            "identity_key": "stock:SZ:300803",
+                            "direction": "buy",
+                            "signal_type": "B_BUY",
+                            "condition_key": "BUY:Y,M,W,D",
+                            "scope_status": "active",
+                            "required_physical_labels": ["10:30"],
+                            "required_raw_source_labels": ["10:31"],
+                        }
+                    ],
+                },
+            }
+        ]
+
+        with patch(
+            "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+            return_value=FakeManager(),
+        ):
+            factory = runner._manager_selected_current_day_market_adapter_factory(
+                planned_artifacts=planned_artifacts,
+            )
+            with self.assertRaisesRegex(
+                runner.FastlaneShellBlocked,
+                "current_day_source_provider_endpoint_selection_failed",
+            ):
+                factory()
 
     def test_current_day_source_provider_keeps_raw_1300_as_physical_afternoon_open(self) -> None:
         from run_n3_c1_n3t_action_confirmation_fastlane_once import (
@@ -8557,6 +9937,60 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(rows[0]["physical_c1_label"], "13:01")
         self.assertEqual(rows[0]["raw_source_label"], "13:01")
         self.assertEqual(rows[0]["amount"], 2231867)
+
+    def test_current_day_source_provider_final_close_requires_raw_1500(self) -> None:
+        from run_n3_c1_n3t_action_confirmation_fastlane_once import (
+            _current_day_source_rows_from_provider_rows,
+        )
+
+        plan_row = {
+            "for_trade_date": "20260709",
+            "asset_kind": "stock",
+            "identity_key": "stock:SZ:300144",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": "n4-match-300144",
+            "source_trigger_run_id": "n4-run-300144",
+            "scope_status": "active",
+            "required_physical_labels": ["14:59"],
+            "required_raw_source_labels": ["15:00"],
+        }
+        raw_1459 = {
+            "bar_time": "2026-07-09T14:59:00+08:00",
+            "open": 10,
+            "high": 10,
+            "low": 10,
+            "close": 10,
+            "amount": 0,
+        }
+        raw_1500 = {
+            "bar_time": "2026-07-09T15:00:00+08:00",
+            "open": 10,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.1,
+            "amount": 1000000,
+        }
+
+        missing_final_close = _current_day_source_rows_from_provider_rows(
+            provider_rows=[raw_1459],
+            plan_row=plan_row,
+            for_trade_date="20260709",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+        rows = _current_day_source_rows_from_provider_rows(
+            provider_rows=[raw_1459, raw_1500],
+            plan_row=plan_row,
+            for_trade_date="20260709",
+            provider_name="mootdx_today_minute_adapter_v1",
+        )
+
+        self.assertEqual(missing_final_close, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["physical_c1_label"], "14:59")
+        self.assertEqual(rows[0]["raw_source_label"], "15:00")
+        self.assertEqual(rows[0]["amount"], 1000000)
 
     def test_current_day_artifact_rebuilds_stale_raw_physical_label_even_with_current_policy(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -12748,7 +14182,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                                 "previous_day_minute_refs": ["previous:stock:SZ:300144:09:31"],
                                 "metric_values": {
                                     **_n3t_boundary_metric_fields(),
-                                    "is_first_120m_of_day": False,
+                                    "is_first_120m_of_day": True,
                                     "previous_120m_period_source": "not_available",
                                     "previous_120m_body_high": 12,
                                     "previous_120m_body_low": 10,
@@ -17081,7 +18515,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         args = argparse.Namespace(current_day_source_provider_max_candidates_per_invocation=0)
 
-        self.assertEqual(runner._current_day_source_provider_max_candidates(args), 256)
+        self.assertEqual(runner._current_day_source_provider_max_candidates(args), 512)
 
     def test_n3_runner_active_a_minute_batch_default_selects_full_active_a(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -18757,7 +20191,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
         self.assertEqual(closed_hhmm, "")
 
-    def test_n3_runner_post_close_does_not_call_c1_provider_for_active_a_hot_path(self) -> None:
+    def test_n3_runner_post_close_waits_for_final_a_close_grace_before_c1_provider(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -18817,7 +20251,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "n3_c1_n3t_artifact_dir": str(output_dir),
                         "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
                         "session_context": {
-                            "current_exchange_time": "2026-07-09T15:03:00+08:00",
+                            "current_exchange_time": "2026-07-09T15:00:59+08:00",
                             "trade_calendar_is_open": True,
                             "formal_trigger_matched_available": True,
                             "closed_minute_available": True,
@@ -18830,7 +20264,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
             def current_day_source_provider_adapter(*, args, planned_artifacts):
-                raise AssertionError("post_close must not call C1 provider")
+                raise AssertionError("post_close C1 provider must wait until 15:01")
 
             manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
                 ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
@@ -18838,10 +20272,356 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             )
 
         self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
-        self.assertEqual(manifest["reason"], "post_close_c1_provider_disabled")
+        self.assertEqual(manifest["reason"], "post_close_final_a_close_grace_waiting")
         self.assertEqual(
             manifest["lane_results"]["c1_lane"]["reason"],
-            "post_close_c1_provider_disabled",
+            "post_close_final_a_close_grace_waiting",
+        )
+        self.assertEqual(
+            manifest["post_close_final_a_close_grace_pull"]["target_physical_minute_label"],
+            "14:59",
+        )
+        self.assertEqual(
+            manifest["post_close_final_a_close_grace_pull"]["raw_source_close_label"],
+            "15:00",
+        )
+
+    def test_post_close_final_a_c1_uses_full_a_before_legacy_twelve_candidate_chunk(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            source_dir = root / "source"
+            scope_path = root / "n5_active_scope_snapshot_v1_20260709_final_a.json"
+            output_dir.mkdir()
+            source_dir.mkdir()
+            scope_rows = []
+            for sequence in range(20):
+                identity_key = f"stock:SZ:{sequence + 1:06d}"
+                ref = {
+                    "for_trade_date": "20260709",
+                    "state_key": f"state:{sequence}",
+                    "asset_kind": "stock",
+                    "identity_key": identity_key,
+                    "direction": "buy",
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,Q,M,W,D",
+                    "scope_status": "active",
+                    "source_trigger_event_id": f"evt:{sequence}",
+                    "source_trigger_run_id": f"n4-run:{sequence}",
+                    "first_confirmation_minute_label": "14:59",
+                    "next_unchecked_minute_label": "14:59",
+                    "source_trigger_event_time": "2026-07-09T14:58:00+08:00",
+                    "trigger_time": "2026-07-09T14:58:00+08:00",
+                }
+                scope_rows.append(
+                    {
+                        "for_trade_date": "20260709",
+                        "asset_kind": "stock",
+                        "identity_key": identity_key,
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                )
+            scope_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_active_scope_snapshot_v1",
+                        "for_trade_date": "20260709",
+                        "action_run_id": "n5_live_tracking_20260709__active_set_a__fastlane_v1",
+                        "scope_granularity": "object",
+                        "scope_count": 20,
+                        "active_tracking_ref_count": 20,
+                        "full_market_fallback_allowed": False,
+                        "n3_scans_n5_internals": False,
+                        "scope_rows": scope_rows,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            raw_scope = runner._discover_single_active_scope_artifact(
+                scope_path,
+                fanout=False,
+            )
+            ref_fanout = runner._discover_single_active_scope_artifact(
+                scope_path,
+                fanout=True,
+            )
+            n3t_chunk, n3t_summary = runner._select_post_close_final_a_pass_candidate_chunk(
+                active_scope_artifacts=ref_fanout,
+                output_dir=output_dir,
+                max_candidates=12,
+            )
+            c1_selected, c1_summary = (
+                runner._select_active_a_minute_batch_direct_provider_artifacts(
+                    active_scope_artifacts=raw_scope,
+                    output_dir=output_dir,
+                    source_dir=source_dir,
+                    closed_hhmm="1459",
+                    max_candidates=256,
+                )
+            )
+            close_grace_pull = {
+                "reason": "post_close_final_a_close_grace_pull_ready",
+                "external_pull_allowed": True,
+            }
+            runner._apply_post_close_final_a_full_scope_coverage(
+                close_grace_pull=close_grace_pull,
+                c1_summary=c1_summary,
+            )
+
+        self.assertEqual(len(n3t_chunk), 12)
+        self.assertEqual(n3t_summary["remaining_candidate_count"], 8)
+        self.assertEqual(len(c1_selected), 20)
+        self.assertEqual(c1_summary["pending_object_count"], 20)
+        self.assertEqual(c1_summary["selected_object_count"], 20)
+        self.assertEqual(c1_summary["remaining_object_count"], 0)
+        self.assertEqual(len(c1_summary["provider_fetch_artifacts"]), 20)
+        self.assertTrue(close_grace_pull["external_pull_allowed"])
+        self.assertEqual(close_grace_pull["full_scope_remaining_object_count"], 0)
+
+    def test_post_close_final_a_c1_rejects_partial_scope_before_external_pull(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        close_grace_pull = {
+            "reason": "post_close_final_a_close_grace_pull_ready",
+            "external_pull_allowed": True,
+        }
+        runner._apply_post_close_final_a_full_scope_coverage(
+            close_grace_pull=close_grace_pull,
+            c1_summary={
+                "pending_object_count": 300,
+                "selected_object_count": 256,
+                "remaining_object_count": 44,
+            },
+        )
+
+        self.assertFalse(close_grace_pull["external_pull_allowed"])
+        self.assertEqual(
+            close_grace_pull["reason"],
+            "post_close_final_a_scope_exceeds_single_pull_limit",
+        )
+        self.assertEqual(close_grace_pull["full_scope_remaining_object_count"], 44)
+
+    def test_post_close_final_a_attempt_marker_claim_is_process_atomic(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "attempt.json"
+            barrier = threading.Barrier(2)
+            outcomes: list[str] = []
+
+            def claim() -> None:
+                barrier.wait()
+                try:
+                    runner._claim_atomic_compact_json(
+                        marker_path,
+                        {"artifact_type": "claim-test", "status": "started"},
+                    )
+                except FileExistsError:
+                    outcomes.append("already_exists")
+                else:
+                    outcomes.append("claimed")
+
+            threads = [threading.Thread(target=claim) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            payload = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(sorted(outcomes), ["already_exists", "claimed"])
+        self.assertEqual(payload["status"], "started")
+
+    def test_n3_runner_post_close_final_a_uses_single_close_grace_pull(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_dir = root / "scope"
+            output_dir = root / "out"
+            current_source_dir = root / "current_day_source"
+            config_path = root / "activation_config.json"
+            artifact_dir.mkdir()
+            current_source_dir.mkdir()
+            ref = {
+                "for_trade_date": "20260709",
+                "asset_kind": "stock",
+                "identity_key": "stock:SZ:300144",
+                "direction": "buy",
+                "signal_type": "B_BUY",
+                "condition_key": "BUY:Y,Q,M,W,D",
+                "scope_status": "active",
+                "source_trigger_event_id": "evt_300144_1458",
+                "source_trigger_event_type": "TriggerMatched",
+                "source_run_hash": "refhash1458",
+                "first_confirmation_minute_label": "14:58",
+                "last_checked_minute_label": "14:58",
+                "next_unchecked_minute_label": "14:59",
+                "source_trigger_event_time": "2026-07-09T14:58:00+08:00",
+                "trigger_time": "2026-07-09T14:58:00+08:00",
+            }
+            scope_payload = {
+                "artifact_type": "n5_active_scope_snapshot_v1",
+                "for_trade_date": "20260709",
+                "action_run_id": "n5_live_tracking_20260709__active_set_a__fastlane_v1",
+                "scope_granularity": "object",
+                "scope_count": 1,
+                "active_tracking_ref_count": 1,
+                "full_market_fallback_allowed": False,
+                "n3_scans_n5_internals": False,
+                "scope_rows": [
+                    {
+                        "for_trade_date": "20260709",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SZ:300144",
+                        "scope_status": "active",
+                        "active_tracking_refs": [ref],
+                        "attention_event_refs": [],
+                    }
+                ],
+            }
+            (artifact_dir / "n5_active_scope_snapshot_v1_20260709_active_set_a.json").write_text(
+                json.dumps(scope_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": "n5_n3t_fastlane_activation_config_v1",
+                        "for_trade_date": "20260709",
+                        "n5_active_scope_artifact_dir": str(artifact_dir),
+                        "n3_c1_n3t_artifact_dir": str(output_dir),
+                        "n3_c1_n3t_current_day_source_artifact_dir": str(current_source_dir),
+                        "session_context": {
+                            "current_exchange_time": "2026-07-09T15:01:00+08:00",
+                            "trade_calendar_is_open": True,
+                            "formal_trigger_matched_available": True,
+                            "closed_minute_available": True,
+                            "post_close_final_a_pass_available": True,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            provider_calls: list[dict[str, str]] = []
+
+            def current_day_source_provider_adapter(*, args, planned_artifacts):
+                planned = dict(planned_artifacts[0])
+                provider_calls.append(
+                    {
+                        "target_hhmm": str(planned["target_hhmm"]),
+                        "namespace": str(planned["namespace_token"]),
+                    }
+                )
+                current_rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260709",
+                    scope_row=ref,
+                    through_label="14:59",
+                )
+                source_path = (
+                    current_source_dir
+                    / f"n3_c1_scoped_current_day_source_rows_v1_{planned['namespace_token']}.json"
+                )
+                source_path.write_text(
+                    json.dumps(
+                        {
+                            "artifact_type": "n3_c1_scoped_current_day_source_rows_v1",
+                            "for_trade_date": "20260709",
+                            "target_hhmm": planned["target_hhmm"],
+                            "target_minute_label": "14:59",
+                            "source_run_hash": planned["source_run_hash"],
+                            "source_run_namespace": planned["namespace_token"],
+                            "scope_count": 1,
+                            "closed_minute_rows": current_rows,
+                            "closed_minute_row_count": len(current_rows),
+                            "database_written": False,
+                            "writes_canonical_minute_bar_1m": False,
+                            "writes_n3_outbox": False,
+                            "touches_n4_n5_n6_outbox": False,
+                            "full_market_fallback_used": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                    "artifact_written": True,
+                    "artifact_count": 1,
+                    "source_row_count": len(current_rows),
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "runtime_execute": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "writes_common_event_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+
+            first_manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            second_manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--activation-config", str(config_path), "--execute", "--user-confirmed"],
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+            )
+            self.assertTrue(provider_calls, (first_manifest, second_manifest))
+            marker_path = (
+                output_dir
+                / "post_close_final_a"
+                / "n3_c1_n3t_post_close_final_a_c1_pull_attempt_v1_20260709.json"
+            )
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            source_payload = json.loads(
+                next(current_source_dir.glob("n3_c1_scoped_current_day_source_rows_v1_*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            staging_paths = list((output_dir / "current_day_staging").glob("*.json"))
+
+        self.assertEqual(len(provider_calls), 1)
+        self.assertEqual(provider_calls[0]["target_hhmm"], "1459")
+        self.assertTrue(provider_calls[0]["namespace"].startswith("20260709_1459_"))
+        self.assertEqual(marker["status"], "completed")
+        self.assertEqual(marker["target_physical_minute_label"], "14:59")
+        self.assertEqual(marker["raw_source_close_label"], "15:00")
+        self.assertRegex(marker["selected_provider_scope_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(marker["full_scope_pending_object_count"], 1)
+        self.assertEqual(marker["full_scope_selected_object_count"], 1)
+        self.assertEqual(marker["full_scope_remaining_object_count"], 0)
+        self.assertFalse(marker["database_written"])
+        self.assertFalse(marker["writes_canonical_minute_bar_1m"])
+        self.assertFalse(marker["writes_n3_outbox"])
+        self.assertFalse(marker["touches_n4_n5_n6_outbox"])
+        self.assertTrue(staging_paths)
+        self.assertNotIn(
+            "15:00",
+            {row["physical_c1_label"] for row in source_payload["closed_minute_rows"]},
+        )
+        final_row = next(
+            row
+            for row in source_payload["closed_minute_rows"]
+            if row["physical_c1_label"] == "14:59"
+        )
+        self.assertEqual(final_row["raw_source_label"], "15:00")
+        self.assertIn(
+            second_manifest.get("reason"),
+            {
+                "c1_active_a_minute_batch_chunk_incomplete",
+                "c1_active_a_minute_batch_ready_for_n3t_lane",
+                "scoped_c1_n3t_executor_required",
+                "waiting_for_valid_c1_n3t_candidate",
+            },
         )
 
     def test_n3_runner_accepts_explicit_current_exchange_time_for_historical_active_a(self) -> None:
@@ -19488,7 +21268,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         high_args = argparse.Namespace(current_day_source_provider_concurrency=99)
 
         self.assertEqual(runner._current_day_source_provider_concurrency(default_args), 8)
-        self.assertEqual(runner._current_day_source_provider_concurrency(high_args), 8)
+        self.assertEqual(runner._current_day_source_provider_concurrency(high_args), 16)
 
     def test_lane_result_after_c1_execution_reports_failed_candidate_count(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -19760,6 +21540,7 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.fetch_count = 0
+                self.close_count = 0
 
             def fetch_minute_bars(self, subscription, for_trade_date):
                 self.fetch_count += 1
@@ -19775,6 +21556,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                         "amount": 1000,
                     }
                 ]
+
+            def close(self) -> None:
+                self.close_count += 1
 
         def adapter_factory():
             adapter = FakeMarketAdapter()
@@ -19833,6 +21617,671 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertEqual(result["provider_adapter_instance_count"], len(adapters))
         self.assertLessEqual(len(adapters), 2)
         self.assertEqual(sum(adapter.fetch_count for adapter in adapters), 6)
+        self.assertTrue(all(adapter.close_count == 1 for adapter in adapters))
+        self.assertEqual(result["provider_adapter_close_failure_count"], 0)
+
+    def test_current_day_source_transport_failure_aborts_unstarted_cohort_once(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeSelection:
+            selectable = True
+            selection_reason = "fixture_primary"
+            endpoint_id = "primary"
+            transport = "mootdx"
+
+        class FakeManager:
+            required_empty_object_threshold = 3
+
+            def __init__(self) -> None:
+                self.selection_calls: list[dict[str, object]] = []
+                self.transport_failures: list[dict[str, object]] = []
+
+            def select_for_batch(self, **kwargs):
+                self.selection_calls.append(dict(kwargs))
+                return FakeSelection()
+
+            def record_transport_failure(self, endpoint_id, **kwargs):
+                self.transport_failures.append(
+                    {"endpoint_id": endpoint_id, **kwargs}
+                )
+
+            def record_required_object_result(self, *args, **kwargs):
+                return False
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+
+            def __init__(self) -> None:
+                self.fetch_count = 0
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                self.fetch_count += 1
+                raise TimeoutError(
+                    "private transport detail host=115.238.56.198"
+                )
+
+        planned_artifacts = []
+        for index in range(313):
+            code = f"{index + 1:06d}"
+            object_key = (
+                "20260730",
+                "stock",
+                f"stock:SZ:{code}",
+                "buy",
+            )
+            source_run_hash = f"hash{code}"
+            planned_artifacts.append(
+                {
+                    "for_trade_date": "20260730",
+                    "target_hhmm": "0958",
+                    "source_run_hash": source_run_hash,
+                    "namespace_token": f"20260730_0958_{source_run_hash}",
+                    "object_batch_key": list(object_key),
+                    "object_batch_keys": [list(object_key)],
+                    "inline_pull_plan_payload": {
+                        "artifact_type": (
+                            "n3_c1_scoped_current_day_pull_plan_v1"
+                        ),
+                        "for_trade_date": "20260730",
+                        "target_hhmm": "0958",
+                        "source_run_hash": source_run_hash,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                        "plan_rows": [
+                            {
+                                "for_trade_date": "20260730",
+                                "asset_kind": "stock",
+                                "identity_key": object_key[2],
+                                "direction": "buy",
+                                "signal_type": "B_BUY",
+                                "condition_key": "BUY:Y,M,W,D",
+                                "scope_status": "active",
+                                "required_physical_labels": ["09:58"],
+                                "required_raw_source_labels": ["09:59"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+        fake_manager = FakeManager()
+        adapters: list[FakeMarketAdapter] = []
+
+        def build_adapter(**kwargs):
+            del kwargs
+            adapter = FakeMarketAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+            return_value=fake_manager,
+        ), patch(
+            "ashare_v3.mootdx_client.create_mootdx_client",
+            return_value=object(),
+        ) as create_client, patch(
+            "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+            side_effect=build_adapter,
+        ):
+            factory = (
+                runner._manager_selected_current_day_market_adapter_factory(
+                    planned_artifacts=planned_artifacts
+                )
+            )
+            result = runner._build_current_day_source_rows_with_market_adapter(
+                args=argparse.Namespace(
+                    output_dir=tmpdir,
+                    current_day_source_provider_concurrency=1,
+                    current_day_source_provider_concurrency_explicit=True,
+                ),
+                planned_artifacts=planned_artifacts,
+                market_adapter_factory=factory,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(len(fake_manager.selection_calls), 1)
+        self.assertEqual(
+            fake_manager.selection_calls[0]["failover_mode"],
+            "active",
+        )
+        self.assertEqual(len(fake_manager.transport_failures), 1)
+        self.assertEqual(create_client.call_count, 1)
+        self.assertEqual(len(adapters), 1)
+        self.assertEqual(adapters[0].fetch_count, 1)
+        self.assertEqual(result["artifact_count"], 0)
+        self.assertEqual(result["failed_candidate_count"], 313)
+        self.assertTrue(result["cohort_aborted"])
+        self.assertEqual(
+            result["endpoint_transport_failure_record_count"],
+            1,
+        )
+        self.assertEqual(result["immediate_retry_candidate_count"], 313)
+        self.assertEqual(
+            result["failure_kind_counts"],
+            {
+                "batch_transport_failure": 1,
+                "cohort_aborted_after_transport_failure": 312,
+            },
+        )
+        self.assertEqual(
+            result["failed_candidates"][0]["failure_kind"],
+            "batch_transport_failure",
+        )
+        self.assertTrue(
+            all(
+                failure["retry_class"] == "endpoint_transport_immediate"
+                for failure in result["failed_candidates"]
+            )
+        )
+        serialized_failures = json.dumps(
+            result["failed_candidates"],
+            ensure_ascii=True,
+        )
+        self.assertNotIn("115.238.56.198", serialized_failures)
+        self.assertNotIn("private transport detail", serialized_failures)
+        self.assertNotIn("host", serialized_failures)
+
+    def test_current_day_source_program_failure_does_not_open_cohort_circuit(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeSelection:
+            selectable = True
+            selection_reason = "fixture_primary"
+            endpoint_id = "primary"
+            transport = "mootdx"
+
+        class FakeManager:
+            def __init__(self) -> None:
+                self.transport_failure_count = 0
+
+            def select_for_batch(self, **kwargs):
+                return FakeSelection()
+
+            def record_transport_failure(self, endpoint_id, **kwargs):
+                del endpoint_id, kwargs
+                self.transport_failure_count += 1
+
+            def record_required_object_result(self, *args, **kwargs):
+                return False
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+
+            def __init__(self) -> None:
+                self.fetch_count = 0
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del subscription, for_trade_date
+                self.fetch_count += 1
+                raise ValueError("fixture program error")
+
+        planned_artifacts = []
+        for index in range(2):
+            code = f"30000{index + 1}"
+            source_run_hash = f"hash{code}"
+            planned_artifacts.append(
+                {
+                    "for_trade_date": "20260730",
+                    "target_hhmm": "0958",
+                    "source_run_hash": source_run_hash,
+                    "namespace_token": f"20260730_0958_{source_run_hash}",
+                    "inline_pull_plan_payload": {
+                        "artifact_type": (
+                            "n3_c1_scoped_current_day_pull_plan_v1"
+                        ),
+                        "for_trade_date": "20260730",
+                        "target_hhmm": "0958",
+                        "source_run_hash": source_run_hash,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                        "plan_rows": [
+                            {
+                                "for_trade_date": "20260730",
+                                "asset_kind": "stock",
+                                "identity_key": f"stock:SZ:{code}",
+                                "direction": "buy",
+                                "scope_status": "active",
+                                "required_physical_labels": ["09:58"],
+                                "required_raw_source_labels": ["09:59"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+        fake_manager = FakeManager()
+        adapters: list[FakeMarketAdapter] = []
+
+        def build_adapter(**kwargs):
+            del kwargs
+            adapter = FakeMarketAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+            return_value=fake_manager,
+        ), patch(
+            "ashare_v3.mootdx_client.create_mootdx_client",
+            return_value=object(),
+        ), patch(
+            "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+            side_effect=build_adapter,
+        ):
+            factory = (
+                runner._manager_selected_current_day_market_adapter_factory(
+                    planned_artifacts=planned_artifacts
+                )
+            )
+            result = runner._build_current_day_source_rows_with_market_adapter(
+                args=argparse.Namespace(
+                    output_dir=tmpdir,
+                    current_day_source_provider_concurrency=1,
+                    current_day_source_provider_concurrency_explicit=True,
+                ),
+                planned_artifacts=planned_artifacts,
+                market_adapter_factory=factory,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(fake_manager.transport_failure_count, 0)
+        self.assertFalse(result["cohort_aborted"])
+        self.assertEqual(result["failed_candidate_count"], 2)
+        self.assertEqual(sum(adapter.fetch_count for adapter in adapters), 2)
+        self.assertEqual(
+            result["failure_kind_counts"],
+            {"candidate_program_failure": 2},
+        )
+        self.assertTrue(
+            all(
+                failure["retry_class"] == "not_retryable"
+                for failure in result["failed_candidates"]
+            )
+        )
+
+    def test_current_day_source_provider_row_conversion_failure_is_isolated(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del for_trade_date
+                raw_source_label = (
+                    "12:00"
+                    if subscription["identity_key"] == "stock:SZ:300001"
+                    else "09:51"
+                )
+                return [
+                    {
+                        "physical_c1_label": "09:51",
+                        "raw_source_label": raw_source_label,
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        planned_artifacts = []
+        for code in ("300001", "300002"):
+            source_run_hash = f"hash{code}"
+            planned_artifacts.append(
+                {
+                    "for_trade_date": "20260730",
+                    "target_hhmm": "0951",
+                    "source_run_hash": source_run_hash,
+                    "namespace_token": f"20260730_0951_{source_run_hash}",
+                    "inline_pull_plan_payload": {
+                        "artifact_type": (
+                            "n3_c1_scoped_current_day_pull_plan_v1"
+                        ),
+                        "for_trade_date": "20260730",
+                        "target_hhmm": "0951",
+                        "source_run_hash": source_run_hash,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                        "plan_rows": [
+                            {
+                                "for_trade_date": "20260730",
+                                "asset_kind": "stock",
+                                "identity_key": f"stock:SZ:{code}",
+                                "direction": "buy",
+                                "scope_status": "active",
+                                "required_physical_labels": ["09:51"],
+                                "required_raw_source_labels": ["09:51"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+        result = runner._build_current_day_source_rows_with_market_adapter(
+            args=argparse.Namespace(
+                output_dir="",
+                current_day_source_provider_concurrency=2,
+                current_day_source_provider_concurrency_explicit=True,
+            ),
+            planned_artifacts=planned_artifacts,
+            market_adapter=FakeMarketAdapter(),
+            provider_name="mootdx_today_minute_adapter_v1",
+            persist_artifacts=False,
+        )
+
+        self.assertFalse(result["cohort_aborted"])
+        self.assertEqual(result["inline_payload_count"], 1)
+        self.assertEqual(len(result["source_artifacts"]), 1)
+        self.assertEqual(result["failed_candidate_count"], 1)
+        self.assertEqual(
+            [row["status"] for row in result["candidate_results"]],
+            ["failed", "passed"],
+        )
+        failure = result["failed_candidates"][0]
+        self.assertEqual(
+            failure["reason"],
+            "current_day_source_provider_row_conversion_failed",
+        )
+        self.assertEqual(
+            failure["failure_kind"],
+            "candidate_data_quality_failure",
+        )
+        self.assertEqual(failure["retry_class"], "object_quality_backoff")
+        self.assertEqual(
+            result["failure_kind_counts"],
+            {"candidate_data_quality_failure": 1},
+        )
+        self.assertTrue(
+            runner._object_cursor_batch_retryable_failure(failure["reason"])
+        )
+
+        converter = runner._current_day_source_rows_from_provider_rows
+
+        def fail_one_conversion(**kwargs):
+            if kwargs["plan_row"]["identity_key"] == "stock:SZ:300001":
+                raise RuntimeError("fixture conversion program error")
+            return converter(**kwargs)
+
+        with patch.object(
+            runner,
+            "_current_day_source_rows_from_provider_rows",
+            side_effect=fail_one_conversion,
+        ):
+            program_failure_result = (
+                runner._build_current_day_source_rows_with_market_adapter(
+                    args=argparse.Namespace(
+                        output_dir="",
+                        current_day_source_provider_concurrency=2,
+                        current_day_source_provider_concurrency_explicit=True,
+                    ),
+                    planned_artifacts=planned_artifacts,
+                    market_adapter=FakeMarketAdapter(),
+                    provider_name="mootdx_today_minute_adapter_v1",
+                    persist_artifacts=False,
+                )
+            )
+
+        self.assertFalse(program_failure_result["cohort_aborted"])
+        self.assertEqual(program_failure_result["inline_payload_count"], 1)
+        self.assertEqual(program_failure_result["failed_candidate_count"], 1)
+        program_failure = program_failure_result["failed_candidates"][0]
+        self.assertEqual(
+            program_failure["reason"],
+            "current_day_source_provider_row_program_failure",
+        )
+        self.assertEqual(
+            program_failure["failure_kind"],
+            "candidate_program_failure",
+        )
+        self.assertEqual(program_failure["retry_class"], "not_retryable")
+        self.assertFalse(
+            runner._object_cursor_batch_retryable_failure(
+                program_failure["reason"]
+            )
+        )
+
+    def test_cache_repair_provider_row_conversion_failure_is_isolated(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.fetch_counts: dict[str, int] = {}
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del for_trade_date
+                identity_key = subscription["identity_key"]
+                fetch_count = self.fetch_counts.get(identity_key, 0) + 1
+                self.fetch_counts[identity_key] = fetch_count
+                if identity_key == "stock:SZ:300001" and fetch_count == 1:
+                    physical_label = raw_label = "09:51"
+                elif identity_key == "stock:SZ:300001":
+                    physical_label, raw_label = "09:52", "12:00"
+                else:
+                    physical_label = raw_label = "09:52"
+                return [
+                    {
+                        "physical_c1_label": physical_label,
+                        "raw_source_label": raw_label,
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        planned_artifacts = []
+        for code in ("300001", "300002"):
+            source_run_hash = f"hash{code}"
+            planned_artifacts.append(
+                {
+                    "for_trade_date": "20260730",
+                    "target_hhmm": "0952",
+                    "source_run_hash": source_run_hash,
+                    "namespace_token": f"20260730_0952_{source_run_hash}",
+                    "inline_pull_plan_payload": {
+                        "artifact_type": (
+                            "n3_c1_scoped_current_day_pull_plan_v1"
+                        ),
+                        "for_trade_date": "20260730",
+                        "target_hhmm": "0952",
+                        "source_run_hash": source_run_hash,
+                        "plan_status": "planned",
+                        "scope_count": 1,
+                        "full_market_fallback_used": False,
+                        "plan_rows": [
+                            {
+                                "for_trade_date": "20260730",
+                                "asset_kind": "stock",
+                                "identity_key": f"stock:SZ:{code}",
+                                "direction": "buy",
+                                "scope_status": "active",
+                                "required_physical_labels": ["09:52"],
+                                "required_raw_source_labels": ["09:52"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+        adapter = FakeMarketAdapter()
+        result = runner._build_current_day_source_rows_with_market_adapter(
+            args=argparse.Namespace(
+                output_dir="",
+                current_day_source_provider_concurrency=1,
+                current_day_source_provider_concurrency_explicit=True,
+            ),
+            planned_artifacts=planned_artifacts,
+            market_adapter=adapter,
+            provider_name="mootdx_today_minute_adapter_v1",
+            persist_artifacts=False,
+        )
+
+        self.assertFalse(result["cohort_aborted"])
+        self.assertEqual(result["inline_payload_count"], 1)
+        self.assertEqual(result["failed_candidate_count"], 1)
+        self.assertEqual(
+            adapter.fetch_counts,
+            {
+                "stock:SZ:300001": 2,
+                "stock:SZ:300002": 1,
+            },
+        )
+        failure = result["failed_candidates"][0]
+        self.assertEqual(
+            failure["reason"],
+            "current_day_source_provider_row_conversion_failed",
+        )
+        self.assertEqual(
+            failure["failure_kind"],
+            "candidate_data_quality_failure",
+        )
+        self.assertEqual(failure["retry_class"], "object_quality_backoff")
+        self.assertTrue(
+            runner._object_cursor_batch_retryable_failure(failure["reason"])
+        )
+
+    def test_current_day_source_endpoint_wide_empty_keeps_distinct_failure_kind(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=5)
+        empty_identities: list[str] = []
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_required_object_result(
+                self,
+                endpoint_id,
+                *,
+                transport,
+                empty,
+                object_identity,
+            ):
+                del endpoint_id, transport
+                if not empty:
+                    empty_identities.clear()
+                    return False
+                if object_identity not in empty_identities:
+                    empty_identities.append(object_identity)
+                return len(empty_identities) >= 3
+
+        class EmptyMarketAdapter:
+            external_source = "fake_mootdx"
+
+            def __init__(self) -> None:
+                self.offset = 0
+                self.fetch_count = 0
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del subscription, for_trade_date
+                self.fetch_count += 1
+                return []
+
+        manager = Manager()
+        adapters: list[EmptyMarketAdapter] = []
+
+        def build_adapter(**kwargs):
+            del kwargs
+            adapter = EmptyMarketAdapter()
+            adapters.append(adapter)
+            return adapter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ), patch(
+                "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+                side_effect=build_adapter,
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                result = runner._build_current_day_source_rows_with_market_adapter(
+                    args=argparse.Namespace(
+                        output_dir=tmpdir,
+                        current_day_source_provider_concurrency=1,
+                        current_day_source_provider_concurrency_explicit=True,
+                    ),
+                    planned_artifacts=plans,
+                    market_adapter_factory=factory,
+                    provider_name="mootdx_today_minute_adapter_v1",
+                    persist_artifacts=False,
+                )
+
+        self.assertTrue(result["cohort_aborted"])
+        self.assertEqual(result["failed_candidate_count"], 5)
+        self.assertEqual(result["endpoint_transport_failure_record_count"], 0)
+        self.assertEqual(result["immediate_retry_candidate_count"], 3)
+        self.assertEqual(
+            result["failure_kind_counts"],
+            {
+                "consecutive_required_objects_empty": 1,
+                "cohort_aborted_after_endpoint_wide_empty": 2,
+            },
+        )
+        endpoint_incident_failures = [
+            failure
+            for failure in result["failed_candidates"]
+            if failure.get("retry_class") == "endpoint_transport_immediate"
+        ]
+        self.assertEqual(len(endpoint_incident_failures), 3)
+        self.assertTrue(
+            all(
+                failure["error_type"]
+                == "MootdxEndpointWideRequiredObjectsEmpty"
+                for failure in endpoint_incident_failures
+            )
+        )
+        self.assertEqual(sum(adapter.fetch_count for adapter in adapters), 5)
 
     def test_active_a_minute_provider_source_key_ignores_cursor_changes(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
@@ -20856,6 +23305,9 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
 
     def test_n3t_writer_batches_rows_per_target_table(self) -> None:
         import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+        )
 
         class FakeCursor:
             def __init__(self) -> None:
@@ -20898,10 +23350,17 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
             "board_n3t_action_confirmation_metric": [dict(row)],
         }
 
-        with patch("psycopg.connect", return_value=fake_connection), patch.object(
-            runner,
-            "_n3t_insert_rows_by_table",
-            return_value=rows_by_table,
+        with (
+            patch.dict(
+                os.environ,
+                {"ASHARE_V3_POSTGRES_DSN": FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO},
+            ),
+            patch("psycopg.connect", return_value=fake_connection),
+            patch.object(
+                runner,
+                "_n3t_insert_rows_by_table",
+                return_value=rows_by_table,
+            ),
         ):
             result = runner._write_n3t_metrics_to_postgres(
                 args=argparse.Namespace(),
@@ -21240,8 +23699,53 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertFalse(persisted["active_worker_write_enabled_ready"])
         self.assertEqual(persisted["result"], "WAITING")
 
+    def test_policy_review_auto_refresh_missing_dsn_reports_safe_exact_reason(self) -> None:
+        from scripts import run_n5_n3t_policy_review_auto_refresh_once as auto_refresh
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            activation_path, review_path = _write_auto_refresh_activation_config(
+                Path(tmpdir)
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(
+                    auto_refresh,
+                    "_exchange_now_iso",
+                    return_value="2026-07-14T09:25:15+08:00",
+                ),
+                redirect_stdout(stdout),
+            ):
+                returncode = auto_refresh.main(
+                    [
+                        "--activation-config",
+                        str(activation_path),
+                        "--scheduler-quiet",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(returncode, 2)
+        self.assertEqual(
+            payload["blocked_reason"],
+            "policy_review_auto_refresh_failed:ASHARE_V3_POSTGRES_DSN_missing",
+        )
+        self.assertFalse(payload["policy_review_written"])
+        self.assertFalse(review_path.exists())
+
+    def test_policy_review_auto_refresh_unknown_value_error_message_is_redacted(self) -> None:
+        from scripts.run_n5_n3t_policy_review_auto_refresh_once import (
+            _safe_failure_code,
+        )
+
+        self.assertEqual(
+            _safe_failure_code(ValueError("opaque-sensitive-value-must-not-leak")),
+            "ValueError",
+        )
+
     def test_policy_review_auto_refresh_launchd_plan_uses_stable_config_without_runtime_args(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
             FASTLANE_POLICY_REVIEW_AUTO_REFRESH_LABEL,
             build_fastlane_policy_review_auto_refresh_launchd_plan,
         )
@@ -21262,11 +23766,63 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
         self.assertFalse(plist["KeepAlive"])
         self.assertIn(str(activation_path), plist["ProgramArguments"])
         self.assertIn("--scheduler-quiet", plist["ProgramArguments"])
+        self.assertEqual(
+            plist["EnvironmentVariables"]["ASHARE_V3_POSTGRES_DSN"],
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+        )
         self.assertNotIn("--current-exchange-time", joined)
         self.assertNotIn("--dsn", joined)
         self.assertNotIn("--execute", joined)
         self.assertNotIn("launchctl", joined)
         self.assertFalse(plan["boundary"]["launchd_installed_or_reloaded"])
+
+    def test_active_launchd_environment_survives_empty_login_environment(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+        )
+
+        root = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from scripts.run_n5_live_tracking_poller_once import DEFAULT_DSN;"
+                    "raise SystemExit(0 if DEFAULT_DSN == "
+                    "r'dbname=ashare_v3 user=ashare_v3_user' else 2)"
+                ),
+            ],
+            cwd=root,
+            env={
+                "ASHARE_V3_POSTGRES_DSN": FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": "src:scripts:.",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_fastlane_runtime_database_environment_rejects_noncanonical_conninfo(self) -> None:
+        from ashare_v3.runtime_control.n5_n3t_fastlane import (
+            _assert_fastlane_local_runtime_conninfo,
+        )
+
+        forbidden_values = (
+            "dbname=other user=ashare_v3_user",
+            "host=127.0.0.1 dbname=ashare_v3 user=ashare_v3_user",
+            "dbname=ashare_v3 user=ashare_v3_user " + "pass" + "word=redacted",
+            "postgres" + "ql://ashare_v3_user@127.0.0.1/ashare_v3",
+        )
+        for value in forbidden_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical local socket profile",
+                ):
+                    _assert_fastlane_local_runtime_conninfo(value)
 
     def test_trading_day_monitor_resolves_trade_date_from_stable_activation_config(self) -> None:
         from ashare_v3.runtime_control.n5_n3t_fastlane import FASTLANE_LABELS
@@ -21302,6 +23858,4065 @@ class N5N3TFastlaneContractTest(unittest.TestCase):
                 summaries[label]["activation_config_artifact_type"],
                 "n5_n3t_fastlane_activation_config_v1",
             )
+
+    def test_object_cursor_batch_queue_capacity_remains_256_objects_and_4096_proofs(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=256)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0946",
+            )
+            selected, summary = runner._select_pending_object_cursor_batch_records(
+                records=records,
+                existing_proof_keys=set(),
+            )
+            provider_plans = runner._object_cursor_batch_provider_plans(
+                selected_records=selected,
+                observed_at="2026-07-17T09:47:05+08:00",
+            )
+
+        self.assertEqual(len(records), 4096)
+        self.assertEqual(len(selected), 4096)
+        self.assertEqual(summary["selected_object_count"], 256)
+        self.assertEqual(summary["remaining_candidate_count"], 0)
+        self.assertEqual(len(provider_plans), 256)
+        self.assertEqual({item["target_hhmm"] for item in provider_plans}, {"0946"})
+
+    def test_object_cursor_batch_fair_queue_balances_live_backlog_and_asset_kinds(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        records: list[dict[str, object]] = []
+
+        def add_record(asset_kind: str, identity_key: str, target_hhmm: str) -> None:
+            records.append(
+                {
+                    "object_key": ("20260720", asset_kind, identity_key, "buy"),
+                    "target_hhmm": target_hhmm,
+                    "n3t_metric_run_id": (
+                        f"n3t_action_confirmation_metric_20260720_until_{target_hhmm}__"
+                        f"fastlane_sr_{asset_kind}_{identity_key[-6:]}_raw_prevday_c1_amount_v1"
+                    ),
+                }
+            )
+
+        for sequence in range(475):
+            add_record(
+                "stock",
+                f"stock:SH:{600000 + sequence:06d}",
+                "1129" if sequence < 8 else "0931",
+            )
+        for sequence in range(17):
+            add_record(
+                "board",
+                f"board:TDX:{881001 + sequence}",
+                "1128" if sequence < 2 else "1057",
+            )
+        add_record("index", "index:SH:000300", "1127")
+
+        selected, summary = runner._select_pending_object_cursor_batch_records(
+            records=records,
+            existing_proof_keys=set(),
+            closed_hhmm="1129",
+            max_objects=8,
+            max_proof_rows=128,
+        )
+        repeated, repeated_summary = runner._select_pending_object_cursor_batch_records(
+            records=records,
+            existing_proof_keys=set(),
+            closed_hhmm="1129",
+            max_objects=8,
+            max_proof_rows=128,
+        )
+
+        selected_keys = [tuple(item["object_key"]) for item in selected]
+        self.assertEqual(selected_keys, [tuple(item["object_key"]) for item in repeated])
+        self.assertEqual(summary, repeated_summary)
+        self.assertEqual(len(set(selected_keys)), 8)
+        self.assertEqual(
+            summary["selected_object_count_by_tier"],
+            {"live": 8, "backlog": 0},
+        )
+        self.assertEqual(summary["pending_object_count_by_asset_kind"]["stock"], 475)
+        self.assertEqual(summary["pending_object_count_by_asset_kind"]["board"], 17)
+        self.assertEqual(summary["pending_object_count_by_asset_kind"]["index"], 1)
+        self.assertEqual({item["queue_tier"] for item in selected}, {"live"})
+        self.assertEqual({item["object_key"][1] for item in selected}, {"stock", "index", "board"})
+        self.assertIn(
+            ("20260720", "stock", "stock:SH:600008", "buy"),
+            selected_keys,
+        )
+
+    def test_object_cursor_batch_live_fastpath_selects_only_fresh_objects(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        records: list[dict[str, object]] = []
+        for sequence in range(16):
+            target_hhmm = "0945" if sequence >= 8 else "0931"
+            records.append(
+                {
+                    "object_key": (
+                        "20260722",
+                        "stock",
+                        f"stock:SH:{600000 + sequence:06d}",
+                        "buy",
+                    ),
+                    "target_hhmm": target_hhmm,
+                    "n3t_metric_run_id": f"proof-{sequence}-{target_hhmm}",
+                }
+            )
+
+        selected, summary = runner._select_pending_object_cursor_batch_records(
+            records=records,
+            existing_proof_keys=set(),
+            closed_hhmm="0946",
+            max_objects=8,
+            max_proof_rows=8,
+            queue_mode=runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH,
+        )
+
+        self.assertEqual(len(selected), 8)
+        self.assertEqual({item["target_hhmm"] for item in selected}, {"0931"})
+        self.assertTrue(all(item["first_proof_urgent"] for item in selected))
+        self.assertEqual({item["queue_tier"] for item in selected}, {"live"})
+        self.assertEqual(summary["selected_object_count_by_tier"], {"live": 8, "backlog": 0})
+        self.assertEqual(summary["queue_mode"], "live_minute_fastpath")
+
+    def test_object_cursor_batch_live_fastpath_falls_back_when_no_live_gap_exists(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        probe_calls: list[str] = []
+
+        def probe(**kwargs):
+            probe_calls.append(str(kwargs["queue_mode"]))
+            return (
+                [],
+                {
+                    "pending_candidate_count": 0,
+                    "pending_candidate_count_by_tier": {"live": 0, "backlog": 0},
+                    "pending_candidate_count_by_asset_kind": {},
+                    "retry_deferred_object_count": 0,
+                },
+                set(),
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-22T09:47:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=tmpdir,
+                max_runtime_seconds=30.0,
+                scheduler_quiet=False,
+            )
+            with patch.object(
+                runner,
+                "_probe_pending_object_cursor_batch_records",
+                side_effect=probe,
+            ):
+                manifest = runner._run_object_cursor_batch_single_chunk(
+                    args=args,
+                    invocation_id="live-fastpath-fallback",
+                    active_scope_artifacts=[{"for_trade_date": "20260722"}],
+                    current_day_source_provider_adapter=None,
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 101.0,
+                    prefer_live_fastpath=True,
+                )
+
+        self.assertEqual(probe_calls, ["live_minute_fastpath", "balanced_fair"])
+        self.assertEqual(manifest["object_cursor_batch"]["queue_mode"], "balanced_fair")
+        self.assertTrue(manifest["object_cursor_batch"]["live_fastpath_attempted"])
+        self.assertEqual(
+            manifest["object_cursor_batch"]["live_fastpath_selected_object_count"],
+            0,
+        )
+
+    def test_object_cursor_batch_live_fastpath_skips_invalid_history_priority_probe(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        object_key = ("20260722", "stock", "stock:SH:600001", "buy")
+        selected = [
+            {
+                "object_key": object_key,
+                "target_hhmm": "0946",
+                "queue_tier": "live",
+                "n3t_metric_run_id": "fresh-proof-run",
+            }
+        ]
+        summary = {
+            "pending_candidate_count": 1,
+            "pending_candidate_count_by_tier": {"live": 1, "backlog": 0},
+            "pending_candidate_count_by_asset_kind": {"stock": 1},
+            "selected_object_count": 1,
+            "selected_candidate_count": 1,
+            "selected_object_count_by_tier": {"live": 1, "backlog": 0},
+            "selected_object_count_by_asset_kind": {"stock": 1},
+            "selected_candidate_count_by_tier": {"live": 1, "backlog": 0},
+            "selected_candidate_count_by_asset_kind": {"stock": 1},
+            "retry_deferred_object_count": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-22T09:47:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=tmpdir,
+                max_runtime_seconds=30.0,
+                scheduler_quiet=True,
+                object_cursor_batch_skip_invalid_priority=False,
+            )
+            with patch.object(
+                runner,
+                "_load_invalid_n3t_object_minute_proof_keys",
+                side_effect=AssertionError("live fastpath must not query invalid history priority"),
+            ), patch.object(
+                runner,
+                "_probe_pending_object_cursor_batch_records",
+                return_value=(selected, summary, set()),
+            ):
+                manifest = runner._run_object_cursor_batch_single_chunk(
+                    args=args,
+                    invocation_id="live-fastpath-no-invalid-priority",
+                    active_scope_artifacts=[{"for_trade_date": "20260722"}],
+                    current_day_source_provider_adapter=None,
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 123.0,
+                    prefer_live_fastpath=True,
+                )
+
+        self.assertEqual(manifest["reason"], "object_cursor_batch_chunk_incomplete")
+        self.assertEqual(manifest["object_cursor_batch"]["queue_mode"], "live_minute_fastpath")
+        self.assertEqual(manifest["object_cursor_batch"]["live_slots_per_chunk"], 512)
+        self.assertEqual(
+            manifest["object_cursor_batch"]["live_fastpath_selected_object_count"],
+            1,
+        )
+
+    def test_object_cursor_batch_proof_aware_probe_pages_past_completed_front_page(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=40)
+        probe_sizes: list[int] = []
+
+        def proof_loader(*, records):
+            probe_sizes.append(len(records))
+            if len(probe_sizes) == 1:
+                return {
+                    runner._object_cursor_batch_proof_key(record)
+                    for record in records
+                }
+            return set()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            selected, summary, _existing = (
+                runner._probe_pending_object_cursor_batch_records(
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    closed_hhmm="0946",
+                    probe_object_limit=32,
+                    chunk_size=8,
+                    max_minutes_per_object=16,
+                    max_proof_rows=128,
+                    priority_object_keys=set(),
+                    cursor_floor_by_object={},
+                    completed_object_keys=set(),
+                    excluded_object_keys=set(),
+                    retry_state={"entries": {}},
+                    observed_at="2026-07-17T09:47:05+08:00",
+                    proof_loader=proof_loader,
+                )
+            )
+
+        selected_identities = {
+            tuple(record["object_key"])[2] for record in selected
+        }
+        self.assertEqual(probe_sizes, [512, 128])
+        self.assertEqual(summary["probe_page_count"], 2)
+        self.assertEqual(summary["existing_proof_skipped_count"], 512)
+        self.assertEqual(summary["selected_object_count"], 8)
+        self.assertEqual(summary["selected_candidate_count"], 128)
+        self.assertTrue(summary["proof_probe_complete"])
+        self.assertEqual(summary["true_remaining_candidate_count"], 0)
+        self.assertEqual(
+            selected_identities,
+            {f"stock:SH:{600000 + index:06d}" for index in range(32, 40)},
+        )
+
+    def test_object_cursor_batch_probe_preserves_object_level_existing_proof_classification(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=2)
+
+        def proof_loader(*, records):
+            first_object_key = ("20260717", "stock", "stock:SH:600000", "buy")
+            first_object_records = [
+                record
+                for record in records
+                if tuple(record["object_key"]) == first_object_key
+            ]
+            return {
+                runner._object_cursor_batch_proof_key(first_object_records[0])
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            selected, summary, _existing = (
+                runner._probe_pending_object_cursor_batch_records(
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    closed_hhmm="0946",
+                    probe_object_limit=32,
+                    chunk_size=2,
+                    max_minutes_per_object=16,
+                    max_proof_rows=32,
+                    priority_object_keys=set(),
+                    cursor_floor_by_object={},
+                    completed_object_keys=set(),
+                    excluded_object_keys=set(),
+                    retry_state={"entries": {}},
+                    observed_at="2026-07-17T09:47:05+08:00",
+                    proof_loader=proof_loader,
+                )
+            )
+
+        selected_by_identity = {
+            tuple(record["object_key"])[2]: record for record in selected
+        }
+        self.assertFalse(
+            selected_by_identity["stock:SH:600000"]["first_proof_urgent"]
+        )
+        self.assertEqual(
+            selected_by_identity["stock:SH:600000"]["queue_tier"],
+            "backlog",
+        )
+        self.assertTrue(
+            selected_by_identity["stock:SH:600001"]["first_proof_urgent"]
+        )
+        self.assertEqual(
+            selected_by_identity["stock:SH:600001"]["queue_tier"],
+            "live",
+        )
+        self.assertEqual(
+            summary["selected_object_count_by_tier"],
+            {"live": 1, "backlog": 1},
+        )
+
+    def test_object_cursor_batch_advanced_cursor_is_not_first_proof_urgent(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=2,
+            next_unchecked_minute_label="09:40",
+        )
+        advanced_ref = payload["scope_rows"][0]["active_tracking_refs"][0]
+        advanced_ref["last_checked_minute_label"] = "09:39"
+        fresh_ref = payload["scope_rows"][1]["active_tracking_refs"][0]
+        fresh_ref.update(
+            {
+                "source_trigger_event_time": "2026-07-17T10:00:00+08:00",
+                "trigger_time": "2026-07-17T10:00:00+08:00",
+                "first_confirmation_minute_label": "10:00",
+                "next_unchecked_minute_label": "10:00",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            selected, summary, _existing = (
+                runner._probe_pending_object_cursor_batch_records(
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    closed_hhmm="1000",
+                    probe_object_limit=32,
+                    chunk_size=2,
+                    max_minutes_per_object=16,
+                    max_proof_rows=32,
+                    priority_object_keys=set(),
+                    cursor_floor_by_object={},
+                    completed_object_keys=set(),
+                    excluded_object_keys=set(),
+                    retry_state={"entries": {}},
+                    observed_at="2026-07-17T10:00:05+08:00",
+                    proof_loader=lambda *, records: set(),
+                )
+            )
+
+        selected_by_identity = {
+            tuple(record["object_key"])[2]: record for record in selected
+        }
+        self.assertFalse(
+            selected_by_identity["stock:SH:600000"]["first_proof_urgent"]
+        )
+        self.assertEqual(
+            selected_by_identity["stock:SH:600000"]["queue_tier"],
+            "backlog",
+        )
+        self.assertTrue(
+            selected_by_identity["stock:SH:600001"]["first_proof_urgent"]
+        )
+        self.assertEqual(
+            selected_by_identity["stock:SH:600001"]["queue_tier"],
+            "live",
+        )
+        self.assertEqual(
+            summary["selected_object_count_by_tier"],
+            {"live": 1, "backlog": 1},
+        )
+
+    def test_object_cursor_batch_backlog_uses_one_pull_for_sixty_four_cursor_minutes(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="1034",
+                max_minutes_per_object=64,
+            )
+            selected, summary = runner._select_pending_object_cursor_batch_records(
+                records=records,
+                existing_proof_keys=set(),
+                closed_hhmm="1034",
+                max_objects=8,
+                max_proof_rows=512,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=selected,
+                observed_at="2026-07-17T10:35:05+08:00",
+            )
+
+        self.assertEqual(len(records), 256)
+        self.assertEqual(len(selected), 256)
+        self.assertEqual(summary["selected_object_count"], 4)
+        self.assertEqual(summary["selected_candidate_count_by_tier"], {"live": 256, "backlog": 0})
+        self.assertEqual(len(plans), 4)
+        self.assertEqual(len({tuple(plan["object_batch_key"]) for plan in plans}), 4)
+
+    def test_object_cursor_batch_retry_state_defers_failed_object_for_sixty_seconds(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        object_key = ("20260722", "board", "board:TDX:881087", "buy")
+        records = [
+            {
+                "object_key": object_key,
+                "target_hhmm": target_hhmm,
+                "n3t_metric_run_id": f"run-{target_hhmm}",
+            }
+            for target_hhmm in ("0956", "0957")
+        ]
+        failure = runner._object_cursor_batch_failure(
+            object_key,
+            target_hhmm="0956",
+            reason="BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, state = runner._load_object_cursor_batch_retry_state(
+                output_dir=Path(tmpdir),
+                for_trade_date="20260722",
+            )
+            first = runner._update_object_cursor_batch_retry_state(
+                path=path,
+                retry_state=state,
+                observed_at="2026-07-22T10:20:00+08:00",
+                proof_records=[],
+                failure_records=[failure],
+            )
+            _path, persisted = runner._load_object_cursor_batch_retry_state(
+                output_dir=Path(tmpdir),
+                for_trade_date="20260722",
+            )
+            deferred, deferred_candidates = (
+                runner._object_cursor_batch_retry_deferred_objects(
+                    records=records,
+                    retry_state=persisted,
+                    observed_at="2026-07-22T10:20:59+08:00",
+                )
+            )
+            due, _due_candidates = runner._object_cursor_batch_retry_deferred_objects(
+                records=records,
+                retry_state=persisted,
+                observed_at="2026-07-22T10:21:00+08:00",
+            )
+            cleared = runner._update_object_cursor_batch_retry_state(
+                path=path,
+                retry_state=persisted,
+                observed_at="2026-07-22T10:21:01+08:00",
+                proof_records=[records[0]],
+                failure_records=[],
+            )
+
+        self.assertTrue(first["written"])
+        self.assertEqual(deferred, {object_key})
+        self.assertEqual(deferred_candidates, 2)
+        self.assertEqual(due, set())
+        self.assertTrue(cleared["written"])
+        self.assertEqual(cleared["active_entry_count"], 0)
+
+    def test_object_cursor_batch_deferred_boards_do_not_take_backlog_slots(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=10)
+        board_keys = []
+        for index, board_code in enumerate(("881087", "881094")):
+            row = payload["scope_rows"][index]
+            ref = row["active_tracking_refs"][0]
+            identity_key = f"board:TDX:{board_code}"
+            row.update({"asset_kind": "board", "identity_key": identity_key})
+            ref.update({"asset_kind": "board", "identity_key": identity_key})
+            board_keys.append(("20260717", "board", identity_key, "buy"))
+
+        entries = {}
+        for object_key in board_keys:
+            entry_key = runner._object_cursor_batch_retry_entry_key(
+                object_key,
+                target_hhmm="0931",
+            )
+            entries[entry_key] = {
+                "object_key": list(object_key),
+                "target_hhmm": "0931",
+                "reason": "BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH",
+                "attempt_count": 1,
+                "last_failed_at": "2026-07-17T09:40:00+08:00",
+                "next_retry_at": "2026-07-17T09:41:00+08:00",
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            selected, summary, _existing = (
+                runner._probe_pending_object_cursor_batch_records(
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    closed_hhmm="0946",
+                    probe_object_limit=32,
+                    chunk_size=8,
+                    max_minutes_per_object=16,
+                    max_proof_rows=128,
+                    priority_object_keys=set(),
+                    cursor_floor_by_object={},
+                    completed_object_keys=set(),
+                    excluded_object_keys=set(),
+                    retry_state={"entries": entries},
+                    observed_at="2026-07-17T09:40:30+08:00",
+                    proof_loader=lambda **_kwargs: set(),
+                )
+            )
+
+        selected_keys = {tuple(record["object_key"]) for record in selected}
+        self.assertEqual(summary["retry_deferred_object_count"], 2)
+        self.assertEqual(summary["selected_object_count"], 8)
+        self.assertTrue(selected_keys.isdisjoint(board_keys))
+        self.assertEqual(
+            {object_key[1] for object_key in selected_keys},
+            {"stock"},
+        )
+
+    def test_object_cursor_batch_does_not_start_chunk_without_runtime_budget(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+
+        def source_adapter(**_kwargs):
+            self.fail("provider must not run without the minimum chunk budget")
+
+        setattr(
+            source_adapter,
+            "inline_batch_adapter",
+            lambda **_kwargs: self.fail("provider must not run without the minimum chunk budget"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-17T09:32:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=0,
+                object_cursor_batch_max_chunks_per_invocation=1,
+            )
+            with patch.object(
+                runner,
+                "_load_existing_n3t_object_minute_proof_keys",
+                return_value=set(),
+            ):
+                manifest = runner._run_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="budget-fixture",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    current_day_source_provider_adapter=source_adapter,
+                    previous_day_context_provider_adapter=lambda **_kwargs: {},
+                    n3t_writer_adapter=lambda **_kwargs: {},
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 123.0,
+                )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(manifest["reason"], "object_cursor_batch_chunk_incomplete")
+        self.assertEqual(manifest["object_cursor_batch"]["completed_chunk_count"], 0)
+        self.assertEqual(manifest["object_cursor_batch"]["provider_call_count"], 0)
+        self.assertGreater(manifest["object_cursor_batch"]["remaining_candidate_count"], 0)
+
+    def test_post_close_final_a_object_batch_waits_without_legacy_source_dir(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:00:30+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+            )
+            manifest = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="post-close-waiting",
+                active_scope_artifacts=[{"path": str(root / "scope.json")}],
+                current_day_source_provider_adapter=None,
+                previous_day_context_provider_adapter=None,
+                n3t_writer_adapter=None,
+                deadline_check=lambda _phase: None,
+                started=0.0,
+                now_monotonic=lambda: 0.0,
+            )
+            legacy_dir_exists = (root / "current_day_source").exists()
+
+        self.assertTrue(runner._object_cursor_batch_hot_path_enabled(args))
+        self.assertEqual(manifest["reason"], "post_close_final_a_close_grace_waiting")
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertFalse(legacy_dir_exists)
+
+    def test_post_close_final_a_object_batch_runs_cached_source_through_n3t_writer(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+        )
+        object_key = ("20260721", "stock", "stock:SH:600000", "buy")
+        ref = dict(payload["scope_rows"][0]["active_tracking_refs"][0])
+        scope_row = {
+            "for_trade_date": object_key[0],
+            "asset_kind": object_key[1],
+            "identity_key": object_key[2],
+            "direction": object_key[3],
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": ref["source_trigger_event_id"],
+            "source_trigger_run_id": ref["source_trigger_run_id"],
+            "scope_status": "active",
+        }
+        current_rows = _current_day_c1_rows_for_fixture(
+            trade_date="20260721",
+            scope_row=scope_row,
+            through_label="14:59",
+        )
+        previous_rows = _previous_day_c1_rows_for_fixture(
+            trade_date="20260720",
+            identity_key=object_key[2],
+        )
+        for row in previous_rows:
+            row["raw_source_label"] = row["physical_c1_label"]
+        afternoon_open = next(
+            row for row in previous_rows if row["physical_c1_label"] == "13:00"
+        )
+        previous_rows.append(
+            {
+                **afternoon_open,
+                "raw_source_label": "11:30",
+                "source_row_ref": "previous:600000:11:30-close",
+            }
+        )
+        next(
+            row for row in previous_rows if row["physical_c1_label"] == "14:59"
+        )["raw_source_label"] = "15:00"
+        provider_calls: list[tuple[str, str, str, str]] = []
+        writer_inputs: list[dict[str, object]] = []
+
+        def previous_adapter(**_kwargs):
+            self.fail("post-close object batch must use inline previous-day adapter")
+
+        def previous_inline_adapter(*, args, staging_payloads):
+            return {
+                "adapter_type": "n3_c1_n3t_previous_day_context_inline_batch_provider_adapter_v1",
+                "for_trade_date": "20260721",
+                "previous_trade_date": "20260720",
+                "previous_day_minute_row_count": len(previous_rows),
+                "previous_day_minute_rows": previous_rows,
+                "missing_row_keys": [],
+                "missing_object_keys": [],
+                "database_connection_count": 1,
+                "database_read": True,
+                "database_written": False,
+                "market_data_pulled": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(previous_adapter, "inline_rows_batch_adapter", previous_inline_adapter)
+
+        def writer_adapter(*, args, n3t_writer_inputs):
+            writer_inputs.extend(dict(item) for item in n3t_writer_inputs)
+            return {
+                "adapter_type": "n3t_action_confirmation_metric_writer_adapter_v1",
+                "write_executed": True,
+                "db_write_executed": True,
+                "writes_enabled": True,
+                "source_basis": "N3T_C1_CLOSED",
+                "metric_role": "action_confirmation",
+                "proof_consumer": "N5",
+                "not_n5_final_proof": False,
+                "n3t_writer_input_count": len(n3t_writer_inputs),
+                "metric_plan_row_count": len(n3t_writer_inputs),
+                "inserted_rows": len(n3t_writer_inputs),
+                "target_table_counts": {
+                    "stock_n3t_action_confirmation_metric": len(n3t_writer_inputs)
+                },
+                "writes_common_event_outbox": False,
+                "writes_canonical_minute_bar_1m": False,
+                "touches_n4_n5_n6_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+                object_cursor_batch_max_chunks_per_invocation=1,
+            )
+            with patch.object(
+                runner,
+                "_load_existing_n3t_object_minute_proof_keys",
+                return_value=set(),
+            ):
+                manifest = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="post-close-real-pipeline",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260721"}
+                    ],
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls,
+                        source_rows_by_object={object_key: current_rows},
+                    ),
+                    previous_day_context_provider_adapter=previous_adapter,
+                    n3t_writer_adapter=writer_adapter,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 101.0,
+                )
+            cache_paths = list(
+                (root / "out" / "post_close_final_a" / "source_cache").glob("*.json")
+            )
+            batch_paths = list((root / "out" / "object_cursor_batch").glob("*.json"))
+
+        self.assertEqual(provider_calls, [object_key])
+        self.assertEqual(len(cache_paths), 1)
+        self.assertEqual(len(batch_paths), 1)
+        self.assertEqual(len(writer_inputs), 1, manifest)
+        self.assertEqual(writer_inputs[0]["target_hhmm"], "1459")
+        self.assertEqual(manifest["reason"], "post_close_final_a_object_batch_completed")
+        self.assertEqual(manifest["post_close_final_a_progress"]["status"], "completed")
+        self.assertEqual(manifest["object_cursor_batch"]["remaining_proof_count"], 0)
+        self.assertFalse(manifest["boundary"]["writes_canonical_minute_bar_1m"])
+        self.assertFalse(manifest["boundary"]["touches_n4_n5_n6_outbox"])
+
+    def test_post_close_final_a_object_batch_reuses_cached_source_after_completion(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+        )
+        object_key = (
+            "20260721",
+            "stock",
+            "stock:SH:600000",
+            "buy",
+        )
+        provider_calls: list[tuple[str, str, str, str]] = []
+        pipeline_calls = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            artifacts = [{"path": str(scope_path), "for_trade_date": "20260721"}]
+            marker_path = (
+                root
+                / "out"
+                / "post_close_final_a"
+                / "n3_c1_n3t_post_close_final_a_progress_v1_20260721.json"
+            )
+
+            def fake_hot_path(**_kwargs):
+                nonlocal pipeline_calls
+                pipeline_calls += 1
+                return _post_close_pipeline_manifest(
+                    proof_object_keys=(object_key,) if pipeline_calls == 1 else (),
+                )
+
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    side_effect=fake_hot_path,
+                ),
+            ):
+                first = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="post-close-first",
+                    active_scope_artifacts=artifacts,
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=lambda **_kwargs: {},
+                    n3t_writer_adapter=lambda **_kwargs: {},
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+                first_marker_bytes = marker_path.read_bytes()
+                first_marker_mtime_ns = marker_path.stat().st_mtime_ns
+                second = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="post-close-second",
+                    active_scope_artifacts=artifacts,
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=lambda **_kwargs: {},
+                    n3t_writer_adapter=lambda **_kwargs: {},
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+            second_marker_bytes = marker_path.read_bytes()
+            second_marker_mtime_ns = marker_path.stat().st_mtime_ns
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            cache_paths = list(
+                (root / "out" / "post_close_final_a" / "source_cache").glob(
+                    "*.json"
+                )
+            )
+            legacy_dir_exists = (root / "current_day_source").exists()
+
+        self.assertEqual(provider_calls, [object_key])
+        self.assertEqual(pipeline_calls, 1)
+        self.assertEqual(first["reason"], "post_close_final_a_object_batch_completed")
+        self.assertEqual(second["reason"], "post_close_final_a_object_batch_completed")
+        self.assertEqual(first_marker_bytes, second_marker_bytes)
+        self.assertEqual(first_marker_mtime_ns, second_marker_mtime_ns)
+        self.assertEqual(marker["status"], "completed")
+        self.assertEqual(marker["target_physical_minute_label"], "14:59")
+        self.assertEqual(marker["raw_source_close_label"], "15:00")
+        self.assertEqual(marker["completed_source_object_count"], 1)
+        self.assertEqual(marker["remaining_source_object_count"], 0)
+        self.assertEqual(marker["remaining_proof_count"], 0)
+        self.assertEqual(len(cache_paths), 1)
+        self.assertFalse(legacy_dir_exists)
+
+    def test_post_close_final_a_object_batch_retries_only_failed_source_object(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=2,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+        )
+        first_key = ("20260721", "stock", "stock:SH:600000", "buy")
+        failed_key = ("20260721", "stock", "stock:SH:600001", "buy")
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    return_value=_post_close_pipeline_manifest(
+                        proof_object_keys=(first_key,)
+                    ),
+                ),
+            ):
+                for invocation_id in ("post-close-failed-first", "post-close-failed-second"):
+                    runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                        args=args,
+                        invocation_id=invocation_id,
+                        active_scope_artifacts=[
+                            {"path": str(scope_path), "for_trade_date": "20260721"}
+                        ],
+                        current_day_source_provider_adapter=_post_close_source_provider(
+                            provider_calls,
+                            failed_object_keys={failed_key},
+                        ),
+                        previous_day_context_provider_adapter=lambda **_kwargs: {},
+                        n3t_writer_adapter=lambda **_kwargs: {},
+                        deadline_check=lambda _phase: None,
+                        started=0.0,
+                        now_monotonic=lambda: 0.0,
+                    )
+            marker_path = (
+                root
+                / "out"
+                / "post_close_final_a"
+                / "n3_c1_n3t_post_close_final_a_progress_v1_20260721.json"
+            )
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(provider_calls.count(first_key), 1)
+        self.assertEqual(provider_calls.count(failed_key), 2)
+        self.assertEqual(marker["status"], "in_progress")
+        self.assertEqual(marker["completed_source_object_count"], 1)
+        self.assertEqual(marker["remaining_source_object_count"], 1)
+        self.assertEqual(marker["failed_object_count"], 1)
+
+    def test_post_close_final_a_object_batch_chunks_754_objects_without_global_limit_blocker(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=754,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+        )
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    side_effect=lambda **_kwargs: _post_close_pipeline_manifest(),
+                ),
+            ):
+                manifests = []
+                for sequence in range(2):
+                    manifests.append(
+                        runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                            args=args,
+                            invocation_id=f"post-close-chunk-{sequence}",
+                            active_scope_artifacts=[
+                                {
+                                    "path": str(scope_path),
+                                    "for_trade_date": "20260721",
+                                }
+                            ],
+                            current_day_source_provider_adapter=_post_close_source_provider(
+                                provider_calls
+                            ),
+                            previous_day_context_provider_adapter=None,
+                            n3t_writer_adapter=None,
+                            deadline_check=lambda _phase: None,
+                            started=0.0,
+                            now_monotonic=lambda: 0.0,
+                        )
+                    )
+            marker = json.loads(
+                (
+                    root
+                    / "out"
+                    / "post_close_final_a"
+                    / "n3_c1_n3t_post_close_final_a_progress_v1_20260721.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(len(provider_calls), 128)
+        self.assertEqual(len(set(provider_calls)), 128)
+        self.assertEqual(
+            manifests[0]["post_close_final_a_progress"]["remaining_source_object_count"],
+            690,
+        )
+        self.assertEqual(
+            manifests[1]["post_close_final_a_progress"]["remaining_source_object_count"],
+            626,
+        )
+        self.assertEqual(marker["current_object_count"], 754)
+        self.assertEqual(marker["remaining_source_object_count"], 626)
+        self.assertNotIn(
+            "post_close_final_a_scope_exceeds_single_pull_limit",
+            {manifest["reason"] for manifest in manifests},
+        )
+
+    def test_post_close_final_a_object_batch_limits_one_proof_chunk_to_64_by_16(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=754,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:44",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260721"}
+                ],
+                closed_hhmm="1459",
+                max_minutes_per_object=16,
+            )
+            selected, summary = runner._select_pending_object_cursor_batch_records(
+                records=records,
+                existing_proof_keys=set(),
+                closed_hhmm="1459",
+                max_objects=runner.DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE,
+                max_proof_rows=runner.DEFAULT_POST_CLOSE_FINAL_A_PROOF_CHUNK_SIZE,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=selected,
+                observed_at="2026-07-21T15:01:05+08:00",
+                provider_target_hhmm="1459",
+            )
+
+        self.assertEqual(summary["selected_object_count"], 64)
+        self.assertEqual(summary["selected_candidate_count"], 1024)
+        self.assertEqual(len(plans), 64)
+        self.assertEqual({plan["target_hhmm"] for plan in plans}, {"1459"})
+
+    def test_post_close_final_a_object_batch_scope_change_fetches_only_new_object(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(
+                    _object_cursor_batch_scope_payload(
+                        object_count=1,
+                        for_trade_date="20260721",
+                        next_unchecked_minute_label="14:59",
+                    ),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            artifacts = [{"path": str(scope_path), "for_trade_date": "20260721"}]
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    side_effect=lambda **_kwargs: _post_close_pipeline_manifest(),
+                ),
+            ):
+                first = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="scope-one",
+                    active_scope_artifacts=artifacts,
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+                scope_path.write_text(
+                    json.dumps(
+                        _object_cursor_batch_scope_payload(
+                            object_count=2,
+                            for_trade_date="20260721",
+                            next_unchecked_minute_label="14:59",
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                second = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="scope-two",
+                    active_scope_artifacts=artifacts,
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+                scope_path.write_text(
+                    json.dumps(
+                        _object_cursor_batch_scope_payload(
+                            object_count=1,
+                            for_trade_date="20260721",
+                            next_unchecked_minute_label="14:59",
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                third = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="scope-one-again",
+                    active_scope_artifacts=artifacts,
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+
+        first_key = ("20260721", "stock", "stock:SH:600000", "buy")
+        second_key = ("20260721", "stock", "stock:SH:600001", "buy")
+        self.assertEqual(provider_calls.count(first_key), 1)
+        self.assertEqual(provider_calls.count(second_key), 1)
+        self.assertEqual(first["post_close_final_a_progress"]["current_object_count"], 1)
+        self.assertEqual(second["post_close_final_a_progress"]["current_object_count"], 2)
+        self.assertTrue(second["post_close_final_a_progress"]["object_scope_changed"])
+        self.assertEqual(third["post_close_final_a_progress"]["current_object_count"], 1)
+        self.assertEqual(third["post_close_final_a_progress"]["remaining_source_object_count"], 0)
+
+    def test_post_close_final_a_excludes_only_after_close_trigger_from_completion_scope(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="15:00",
+        )
+        ref = payload["scope_rows"][0]["active_tracking_refs"][0]
+        ref.update(
+            {
+                "first_confirmation_minute_label": "15:00",
+                "source_trigger_event_time": "2026-07-21T15:00:00+08:00",
+                "trigger_time": "2026-07-21T15:00:00+08:00",
+            }
+        )
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+            )
+            manifest = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="after-close-only",
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260721"}
+                ],
+                current_day_source_provider_adapter=_post_close_source_provider(
+                    provider_calls
+                ),
+                previous_day_context_provider_adapter=None,
+                n3t_writer_adapter=None,
+                deadline_check=lambda _phase: None,
+                started=0.0,
+                now_monotonic=lambda: 0.0,
+            )
+            marker = json.loads(
+                (
+                    root
+                    / "out"
+                    / "post_close_final_a"
+                    / "n3_c1_n3t_post_close_final_a_progress_v1_20260721.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(manifest["reason"], "post_close_final_a_object_batch_completed")
+        self.assertEqual(marker["status"], "completed")
+        self.assertEqual(marker["current_object_count"], 0)
+        self.assertEqual(marker["remaining_source_object_count"], 0)
+        self.assertEqual(marker["remaining_proof_count"], 0)
+        self.assertEqual(marker["failed_object_count"], 0)
+        self.assertEqual(marker["no_evaluable_after_close_ref_count"], 1)
+        self.assertEqual(
+            marker["no_evaluable_after_close_refs"][0]["reason"],
+            "trigger_after_final_evaluable_minute",
+        )
+        self.assertEqual(
+            marker["no_evaluable_after_close_refs"][0]["source_trigger_event_id"],
+            ref["source_trigger_event_id"],
+        )
+
+    def test_post_close_final_a_mixed_ref_processes_object_and_excludes_late_ref(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+            include_hint_ref=True,
+        )
+        refs = payload["scope_rows"][0]["active_tracking_refs"]
+        refs[1].update(
+            {
+                "first_confirmation_minute_label": "15:00",
+                "next_unchecked_minute_label": "15:00",
+                "source_trigger_event_time": "2026-07-21T15:00:00+08:00",
+                "trigger_time": "2026-07-21T15:00:00+08:00",
+            }
+        )
+        object_key = ("20260721", "stock", "stock:SH:600000", "buy")
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    return_value=_post_close_pipeline_manifest(
+                        proof_object_keys=(object_key,)
+                    ),
+                ),
+            ):
+                manifest = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="mixed-after-close",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260721"}
+                    ],
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+
+        self.assertEqual(provider_calls, [object_key])
+        progress = manifest["post_close_final_a_progress"]
+        self.assertEqual(progress["status"], "completed")
+        self.assertEqual(progress["current_object_count"], 1)
+        self.assertEqual(progress["no_evaluable_after_close_ref_count"], 1)
+        self.assertEqual(progress["remaining_source_object_count"], 0)
+        self.assertEqual(progress["remaining_proof_count"], 0)
+
+    def test_post_close_final_a_mixed_objects_never_fetches_late_trigger(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=2,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="14:59",
+        )
+        late_ref = payload["scope_rows"][1]["active_tracking_refs"][0]
+        late_ref.update(
+            {
+                "first_confirmation_minute_label": "15:00",
+                "next_unchecked_minute_label": "15:00",
+                "source_trigger_event_time": "2026-07-21T15:00:00+08:00",
+                "trigger_time": "2026-07-21T15:00:00+08:00",
+            }
+        )
+        valid_key = ("20260721", "stock", "stock:SH:600000", "buy")
+        late_key = ("20260721", "stock", "stock:SH:600001", "buy")
+        provider_calls: list[tuple[str, str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=256,
+            )
+            with (
+                patch.object(
+                    runner,
+                    "_load_existing_n3t_object_minute_proof_keys",
+                    return_value=set(),
+                ),
+                patch.object(
+                    runner,
+                    "_run_object_cursor_batch_hot_path",
+                    return_value=_post_close_pipeline_manifest(
+                        proof_object_keys=(valid_key,)
+                    ),
+                ),
+            ):
+                manifest = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="mixed-objects-after-close",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260721"}
+                    ],
+                    current_day_source_provider_adapter=_post_close_source_provider(
+                        provider_calls
+                    ),
+                    previous_day_context_provider_adapter=None,
+                    n3t_writer_adapter=None,
+                    deadline_check=lambda _phase: None,
+                    started=0.0,
+                    now_monotonic=lambda: 0.0,
+                )
+
+        self.assertEqual(provider_calls, [valid_key])
+        self.assertNotIn(late_key, provider_calls)
+        progress = manifest["post_close_final_a_progress"]
+        self.assertEqual(progress["status"], "completed")
+        self.assertEqual(progress["current_object_count"], 1)
+        self.assertEqual(progress["no_evaluable_after_close_object_count"], 1)
+        self.assertEqual(progress["failed_object_count"], 0)
+        self.assertNotIn(
+            "post_close_final_a_source_scope_record_missing",
+            json.dumps(manifest),
+        )
+
+    def test_post_close_final_a_new_late_ref_changes_completed_scope_hash(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            for_trade_date="20260721",
+            next_unchecked_minute_label="15:00",
+        )
+        ref = payload["scope_rows"][0]["active_tracking_refs"][0]
+        ref.update(
+            {
+                "first_confirmation_minute_label": "15:00",
+                "source_trigger_event_time": "2026-07-21T15:00:00+08:00",
+                "trigger_time": "2026-07-21T15:00:00+08:00",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            args = argparse.Namespace(
+                scheduler_quiet=True,
+                execute=True,
+                fastlane_session_phase="post_close",
+                fastlane_active_worker_decision={
+                    "worker_mode": "post_close_final_a_pass",
+                    "post_close_final_a_pass_allowed": True,
+                    "external_c1_pull_allowed_once": True,
+                },
+                fastlane_current_exchange_time="2026-07-21T15:01:05+08:00",
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                for_trade_date="20260721",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+            )
+            artifacts = [{"path": str(scope_path), "for_trade_date": "20260721"}]
+            first = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="late-one",
+                active_scope_artifacts=artifacts,
+                current_day_source_provider_adapter=None,
+                previous_day_context_provider_adapter=None,
+                n3t_writer_adapter=None,
+                deadline_check=lambda _phase: None,
+                started=0.0,
+                now_monotonic=lambda: 0.0,
+            )
+            payload["scope_rows"][0]["active_tracking_refs"].append(
+                {
+                    **ref,
+                    "state_key": "state-600000-late-second",
+                    "source_trigger_event_id": "trigger-600000-late-second",
+                }
+            )
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            second = runner._run_post_close_final_a_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="late-two",
+                active_scope_artifacts=artifacts,
+                current_day_source_provider_adapter=None,
+                previous_day_context_provider_adapter=None,
+                n3t_writer_adapter=None,
+                deadline_check=lambda _phase: None,
+                started=0.0,
+                now_monotonic=lambda: 0.0,
+            )
+
+        first_progress = first["post_close_final_a_progress"]
+        second_progress = second["post_close_final_a_progress"]
+        self.assertNotEqual(
+            first_progress["object_scope_sha256"],
+            second_progress["object_scope_sha256"],
+        )
+        self.assertTrue(second_progress["object_scope_changed"])
+        self.assertEqual(second_progress["no_evaluable_after_close_ref_count"], 2)
+        self.assertEqual(second_progress["status"], "completed")
+
+    def test_object_cursor_batch_buy_and_hint_share_one_object_minute_proof(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1, include_hint_ref=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0931",
+            )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["selected_ref_count"], 2)
+        refs = records[0]["payload"]["scope_rows"][0]["active_tracking_refs"]
+        self.assertEqual({ref["condition_key"] for ref in refs}, {"BUY:Y,Q,M,W,D", "BUY_HINT:M"})
+
+    def test_object_cursor_batch_provider_pulls_once_per_object_without_legacy_artifacts(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=256)
+        fetches: list[str] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                fetches.append(str(subscription["identity_key"]))
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": source_close_label_for_physical_start_label(
+                            for_trade_date,
+                            label,
+                        )["raw_source_label"],
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                    for label in ("09:31", "09:32")
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[{"path": str(scope_path), "for_trade_date": "20260717"}],
+                closed_hhmm="0932",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:33:05+08:00",
+            )
+            result = runner._build_current_day_source_rows_with_market_adapter(
+                args=argparse.Namespace(
+                    current_day_source_artifact_dir=str(root / "legacy_source"),
+                    current_day_source_provider_concurrency=4,
+                ),
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+            legacy_dir_exists = (root / "legacy_source").exists()
+
+        self.assertEqual(len(plans), 256)
+        self.assertEqual(len(fetches), 256)
+        self.assertEqual(len(set(fetches)), 256)
+        self.assertEqual(result["inline_payload_count"], 256)
+        self.assertEqual(result["artifact_count"], 0)
+        self.assertFalse(result["artifact_written"])
+        self.assertFalse(legacy_dir_exists)
+
+    def test_open_burst_cohort_keeps_all_first_proofs_urgent(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        records = [
+            {
+                "object_key": (
+                    "20260724",
+                    (
+                        "stock"
+                        if sequence < 347
+                        else "board"
+                        if sequence < 387
+                        else "index"
+                    ),
+                    f"identity:{sequence:04d}",
+                    "sell" if sequence < 338 or sequence >= 347 else "buy",
+                ),
+                "target_hhmm": "0931",
+                "n3t_metric_run_id": f"proof-{sequence}",
+            }
+            for sequence in range(394)
+        ]
+
+        selected, summary = runner._select_pending_object_cursor_batch_records(
+            records=records,
+            existing_proof_keys=set(),
+            closed_hhmm="0940",
+            max_objects=512,
+            max_proof_rows=4096,
+            queue_mode=runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH,
+        )
+
+        self.assertEqual(len(selected), 394)
+        self.assertEqual(summary["selected_object_count"], 394)
+        self.assertEqual(
+            summary["selected_object_count_by_tier"],
+            {"live": 394, "backlog": 0},
+        )
+        self.assertTrue(all(item["first_proof_urgent"] for item in selected))
+
+    def test_provider_plan_deduplicates_buy_and_sell_by_identity(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        buy_ref = dict(
+            payload["scope_rows"][0]["active_tracking_refs"][0]
+        )
+        sell_ref = {
+            **buy_ref,
+            "state_key": "state-600000-sell",
+            "direction": "sell",
+            "signal_type": "S_SELL",
+            "condition_key": "SELL:Y,Q,M,W,D",
+            "source_trigger_event_id": "trigger-600000-sell",
+        }
+        payload["scope_rows"][0]["active_tracking_refs"].append(sell_ref)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            buy_only_plan = runner._object_cursor_batch_provider_plans(
+                selected_records=[
+                    record
+                    for record in records
+                    if tuple(record["object_key"])[3] == "buy"
+                ],
+                observed_at="2026-07-17T09:32:05+08:00",
+            )[0]
+            sell_only_plan = runner._object_cursor_batch_provider_plans(
+                selected_records=[
+                    record
+                    for record in records
+                    if tuple(record["object_key"])[3] == "sell"
+                ],
+                observed_at="2026-07-17T09:32:05+08:00",
+            )[0]
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(len(plans[0]["object_batch_keys"]), 2)
+        self.assertEqual(
+            {key[3] for key in plans[0]["object_batch_keys"]},
+            {"buy", "sell"},
+        )
+        self.assertEqual(
+            buy_only_plan["source_run_hash"],
+            sell_only_plan["source_run_hash"],
+        )
+
+    def test_intraday_source_cache_uses_dynamic_then_tail_offset(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        observed_offsets: list[int] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.offset = 800
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                observed_offsets.append(self.offset)
+                labels = runner._canonical_ashare_1m_labels_cached(
+                    for_trade_date
+                )
+                selected_labels = labels[-self.offset :]
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": (
+                            source_close_label_for_physical_start_label(
+                                for_trade_date,
+                                label,
+                            )["raw_source_label"]
+                        ),
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                    for label in selected_labels
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="1459",
+                max_minutes_per_object=240,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T15:00:05+08:00",
+            )
+            args = argparse.Namespace(
+                current_day_source_artifact_dir=str(root / "legacy"),
+                current_day_source_provider_concurrency=8,
+                output_dir=str(root / "out"),
+            )
+            first = runner._build_current_day_source_rows_with_market_adapter(
+                args=args,
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+            second = runner._build_current_day_source_rows_with_market_adapter(
+                args=args,
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(first["inline_payload_count"], 1)
+        self.assertEqual(second["inline_payload_count"], 1)
+        self.assertEqual(observed_offsets, [256, 32])
+        self.assertFalse(first["candidate_results"][0]["source_cache_hit"])
+        self.assertTrue(second["candidate_results"][0]["source_cache_hit"])
+
+    def test_intraday_source_cold_cache_backlog_triggers_one_full_repair(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        observed_offsets: list[int] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.offset = 800
+
+            def fetch_minute_bars(self, _subscription, for_trade_date):
+                observed_offsets.append(self.offset)
+                labels = runner._canonical_ashare_1m_labels_cached(
+                    for_trade_date
+                )
+                closed_labels = labels[: labels.index("14:00") + 1]
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": (
+                            source_close_label_for_physical_start_label(
+                                for_trade_date,
+                                label,
+                            )["raw_source_label"]
+                        ),
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                    for label in closed_labels[-self.offset :]
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="1400",
+                max_minutes_per_object=1,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T14:01:05+08:00",
+            )
+            args = argparse.Namespace(
+                current_day_source_artifact_dir=str(root / "legacy"),
+                current_day_source_provider_concurrency=8,
+                output_dir=str(root / "out"),
+            )
+            repaired = runner._build_current_day_source_rows_with_market_adapter(
+                args=args,
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(observed_offsets, [32, 256])
+        self.assertEqual(repaired["inline_payload_count"], 1)
+        result = repaired["candidate_results"][0]
+        self.assertFalse(result["source_cache_hit"])
+        self.assertTrue(result["source_cache_repaired"])
+        self.assertEqual(
+            result["source_cache_repair_reason"],
+            "intraday_source_cache_scope_incomplete",
+        )
+        source_rows = repaired["source_artifacts"][0]["payload"][
+            "closed_minute_rows"
+        ]
+        self.assertIn(
+            "09:31",
+            {row["physical_c1_label"] for row in source_rows},
+        )
+
+    def test_intraday_source_cache_gap_repairs_once_and_conflict_fails_closed(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        observed_offsets: list[int] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.offset = 800
+
+            def fetch_minute_bars(self, _subscription, for_trade_date):
+                observed_offsets.append(self.offset)
+                if self.offset == 32:
+                    return []
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": (
+                            source_close_label_for_physical_start_label(
+                                for_trade_date,
+                                label,
+                            )["raw_source_label"]
+                        ),
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                    for label in runner._canonical_ashare_1m_labels_cached(
+                        for_trade_date
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="1459",
+                max_minutes_per_object=240,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T15:00:05+08:00",
+            )
+            args = argparse.Namespace(
+                current_day_source_artifact_dir=str(root / "legacy"),
+                current_day_source_provider_concurrency=8,
+                output_dir=str(root / "out"),
+            )
+            cache_path = runner._intraday_source_cache_path(
+                output_dir=Path(args.output_dir),
+                for_trade_date="20260717",
+                asset_kind="stock",
+                identity_key="stock:SH:600000",
+            )
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": runner.INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE,
+                        "for_trade_date": "20260717",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SH:600000",
+                        "closed_minute_rows": [
+                            {
+                                "for_trade_date": "20260717",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SH:600000",
+                                "direction": "buy",
+                                "scope_status": "active",
+                                "physical_c1_label": "09:31",
+                                "raw_source_label": "09:32",
+                                "open": 10,
+                                "high": 11,
+                                "low": 9,
+                                "close": 10.5,
+                                "amount": 1000,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            repaired = runner._build_current_day_source_rows_with_market_adapter(
+                args=args,
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(observed_offsets, [32, 256])
+        self.assertEqual(repaired["inline_payload_count"], 1)
+        self.assertTrue(
+            repaired["candidate_results"][0]["source_cache_repaired"]
+        )
+        cached_row = {
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "physical_c1_label": "09:31",
+            "raw_source_label": "09:32",
+            "open": 10,
+            "close": 10.5,
+            "amount": 1000,
+        }
+        with self.assertRaisesRegex(
+            runner.FastlaneShellBlocked,
+            "intraday_source_cache_label_conflict",
+        ):
+            runner._merge_intraday_source_rows(
+                [cached_row],
+                [{**cached_row, "close": 10.6}],
+            )
+
+    def test_intraday_source_cache_conflict_triggers_one_full_repair(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        observed_offsets: list[int] = []
+
+        class FakeMarketAdapter:
+            external_source = "fake_mootdx"
+            source_version = "test"
+
+            def __init__(self) -> None:
+                self.offset = 800
+
+            def fetch_minute_bars(self, _subscription, for_trade_date):
+                observed_offsets.append(self.offset)
+                labels = (
+                    ["09:31"]
+                    if len(observed_offsets) == 1
+                    else runner._canonical_ashare_1m_labels_cached(for_trade_date)
+                )
+                return [
+                    {
+                        "physical_c1_label": label,
+                        "raw_source_label": (
+                            source_close_label_for_physical_start_label(
+                                for_trade_date,
+                                label,
+                            )["raw_source_label"]
+                        ),
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.6,
+                        "amount": 1000,
+                    }
+                    for label in labels
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="1459",
+                max_minutes_per_object=240,
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T15:00:05+08:00",
+            )
+            args = argparse.Namespace(
+                current_day_source_artifact_dir=str(root / "legacy"),
+                current_day_source_provider_concurrency=8,
+                output_dir=str(root / "out"),
+            )
+            cache_path = runner._intraday_source_cache_path(
+                output_dir=Path(args.output_dir),
+                for_trade_date="20260717",
+                asset_kind="stock",
+                identity_key="stock:SH:600000",
+            )
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_type": runner.INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE,
+                        "for_trade_date": "20260717",
+                        "asset_kind": "stock",
+                        "identity_key": "stock:SH:600000",
+                        "closed_minute_rows": [
+                            {
+                                "for_trade_date": "20260717",
+                                "asset_kind": "stock",
+                                "identity_key": "stock:SH:600000",
+                                "direction": "buy",
+                                "scope_status": "active",
+                                "physical_c1_label": "09:31",
+                                "raw_source_label": "09:32",
+                                "open": 10,
+                                "high": 11,
+                                "low": 9,
+                                "close": 10.5,
+                                "amount": 1000,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            repaired = runner._build_current_day_source_rows_with_market_adapter(
+                args=args,
+                planned_artifacts=plans,
+                market_adapter_factory=FakeMarketAdapter,
+                provider_name="mootdx_today_minute_adapter_v1",
+                persist_artifacts=False,
+            )
+
+        self.assertEqual(observed_offsets, [32, 256])
+        self.assertEqual(repaired["inline_payload_count"], 1)
+        result = repaired["candidate_results"][0]
+        self.assertTrue(result["source_cache_repaired"])
+        self.assertEqual(
+            result["source_cache_repair_reason"],
+            "intraday_source_cache_label_conflict",
+        )
+        source_rows = repaired["source_artifacts"][0]["payload"][
+            "closed_minute_rows"
+        ]
+        repaired_0931 = next(
+            row for row in source_rows if row["physical_c1_label"] == "09:31"
+        )
+        self.assertEqual(repaired_0931["close"], 10.6)
+
+    def test_provider_concurrency_scales_with_cohort_pressure(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        self.assertEqual(
+            runner._adaptive_current_day_source_provider_concurrency(63),
+            8,
+        )
+        self.assertEqual(
+            runner._adaptive_current_day_source_provider_concurrency(64),
+            16,
+        )
+        self.assertEqual(
+            runner._adaptive_current_day_source_provider_concurrency(256),
+            16,
+        )
+
+    def test_invocation_provider_factory_selects_endpoint_once(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        selection_calls: list[str] = []
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+
+        class Manager:
+            def select_for_batch(self, **kwargs):
+                selection_calls.append(str(kwargs["batch_id"]))
+                return Selection()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=Manager(),
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ), patch(
+                "ashare_v3.market.mootdx_batch_attempt.build_mootdx_minute_semantic_probe",
+                return_value=lambda _client: {},
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                adapters = [
+                    factory()
+                    for _ in range(
+                        runner.MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY
+                    )
+                ]
+
+        self.assertEqual(
+            len(adapters),
+            runner.MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY,
+        )
+        self.assertEqual(len(selection_calls), 1)
+
+    def test_invocation_provider_factory_aborts_after_three_distinct_empty_objects(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=5)
+        empty_identities: list[str] = []
+        manager_record_calls: list[str] = []
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_required_object_result(
+                self,
+                endpoint_id,
+                *,
+                transport,
+                empty,
+                object_identity,
+            ):
+                del endpoint_id, transport
+                manager_record_calls.append(object_identity)
+                if not empty:
+                    empty_identities.clear()
+                    return False
+                if object_identity not in empty_identities:
+                    empty_identities.append(object_identity)
+                return len(empty_identities) >= 3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=Manager(),
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                factory()
+                record_result = getattr(
+                    factory,
+                    "record_required_object_result",
+                )
+                self.assertIsNone(
+                    record_result(identity_key="one", empty=True)
+                )
+                self.assertIsNone(
+                    record_result(identity_key="two", empty=True)
+                )
+                metadata = record_result(identity_key="three", empty=True)
+                fourth_metadata = record_result(
+                    identity_key="four",
+                    empty=True,
+                )
+                fifth_metadata = record_result(
+                    identity_key="five",
+                    empty=True,
+                )
+                successful_inflight_metadata = record_result(
+                    identity_key="successful-inflight",
+                    empty=False,
+                )
+
+        self.assertTrue(getattr(factory, "cohort_is_aborted")())
+        self.assertEqual(manager_record_calls, ["one", "two", "three"])
+        self.assertEqual(
+            metadata["failure_kind"],
+            "consecutive_required_objects_empty",
+        )
+        self.assertEqual(
+            metadata["retry_class"],
+            "endpoint_transport_immediate",
+        )
+        self.assertEqual(fourth_metadata, metadata)
+        self.assertEqual(fifth_metadata, metadata)
+        self.assertIsNone(successful_inflight_metadata)
+
+    def test_invocation_provider_factory_claims_first_cohort_incident_atomically(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def __init__(self) -> None:
+                self.empty_entered = threading.Event()
+                self.release_empty = threading.Event()
+                self.incident_records: list[str] = []
+
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_required_object_result(self, *args, **kwargs):
+                self.empty_entered.set()
+                self.release_empty.wait(timeout=2)
+                self.incident_records.append("empty_incident")
+                return True
+
+            def record_transport_failure(self, *args, **kwargs):
+                self.incident_records.append("transport_incident")
+
+        manager = Manager()
+        callback_results: dict[str, dict[str, Any] | None] = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                empty_thread = threading.Thread(
+                    target=lambda: callback_results.setdefault(
+                        "empty",
+                        factory.record_required_object_result(
+                            identity_key="empty",
+                            empty=True,
+                        ),
+                    )
+                )
+                transport_thread = threading.Thread(
+                    target=lambda: callback_results.setdefault(
+                        "transport",
+                        factory.record_transport_failure(
+                            TimeoutError("fixture transport failure")
+                        ),
+                    )
+                )
+                empty_thread.start()
+                self.assertTrue(manager.empty_entered.wait(timeout=2))
+                transport_thread.start()
+                manager.release_empty.set()
+                empty_thread.join(timeout=2)
+                transport_thread.join(timeout=2)
+
+        self.assertFalse(empty_thread.is_alive())
+        self.assertFalse(transport_thread.is_alive())
+        self.assertEqual(manager.incident_records, ["empty_incident"])
+        self.assertEqual(
+            callback_results["empty"]["failure_kind"],
+            "consecutive_required_objects_empty",
+        )
+        self.assertEqual(callback_results["transport"], callback_results["empty"])
+        self.assertEqual(
+            callback_results["transport"]["transport_failure_record_count"],
+            0,
+        )
+
+    def test_transport_incident_aborts_before_health_cache_persistence_completes(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def __init__(self) -> None:
+                self.persistence_entered = threading.Event()
+                self.release_persistence = threading.Event()
+                self.record_count = 0
+
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_transport_failure(self, *args, **kwargs):
+                del args, kwargs
+                self.record_count += 1
+                self.persistence_entered.set()
+                self.release_persistence.wait(timeout=2)
+
+        manager = Manager()
+        callback_result: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                persistence_thread = threading.Thread(
+                    target=lambda: callback_result.setdefault(
+                        "metadata",
+                        factory.record_transport_failure(
+                            TimeoutError("fixture transport failure")
+                        ),
+                    )
+                )
+                persistence_thread.start()
+                self.assertTrue(manager.persistence_entered.wait(timeout=2))
+                aborted_during_persistence = factory.cohort_is_aborted()
+                with self.assertRaisesRegex(
+                    runner.FastlaneShellBlocked,
+                    "current_day_source_provider_cohort_aborted",
+                ):
+                    factory()
+                manager.release_persistence.set()
+                persistence_thread.join(timeout=2)
+
+        self.assertFalse(persistence_thread.is_alive())
+        self.assertTrue(aborted_during_persistence)
+        self.assertEqual(manager.record_count, 1)
+        self.assertEqual(
+            callback_result["metadata"]["failure_kind"],
+            "batch_transport_failure",
+        )
+        self.assertEqual(
+            callback_result["metadata"]["transport_failure_record_count"],
+            1,
+        )
+
+    def test_transport_health_cache_persistence_failure_remains_fail_closed(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def __init__(self) -> None:
+                self.record_count = 0
+
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_transport_failure(self, *args, **kwargs):
+                del args, kwargs
+                self.record_count += 1
+                raise OSError("private health cache path")
+
+        class FailingMarketAdapter:
+            external_source = "fake_mootdx"
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del subscription, for_trade_date
+                raise TimeoutError("private transport host")
+
+        manager = Manager()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ), patch(
+                "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+                return_value=FailingMarketAdapter(),
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                result = (
+                    runner._build_current_day_source_rows_with_market_adapter(
+                        args=argparse.Namespace(
+                            output_dir=tmpdir,
+                            current_day_source_provider_concurrency=1,
+                            current_day_source_provider_concurrency_explicit=True,
+                        ),
+                        planned_artifacts=plans,
+                        market_adapter_factory=factory,
+                        provider_name="mootdx_today_minute_adapter_v1",
+                        persist_artifacts=False,
+                    )
+                )
+
+        self.assertEqual(manager.record_count, 1)
+        self.assertTrue(result["cohort_aborted"])
+        self.assertEqual(result["endpoint_transport_failure_record_count"], 0)
+        self.assertEqual(result["failed_candidate_count"], 1)
+        failure = result["failed_candidates"][0]
+        self.assertEqual(failure["error_type"], "TimeoutError")
+        self.assertEqual(failure["failure_kind"], "batch_transport_failure")
+        self.assertEqual(failure["retry_class"], "endpoint_transport_immediate")
+        serialized = json.dumps(result, ensure_ascii=True)
+        self.assertNotIn("private health cache path", serialized)
+        self.assertNotIn("private transport host", serialized)
+
+    def test_required_object_health_persistence_failure_is_candidate_local(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=2)
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def __init__(self) -> None:
+                self.recorded_identities: list[str] = []
+
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_required_object_result(
+                self,
+                endpoint_id,
+                *,
+                transport,
+                empty,
+                object_identity,
+            ):
+                del endpoint_id, transport, empty
+                self.recorded_identities.append(object_identity)
+                if object_identity == "stock:SH:600000":
+                    raise OSError("private health cache path")
+                return False
+
+        class MarketAdapter:
+            external_source = "fake_mootdx"
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del for_trade_date
+                if subscription["identity_key"] == "stock:SH:600000":
+                    return []
+                return [
+                    {
+                        "physical_c1_label": "09:31",
+                        "raw_source_label": "09:31",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        manager = Manager()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0931",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:32:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ), patch(
+                "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+                return_value=MarketAdapter(),
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                result = (
+                    runner._build_current_day_source_rows_with_market_adapter(
+                        args=argparse.Namespace(
+                            output_dir=tmpdir,
+                            current_day_source_provider_concurrency=1,
+                            current_day_source_provider_concurrency_explicit=True,
+                        ),
+                        planned_artifacts=plans,
+                        market_adapter_factory=factory,
+                        provider_name="mootdx_today_minute_adapter_v1",
+                        persist_artifacts=False,
+                    )
+                )
+
+        self.assertFalse(result["cohort_aborted"])
+        self.assertEqual(result["inline_payload_count"], 1)
+        self.assertEqual(result["failed_candidate_count"], 1)
+        self.assertEqual(
+            manager.recorded_identities,
+            ["stock:SH:600000", "stock:SH:600001"],
+        )
+        failure = result["failed_candidates"][0]
+        self.assertEqual(
+            failure["reason"],
+            "current_day_source_provider_required_object_health_persistence_failed",
+        )
+        self.assertEqual(
+            failure["failure_kind"],
+            "candidate_health_persistence_failure",
+        )
+        self.assertEqual(
+            failure["retry_class"],
+            "local_health_persistence_immediate",
+        )
+        serialized = json.dumps(result, ensure_ascii=True)
+        self.assertNotIn("private health cache path", serialized)
+
+    def test_cache_repair_required_object_health_persistence_failure_is_local(
+        self,
+    ) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(
+            object_count=1,
+            next_unchecked_minute_label="09:32",
+        )
+
+        class Selection:
+            selectable = True
+            selection_reason = "fixture"
+            endpoint_id = "primary"
+            transport = "mootdx"
+            failover_mode = "active"
+
+        class Manager:
+            def __init__(self) -> None:
+                self.record_count = 0
+
+            def select_for_batch(self, **kwargs):
+                return Selection()
+
+            def record_required_object_result(self, *args, **kwargs):
+                del args, kwargs
+                self.record_count += 1
+                if self.record_count == 2:
+                    raise OSError("private repair health cache path")
+                return False
+
+        class MarketAdapter:
+            external_source = "fake_mootdx"
+
+            def __init__(self) -> None:
+                self.fetch_count = 0
+
+            def fetch_minute_bars(self, subscription, for_trade_date):
+                del subscription, for_trade_date
+                self.fetch_count += 1
+                physical_label, raw_label = (
+                    ("09:31", "09:31")
+                    if self.fetch_count == 1
+                    else ("09:32", "09:32")
+                )
+                return [
+                    {
+                        "physical_c1_label": physical_label,
+                        "raw_source_label": raw_label,
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        manager = Manager()
+        adapter = MarketAdapter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0932",
+            )
+            plans = runner._object_cursor_batch_provider_plans(
+                selected_records=records,
+                observed_at="2026-07-17T09:33:05+08:00",
+            )
+            with patch(
+                "ashare_v3.mootdx_client.MootdxEndpointManager.from_toml",
+                return_value=manager,
+            ), patch(
+                "ashare_v3.mootdx_client.create_mootdx_client",
+                return_value=object(),
+            ), patch(
+                "ashare_v3.market.today_minute_execute.MootdxTodayMinuteAdapter",
+                return_value=adapter,
+            ):
+                factory = (
+                    runner._manager_selected_current_day_market_adapter_factory(
+                        planned_artifacts=plans
+                    )
+                )
+                result = (
+                    runner._build_current_day_source_rows_with_market_adapter(
+                        args=argparse.Namespace(
+                            output_dir=tmpdir,
+                            current_day_source_provider_concurrency=1,
+                            current_day_source_provider_concurrency_explicit=True,
+                        ),
+                        planned_artifacts=plans,
+                        market_adapter_factory=factory,
+                        provider_name="mootdx_today_minute_adapter_v1",
+                        persist_artifacts=False,
+                    )
+                )
+
+        self.assertFalse(result["cohort_aborted"])
+        self.assertEqual(adapter.fetch_count, 2)
+        self.assertEqual(manager.record_count, 2)
+        self.assertEqual(result["failed_candidate_count"], 1)
+        failure = result["failed_candidates"][0]
+        self.assertEqual(
+            failure["reason"],
+            "current_day_source_provider_required_object_health_persistence_failed",
+        )
+        self.assertEqual(
+            failure["failure_kind"],
+            "candidate_health_persistence_failure",
+        )
+        self.assertEqual(
+            failure["retry_class"],
+            "local_health_persistence_immediate",
+        )
+        serialized = json.dumps(result, ensure_ascii=True)
+        self.assertNotIn("private repair health cache path", serialized)
+
+    def test_object_cursor_batch_previous_day_context_reuses_one_connection(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.sql: list[str] = []
+                self.calendar_query = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, _params) -> None:
+                self.sql.append(str(sql))
+                self.calendar_query = "common_trade_calendar" in str(sql)
+
+            def fetchone(self):
+                return {"prev_trade_date": "20260716"} if self.calendar_query else None
+
+            def fetchall(self):
+                if self.calendar_query:
+                    return []
+                return [
+                    {
+                        "bar_id": 1,
+                        "identity_key": "stock:SH:600000",
+                        "raw_source_label": "09:32",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "amount": 1000,
+                    }
+                ]
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        connections: list[FakeConnection] = []
+
+        def connect_factory(_dsn):
+            connection = FakeConnection()
+            connections.append(connection)
+            return connection
+
+        expected = {"stock": {("stock:SH:600000", "09:31"): {"09:32"}}}
+        with patch.object(runner, "_expected_previous_day_context_keys", return_value=expected):
+            result = runner._load_previous_day_context_rows_for_object_cursor_batch(
+                args=argparse.Namespace(),
+                staging_payloads=[
+                    {"for_trade_date": "20260717", "target_minute_label": "09:31"},
+                    {"for_trade_date": "20260717", "target_minute_label": "09:32"},
+                ],
+                provider_name="postgres_previous_day_raw_c1_context_v1",
+                dsn="postgresql://test",
+                connect_factory=connect_factory,
+            )
+
+        self.assertEqual(len(connections), 1)
+        self.assertEqual(result["database_connection_count"], 1)
+        self.assertEqual(result["previous_day_minute_row_count"], 1)
+        self.assertEqual(result["missing_row_keys"], [])
+        market_queries = [sql for sql in connections[0].cursor_instance.sql if "minute_bar_1m" in sql]
+        self.assertEqual(len(market_queries), 1)
+
+    def test_object_cursor_batch_existing_proof_check_reads_only_n3t_tables(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.sql: list[str] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, _params) -> None:
+                self.sql.append(str(sql))
+
+            def fetchall(self):
+                return [
+                    {
+                        "projection_run_id": "n3t-run-1",
+                        "identity_key": "stock:SH:600000",
+                        "metric_minute_label": "09:31",
+                    }
+                ]
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        connection = FakeConnection()
+        existing = runner._load_existing_n3t_object_minute_proof_keys(
+            records=[
+                {
+                    "object_key": ("20260717", "stock", "stock:SH:600000", "buy"),
+                    "target_hhmm": "0931",
+                    "n3t_metric_run_id": "n3t-run-1",
+                }
+            ],
+            dsn="postgresql://test",
+            connect_factory=lambda _dsn: connection,
+        )
+
+        self.assertEqual(existing, {("n3t-run-1", "stock:SH:600000", "09:31")})
+        joined_sql = "\n".join(connection.cursor_instance.sql)
+        self.assertIn("stock_n3t_action_confirmation_metric", joined_sql)
+        for period in ("1m", "5m", "30m", "120m"):
+            self.assertIn(
+                f"trace_json -> 'previous_period_sources' ->> '{period}'",
+                joined_sql,
+            )
+        self.assertIn("same_trade_date_previous_period", joined_sql)
+        self.assertIn("previous_trade_date_last_period", joined_sql)
+        self.assertNotIn("common_action_tracking_state", joined_sql)
+        self.assertNotIn("common_event_outbox", joined_sql)
+
+    def test_object_cursor_batch_invalid_existing_proof_check_is_read_only(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.sql: list[str] = []
+                self.rows = [
+                    {
+                        "projection_run_id": "n3t-run-invalid-old-lineage",
+                        "identity_key": "stock:SH:600000",
+                        "metric_minute_label": "09:31",
+                        "metric_ready": True,
+                        "trace_json": {
+                            "previous_period_sources": {
+                                "1m": "same_trade_date_previous_period",
+                                "5m": "same_trade_date_previous_period",
+                                "30m": "previous_trade_date_last_period",
+                                "120m": "not_available",
+                            }
+                        },
+                    }
+                ]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, _params) -> None:
+                self.sql.append(str(sql))
+
+            def fetchall(self):
+                return list(self.rows)
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cursor(self):
+                return self.cursor_instance
+
+        connection = FakeConnection()
+        invalid = runner._load_invalid_n3t_object_minute_proof_keys(
+            records=[
+                {
+                    "object_key": ("20260717", "stock", "stock:SH:600000", "buy"),
+                    "target_hhmm": "0931",
+                    "n3t_metric_run_id": "n3t-run-invalid",
+                }
+            ],
+            dsn="postgresql://test",
+            connect_factory=lambda _dsn: connection,
+        )
+
+        self.assertEqual(
+            invalid,
+            {("n3t-run-invalid", "stock:SH:600000", "09:31")},
+        )
+        joined_sql = "\n".join(connection.cursor_instance.sql)
+        self.assertIn("metric_ready IS TRUE", joined_sql)
+        self.assertIn("trade_date = %s", joined_sql)
+        self.assertIn("identity_key = ANY", joined_sql)
+        self.assertNotIn("NOT (", joined_sql)
+        self.assertIn("stock_n3t_action_confirmation_metric", joined_sql)
+        self.assertNotIn("common_action_tracking_state", joined_sql)
+        self.assertNotIn("common_event_outbox", joined_sql)
+
+        connection.cursor_instance.rows.append(
+            {
+                "projection_run_id": "n3t-run-valid-replacement",
+                "identity_key": "stock:SH:600000",
+                "metric_minute_label": "09:31",
+                "metric_ready": True,
+                "trace_json": {
+                    "previous_period_sources": {
+                        period: "previous_trade_date_last_period"
+                        for period in ("1m", "5m", "30m", "120m")
+                    }
+                },
+            }
+        )
+        repaired = runner._load_invalid_n3t_object_minute_proof_keys(
+            records=[
+                {
+                    "object_key": (
+                        "20260717",
+                        "stock",
+                        "stock:SH:600000",
+                        "buy",
+                    ),
+                    "target_hhmm": "0931",
+                    "n3t_metric_run_id": "n3t-run-invalid",
+                }
+            ],
+            dsn="postgresql://test",
+            connect_factory=lambda _dsn: connection,
+        )
+        self.assertEqual(repaired, set())
+
+    def test_object_cursor_batch_prioritizes_invalid_existing_proof_object(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=50)
+        priority_key = ("20260717", "stock", "stock:SH:600049", "buy")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scope_path = Path(tmpdir) / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload), encoding="utf-8")
+            records = runner._object_cursor_batch_candidate_records(
+                active_scope_artifacts=[
+                    {"path": str(scope_path), "for_trade_date": "20260717"}
+                ],
+                closed_hhmm="0946",
+                max_minutes_per_object=1,
+                max_objects=8,
+                priority_object_keys={priority_key},
+            )
+
+        selected_keys = {tuple(record["object_key"]) for record in records}
+        self.assertEqual(len(selected_keys), 8)
+        self.assertIn(priority_key, selected_keys)
+
+    def test_n3t_writer_accepts_inline_metric_context_without_file_read(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        scope_row = {
+            "for_trade_date": "20260717",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": "trigger-600000",
+            "source_trigger_run_id": "n4-run-600000",
+            "scope_status": "active",
+        }
+        metric_payload = {
+            "artifact_type": "n3_c1_scoped_closed_1m_artifact_v1",
+            "artifact_status": "planned",
+            "for_trade_date": "20260717",
+            "target_minute_label": "09:31",
+            "metric_context_status": "ready",
+            "scope_count": 1,
+            "scope_rows": [scope_row],
+            "metric_context_count": 1,
+            "metric_context_rows": [
+                {
+                    **scope_row,
+                    "source_closed_minute_bar_ids": ["current:600000:09:31"],
+                    "closed_minute_rows": [{"source_row_ref": "current:600000:09:31"}],
+                    "previous_day_minute_refs": ["previous:600000:09:31"],
+                    "metric_values": {
+                        **_n3t_boundary_metric_fields(),
+                        "current_price": 12,
+                        "previous_120m_body_high": 11,
+                        "previous_120m_body_low": 9,
+                        "previous_30m_body_high": 10.5,
+                        "previous_30m_body_low": 9.5,
+                        "previous_5m_body_high": 10.1,
+                        "previous_5m_body_low": 9.8,
+                        "previous_1m_body_high": 10,
+                        "previous_1m_body_low": 9.9,
+                        "current_1m_amount": 1000,
+                        "previous_1m_amount": 900,
+                        "current_5m_amount": 5000,
+                        "previous_5m_amount": 4500,
+                        "current_30m_closed_elapsed_amount": 30000,
+                        "previous_day_same_window_amount": 28000,
+                    },
+                }
+            ],
+            "full_market_fallback_used": False,
+            "database_written": False,
+            "writes_n3_outbox": False,
+        }
+        metric_hash = runner._json_payload_sha256(metric_payload)
+        with patch.object(
+            runner,
+            "_read_optional_json_artifact",
+            side_effect=AssertionError("inline writer must not read a metric file"),
+        ):
+            rows_by_table = runner._n3t_insert_rows_by_table(
+                args=argparse.Namespace(
+                    fastlane_current_exchange_time="2026-07-17T09:32:05+08:00"
+                ),
+                n3t_writer_inputs=[
+                    {
+                        "n3t_metric_run_id": (
+                            "n3t_action_confirmation_metric_20260717_until_0931__"
+                            "fastlane_sr_inlineproof01_raw_prevday_c1_amount_v1"
+                        ),
+                        "metric_context_artifact_path": "inline://object_cursor_batch/metric_context",
+                        "metric_context_artifact_sha256": metric_hash,
+                        "metric_context_payload": metric_payload,
+                    }
+                ],
+            )
+
+        self.assertEqual(list(rows_by_table), ["stock_n3t_action_confirmation_metric"])
+        self.assertEqual(len(rows_by_table["stock_n3t_action_confirmation_metric"]), 1)
+        self.assertTrue(rows_by_table["stock_n3t_action_confirmation_metric"][0]["metric_ready"])
+
+    def test_object_cursor_batch_runs_source_staging_and_proof_in_one_invocation(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=1)
+        ref = dict(payload["scope_rows"][0]["active_tracking_refs"][0])
+        scope_row = {
+            "for_trade_date": "20260717",
+            "asset_kind": "stock",
+            "identity_key": "stock:SH:600000",
+            "direction": "buy",
+            "signal_type": "B_BUY",
+            "condition_key": "BUY:Y,Q,M,W,D",
+            "source_trigger_event_id": ref["source_trigger_event_id"],
+            "source_trigger_run_id": ref["source_trigger_run_id"],
+            "scope_status": "active",
+        }
+        current_rows = _current_day_c1_rows_for_fixture(
+            trade_date="20260717",
+            scope_row=scope_row,
+            through_label="09:32",
+        )
+        previous_rows = _previous_day_c1_rows_for_fixture(
+            trade_date="20260716",
+            identity_key="stock:SH:600000",
+        )
+        captured_writer_inputs: list[dict[str, object]] = []
+
+        def source_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline source adapter")
+
+        def source_inline_adapter(*, args, planned_artifacts):
+            artifacts = []
+            for plan in planned_artifacts:
+                source_payload = {
+                    "artifact_type": runner.CURRENT_DAY_SOURCE_ROWS_TYPE,
+                    "artifact_schema_version": "v1",
+                    "producer_layer": "N3_market_data",
+                    "for_trade_date": "20260717",
+                    "target_hhmm": plan["target_hhmm"],
+                    "source_run_hash": plan["source_run_hash"],
+                    "source_run_namespace": plan["namespace_token"],
+                    "source_provider": "fixture",
+                    "source_adapter": "fixture",
+                    "source_version": "test",
+                    "direction": "buy",
+                    "source_written_at": "2026-07-17T09:33:05+08:00",
+                    "minute_closed_to_source_ms": 5000,
+                    "scope_count": 1,
+                    "closed_minute_row_count": len(current_rows),
+                    "closed_minute_rows": current_rows,
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+                artifacts.append(
+                    {
+                        "path": "inline://object_cursor_batch/source",
+                        "sha256": runner._json_payload_sha256(source_payload),
+                        "payload": source_payload,
+                        "object_batch_key": plan["object_batch_key"],
+                    }
+                )
+            return {
+                "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                "inline_payload_count": len(artifacts),
+                "source_artifacts": artifacts,
+                "failed_candidate_count": 0,
+                "market_data_pulled": True,
+                "database_written": False,
+                "runtime_execute": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(source_adapter, "inline_batch_adapter", source_inline_adapter)
+
+        def previous_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline previous-day adapter")
+
+        def previous_inline_adapter(*, args, staging_payloads):
+            return {
+                "adapter_type": "n3_c1_n3t_previous_day_context_inline_batch_provider_adapter_v1",
+                "for_trade_date": "20260717",
+                "previous_trade_date": "20260716",
+                "previous_day_minute_row_count": len(previous_rows),
+                "previous_day_minute_rows": previous_rows,
+                "missing_row_keys": [],
+                "missing_object_keys": [],
+                "database_connection_count": 1,
+                "database_read": True,
+                "database_written": False,
+                "market_data_pulled": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(previous_adapter, "inline_rows_batch_adapter", previous_inline_adapter)
+
+        def writer_adapter(*, args, n3t_writer_inputs):
+            captured_writer_inputs.extend(dict(item) for item in n3t_writer_inputs)
+            return {
+                "adapter_type": "n3t_action_confirmation_metric_writer_adapter_v1",
+                "write_executed": True,
+                "db_write_executed": True,
+                "writes_enabled": True,
+                "source_basis": "N3T_C1_CLOSED",
+                "metric_role": "action_confirmation",
+                "proof_consumer": "N5",
+                "not_n5_final_proof": False,
+                "n3t_writer_input_count": len(n3t_writer_inputs),
+                "metric_plan_row_count": len(n3t_writer_inputs),
+                "inserted_rows": len(n3t_writer_inputs),
+                "target_table_counts": {
+                    "stock_n3t_action_confirmation_metric": len(n3t_writer_inputs)
+                },
+                "writes_common_event_outbox": False,
+                "writes_canonical_minute_bar_1m": False,
+                "touches_n4_n5_n6_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-17T09:33:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=0,
+                object_cursor_batch_max_chunks_per_invocation=1,
+            )
+            with patch.object(
+                runner,
+                "_load_existing_n3t_object_minute_proof_keys",
+                return_value=set(),
+            ):
+                manifest = runner._run_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="fixture-invocation",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    current_day_source_provider_adapter=source_adapter,
+                    previous_day_context_provider_adapter=previous_adapter,
+                    n3t_writer_adapter=writer_adapter,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 101.0,
+                )
+            batch_paths = list((root / "out" / "object_cursor_batch").glob("*.json"))
+            legacy_paths = list((root / "out").glob("current_day_staging/*.json"))
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_EXECUTE_PASS")
+        self.assertEqual(len(captured_writer_inputs), 2)
+        self.assertEqual(
+            [item["target_hhmm"] for item in captured_writer_inputs],
+            ["0931", "0932"],
+        )
+        self.assertEqual(manifest["object_cursor_batch"]["provider_call_count"], 1)
+        self.assertEqual(manifest["object_cursor_batch"]["proof_row_count"], 2)
+        self.assertEqual(len(batch_paths), 1)
+        self.assertEqual(legacy_paths, [])
+        self.assertTrue(manifest["boundary"]["pulls_market_data"])
+        self.assertTrue(manifest["boundary"]["writes_n3t_metric_db"])
+        self.assertFalse(manifest["boundary"]["scans_n5_db"])
+        self.assertFalse(manifest["boundary"]["writes_canonical_minute_bar_1m"])
+        self.assertFalse(manifest["boundary"]["touches_n4_n5_n6_outbox"])
+
+    def test_object_cursor_batch_hot_path_fetches_only_one_complete_eight_object_chunk(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        payload = _object_cursor_batch_scope_payload(object_count=256)
+        planned_object_keys: list[tuple[str, str, str, str]] = []
+        captured_writer_inputs: list[dict[str, object]] = []
+        proof_probe_sizes: list[int] = []
+
+        def source_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline source adapter")
+
+        def source_inline_adapter(*, args, planned_artifacts):
+            artifacts = []
+            for plan in planned_artifacts:
+                object_key = tuple(plan["object_batch_key"])
+                planned_object_keys.append(object_key)
+                scope_row = {
+                    "for_trade_date": object_key[0],
+                    "asset_kind": object_key[1],
+                    "identity_key": object_key[2],
+                    "direction": object_key[3],
+                    "signal_type": "B_BUY",
+                    "condition_key": "BUY:Y,Q,M,W,D",
+                    "source_trigger_event_id": f"trigger-{object_key[2]}",
+                    "source_trigger_run_id": f"n4-run-{object_key[2]}",
+                    "scope_status": "active",
+                }
+                current_rows = _current_day_c1_rows_for_fixture(
+                    trade_date="20260717",
+                    scope_row=scope_row,
+                    through_label="09:46",
+                )
+                source_payload = {
+                    "artifact_type": runner.CURRENT_DAY_SOURCE_ROWS_TYPE,
+                    "artifact_schema_version": "v1",
+                    "producer_layer": "N3_market_data",
+                    "for_trade_date": "20260717",
+                    "target_hhmm": plan["target_hhmm"],
+                    "source_run_hash": plan["source_run_hash"],
+                    "source_run_namespace": plan["namespace_token"],
+                    "source_provider": "fixture",
+                    "source_adapter": "fixture",
+                    "source_version": "test",
+                    "direction": object_key[3],
+                    "source_written_at": "2026-07-17T09:33:05+08:00",
+                    "minute_closed_to_source_ms": 5000,
+                    "scope_count": 1,
+                    "closed_minute_row_count": len(current_rows),
+                    "closed_minute_rows": current_rows,
+                    "market_data_pulled": True,
+                    "database_written": False,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "updates_n4_outbox": False,
+                    "scans_n5_db": False,
+                    "touches_n6": False,
+                    "full_market_fallback_used": False,
+                }
+                artifacts.append(
+                    {
+                        "path": "inline://object_cursor_batch/source",
+                        "sha256": runner._json_payload_sha256(source_payload),
+                        "payload": source_payload,
+                        "object_batch_key": list(object_key),
+                    }
+                )
+            return {
+                "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+                "inline_payload_count": len(artifacts),
+                "source_artifacts": artifacts,
+                "failed_candidate_count": 0,
+                "market_data_pulled": True,
+                "database_written": False,
+                "runtime_execute": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(source_adapter, "inline_batch_adapter", source_inline_adapter)
+
+        def previous_adapter(**_kwargs):
+            self.fail("object cursor hot path must use inline previous-day adapter")
+
+        def previous_inline_adapter(*, args, staging_payloads):
+            previous_rows: list[dict[str, object]] = []
+            for object_key in planned_object_keys:
+                previous_rows.extend(
+                    _previous_day_c1_rows_for_fixture(
+                        trade_date="20260716",
+                        identity_key=object_key[2],
+                    )
+                )
+            return {
+                "adapter_type": "n3_c1_n3t_previous_day_context_inline_batch_provider_adapter_v1",
+                "for_trade_date": "20260717",
+                "previous_trade_date": "20260716",
+                "previous_day_minute_row_count": len(previous_rows),
+                "previous_day_minute_rows": previous_rows,
+                "missing_row_keys": [],
+                "missing_object_keys": [],
+                "database_connection_count": 1,
+                "database_read": True,
+                "database_written": False,
+                "market_data_pulled": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_common_event_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "touches_n6": False,
+                "full_market_fallback_used": False,
+            }
+
+        setattr(previous_adapter, "inline_rows_batch_adapter", previous_inline_adapter)
+
+        def writer_adapter(*, args, n3t_writer_inputs):
+            captured_writer_inputs.extend(dict(item) for item in n3t_writer_inputs)
+            return {
+                "adapter_type": "n3t_action_confirmation_metric_writer_adapter_v1",
+                "write_executed": True,
+                "db_write_executed": True,
+                "writes_enabled": True,
+                "source_basis": "N3T_C1_CLOSED",
+                "metric_role": "action_confirmation",
+                "proof_consumer": "N5",
+                "not_n5_final_proof": False,
+                "n3t_writer_input_count": len(n3t_writer_inputs),
+                "metric_plan_row_count": len(n3t_writer_inputs),
+                "inserted_rows": len(n3t_writer_inputs),
+                "target_table_counts": {
+                    "stock_n3t_action_confirmation_metric": len(n3t_writer_inputs)
+                },
+                "writes_common_event_outbox": False,
+                "writes_canonical_minute_bar_1m": False,
+                "touches_n4_n5_n6_outbox": False,
+                "full_market_fallback_used": False,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scope_path = root / "n5_active_scope_snapshot_v1.json"
+            scope_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            args = argparse.Namespace(
+                fastlane_current_exchange_time="2026-07-17T09:47:05+08:00",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                output_dir=str(root / "out"),
+                max_runtime_seconds=30.0,
+                current_day_source_provider_max_candidates_per_invocation=8,
+                object_cursor_batch_max_chunks_per_invocation=1,
+            )
+            def load_existing_proofs(*, records, **_kwargs):
+                proof_probe_sizes.append(len(records))
+                return set()
+
+            with patch.object(
+                runner,
+                "_load_existing_n3t_object_minute_proof_keys",
+                side_effect=load_existing_proofs,
+            ):
+                manifest = runner._run_object_cursor_batch_hot_path(
+                    args=args,
+                    invocation_id="eight-object-fixture",
+                    active_scope_artifacts=[
+                        {"path": str(scope_path), "for_trade_date": "20260717"}
+                    ],
+                    current_day_source_provider_adapter=source_adapter,
+                    previous_day_context_provider_adapter=previous_adapter,
+                    n3t_writer_adapter=writer_adapter,
+                    deadline_check=lambda _phase: None,
+                    started=100.0,
+                    now_monotonic=lambda: 101.0,
+                )
+            batch_payloads = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in (root / "out" / "object_cursor_batch").glob("*.json")
+            ]
+
+        self.assertEqual(len(planned_object_keys), 8)
+        self.assertEqual(len(set(planned_object_keys)), 8)
+        self.assertEqual(proof_probe_sizes, [128])
+        self.assertEqual(len(captured_writer_inputs), 128)
+        self.assertEqual(len(batch_payloads), 8)
+        self.assertTrue(all(item["chunk_status"] == "completed" for item in batch_payloads))
+        self.assertTrue(all(len(item["proofs"]) == 16 for item in batch_payloads))
+        self.assertEqual(manifest["object_cursor_batch"]["provider_call_count"], 8)
+        self.assertEqual(manifest["object_cursor_batch"]["proof_row_count"], 128)
+        self.assertEqual(manifest["object_cursor_batch"]["proof_probe_object_count"], 8)
+        self.assertEqual(manifest["object_cursor_batch"]["proof_probe_candidate_count"], 128)
+        self.assertFalse(manifest["object_cursor_batch"]["proof_probe_complete"])
+        self.assertEqual(manifest["object_cursor_batch"]["source_only_artifact_count"], 0)
+        self.assertEqual(manifest["object_cursor_batch"]["completed_chunk_count"], 1)
+        self.assertEqual(
+            manifest["object_cursor_batch"]["processed_candidate_count_by_tier"],
+            {"live": 128, "backlog": 0},
+        )
+        self.assertEqual(
+            manifest["object_cursor_batch"]["failed_candidate_count_by_tier"],
+            {"live": 0, "backlog": 0},
+        )
+        self.assertEqual(
+            manifest["object_cursor_batch"]["remaining_candidate_count_by_tier"],
+            {"live": 3968, "backlog": 0},
+        )
+        self.assertEqual(manifest["lane_results"]["c1_lane"]["processed_candidate_count"], 8)
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["processed_candidate_count"], 128)
+
+    def test_object_cursor_batch_uses_one_invocation_level_cohort(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        args = argparse.Namespace(
+            fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+            fastlane_session_phase="trading",
+            fastlane_active_worker_decision={},
+            max_runtime_seconds=30.0,
+            object_cursor_batch_max_chunks_per_invocation=2,
+        )
+        calls: list[dict[str, object]] = []
+
+        def chunk_manifest(sequence: int) -> dict[str, object]:
+            object_keys = [
+                [
+                    "20260720",
+                    "stock",
+                    f"stock:SH:{600000 + sequence * 8 + offset:06d}",
+                    "buy",
+                ]
+                for offset in range(8)
+            ]
+            remaining = 896 - sequence * 128
+            return {
+                "verdict": "N3_C1_N3T_FASTLANE_EXECUTE_PASS",
+                "reason": "object_cursor_batch_chunk_incomplete",
+                "invocation_id": "multi-chunk-fixture",
+                "writes_enabled": True,
+                "lane_results": {
+                    "c1_lane": {
+                        "lane": "c1_lane",
+                        "mode": runner.OBJECT_CURSOR_BATCH_MODE,
+                        "selected_candidate_count": 8,
+                        "processed_candidate_count": 8,
+                        "failed_candidate_count": 0,
+                        "skipped_candidate_count": 0,
+                        "remaining_candidate_count": remaining,
+                        "reason": "object_cursor_batch_chunk_incomplete",
+                        "hard_blocker_count": 0,
+                    },
+                    "n3t_lane": {
+                        "lane": "n3t_lane",
+                        "mode": runner.OBJECT_CURSOR_BATCH_MODE,
+                        "selected_candidate_count": 128,
+                        "processed_candidate_count": 128,
+                        "failed_candidate_count": 0,
+                        "skipped_candidate_count": 0,
+                        "remaining_candidate_count": remaining,
+                        "reason": "object_cursor_batch_chunk_incomplete",
+                        "hard_blocker_count": 0,
+                    },
+                },
+                "object_cursor_batch": {
+                    "chunk_sequence": sequence,
+                    "selected_object_count": 8,
+                    "selected_candidate_count": 128,
+                    "processed_object_count": 8,
+                    "processed_candidate_count": 128,
+                    "failed_candidate_count": 0,
+                    "remaining_candidate_count": remaining,
+                    "selected_object_count_by_tier": {"live": 4, "backlog": 4},
+                    "selected_candidate_count_by_tier": {
+                        "live": 64,
+                        "backlog": 64,
+                    },
+                    "processed_candidate_count_by_tier": {
+                        "live": 64,
+                        "backlog": 64,
+                    },
+                    "failed_candidate_count_by_tier": {
+                        "live": 0,
+                        "backlog": 0,
+                    },
+                    "remaining_candidate_count_by_tier": {
+                        "live": remaining // 2,
+                        "backlog": remaining // 2,
+                    },
+                    "provider_call_count": 8,
+                    "previous_day_database_connection_count": 1,
+                    "proof_row_count": 128,
+                    "completed_chunk_count": 1,
+                    "source_only_artifact_count": 0,
+                    "attempted_object_keys": object_keys,
+                    "batch_artifacts": [
+                        {
+                            "path": f"chunk-{sequence}-{offset}.json",
+                            "chunk_status": "completed",
+                        }
+                        for offset in range(8)
+                    ],
+                    "failure_records": [],
+                },
+                "current_day_source_provider_result": {
+                    "inline_payload_count": 8,
+                    "market_data_pulled": True,
+                },
+                "execute_result": {
+                    "write_executed": True,
+                    "db_write_executed": True,
+                    "inserted_rows": 128,
+                },
+                "boundary": {
+                    "writes_db": True,
+                    "writes_n3t_metric_db": True,
+                    "pulls_market_data": True,
+                    "writes_canonical_minute_bar_1m": False,
+                    "writes_n3_outbox": False,
+                    "touches_n4_n5_n6_outbox": False,
+                    "scans_n5_db": False,
+                    "full_market_fallback_used": False,
+                },
+            }
+
+        def run_single_chunk(**kwargs):
+            calls.append(dict(kwargs))
+            return chunk_manifest(int(kwargs["chunk_sequence"]))
+
+        with patch.object(
+            runner,
+            "_run_object_cursor_batch_single_chunk",
+            side_effect=run_single_chunk,
+        ):
+            manifest = runner._run_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="multi-chunk-fixture",
+                active_scope_artifacts=[{"path": "latest-a.json"}],
+                current_day_source_provider_adapter=lambda **_kwargs: {},
+                previous_day_context_provider_adapter=lambda **_kwargs: {},
+                n3t_writer_adapter=lambda **_kwargs: {},
+                deadline_check=lambda _phase: None,
+                started=100.0,
+                now_monotonic=lambda: 101.0,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["chunk_sequence"], 0)
+        self.assertEqual(calls[0]["excluded_object_keys"], set())
+        self.assertTrue(calls[0]["prefer_live_fastpath"])
+        batch = manifest["object_cursor_batch"]
+        self.assertEqual(batch["attempted_chunk_count"], 1)
+        self.assertEqual(batch["completed_chunk_count"], 1)
+        self.assertEqual(batch["max_chunks_per_invocation"], 1)
+        self.assertEqual(batch["selected_object_count"], 8)
+        self.assertEqual(batch["processed_object_count"], 8)
+        self.assertEqual(batch["processed_candidate_count"], 128)
+        self.assertEqual(batch["provider_call_count"], 8)
+        self.assertEqual(batch["proof_row_count"], 128)
+        self.assertEqual(batch["batch_artifact_count"], 8)
+        self.assertEqual(batch["source_only_artifact_count"], 0)
+        self.assertEqual(
+            batch["selected_object_count_by_tier"],
+            {"live": 4, "backlog": 4},
+        )
+        self.assertEqual(
+            manifest["lane_results"]["c1_lane"]["processed_candidate_count"],
+            8,
+        )
+        self.assertEqual(
+            manifest["lane_results"]["n3t_lane"]["processed_candidate_count"],
+            128,
+        )
+
+    def test_object_cursor_batch_runs_single_live_cohort_per_invocation(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        args = argparse.Namespace(
+            fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+            fastlane_session_phase="trading",
+            fastlane_active_worker_decision={},
+            max_runtime_seconds=30.0,
+            object_cursor_batch_max_chunks_per_invocation=6,
+        )
+        calls: list[dict[str, object]] = []
+
+        def run_single_chunk(**kwargs):
+            calls.append(dict(kwargs))
+            sequence = int(kwargs["chunk_sequence"])
+            live_fastpath = bool(kwargs["prefer_live_fastpath"])
+            selected_live = 8 if live_fastpath else 4
+            selected_backlog = 0 if live_fastpath else 4
+            return {
+                "reason": "object_cursor_batch_chunk_incomplete",
+                "object_cursor_batch": {
+                    "queue_mode": (
+                        runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+                        if live_fastpath
+                        else runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+                    ),
+                    "completed_chunk_count": 1,
+                    "processed_candidate_count": 8,
+                    "failed_candidate_count": 0,
+                    "pending_object_count_by_tier": {
+                        "live": 48 - sequence * 8,
+                        "backlog": 20,
+                    },
+                    "selected_live_object_count": selected_live,
+                    "selected_backlog_object_count": selected_backlog,
+                    "attempted_object_keys": [
+                        [
+                            "20260723",
+                            "stock",
+                            f"stock:SH:{600000 + sequence * 8 + offset:06d}",
+                            "buy",
+                        ]
+                        for offset in range(8)
+                    ],
+                },
+            }
+
+        with patch.object(
+            runner,
+            "_run_object_cursor_batch_single_chunk",
+            side_effect=run_single_chunk,
+        ), patch.object(
+            runner,
+            "_merge_object_cursor_batch_chunk_manifests",
+            side_effect=lambda **kwargs: {"manifests": kwargs["manifests"]},
+        ):
+            manifest = runner._run_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="adaptive-live-capacity-fixture",
+                active_scope_artifacts=[{"path": "latest-a.json"}],
+                current_day_source_provider_adapter=lambda **_kwargs: {},
+                previous_day_context_provider_adapter=lambda **_kwargs: {},
+                n3t_writer_adapter=lambda **_kwargs: {},
+                deadline_check=lambda _phase: None,
+                started=100.0,
+                now_monotonic=lambda: 101.0,
+            )
+
+        self.assertEqual(len(manifest["manifests"]), 1)
+        self.assertEqual(
+            [bool(call["prefer_live_fastpath"]) for call in calls],
+            [True],
+        )
+        self.assertEqual(calls[-1]["excluded_object_keys"], set())
+
+    def test_object_cursor_batch_returns_to_balanced_queue_when_live_gap_is_small(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        first_manifest = {
+            "object_cursor_batch": {
+                "queue_mode": runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH,
+                "pending_object_count_by_tier": {"live": 12, "backlog": 20},
+                "selected_live_object_count": 8,
+            }
+        }
+
+        self.assertFalse(
+            runner._object_cursor_batch_prefer_live_fastpath(
+                chunk_sequence=1,
+                max_chunks=6,
+                manifests=[first_manifest],
+            )
+        )
+        self.assertFalse(
+            runner._object_cursor_batch_prefer_live_fastpath(
+                chunk_sequence=5,
+                max_chunks=6,
+                manifests=[first_manifest],
+            )
+        )
+
+    def test_object_cursor_batch_adaptive_capacity_does_not_start_chunk_below_budget(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        calls: list[dict[str, object]] = []
+
+        def run_single_chunk(**kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "reason": "object_cursor_batch_chunk_incomplete",
+                "object_cursor_batch": {
+                    "queue_mode": runner.OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH,
+                    "completed_chunk_count": 1,
+                    "processed_candidate_count": 8,
+                    "failed_candidate_count": 0,
+                    "pending_object_count_by_tier": {"live": 80, "backlog": 20},
+                    "selected_live_object_count": 8,
+                    "attempted_object_keys": [
+                        ["20260723", "stock", "stock:SH:600000", "buy"]
+                    ],
+                },
+            }
+
+        args = argparse.Namespace(
+            fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+            fastlane_session_phase="trading",
+            fastlane_active_worker_decision={},
+            max_runtime_seconds=30.0,
+            object_cursor_batch_max_chunks_per_invocation=6,
+        )
+        with patch.object(
+            runner,
+            "_run_object_cursor_batch_single_chunk",
+            side_effect=run_single_chunk,
+        ), patch.object(
+            runner,
+            "_merge_object_cursor_batch_chunk_manifests",
+            side_effect=lambda **kwargs: {"manifests": kwargs["manifests"]},
+        ):
+            manifest = runner._run_object_cursor_batch_hot_path(
+                args=args,
+                invocation_id="adaptive-live-budget-fixture",
+                active_scope_artifacts=[{"path": "latest-a.json"}],
+                current_day_source_provider_adapter=lambda **_kwargs: {},
+                previous_day_context_provider_adapter=lambda **_kwargs: {},
+                n3t_writer_adapter=lambda **_kwargs: {},
+                deadline_check=lambda _phase: None,
+                started=100.0,
+                now_monotonic=lambda: 123.0,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(manifest["manifests"]), 1)
+
+    def test_scheduler_object_cursor_hot_path_skips_legacy_fanout_discovery(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        raw_artifact = {"path": "latest-a.json", "for_trade_date": "20260717"}
+
+        def apply_config(args):
+            args.fastlane_session_phase = "trading"
+            args.fastlane_active_worker_decision = {}
+            args.fastlane_current_exchange_time = "2026-07-17T09:33:05+08:00"
+            args.output_dir = "/tmp/object-cursor-batch-test"
+
+        def discover(_args, *, fanout=True):
+            if fanout:
+                self.fail("scheduler hot path must not discover legacy fanout artifacts")
+            return [raw_artifact]
+
+        with patch.object(runner, "_apply_activation_config", side_effect=apply_config), patch.object(
+            runner,
+            "_validate_args",
+            return_value=None,
+        ), patch.object(
+            runner,
+            "_discover_requested_active_scope_artifacts",
+            side_effect=discover,
+        ), patch.object(
+            runner,
+            "_configured_current_day_source_provider_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_configured_previous_day_context_provider_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_configured_n3t_writer_adapter",
+            return_value=lambda **_kwargs: {},
+        ), patch.object(
+            runner,
+            "_run_object_cursor_batch_hot_path",
+            return_value={"verdict": "fixture-hot-path"},
+        ) as hot_path:
+            manifest = runner.run_n3_c1_n3t_action_confirmation_fastlane_once(
+                ["--execute", "--scheduler-quiet"]
+            )
+
+        self.assertEqual(manifest["verdict"], "fixture-hot-path")
+        self.assertEqual(hot_path.call_args.kwargs["active_scope_artifacts"], [raw_artifact])
+
+    def test_object_cursor_batch_deadline_reports_clean_remaining_progress(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        manifest = runner._object_cursor_batch_manifest(
+            args=argparse.Namespace(
+                fastlane_lane_id="n5_action_confirmation_fastlane_v1",
+                fastlane_session_phase="trading",
+                fastlane_active_worker_decision={},
+                max_runtime_seconds=30.0,
+            ),
+            invocation_id="deadline-fixture",
+            active_scope_artifacts=[{"path": "latest-a.json"}],
+            selection_summary={
+                "selected_object_count": 2,
+                "selected_candidate_count": 32,
+                "processed_candidate_count": 16,
+                "failed_candidate_count": 0,
+                "remaining_candidate_count": 16,
+            },
+            source_result={"inline_payload_count": 2, "market_data_pulled": True},
+            previous_result={"database_connection_count": 1},
+            writer_result={},
+            batch_artifacts=[],
+            failure_records=[],
+            reason="object_cursor_batch_chunk_incomplete",
+            started=100.0,
+            now_monotonic=lambda: 130.1,
+        )
+
+        self.assertEqual(manifest["verdict"], "N3_C1_N3T_FASTLANE_READINESS_WAITING")
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["remaining_candidate_count"], 16)
+        self.assertEqual(
+            manifest["lane_results"]["n3t_lane"]["reason"],
+            "object_cursor_batch_chunk_incomplete",
+        )
+        self.assertEqual(manifest["lane_results"]["n3t_lane"]["hard_blocker_count"], 0)
+
+    def test_previous_day_query_uses_shared_fixed_period_physical_axis(self) -> None:
+        import run_n3_c1_n3t_action_confirmation_fastlane_once as runner
+
+        labels = canonical_ashare_1m_labels("20260727")
+        effective_labels = [label for label in labels if label != "09:30"]
+        position = effective_labels.index("11:26") + 1
+        required = runner._required_previous_day_metric_context_labels(
+            labels=labels,
+            current_labels=set(effective_labels[:position]),
+        )
+
+        self.assertTrue(set(labels[-120:]).issubset(required))
+        self.assertTrue(
+            {"11:26", "11:27", "11:28", "11:29", "13:00"}.issubset(required)
+        )
+        self.assertNotIn("09:30", required)
+        self.assertNotIn("11:30", required)
 
 
 if __name__ == "__main__":

@@ -356,6 +356,49 @@ class ProvisionalTriggerLifecycleTest(unittest.TestCase):
         self.assertEqual(outputs[0]["state_change_reason"], "deactivated")
         self.assertEqual(outputs[0]["lifecycle_output_reason"], "matched_to_inactive")
 
+    def test_matched_to_inactive_resets_opposite_hint_projection_type(self) -> None:
+        cases = (
+            ("BUY_HINT", "B_BUY", "BUY_HINT", "buy", "volume_up", "30m_volume", "shrink_down"),
+            ("SELL_HINT", "S_SELL", "SELL_HINT", "sell", "shrink_down", "30m_shrink", "volume_up"),
+        )
+        for condition_key, signal_type, trigger_type, direction, previous_type, previous_mark, current_type in cases:
+            with self.subTest(condition_key=condition_key):
+                matched = plan(
+                    condition_key=condition_key,
+                    signal_type=signal_type,
+                    trigger_type=trigger_type,
+                    projection_30m_type=previous_type,
+                    trigger_mark_candidate=previous_mark,
+                )
+                matched["direction"] = direction
+                current = plan(
+                    condition_key=condition_key,
+                    signal_type=signal_type,
+                    trigger_type=trigger_type,
+                    status="no_op",
+                )
+                current["direction"] = direction
+                current["projection_30m_type"] = current_type
+                current["projection_30m_flag"] = True
+
+                outputs = build_lifecycle_output_plans(
+                    [current],
+                    previous_states=[previous_state(matched)],
+                )
+
+                self.assertEqual(len(outputs), 1)
+                output = outputs[0]
+                self.assertEqual(output["output_event_type"], TRIGGER_STATE_CHANGED_EVENT_TYPE)
+                self.assertEqual(output["current_status"], "inactive")
+                self.assertFalse(output["trigger_live"])
+                self.assertEqual(output["trigger_mark_candidate"], "normal")
+                self.assertFalse(output["projection_30m_flag"])
+                self.assertEqual(output["projection_30m_type"], "none")
+                self.assertEqual(output["previous_projection_30m_type"], previous_type)
+                self.assertEqual(output["previous_trigger_mark_candidate"], previous_mark)
+                self.assertFalse(output["writes_trigger_match"])
+                self.assertFalse(output["n5_entry_allowed"])
+
     def test_matched_to_inactive_revalidates_buy_signal_type_alias(self) -> None:
         current = plan(condition_key="BUY:FULL", signal_type="BUY", trigger_type="BUY:FULL", status="no_op")
         prior = previous_state(plan(condition_key="BUY:FULL", signal_type="B_BUY", trigger_type="BUY:FULL"))

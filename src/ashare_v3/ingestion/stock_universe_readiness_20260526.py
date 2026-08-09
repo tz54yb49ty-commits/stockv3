@@ -14,12 +14,20 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
 
 from ashare_v3.ingestion.tushare_env import load_tushare_token
+from ashare_v3.mootdx_client import (
+    EndpointSelection,
+    MootdxEndpointManager,
+    Probe,
+    build_n1_protocol_probe,
+)
+from ashare_v3.quote_transport import create_quote_transport, resolve_quote_transport_name
 
 
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -437,57 +445,198 @@ class DefaultTushareStockUniverseProbe:
 
 
 class DefaultMootdxStockDailyProbe:
-    def __init__(self, *, offset: int = 20, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        offset: int = 20,
+        client: Any | None = None,
+        endpoint_manager: MootdxEndpointManager | None = None,
+        endpoint_probe: Probe | None = None,
+        client_factory: Any | None = None,
+        transport_factory: Any = create_quote_transport,
+        quote_transport: str | None = None,
+        transport_environ: Mapping[str, str] | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
         self.offset = offset
         self._client = client
+        self._endpoint_manager = endpoint_manager
+        self._endpoint_probe = endpoint_probe
+        self._transport_name = resolve_quote_transport_name(
+            quote_transport,
+            environ=transport_environ,
+        )
+        if client_factory is not None:
+            self._client_factory = client_factory
+        else:
+            self._client_factory = lambda selection, profile: transport_factory(
+                selection,
+                profile,
+                transport=self._transport_name,
+            )
+        self._selection: EndpointSelection | None = None
+        self._attempt_id = attempt_id or f"n1_stock_readiness_attempt__{uuid4().hex}"
+        self._business_client_close_error: str | None = None
+        if self._client is None:
+            self._endpoint_manager = self._endpoint_manager or MootdxEndpointManager.from_toml()
 
     def fetch_snapshot(self, *, candidates: Sequence[Mapping[str, Any]], trade_date: str = TRADE_DATE) -> dict[str, Any]:
+        normalized_candidates = [normalize_identity_row(row) for row in candidates]
         try:
-            client = self._get_client()
+            client = self._get_client(
+                trade_date=trade_date,
+                symbols=[row["code"] for row in normalized_candidates],
+            )
         except Exception as exc:  # pragma: no cover - environment dependent
-            return {
+            return self._finalize_snapshot({
                 "trade_date": trade_date,
                 "source": "mootdx.stock_daily.readonly",
                 "source_available": False,
                 "source_unavailable_reason": f"{type(exc).__name__}: {exc}",
                 "presence_by_identity_key": {},
-            }
+                "mootdx_endpoint_provenance": self._provenance(),
+            })
         presence: dict[str, Any] = {}
-        for row in candidates:
-            identity = normalize_identity_row(row)
+        for identity in normalized_candidates:
             try:
                 records = frame_to_records(client.bars(symbol=identity["code"], frequency=9, start=0, offset=self.offset))
+                if self._record_required_object_result(
+                    empty=not records,
+                    object_identity=identity["identity_key"],
+                ):
+                    return self._finalize_snapshot({
+                        "trade_date": trade_date,
+                        "source": "mootdx.stock_daily.readonly",
+                        "source_available": False,
+                        "source_unavailable_reason": (
+                            "endpoint-wide failure: three consecutive required objects empty; "
+                            "complete readiness attempt discarded"
+                        ),
+                        "presence_by_identity_key": {},
+                        "mootdx_endpoint_provenance": self._provenance(),
+                    })
                 matched = [record for record in records if parse_record_trade_date(record) == trade_date]
                 if matched:
                     presence[identity["identity_key"]] = {
                         "present": True,
                         "source": "mootdx.stock_daily",
-                        "evidence": select_bar_evidence(matched[-1]),
+                        "evidence": {
+                            **select_bar_evidence(matched[-1]),
+                            "mootdx_endpoint_provenance": self._provenance(),
+                        },
                     }
                 else:
                     presence[identity["identity_key"]] = {
                         "present": False,
                         "source": "mootdx.stock_daily",
-                        "evidence": {"checked": True, "reason": "no row for trade_date"},
+                        "evidence": {
+                            "checked": True,
+                            "reason": "no row for trade_date",
+                            "mootdx_endpoint_provenance": self._provenance(),
+                        },
                     }
             except Exception as exc:  # pragma: no cover - environment dependent
-                presence[identity["identity_key"]] = {
-                    "present": False,
-                    "source": "mootdx.stock_daily",
-                    "evidence": {"error": f"{type(exc).__name__}: {exc}"},
-                }
-        return {
+                if self._endpoint_manager is not None and self._selection is not None:
+                    self._endpoint_manager.record_transport_failure(
+                        self._selection.endpoint_id,
+                        transport=self._selection.transport,
+                        failure_kind="source_fetch_transport_exception",
+                        detail=type(exc).__name__,
+                    )
+                return self._finalize_snapshot({
+                    "trade_date": trade_date,
+                    "source": "mootdx.stock_daily.readonly",
+                    "source_available": False,
+                    "source_unavailable_reason": (
+                        f"{type(exc).__name__}: {exc}; complete readiness attempt discarded"
+                    ),
+                    "presence_by_identity_key": {},
+                    "mootdx_endpoint_provenance": self._provenance(),
+                })
+        return self._finalize_snapshot({
             "trade_date": trade_date,
             "source": "mootdx.stock_daily.readonly",
             "source_available": True,
             "presence_by_identity_key": normalize_jsonable(presence),
-        }
+            "mootdx_endpoint_provenance": self._provenance(),
+        })
 
-    def _get_client(self) -> Any:
+    def close(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        self._client = None
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            self._business_client_close_error = type(exc).__name__
+            raise StockUniverseReadinessBlocked(
+                "Mootdx readiness business client close failed; snapshot is fail-closed"
+            ) from exc
+
+    def _finalize_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        finalized = dict(snapshot)
+        try:
+            self.close()
+        except StockUniverseReadinessBlocked as exc:
+            finalized.update(
+                {
+                    "source_available": False,
+                    "source_unavailable_reason": f"{type(exc).__name__}: {exc}",
+                    "presence_by_identity_key": {},
+                    "mootdx_endpoint_provenance": self._provenance(),
+                }
+            )
+        return finalized
+
+    def _get_client(self, *, trade_date: str, symbols: list[str]) -> Any:
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market="std")
+            if self._endpoint_manager is None:
+                raise StockUniverseReadinessBlocked("Mootdx endpoint manager is required")
+            probe = self._endpoint_probe or build_n1_protocol_probe(
+                scope_kind="stock",
+                symbols=symbols,
+                target_trade_date=trade_date,
+                frequency=9,
+                start=0,
+                offset=self.offset,
+            )
+            selection = self._endpoint_manager.select_for_run(
+                run_id=self._attempt_id,
+                attempt_id=self._attempt_id,
+                probe=probe,
+                transport=self._transport_name,
+                client_factory=self._client_factory,
+            )
+            self._selection = selection
+            if not selection.selectable:
+                raise StockUniverseReadinessBlocked(
+                    "Mootdx readiness endpoint preflight failed closed: "
+                    f"{selection.selection_reason}; would_switch_to={selection.would_switch_to or ''}"
+                )
+            self._client = self._client_factory(selection, "std")
         return self._client
+
+    def _record_required_object_result(self, *, empty: bool, object_identity: str) -> bool:
+        if self._endpoint_manager is None or self._selection is None:
+            return False
+        return self._endpoint_manager.record_required_object_result(
+            self._selection.endpoint_id,
+            transport=self._selection.transport,
+            empty=empty,
+            object_identity=object_identity,
+        )
+
+    def _provenance(self) -> dict[str, Any] | None:
+        if self._selection is None:
+            return None
+        return {
+            **self._selection.to_provenance(),
+            "business_client_close_error": self._business_client_close_error,
+        }
 
 
 def run_readiness_planner(

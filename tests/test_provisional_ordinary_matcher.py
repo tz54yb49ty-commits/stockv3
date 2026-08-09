@@ -868,6 +868,147 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
                 )
                 self.assertEqual("W" in plan["triggered_periods"], w_triggered)
 
+    def test_same_day_q_pair_allows_independent_daily_trigger_without_n2_trace(self) -> None:
+        expected_by_formal_periods = {
+            ("Q", "M"): (["Q"], ["Q", "M"], "Q", ["M"]),
+            ("Q", "M", "D"): (["Q", "D"], ["Q", "M", "D"], "Q", ["M"]),
+        }
+        for direction in ("buy", "sell"):
+            with self.subTest(direction=direction):
+                prefix = "BUY" if direction == "buy" else "SELL"
+                plans: dict[tuple[str, ...], dict[str, object]] = {}
+                contexts: dict[tuple[str, ...], dict[str, object]] = {}
+                for formal_periods, expected in expected_by_formal_periods.items():
+                    context, metric = production_20260714_1322_negative_evidence_fixture(
+                        asset_kind="stock",
+                        identity_key="stock:SZ:002414",
+                        direction=direction,
+                        condition_key=f"{prefix}:Y,Q,M,W,D",
+                        formal_periods=formal_periods,
+                        negative_statuses={},
+                    )
+                    plan = build_provisional_ordinary_matcher_plans(
+                        trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+                        source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+                        context_rows=[context],
+                        metric_rows=[metric],
+                    )[0]
+
+                    assert_same_day_period_escalation_output_contract(plan)
+                    self.assertEqual(plan["triggered_periods"], expected[0])
+                    self.assertEqual(plan["all_trigger_periods"], expected[1])
+                    self.assertEqual(plan["primary_trigger_period"], expected[2])
+                    self.assertEqual(plan["prerequisite_periods"], expected[3])
+                    self.assertEqual(
+                        plan["period_escalation_trace"]["periods"]["Q"]["evidence_source"],
+                        "current_same_day_formal_pass",
+                    )
+                    plans[formal_periods] = plan
+                    contexts[formal_periods] = context
+
+                previous_context = contexts[("Q", "M")]["period_trigger_baseline_json"][
+                    "period_escalation_context"
+                ]
+                current_context = contexts[("Q", "M", "D")]["period_trigger_baseline_json"][
+                    "period_escalation_context"
+                ]
+                self.assertEqual(
+                    previous_context["context_hash"],
+                    current_context["context_hash"],
+                )
+                self.assertEqual(
+                    {
+                        period: entry["entry_hash"]
+                        for period, entry in previous_context["directions"][direction].items()
+                    },
+                    {
+                        period: entry["entry_hash"]
+                        for period, entry in current_context["directions"][direction].items()
+                    },
+                )
+
+                current = plans[("Q", "M", "D")]
+                self.assertNotIn("D", current["period_escalation_trace"]["periods"])
+                d_evaluation = next(
+                    detail
+                    for detail in current["rule_proof"]["period_evaluation_details"]
+                    if detail["period"] == "D"
+                )
+                d_triggered = next(
+                    detail
+                    for detail in current["rule_proof"]["triggered_period_details"]
+                    if detail["period"] == "D"
+                )
+                self.assertEqual(d_evaluation, d_triggered)
+                self.assertEqual(d_evaluation["classification"], "triggered")
+                self.assertNotIn("period_escalation_trace", d_evaluation)
+
+    def test_independent_daily_trigger_still_requires_canonical_formal_detail(self) -> None:
+        context, metric = production_20260714_1322_negative_evidence_fixture(
+            asset_kind="stock",
+            identity_key="stock:SZ:002414",
+            direction="buy",
+            condition_key="BUY:Y,Q,M,W,D",
+            formal_periods=("Q", "M", "D"),
+            negative_statuses={},
+        )
+        valid = build_provisional_ordinary_matcher_plans(
+            trigger_context_run_id=SAME_DAY_CONTEXT_RUN_ID,
+            source_metric_run_id=PRODUCTION_20260714_1322_METRIC_RUN_ID,
+            context_rows=[context],
+            metric_rows=[metric],
+        )[0]
+
+        def mutate_daily_detail(
+            plan: dict[str, object],
+            field: str,
+            value: object,
+        ) -> None:
+            for detail_field in ("period_evaluation_details", "triggered_period_details"):
+                for detail in plan["rule_proof"][detail_field]:
+                    if detail["period"] == "D":
+                        detail[field] = value
+
+        def remove_daily_from_formal_trace(plan: dict[str, object]) -> None:
+            for source in (plan, plan["rule_proof"], plan["rule_eval_result"]):
+                source["period_escalation_trace"]["periods"]["Q"][
+                    "current_formal_pass_periods"
+                ] = ["Q", "M"]
+            for detail_field in ("period_evaluation_details", "triggered_period_details"):
+                for detail in plan["rule_proof"][detail_field]:
+                    if detail["period"] == "Q":
+                        detail["period_escalation_trace"]["current_formal_pass_periods"] = [
+                            "Q",
+                            "M",
+                        ]
+
+        for field, value in (
+            ("current_transition", "flat"),
+            ("transition_amount_pass", False),
+            ("trigger_amount_chain_pass", False),
+            ("current_amount_metric", None),
+            ("used_for_period", "W"),
+        ):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(valid)
+                mutate_daily_detail(invalid, field, value)
+                remove_daily_from_formal_trace(invalid)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "independent_triggered_period_n2_proof_invalid",
+                ):
+                    assert_same_day_period_escalation_output_contract(invalid)
+
+        for field, value in (
+            ("classification", "no_op"),
+            ("period", "Z"),
+        ):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(valid)
+                mutate_daily_detail(invalid, field, value)
+                with self.assertRaises(ValueError):
+                    assert_same_day_period_escalation_output_contract(invalid)
+
     def test_independent_daily_match_can_deactivate_with_unrelated_q_y_not_ready(self) -> None:
         context, initial_metric = production_20260714_1322_negative_evidence_fixture(
             asset_kind="stock",
@@ -1183,7 +1324,9 @@ class ProvisionalOrdinaryMatcherTest(unittest.TestCase):
             (("W", "D"), ["W"], ["W", "D"], ["D"]),
             (("M", "W"), ["M"], ["M", "W"], ["W"]),
             (("Q", "M"), ["Q"], ["Q", "M"], ["M"]),
+            (("Q", "M", "D"), ["Q", "D"], ["Q", "M", "D"], ["M"]),
             (("Y", "Q"), ["Y"], ["Y", "Q"], ["Q"]),
+            (("Y", "Q", "D"), ["Y", "D"], ["Y", "Q", "D"], ["Q"]),
             (("M", "W", "D"), ["M"], ["M", "W"], ["W"]),
             (("Y", "Q", "M", "W", "D"), ["Y"], ["Y", "Q"], ["Q"]),
             (("Y", "Q", "W", "D"), ["Y", "W"], ["Y", "Q", "W", "D"], ["Q", "D"]),

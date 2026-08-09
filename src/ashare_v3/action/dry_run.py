@@ -83,6 +83,7 @@ BUY_CONFIRMATION_FLAGS = (
 )
 BUY_ACTION_EXECUTION_FLAGS = (
     "buy_120m_price_pass",
+    "buy_30m_price_pass",
     "buy_5m_price_pass",
     "buy_5m_amount_pass",
     "buy_1m_price_pass",
@@ -98,6 +99,7 @@ SELL_CONFIRMATION_FLAGS = (
 )
 SELL_ACTION_EXECUTION_FLAGS = (
     "sell_120m_price_pass",
+    "sell_30m_price_pass",
     "sell_5m_price_pass",
     "sell_5m_amount_pass",
     "sell_1m_price_pass",
@@ -1807,7 +1809,12 @@ def evaluate_numeric_action_confirmation_metric(
                 default_pass_field="first_1m_amount_default_pass",
             ),
         }
-        price_flags = ("buy_120m_price_pass", "buy_5m_price_pass", "buy_1m_price_pass")
+        price_flags = (
+            "buy_120m_price_pass",
+            "buy_30m_price_pass",
+            "buy_5m_price_pass",
+            "buy_1m_price_pass",
+        )
         amount_flags = ("buy_5m_amount_pass", "buy_1m_amount_pass")
     else:
         selected_flags = {
@@ -1832,7 +1839,12 @@ def evaluate_numeric_action_confirmation_metric(
                 default_pass_field="first_1m_amount_default_pass",
             ),
         }
-        price_flags = ("sell_120m_price_pass", "sell_5m_price_pass", "sell_1m_price_pass")
+        price_flags = (
+            "sell_120m_price_pass",
+            "sell_30m_price_pass",
+            "sell_5m_price_pass",
+            "sell_1m_price_pass",
+        )
         amount_flags = ("sell_5m_amount_pass", "sell_1m_amount_pass")
     if missing_previous_session_reference(metric_fact):
         blocked_reason = "missing_previous_session_reference"

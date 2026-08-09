@@ -92,11 +92,17 @@ def validate_execute_request(
 class DefaultOfficialDaily20260526SourceAdapter:
     """Lazy real source adapter used only after explicit final execute flags."""
 
-    def __init__(self, *, tushare_token: str | None = None, mootdx_offset: int = 800) -> None:
+    def __init__(
+        self,
+        *,
+        tushare_token: str | None = None,
+        mootdx_offset: int = 800,
+        mootdx_source: Any | None = None,
+    ) -> None:
         self.tushare_token = tushare_token or load_tushare_token()
         self.mootdx_offset = mootdx_offset
         self._tushare_client: Any | None = None
-        self._mootdx_source: Any | None = None
+        self._mootdx_source = mootdx_source
 
     def fetch_stock_daily(self, *, trade_date: str, expected_scope: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pro = self._pro()

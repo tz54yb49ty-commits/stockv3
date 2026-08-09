@@ -13,7 +13,6 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
-import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,15 @@ from psycopg.types.json import Jsonb
 
 from ashare_v3.condition.basis import count_quality_severities, quality_item
 from ashare_v3.market.migration_execute import fetch_n1_n2_active_snapshot, stable_json_hash
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    MootdxBatchObjectTracker,
+    MootdxEndpointTransportError,
+    build_mootdx_minute_semantic_probe,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+    with_batch_attempt_provenance,
+)
 from ashare_v3.market.preload_execute_contract import DEFAULT_A1_CONTRACT_JSON_PATH, read_json
 from ashare_v3.market.preload_plan import (
     EXPECTED_A_SHARE_MINUTE_BAR_COUNT,
@@ -36,6 +44,7 @@ from ashare_v3.market.preload_plan import (
 )
 from ashare_v3.market.repositories import ASSET_FACT_TABLES, PreloadStatusRepository
 from ashare_v3.market.subscription_plan import ADAPTER_NAMES, ASSET_KINDS
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
 
 
 DEFAULT_N3_A1_PRE_BACKUP_PATH = "docs/N3_A1_previous_day_minute_preload_execute_backup_before.json"
@@ -75,8 +84,9 @@ class MootdxPreviousDayMinuteAdapter:
         self.offset = offset
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise PreviousDayMinutePreloadExecuteError(
+                "MootdxPreviousDayMinuteAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_minute_bars(self, subscription: Mapping[str, Any], trade_date: str) -> list[dict[str, Any]]:
         asset_kind = str(subscription.get("asset_kind") or "")
@@ -109,6 +119,9 @@ def run_previous_day_minute_preload_execute(
     json_report_path: str = DEFAULT_N3_A1_JSON_REPORT_PATH,
     markdown_report_path: str = DEFAULT_N3_A1_MD_REPORT_PATH,
     adapter: Any | None = None,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_every: int = 100,
     execute: bool = False,
@@ -138,50 +151,78 @@ def run_previous_day_minute_preload_execute(
     subscriptions = previous_day_subscriptions(subscription_report)
     ensure_subscription_counts_match_contract(subscriptions, contract)
 
-    resolved_adapter = adapter or MootdxPreviousDayMinuteAdapter()
     source_run_row = fetch_source_market_data_run(dsn, source_run_id)
-    insert_preload_run(
-        dsn,
-        contract=contract,
-        source_run_row=source_run_row,
-        started_at=started_at,
-    )
+    outcome: MootdxBatchAttemptOutcome[Any] | None = None
+    atomic_committed = False
+    if adapter is None:
+        prepared, outcome = prepare_mootdx_previous_day_batch(
+            contract=contract,
+            subscriptions=subscriptions,
+            manager=endpoint_manager or MootdxEndpointManager.from_toml(),
+            probe=endpoint_probe
+            or build_mootdx_minute_semantic_probe(
+                subscriptions=subscriptions,
+                trade_date=previous_day_minute_date,
+                adapter_factory=lambda client: MootdxPreviousDayMinuteAdapter(client=client),
+            ),
+            client_factory=endpoint_client_factory,
+        )
+        object_results, data_snapshot, post_checks, quality_items = commit_previous_day_attempt_transaction(
+            dsn=dsn,
+            contract=contract,
+            source_run_row=source_run_row,
+            started_at=started_at,
+            prepared=prepared,
+            failed_results=failed_previous_day_batch_results(contract, subscriptions, outcome),
+            outcome=outcome,
+            pre_backup=pre_backup,
+        )
+        atomic_committed = True
+    else:
+        insert_preload_run(
+            dsn,
+            contract=contract,
+            source_run_row=source_run_row,
+            started_at=started_at,
+        )
+        object_results = execute_subscription_preloads(
+            dsn=dsn,
+            contract=contract,
+            subscriptions=subscriptions,
+            adapter=adapter,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
 
-    object_results = execute_subscription_preloads(
-        dsn=dsn,
-        contract=contract,
-        subscriptions=subscriptions,
-        adapter=resolved_adapter,
-        progress_callback=progress_callback,
-        progress_every=progress_every,
-    )
-
-    data_snapshot = capture_preload_execute_backup(
-        dsn,
-        phase="after_n3_a1_data_before_quality",
-        preload_run_id=preload_run_id,
-        source_run_id=source_run_id,
-        previous_day_minute_date=previous_day_minute_date,
-    )
-    post_checks = build_post_execute_checks(
-        contract=contract,
-        pre_backup=pre_backup,
-        data_snapshot=data_snapshot,
-        object_results=object_results,
-    )
-    quality_items = build_post_execute_quality_items(
-        contract=contract,
-        post_checks=post_checks,
-        object_results=object_results,
-    )
+    if not atomic_committed:
+        data_snapshot = capture_preload_execute_backup(
+            dsn,
+            phase="after_n3_a1_data_before_quality",
+            preload_run_id=preload_run_id,
+            source_run_id=source_run_id,
+            previous_day_minute_date=previous_day_minute_date,
+        )
+        post_checks = build_post_execute_checks(
+            contract=contract,
+            pre_backup=pre_backup,
+            data_snapshot=data_snapshot,
+            object_results=object_results,
+        )
+        quality_items = build_post_execute_quality_items(
+            contract=contract,
+            post_checks=post_checks,
+            object_results=object_results,
+        )
     quality_counts = count_quality_severities(quality_items)
-    write_preload_quality_and_finalize_run(
-        dsn,
-        contract=contract,
-        quality_items=quality_items,
-        object_results=object_results,
-        status="passed" if quality_counts["P0"] == 0 else "failed",
-    )
+    if not atomic_committed:
+        write_preload_quality_and_finalize_run(
+            dsn,
+            contract=contract,
+            quality_items=quality_items,
+            object_results=object_results,
+            status="passed" if quality_counts["P0"] == 0 else "failed",
+            batch_attempt=outcome.to_provenance() if outcome is not None else None,
+        )
 
     post_backup = capture_preload_execute_backup(
         dsn,
@@ -242,6 +283,256 @@ def run_previous_day_minute_preload_execute(
     write_json(json_report_path, report)
     write_text(markdown_report_path, format_previous_day_minute_execute_report(report))
     return report
+
+
+def prepare_mootdx_previous_day_batch(
+    *,
+    contract: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    manager: MootdxEndpointManager,
+    probe: Callable[..., Mapping[str, Any]],
+    client_factory: Callable[[EndpointSelection], Any] | None = None,
+) -> tuple[list[dict[str, Any]], MootdxBatchAttemptOutcome[Any]]:
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=str(contract["preload_run_id"]),
+        probe=probe,
+        client_factory=client_factory,
+        required_checks=("minute_scope_sentinels",),
+        fetch_batch=lambda client, selection: _prepare_previous_day_attempt(
+            contract=contract,
+            subscriptions=subscriptions,
+            adapter=MootdxPreviousDayMinuteAdapter(client=client),
+            object_tracker=MootdxBatchObjectTracker(manager, selection),
+        ),
+    )
+    prepared = list(outcome.result or [])
+    for item in prepared:
+        item["minute_records"] = [
+            with_batch_attempt_provenance(record, outcome)
+            for record in item["minute_records"]
+        ]
+        item["status_record"] = with_batch_attempt_provenance(item["status_record"], outcome)
+    return prepared, outcome
+
+
+def _prepare_previous_day_attempt(
+    *,
+    contract: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    adapter: Any,
+    object_tracker: MootdxBatchObjectTracker,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    expected_count = int(contract.get("expected_bar_count_per_object") or EXPECTED_A_SHARE_MINUTE_BAR_COUNT)
+    for subscription in subscriptions:
+        try:
+            rows = adapter.fetch_minute_bars(subscription, str(contract["previous_day_minute_date"]))
+        except Exception as exc:  # noqa: BLE001 - preserve local program and contract errors.
+            if is_endpoint_transport_exception(exc):
+                raise MootdxEndpointTransportError(str(exc)) from exc
+            raise
+        minute_records = build_minute_fact_records(
+            contract=contract,
+            subscription=subscription,
+            normalized_rows=rows,
+            adapter_name=adapter_name_for_subscription(contract, subscription),
+            adapter=adapter,
+        )
+        object_tracker.record(
+            identity_key=str(subscription.get("identity_key") or ""),
+            value=minute_records,
+            empty=len(minute_records) == 0,
+        )
+        passed = len(minute_records) == expected_count
+        error_message = (
+            None
+            if passed
+            else f"object minute rows incomplete: expected={expected_count} actual={len(minute_records)}"
+        )
+        status_record = build_preload_status_record(
+            contract=contract,
+            subscription=subscription,
+            adapter_name=adapter_name_for_subscription(contract, subscription),
+            adapter=adapter,
+            minute_records=minute_records,
+            expected_count=expected_count,
+            error_message=error_message,
+        )
+        prepared.append(
+            {
+                "subscription": dict(subscription),
+                "minute_records": minute_records if passed else [],
+                "status_record": status_record,
+            }
+        )
+    return prepared
+
+
+def write_prepared_previous_day_batch(
+    *,
+    dsn: str,
+    prepared: Sequence[Mapping[str, Any]],
+    connection_factory: Callable[[str], Any] | None = None,
+    run_context: tuple[Mapping[str, Any], Mapping[str, Any], str] | None = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    connect = connection_factory or (
+        lambda value: audited_n3_market_execute_connect(value, connect_timeout=10, row_factory=dict_row)
+    )
+    with connect(dsn) as conn:
+        with conn.transaction():
+            if run_context is not None:
+                contract, source_run_row, started_at = run_context
+                first_status = dict(prepared[0]["status_record"]) if prepared else {}
+                first_raw = first_status.get("raw_json")
+                first_raw = first_raw if isinstance(first_raw, Mapping) else getattr(first_raw, "obj", {})
+                with conn.cursor() as cur:
+                    _insert_preload_run(
+                        cur,
+                        contract=contract,
+                        source_run_row=source_run_row,
+                        started_at=started_at,
+                        batch_attempt=(
+                            first_raw.get("mootdx_batch_attempt")
+                            if isinstance(first_raw, Mapping)
+                            else None
+                        ),
+                    )
+            results.extend(_write_prepared_previous_day_batch_on_connection(conn, prepared))
+    return results
+
+
+def _write_prepared_previous_day_batch_on_connection(
+    conn: Any,
+    prepared: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in prepared:
+        subscription = dict(item["subscription"])
+        minute_records = list(item["minute_records"])
+        status_record = dict(item["status_record"])
+        with conn.cursor() as cur:
+            written = (
+                bulk_upsert_minute_bars(cur, str(subscription["asset_kind"]), minute_records)
+                if minute_records
+                else 0
+            )
+            PreloadStatusRepository(cur).upsert_preload_status(status_record)
+        raw_json = status_record.get("raw_json")
+        raw_json = raw_json if isinstance(raw_json, Mapping) else getattr(raw_json, "obj", {})
+        results.append(
+            {
+                "asset_kind": subscription.get("asset_kind"),
+                "identity_key": subscription.get("identity_key"),
+                "subscription_id": subscription.get("subscription_id"),
+                "status": status_record["status"],
+                "quality_status": status_record["quality_status"],
+                "expected_bar_count": status_record["expected_bar_count"],
+                "actual_bar_count": status_record["actual_bar_count"],
+                "missing_bar_count": status_record["missing_bar_count"],
+                "minute_rows_written": written,
+                "error_message": status_record["error_message"],
+                "mootdx_batch_attempt": (
+                    raw_json.get("mootdx_batch_attempt")
+                    if isinstance(raw_json, Mapping)
+                    else None
+                ),
+            }
+        )
+    return results
+
+
+def commit_previous_day_attempt_transaction(
+    *,
+    dsn: str,
+    contract: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    prepared: Sequence[Mapping[str, Any]],
+    failed_results: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+    pre_backup: Mapping[str, Any],
+    connection_factory: Callable[[str], Any] | None = None,
+    data_snapshot_builder: Callable[[Any], Mapping[str, Any]] | None = None,
+    finalizer: Callable[..., None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    connect = connection_factory or (
+        lambda value: audited_n3_market_execute_connect(value, connect_timeout=10, row_factory=dict_row)
+    )
+    provenance = outcome.to_provenance()
+    with connect(dsn) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _insert_preload_run(
+                    cur,
+                    contract=contract,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    batch_attempt=provenance,
+                )
+            object_results = (
+                _write_prepared_previous_day_batch_on_connection(conn, prepared)
+                if outcome.status == "passed"
+                else [dict(row) for row in failed_results]
+            )
+            with conn.cursor() as cur:
+                data_snapshot = dict(
+                    data_snapshot_builder(cur)
+                    if data_snapshot_builder is not None
+                    else _capture_preload_execute_backup_with_cursor(
+                        cur,
+                        phase="after_n3_a1_data_before_quality",
+                        preload_run_id=str(contract["preload_run_id"]),
+                        source_run_id=str(contract["source_run_id"]),
+                        previous_day_minute_date=str(contract["previous_day_minute_date"]),
+                    )
+                )
+                post_checks = build_post_execute_checks(
+                    contract=contract,
+                    pre_backup=pre_backup,
+                    data_snapshot=data_snapshot,
+                    object_results=object_results,
+                )
+                quality_items = build_post_execute_quality_items(
+                    contract=contract,
+                    post_checks=post_checks,
+                    object_results=object_results,
+                )
+                quality_counts = count_quality_severities(quality_items)
+                (finalizer or _finalize_preload_run_with_cursor)(
+                    cur,
+                    contract=contract,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status="passed" if quality_counts["P0"] == 0 else "failed",
+                    batch_attempt=provenance,
+                )
+    return object_results, data_snapshot, post_checks, quality_items
+
+
+def failed_previous_day_batch_results(
+    contract: Mapping[str, Any],
+    subscriptions: Sequence[Mapping[str, Any]],
+    outcome: MootdxBatchAttemptOutcome[Any],
+) -> list[dict[str, Any]]:
+    expected_count = int(contract.get("expected_bar_count_per_object") or EXPECTED_A_SHARE_MINUTE_BAR_COUNT)
+    return [
+        {
+            "asset_kind": subscription.get("asset_kind"),
+            "identity_key": subscription.get("identity_key"),
+            "subscription_id": subscription.get("subscription_id"),
+            "status": "failed",
+            "quality_status": "failed",
+            "expected_bar_count": expected_count,
+            "actual_bar_count": 0,
+            "missing_bar_count": expected_count,
+            "minute_rows_written": 0,
+            "error_message": "atomic Mootdx previous-day batch failed; all attempt rows discarded",
+            "mootdx_batch_attempt": outcome.to_provenance(),
+        }
+        for subscription in subscriptions
+    ]
 
 
 def ensure_execute_authorized(*, execute: bool, user_confirmed: bool) -> None:
@@ -703,50 +994,75 @@ def insert_preload_run(
     contract: Mapping[str, Any],
     source_run_row: Mapping[str, Any],
     started_at: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
-    expected_counts = contract.get("expected_asset_counts") or {}
-    subscription_count = sum(int((expected_counts.get(asset) or {}).get("subscription_count") or 0) for asset in ASSET_KINDS)
-    object_count = sum(int((expected_counts.get(asset) or {}).get("object_count") or 0) for asset in ASSET_KINDS)
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO common_market_data_run (
-                      run_id, source_condition_run_id, for_trade_date, source_trade_date,
-                      prev_trade_date, mode, status, p0_count, p1_count, p2_count,
-                      source_scope_row_count, candidate_row_count, subscription_row_count,
-                      subscription_object_count, dedup_ratio, generated_by,
-                      market_data_pulled, market_data_fact_written,
-                      downstream_layers_touched, worker_started, started_at, raw_json
-                    )
-                    VALUES (%s, %s, %s, %s, %s, 'execute', 'running', 0, 0, 0,
-                            %s, %s, %s, %s, %s, 'market_data_layer',
-                            false, false, false, false, %s, %s)
-                    """,
-                    (
-                        contract["preload_run_id"],
-                        contract["source_condition_run_id"],
-                        contract["for_trade_date"],
-                        contract["source_trade_date"],
-                        contract["previous_day_minute_date"],
-                        int(source_run_row.get("source_scope_row_count") or 0),
-                        int(source_run_row.get("candidate_row_count") or 0),
-                        subscription_count,
-                        object_count,
-                        source_run_row.get("dedup_ratio"),
-                        started_at,
-                        Jsonb(
-                            {
-                                "stage": "N3-A1",
-                                "source_run_id": contract["source_run_id"],
-                                "preload_run_id": contract["preload_run_id"],
-                                "contract_path": DEFAULT_A1_CONTRACT_JSON_PATH,
-                                "writes_outbox": False,
-                            }
-                        ),
-                    ),
+                _insert_preload_run(
+                    cur,
+                    contract=contract,
+                    source_run_row=source_run_row,
+                    started_at=started_at,
+                    batch_attempt=batch_attempt,
                 )
+
+
+def _insert_preload_run(
+    cur: Any,
+    *,
+    contract: Mapping[str, Any],
+    source_run_row: Mapping[str, Any],
+    started_at: str,
+    batch_attempt: Mapping[str, Any] | None,
+) -> None:
+    expected_counts = contract.get("expected_asset_counts") or {}
+    subscription_count = sum(
+        int((expected_counts.get(asset) or {}).get("subscription_count") or 0)
+        for asset in ASSET_KINDS
+    )
+    object_count = sum(
+        int((expected_counts.get(asset) or {}).get("object_count") or 0)
+        for asset in ASSET_KINDS
+    )
+    cur.execute(
+        """
+        INSERT INTO common_market_data_run (
+          run_id, source_condition_run_id, for_trade_date, source_trade_date,
+          prev_trade_date, mode, status, p0_count, p1_count, p2_count,
+          source_scope_row_count, candidate_row_count, subscription_row_count,
+          subscription_object_count, dedup_ratio, generated_by,
+          market_data_pulled, market_data_fact_written,
+          downstream_layers_touched, worker_started, started_at, raw_json
+        )
+        VALUES (%s, %s, %s, %s, %s, 'execute', 'running', 0, 0, 0,
+                %s, %s, %s, %s, %s, 'market_data_layer',
+                false, false, false, false, %s, %s)
+        """,
+        (
+            contract["preload_run_id"],
+            contract["source_condition_run_id"],
+            contract["for_trade_date"],
+            contract["source_trade_date"],
+            contract["previous_day_minute_date"],
+            int(source_run_row.get("source_scope_row_count") or 0),
+            int(source_run_row.get("candidate_row_count") or 0),
+            subscription_count,
+            object_count,
+            source_run_row.get("dedup_ratio"),
+            started_at,
+            Jsonb(
+                {
+                    "stage": "N3-A1",
+                    "source_run_id": contract["source_run_id"],
+                    "preload_run_id": contract["preload_run_id"],
+                    "contract_path": DEFAULT_A1_CONTRACT_JSON_PATH,
+                    "writes_outbox": False,
+                    "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+                }
+            ),
+        ),
+    )
 
 
 def fetch_source_market_data_run(dsn: str, source_run_id: str) -> dict[str, Any]:
@@ -773,13 +1089,44 @@ def write_preload_quality_and_finalize_run(
     quality_items: Sequence[Mapping[str, Any]],
     object_results: Sequence[Mapping[str, Any]],
     status: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
     quality_counts = count_quality_severities(quality_items)
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                insert_quality_items(cur, contract=contract, quality_items=quality_items)
-                cur.execute(
+                _finalize_preload_run_with_cursor(
+                    cur,
+                    contract=contract,
+                    quality_items=quality_items,
+                    object_results=object_results,
+                    status=status,
+                    batch_attempt=batch_attempt,
+                )
+
+
+def _finalize_preload_run_with_cursor(
+    cur: Any,
+    *,
+    contract: Mapping[str, Any],
+    quality_items: Sequence[Mapping[str, Any]],
+    object_results: Sequence[Mapping[str, Any]],
+    status: str,
+    batch_attempt: Mapping[str, Any] | None,
+) -> None:
+    quality_counts = count_quality_severities(quality_items)
+    traced_quality_items = [
+        {
+            **dict(item),
+            "details": {
+                **dict(item.get("details") or {}),
+                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+            },
+        }
+        for item in quality_items
+    ]
+    insert_quality_items(cur, contract=contract, quality_items=traced_quality_items)
+    cur.execute(
                     """
                     UPDATE common_market_data_run
                     SET status = %s,
@@ -809,11 +1156,12 @@ def write_preload_quality_and_finalize_run(
                                 "writes_outbox": False,
                                 "write_result": summarize_write_result(object_results, quality_items),
                                 "actual_asset_counts": summarize_actual_asset_counts(object_results),
+                                "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
                             }
                         ),
                         contract["preload_run_id"],
                     ),
-                )
+    )
 
 
 def insert_quality_items(
@@ -886,26 +1234,51 @@ def capture_preload_execute_backup(
         options="-c default_transaction_read_only=on",
         row_factory=dict_row,
     ) as conn, conn.cursor() as cur:
-        return {
-            "phase": phase,
-            "captured_at": utc_now_iso(),
-            "source_run_id": source_run_id,
-            "preload_run_id": preload_run_id,
-            "previous_day_minute_date": previous_day_minute_date,
-            "active_snapshot": fetch_n1_n2_active_snapshot(cur),
-            "preload_run_exists": market_data_run_exists(cur, preload_run_id),
-            "preload_run_row": fetch_market_data_run_row(cur, preload_run_id),
-            "source_run_row": fetch_market_data_run_row(cur, source_run_id),
-            "target_table_row_counts": fetch_table_row_counts(cur, N3_A1_FACT_AND_STATUS_TABLES),
-            "target_preload_run_row_counts": fetch_preload_run_row_counts(cur, preload_run_id),
-            "target_preload_run_row_counts_by_asset": fetch_preload_run_counts_by_asset(cur, preload_run_id, previous_day_minute_date),
-            "duplicate_minute_key_count_by_asset": fetch_duplicate_minute_key_counts(cur, preload_run_id, previous_day_minute_date),
-            "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(cur, preload_run_id),
-            "common_event_outbox_row_count": fetch_table_count(cur, "common_event_outbox"),
-            "common_event_inbox_row_count": fetch_table_count(cur, "common_event_inbox"),
-            "common_event_consumer_checkpoint_row_count": fetch_table_count(cur, "common_event_consumer_checkpoint"),
-            "scoped_event_ref_counts": fetch_scoped_event_ref_counts(cur, preload_run_id),
-        }
+        return _capture_preload_execute_backup_with_cursor(
+            cur,
+            phase=phase,
+            preload_run_id=preload_run_id,
+            source_run_id=source_run_id,
+            previous_day_minute_date=previous_day_minute_date,
+        )
+
+
+def _capture_preload_execute_backup_with_cursor(
+    cur: Any,
+    *,
+    phase: str,
+    preload_run_id: str,
+    source_run_id: str,
+    previous_day_minute_date: str,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "captured_at": utc_now_iso(),
+        "source_run_id": source_run_id,
+        "preload_run_id": preload_run_id,
+        "previous_day_minute_date": previous_day_minute_date,
+        "active_snapshot": fetch_n1_n2_active_snapshot(cur),
+        "preload_run_exists": market_data_run_exists(cur, preload_run_id),
+        "preload_run_row": fetch_market_data_run_row(cur, preload_run_id),
+        "source_run_row": fetch_market_data_run_row(cur, source_run_id),
+        "target_table_row_counts": fetch_table_row_counts(cur, N3_A1_FACT_AND_STATUS_TABLES),
+        "target_preload_run_row_counts": fetch_preload_run_row_counts(cur, preload_run_id),
+        "target_preload_run_row_counts_by_asset": fetch_preload_run_counts_by_asset(
+            cur, preload_run_id, previous_day_minute_date
+        ),
+        "duplicate_minute_key_count_by_asset": fetch_duplicate_minute_key_counts(
+            cur, preload_run_id, previous_day_minute_date
+        ),
+        "physical_isolation_violation_count_by_asset": fetch_physical_isolation_violation_counts(
+            cur, preload_run_id
+        ),
+        "common_event_outbox_row_count": fetch_table_count(cur, "common_event_outbox"),
+        "common_event_inbox_row_count": fetch_table_count(cur, "common_event_inbox"),
+        "common_event_consumer_checkpoint_row_count": fetch_table_count(
+            cur, "common_event_consumer_checkpoint"
+        ),
+        "scoped_event_ref_counts": fetch_scoped_event_ref_counts(cur, preload_run_id),
+    }
 
 
 def market_data_run_exists(cur: Any, run_id: str) -> bool:

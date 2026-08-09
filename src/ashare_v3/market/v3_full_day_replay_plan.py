@@ -307,6 +307,7 @@ def build_full_day_backfill_records_for_context(
     for_trade_date: str,
     minute_trade_date: str | None = None,
     is_previous_day_preload: bool = False,
+    transport_provenance: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Build scoped full-day 1m records without touching the database.
 
@@ -316,6 +317,7 @@ def build_full_day_backfill_records_for_context(
     """
 
     minute_trade_date = minute_trade_date or for_trade_date
+    transport_provenance = dict(transport_provenance or {})
     records_by_asset: dict[str, list[dict[str, Any]]] = {asset: [] for asset in ASSET_CONFIG}
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -361,6 +363,7 @@ def build_full_day_backfill_records_for_context(
                     **extra,
                     "source_bar_id": row.get("source_bar_id"),
                     "source_run_id": row.get("source_run_id"),
+                    **(transport_provenance if source_policy == "mootdx_full_day_backfill" else {}),
                 },
             )
             for row in source_rows
@@ -375,6 +378,9 @@ def build_full_day_backfill_records_for_context(
                 "adapter_row_count": len(adapter_rows),
                 "minute_rows_written": len(built_rows),
                 "status": "passed" if len(built_rows) >= FULL_DAY_EXPECTED_1M_BAR_COUNT else "missing",
+                "transport_provenance": (
+                    transport_provenance if source_policy == "mootdx_full_day_backfill" else {}
+                ),
             }
         )
     return records_by_asset, results
@@ -653,8 +659,10 @@ def write_full_day_backfill_to_db(
     prev_trade_date: str,
     records_by_asset: Mapping[str, Sequence[Mapping[str, Any]]],
     object_results: Sequence[Mapping[str, Any]],
+    transport_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     minute_trade_date = minute_trade_date or for_trade_date
+    transport_provenance = dict(transport_provenance or {})
     pre_counts = capture_full_day_backfill_counts(
         dsn=dsn,
         backfill_run_id=backfill_run_id,
@@ -710,6 +718,7 @@ def write_full_day_backfill_to_db(
                                 "records_planned": total_rows,
                                 "writes_outbox": False,
                                 "old_system_read": False,
+                                "transport_provenance": transport_provenance,
                             }
                         ),
                     ),
@@ -746,7 +755,8 @@ def write_full_day_backfill_to_db(
                                     "source_policy_counts": dict(
                                         Counter(str(row.get("source_policy")) for row in object_results)
                                     ),
-                                }
+                                },
+                                "transport_provenance": transport_provenance,
                             }
                         ),
                         backfill_run_id,

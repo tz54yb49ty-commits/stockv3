@@ -1539,13 +1539,20 @@ def assert_same_day_period_escalation_output_contract(
     independent_triggered_periods = set(triggered_periods) - same_day_targets
     for period in independent_triggered_periods:
         detail = evaluation_details_by_period.get(period)
-        detail_trace = detail.get("period_escalation_trace") if isinstance(detail, Mapping) else None
-        # Only a period that is actually emitted as a target needs positive
-        # ready/seen N2 proof; not_seen/not_ready can never authorize that target.
+        if not isinstance(detail, Mapping) or not canonical_formal_detail_passes(
+            direction,
+            period,
+            detail,
+        ):
+            fail("independent_triggered_period_n2_proof_invalid")
+        # D is an ordinary same-day formal trigger and has no N2 escalation
+        # source_entry. Higher independent targets still require complete,
+        # positive ready/seen N2 proof.
+        if period == "D":
+            continue
+        detail_trace = detail.get("period_escalation_trace")
         if (
             period not in PERIOD_ESCALATION_REQUIREMENTS
-            or not isinstance(detail, Mapping)
-            or not canonical_formal_detail_passes(direction, period, detail)
             or not isinstance(detail_trace, Mapping)
             or not n2_context_trace_is_complete(period, detail_trace)
         ):

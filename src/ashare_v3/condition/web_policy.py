@@ -277,6 +277,8 @@ def default_web_policy() -> dict[str, Any]:
             "exclude_bj": True,
             "require_official_daily_proof": True,
             "require_financial_quality_passed": False,
+            "allowed_monitor_types": ["source_universe_preview"],
+            "allow_financial_key_fields_missing": False,
             "directions": ["buy", "sell"],
             "condition_keys": ["*"],
             "condition_family": ["ordinary", "full", "hint"],
@@ -619,6 +621,12 @@ def _stock_web_to_scope(section: Mapping[str, Any]) -> dict[str, Any]:
         "max_total_mv_wan": _market_value_wan(section, web_key="max_total_mv_yi", scope_key="max_total_mv_wan"),
         "market_value_compare": section.get("market_value_compare", ">="),
         "exclude_bj": bool(section.get("exclude_bj", False)),
+        "allowed_monitor_types": list(_string_list(section.get("allowed_monitor_types"))),
+        "require_financial_key_field": bool(
+            section.get("require_financial_key_field")
+            if "require_financial_key_field" in section
+            else not bool(section.get("allow_financial_key_fields_missing", False))
+        ),
         "require_buy_target_price": bool(section.get("require_buy_target_price", False)),
         "require_sell_target_price": bool(section.get("require_sell_target_price", False)),
         "require_up_sell_reference_period": bool(section.get("require_up_sell_reference_period", False)),

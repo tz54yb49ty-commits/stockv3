@@ -1085,6 +1085,57 @@ class ProvisionalProjectionExecuteTest(unittest.TestCase):
         self.assertFalse(payload["n5_entry_allowed"])
         assert_canonical_state_columns(self, plan["writes"]["common_trigger_state"][0])
 
+    def test_opposite_hint_projection_writes_canonical_inactive_state(self) -> None:
+        cases = (
+            ("buy", "BUY_HINT", "volume_up", "shrink_down", "30m_volume"),
+            ("sell", "SELL_HINT", "shrink_down", "volume_up", "30m_shrink"),
+        )
+        for direction, condition_key, previous_type, current_type, previous_mark in cases:
+            with self.subTest(condition_key=condition_key):
+                identity_key = f"board:TDX:{'BK001' if direction == 'buy' else 'BK002'}"
+                context = context_row(
+                    identity_key,
+                    direction,
+                    condition_key,
+                    [condition_key],
+                    asset_kind="board",
+                )
+                initial = build_plan(
+                    [context],
+                    [hint_1m_projection_row("board", identity_key, previous_type)],
+                )
+                previous = previous_state_for_payload(
+                    initial["writes"]["common_event_outbox"][0]["payload_json"]
+                )
+
+                plan = build_plan(
+                    [context],
+                    [hint_1m_projection_row("board", identity_key, current_type)],
+                    previous_trigger_states=[previous],
+                )
+
+                self.assertEqual(plan["state_changed_count"], 1)
+                self.assertEqual(plan["matched_count"], 0)
+                self.assertEqual(len(plan["writes"]["common_trigger_state"]), 1)
+                self.assertEqual(plan["writes"]["common_trigger_match"], [])
+                self.assertEqual(len(plan["writes"]["common_event_outbox"]), 1)
+                self.assertEqual(
+                    {row["event_type"] for row in plan["writes"]["common_event_outbox"]},
+                    {"TriggerStateChanged"},
+                )
+                state = plan["writes"]["common_trigger_state"][0]
+                payload = plan["writes"]["common_event_outbox"][0]["payload_json"]
+                self.assertEqual(payload["current_status"], "inactive")
+                self.assertFalse(payload["trigger_live"])
+                self.assertEqual(payload["trigger_mark_candidate"], "normal")
+                self.assertFalse(payload["projection_30m_flag"])
+                self.assertEqual(payload["projection_30m_type"], "none")
+                self.assertEqual(payload["previous_projection_30m_type"], previous_type)
+                self.assertEqual(payload["previous_trigger_mark_candidate"], previous_mark)
+                self.assertFalse(payload["n5_entry_allowed"])
+                self.assertNotIn("ActionEligible", {row["event_type"] for row in plan["writes"]["common_event_outbox"]})
+                assert_canonical_state_columns(self, state)
+
     def test_hint_state_insert_includes_all_canonical_typed_columns(self) -> None:
         class Cursor:
             def execute(self, sql: str, params: dict[str, object]) -> None:

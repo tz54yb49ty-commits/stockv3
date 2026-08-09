@@ -17,12 +17,16 @@ kernel_output:
   kernel_decision:
     state: ACCEPT | REJECT | BLOCK | ESCALATE
     reason: string
+    policy_id: string | null
 
   kernel_input:
     intent: string
     layer_role: string
     affected_files:
       - string
+    affected_resources:
+      - string
+    policy_id: string | null
     data_flow: string
     risk_level: low | medium | high | critical
 
@@ -30,6 +34,8 @@ kernel_output:
     kernel_evaluated: boolean
     cross_layer_violation_detected: boolean
     runtime_execution_requested: boolean
+    named_policy_evaluated: boolean
+    named_policy_passed: boolean
 ```
 
 No raw user request, inferred task, or unstated assumption may bypass `kernel_output`.
@@ -38,13 +44,7 @@ No raw user request, inferred task, or unstated assumption may bypass `kernel_ou
 
 ### ACCEPT
 
-The Kernel exists, the Kernel returned `ACCEPT`, no cross-layer violation is
-present, and the requested action remains within approved file/resource and
-layer boundaries. Runtime execution must be absent unless the Kernel selected
-and fully passed a named fail-closed policy authorized by this contract,
-including the Strategy Center bounded evaluator, scheduled evaluator, Web
-rebind, schema/catalog maintenance, post-083 single/remaining-user migration,
-reviewed-view date authority, and post-canary Web write-restore policies.
+The Kernel exists, the Kernel returned `ACCEPT`, no cross-layer violation is present, and the requested action remains within approved file/resource and layer boundaries. Runtime execution must be absent unless the Kernel selected and fully passed a named machine-readable policy, including the Strategy Center bounded run-once, scheduled evaluator, Web rebind/quiesce, migration, reviewed-date, write-restore, single remaining-user migration, or final V1-retirement policies listed in `AGENTS.md`.
 
 Result: execution may proceed only within the approved scope.
 
@@ -101,6 +101,7 @@ No Kernel -> REJECT
 No ACCEPT -> STOP
 Cross-layer violation -> REJECT
 Runtime execution -> REJECT
+Runtime execution with one exact passed named policy -> ACCEPT
 ```
 
 Detailed rules:
@@ -114,17 +115,24 @@ Detailed rules:
    - `kernel_decision.state == ACCEPT`;
    - `kernel_decision.policy_id` equals
      `n6_strategy_center_display_only_bounded_run_once_v1`,
-     `n6_strategy_center_display_only_scheduled_evaluator_f464_v1`, or
+     `n6_strategy_center_display_only_scheduled_evaluator_v1`, or
      `n6_user_web_immutable_release_bounded_rebind_v1`, or
      `n6_strategy_center_schema_migration_maintenance_window_v1`, or
      `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`, or
+     `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`, or
      `n6_strategy_center_post_081_v2_catalog_migration_window_v1`, or
      `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`, or
-     `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`, or
+     `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`, or
      `n6_strategy_center_pre_canary_web_write_quiesce_v1`, or
      `n6_strategy_center_reviewed_view_date_authority_084_v1`, or
      `n6_strategy_center_post_canary_web_write_restore_v1`, or
-     `n6_strategy_center_shadow_activation_grant_v1`;
+     `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`, or
+     `n6_strategy_center_v1_retirement_after_all_users_v2_v1`, or
+     `n6_immutable_release_install_bounded_v1`, or
+     `n6_immutable_release_install_pre_rename_validator_recovery_v1`, or
+     `n6_immutable_release_install_preflight_git_violation_recovery_v1`, or
+     `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`, or
+     `n4_lifecycle_inactive_mark_recovery_v1`;
    - `named_policy_evaluated == true`;
    - `named_policy_passed == true`;
    - the complete machine-readable Kernel policy still matches fresh Runtime
@@ -136,8 +144,9 @@ Detailed rules:
    presence, current trade date, exact single-user scope, dry-run/watermark/plan
    hash, dedicated ACL, before/after scope, CAS, rollback, attempt counts, and
    every forbidden field. If the virtual executor is loaded or running, it must
-   also recheck the exact post-083 Gate2/revision-20/current-20260723
-   coexistence mode, zero pre-Gate2 dry-run/primary/replay attempts, frozen
+   also recheck the exact post-083 Gate2 dynamic positive revision/current
+   reviewed-N6 `for_trade_date` coexistence mode, zero pre-Gate2
+   dry-run/primary/replay attempts, frozen
    label/plist/Release/runner/PGSERVICE/role-ACL/object-boundary hashes,
    Strategy Center table-write/function-execute/code-reference disjointness,
    exact dry-run -> primary -> same-input replay order, zero executor
@@ -160,15 +169,9 @@ Detailed rules:
    `n6_strategy_center_pre_canary_web_write_quiesce_v1` may first perform one
    exact-Web flag-only `1 -> 0` rebind on the unchanged d85 Release, with the
    evaluator already absent and virtual executor untouched.
-10. F464 scheduled evaluator activation additionally requires the 20260727
-   natural-input canary for exact principal 12/principal-type human_user/user
-   11/revision 22/revision-no 1/package_1 v2 with every CAS match and fresh
-   business zero increment; `user`, `admin` and unknown principal types are
-   rejected for this revision 22 scope; exact F464 commit/tree, blobs, Temporal
-   Confluence V2 and 081/082/083 lineage; frozen Web/Evaluator plist,
-   offline-manifest and 78-event activation-chain hashes; one scope per tick;
-   pending-first/active-round-robin; exact five-second configuration; and a
-   frozen twelve-tick stability window.
+10. Scheduled evaluator activation additionally requires the current-date
+   bounded canary, one scope per tick, pending-first/active-round-robin,
+   exact five-second configuration and a frozen twelve-tick stability window.
 11. Web write restore requires canary PASS, twelve stable ticks, pending zero
     and one exact-Web flag-only `0 -> 1` rebind. Each remaining user then
     requires a separate one-scope CAS transaction; all-users migration rejects.
@@ -180,20 +183,20 @@ Detailed rules:
    rebind, or `n6_strategy_center_schema_migration_maintenance_window_v1` for
    the exact prepare-081 quiesce window, or
    `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` for the exact
-   post-081 V2 Web rebind. None grants N6 business or migration authority.
+   post-081 V2 Web rebind, or
+   `n6_strategy_center_post_083_v2_web_bounded_rebind_v1` for the exact
+   post-083/084 legacy-source-to-formal-target Web rebind. None grants N6
+   business or migration authority.
 9. For the Web rebind policy, Runtime Gate must freshly recheck source and target
    commit/tree/archive/manifest hashes, non-regressing lineage, immutable
    content, affected resources, PID/PPID/argv/cwd, plist SHA/metadata,
    environment, launchd ownership, primary/rollback attempt counts, readiness,
    routes, stability, evaluator/executor absence, and every forbidden field.
-10. For the F464 scheduled-evaluator policy, Runtime Gate must freshly recheck
-    current-request authorization, the exact 20260727 natural-input single-scope
-    canary and CAS result, fresh business zero increment, exact current open
-    trade date, immutable F464 Release commit/tree/archive/manifest/filesystem
-    hashes, exact auto runner/planner/worker blobs, Temporal Confluence V2
-    candidate/canonical/bundle lineage, committed 081/082/083 live predicate,
-    exact Web target plist, Evaluator source/target plists, offline activation
-    manifest and 78-event activation chain, dependency
+10. For the scheduled-evaluator policy, Runtime Gate must freshly recheck the
+    current-request authorization, the frozen 20260722 bounded-canary artifact,
+    exact current open trade date, immutable Release commit/tree/archive/
+    manifest/filesystem hashes, pinned dfb5b04a/995e4803 source-authority and
+    exact auto runner/planner blobs, dependency
     lock/runtime-env hashes and planner-derived argv, exact label/plist/
     StartInterval, `PGSERVICE=n6_strategy_worker`, the four-table
     DML allowlist, per-user isolation, complete observation scope/grain/
@@ -203,40 +206,7 @@ Detailed rules:
     observation-preserving exact-label/plist rollback, V2-dependent 081 schema
     rollback rejection, and every forbidden field. Each tick needs a fresh gate.
     A non-open-day tick may return only the declared no-DML no-op; it never
-    inherits current-open-day write authority. The absent-label primary path
-    allows one atomic plist replacement and one bootstrap, zero bootout/
-    kickstart/start/retry, and a settled-absence barrier. Failure compensation
-    may restore the exact frozen source plist once but must leave the source
-    label/process absent, never bootstrap 658, and never restore an empty state.
-11. For `n6_strategy_center_shadow_activation_grant_v1`, Runtime Gate accepts
-    only a later independent `runtime_control` request carrying parent approval
-    `N6_AI_SIMULATED_INVESTOR_RESUMABLE_ACTIVATION`. It must freshly verify the
-    second-level immutable supersession manifest and complete SHA chain, the external
-    attestation of the final governance commit, the manifest-bound Web and
-    Evaluator live commit/tree/plist anchors, both source-to-target ancestry
-    paths, critical N6 blob/API/strategy non-regression, and unchanged Virtual
-    Executor, N1-N5, broker, and trading boundaries.
-12. The same policy requires `GOVERNANCE=passed`,
-    `EVALUATOR_RESUME_FIX=passed`, an evidence-bound resume of the failed
-    `BOUNDED_REBIND`, `BOUNDED_REBIND_WEB_TARGET=planned`, and
-    `BOUNDED_REBIND_EVALUATOR_TARGET=blocked_pending_canary`, plus an unexpired
-    WEB_TARGET lease. Ordinary checkpoint JSON is evidence only.
-13. WEB_TARGET may install immutable f464 and rebind only exact Web from d85 to
-    f464. Strategy-write remains `0`; the Evaluator job/runner must remain
-    absent/0. Any Evaluator operation, canary, kickstart, runner, database,
-    Virtual Executor, N1-N5, broker/trading access, extra label, or empty-state
-    restore returns `REJECT`.
-14. EVALUATOR_TARGET cannot become planned or receive a lease until WEB_TARGET
-    is passed and a later independent current-date bounded canary PASS is
-    imported into the hash chain. It may then bootstrap only the exact
-    Evaluator label to the same f464 target.
-15. Candidate, strategy-rule, implementation, target-artifact,
-    ancestry, critical-blob, API, or boundary drift is semantic drift and
-    terminates the parent approval. Only a freshly attested compatible
-    source-runtime-anchor change is operational drift eligible for immutable
-    supersession. The d85 bundle is historical; the only current target bundle
-    is f464 file `6efda630...` with internal SHA `119296de...`. No existing
-    manifest may be rewritten.
+    inherits current-open-day write authority.
 11. For the 081 maintenance-window policy, Runtime Gate must freshly recheck
     current-request authorization; exact 081 forward/rollback hashes; immutable
     Release hashes; exact Web/evaluator label, plist, runner, role, ownership,
@@ -262,6 +232,27 @@ Detailed rules:
     enable, missing evidence, drift, extra service, repeated primary attempt,
     N1-N5, queue, business, broker, or trading effect returns `REJECT`. Normal
     virtual-executor StartInterval PID/runs cycling alone is not drift.
+12A. For the post-083 V2 Web rebind policy, Runtime Gate must freshly recheck
+    current-request authorization; committed 081/082/083/084 and frozen
+    schema/catalog evidence; the exact legacy source basename
+    `20260724_042200__a1dc7350`; its closure to full commit
+    `a1dc73503a07055f7bdb9cd29b378d1272642473`, tree, archive, git-ls-tree,
+    manifest, filesystem, path/blob/mode, ownership, and immutable attestation;
+    proof that it is the current Web Release and is used only once as the exact
+    rollback source; one formally named 40-character target whose name matches
+    its commit and whose lineage/schema/N6 capabilities do not regress; exact
+    Web ownership/plist/environment with strategy write `1` before, target,
+    readiness, and rollback; a passed independent evaluator-quiesce artifact
+    plus evaluator job/PID absence and zero evaluator operations; and frozen
+    exact virtual-executor `StartInterval=5`
+    plist/Release/runner/role-ACL/object-boundary evidence, Web/Strategy Center
+    write disjointness, and zero executor operations. The only mutable service
+    is the Web, with one primary bootout/bootstrap, zero retries, 60-second
+    readiness, 30-second stability, and one conditional exact-source rollback.
+    Legacy-source reuse/mutation/target use, a short target, database,
+    migration, evaluator/executor operation, extra service, repeated attempt,
+    N1-N5, queue, business, broker, or trading effects return `REJECT`. Normal
+    virtual-executor PID/runs cycling alone is not drift.
 13. For the post-081 V2 catalog migration policy, Runtime Gate must freshly
     select exactly one `N6_user` phase. 082 requires committed 081, absent
     082/083, pending count zero, exact immutable/SQL hashes, and an install-only
@@ -309,20 +300,18 @@ Detailed rules:
     official-function change, secret leakage, second mutation attempt, Web
     PUT/write enable, activation, compensation call, multi-scope, package-key
     change, extra table, or missing/drifted evidence returns `REJECT`.
-15. For remaining post-083 users, Runtime Gate may ACCEPT only one explicitly
-    authorized principal/user scope whose active V1 predecessor, current N6
-    authority date, same package-key set and predecessor+1 CAS are frozen.
-    Strategy write must remain `1`; Web PUT is forbidden. A running evaluator
-    may be observed but must not be operated. The target owner-isolated
-    selection function must be independently attested; the existing session-
-    token Web function and hand-written SQL are not substitutes. Missing
-    owner-function proof returns
-    `scope_expansion_required=owner_selection_function` and `REJECT`.
-    Exactly one transaction, one advisory lock, one official function call, one
-    mutation attempt and zero retry may insert only the pending revision/items.
-    Activation, projection/change, catalog/schema, executor, business,
-    trading, N1-N5, all-users, multi-scope, date/hash drift or a second attempt
-    returns `REJECT`.
+15. For the evaluator-quiesce-for-Web-rebind policy, Runtime Gate must freshly
+    recheck current-request authorization, `layer_role=runtime_control`,
+    post-083 state, strategy write `1`, exact evaluator label/plist/path,
+    immutable Release, runner, role/ACL, launchd ownership, and before state.
+    It permits exactly one bootout of that label and requires state-driven proof
+    that both PID and job are absent. Evaluator bootstrap, execution, kickstart,
+    kill/signal, retry, or automatic restore returns `REJECT`. Web and virtual
+    executor must remain unoperated; the latter's label/plist/Release/runner/
+    role-ACL/object-boundary hashes and write-disjointness remain frozen.
+    Normal configured virtual-executor PID/runs cycling alone is not drift.
+    Any database connection, migration, selection/projection/change, queue,
+    N1-N5, business, broker, or trading effect returns `REJECT`.
 16. General N6 execute, general `runtime_control` service operations, and every
     other runtime/database-write request continue to return `REJECT`.
 
@@ -341,8 +330,272 @@ missing kernel_output -> REJECT
 missing gate decision -> STOP
 ```
 
-Allowed execution means only the approved action may proceed. It does not authorize runtime commands, database writes, rollback, worker startup, outbox consumption, N1-N6 behavior changes, voice, mobile, sim, position, or real trading.
+Allowed execution means only the approved named action may proceed. The N6
+strategy policy authorizes only one bounded display-only primary commit and at
+most one exact idempotence replay against its four N6 strategy tables; it never
+authorizes LaunchAgent or rollback execution. Its post-083 coexistence branch
+only tolerates an already-scheduled, frozen, write/execute/code-disjoint virtual
+executor and never authorizes operating it. The Web rebind policy authorizes
+only the exact N6 Web plist/label mutation, one primary bootout/bootstrap, and a
+conditional one-pair restore of the frozen source Release. The scheduled policy
+authorizes only the absent exact label/plist, one install/bootstrap, the exact
+immutable scheduled run-once runner at `StartInterval=5`, its four-table DML on
+the current open trade date, and one readiness-failure rollback to the frozen
+absent state. The post-081 catalog migration policy authorizes exactly one 082
+tooling transaction or, only after its postflight, one 083 catalog transition
+transaction in separate `N6_user` requests. No policy authorizes a general runtime command, another service,
+mutable or immutable Release content change, general business worker, evaluator
+under the Web policy, virtual executor, outbox/inbox/checkpoint mutation, N1-N5
+behavior change, account/cash/position mutation, proposal/order/trade, real
+broker, voice, mobile, sim, or real trading.
+
+### Named policy: n6_strategy_center_evaluator_quiesce_for_web_rebind_v1
+
+Runtime Gate accepts only one explicitly authorized post-083
+`runtime_control` bootout of exact label
+`com.ashare-v3.n6.strategy-center-evaluator-v1` while strategy write remains
+`1`. It requires frozen plist/path/runner/Release/role/ACL/ownership/state,
+state-driven PID/job absence, zero bootstrap/kickstart/kill/retry/automatic
+restore, and unchanged Web and virtual executor. It grants no database,
+migration, evaluator execution, business, trading, or N1-N5 authority.
+
+### Named policy: n6_strategy_center_pre_canary_web_write_quiesce_v1
+
+Runtime Gate accepts only one explicitly authorized `runtime_control` rebind of
+`com.ashare-v3.n6.user-web` that preserves the exact d85 Release and changes
+only `ASHARE_V3_N6_STRATEGY_CENTER_WRITE_ENABLED=1→0`. The evaluator must
+already have no job or runner process; this policy performs zero evaluator and
+virtual-executor operations. It allows one primary bootout/bootstrap and, only
+after real health failure, one frozen-plist rollback to flag `1`. Any Release,
+path, other environment, database, migration, canary, N1-N5, or trading action
+returns `REJECT`.
+
+### Named policies: Strategy Center 30-day isolation decommission
+
+The lifecycle retirement override is evaluated before every named-policy
+contract. Any retired Strategy Center policy id returns `REJECT`, even when its
+historical policy block would otherwise have returned `ACCEPT`.
+
+`n6_strategy_center_decommission_web_runtime_v1` may return `ACCEPT` only for
+the exact Web service, one immutable Strategy Center-removal Release, write
+flag `0` before/after/rollback, evaluator job/PID absent with zero restore,
+one primary bootout/bootstrap, bounded readiness/stability, conditional frozen
+source rollback, and optional post-stability read-only evaluator artifact
+archive. Any database, virtual-executor, other-service, heartbeat, N1-N5, or
+trading operation returns `REJECT`.
+
+`n6_strategy_center_decommission_schema_archive_v1` may return `ACCEPT` only
+for one independent `N6_user` transaction over the exact six core tables and
+their owned sequences/indexes, a new owner-only archive schema, revoked archive
+`USAGE` for the frozen Web role, `n6_strategy_worker`, and `PUBLIC`, exact
+Strategy Center-only trigger/function removal, complete per-table evidence,
+and a hash-bound rollback valid during the 30-day retention period. Any data or
+table drop, truncate, row DML, retry, protected-object change, combined Web
+gate, automatic deletion, or heartbeat operation returns `REJECT`.
+
+The 30-day deadline never authorizes physical deletion. Deletion requires a new
+independent explicit policy and request after the retention period.
 
 ## 6. Golden Rule
 
+### Named policy: n6_immutable_release_install_bounded_v1
+
+Runtime Gate may accept only artifact installation of one already-attested N6
+immutable Release. It permits a unique same-parent staging path, validation,
+one atomic rename, and attestation writes. For a frozen owner-controlled
+Release root at `0555`, it also permits exactly one temporary owner-write
+transition to `0755` and requires exactly one restoration to `0555` before
+finalization or failure return. Owner/group/ACL/xattr drift, group/other write,
+an extra mode transition, or a writable final root returns `REJECT`. It does not permit LaunchAgent or
+service operations, database access, evaluator/executor operations, migration,
+business or trading writes. Existing Releases must remain unchanged; cleanup
+may remove only paths created by the failed attempt. General runtime and
+database operations remain `REJECT`.
+
 Gate is mandatory and non-bypassable.
+
+### Named policy: n6_immutable_release_install_pre_rename_validator_recovery_v1
+
+Runtime Gate may accept only one separately authorized recovery for the exact
+`aa6d19c169df3837b3115d975587686cc726b87b` pre-rename failure bound to
+BLOCKED attestation SHA-256
+`9594308305ff68a217d51f6071ded07e4c01892a3ed91227abea9f1586b2edf1`.
+Fresh evidence must prove `failure_type=validation_tool_capability_missing`,
+zero prior rename/fallback/retry/cleanup attempts, absent target, restored
+`0555` Release root, unchanged source hashes, unchanged existing Releases and
+the exact preserved staging-v1 path/device/inode/owner/mode/count/ACL/xattr
+fingerprints. Staging-v1 is permanent evidence only and may not be reused,
+modified, renamed, deleted or cleaned.
+
+The one later recovery request must first create and seal the exact new
+validator artifact directories, capability attestation and SHA sidecar
+required by the Kernel policy, bind the validator executable and protocol
+hashes, and prove complete read-only xattr name/value capability. The
+sidecar-recorded attestation SHA, literal `/usr/bin/xattr` SHA and
+attestation-embedded executable/protocol hashes must match and be frozen
+before Release-root mutation. Capability failure must STOP before Release-root
+chmod or staging-v2 creation, but must first confirm root remains `0555` and
+FINALIZE the exact sealed recovery failure artifacts. Only after capability PASS may recovery create
+the exact fresh same-parent staging-v2, rematerialize it from the frozen
+archive, validate every blob/path/mode/ACL/xattr name and value against the
+exact release-content-manifest-derived 6288-record
+path/name/raw-value/canonical-fingerprint authority and exact owner/group.
+Promotion must use one same-root-dirfd
+`renameatx_np(RENAME_EXCL|RENAME_NOFOLLOW_ANY|RENAME_RESOLVE_BENEATH)` call;
+ordinary or overwrite-capable rename is rejected. Recovery may use one owner-only Release-root
+`0555 -> 0755 -> 0555` window. The root must be restored to `0555` immediately
+after the rename attempt and before target postflight or attestation writes. A
+failure after staging-v2 creation must
+recursively seal every created entry to `0444/0555`, attest its identity and
+metadata, and restore the root before returning if rename has not succeeded;
+writable failure residue is `REJECT`. A post-rename postflight failure must
+leave the target immutable and preserve it as evidence without modification
+or deletion. Capability drift, partial validation, old
+staging reuse/modification/rename/deletion/cleanup, second recovery, fallback
+to another install policy, runtime/service/LaunchAgent/port/Git/test/database/
+evaluator/executor/migration/N1-N6/business/trading work all return `REJECT`.
+Recovery validation, install attestation and sidecar must use the exact absent
+new paths/modes/counts in Kernel; unknown request keys, output overwrite or an
+unbound write returns `REJECT`. Their directories must not be created until
+the Release root is restored or confirmed unchanged at `0555` and the selected
+recovery outcome branch, including capability failure, has completed sealing
+and postflight; early output
+creation returns `REJECT`. After any output path is first created, a
+directory/file write or seal failure must seal every created output path to
+`0444/0555`, record partial identity/hash evidence and return with zero
+writable output residue.
+Read-only verification of the frozen staging-v1 remains mandatory. The
+governance definition gate cannot execute this policy.
+
+### Named policy: n6_immutable_release_install_preflight_git_violation_recovery_v1
+
+Runtime Gate may accept only the frozen pre-mutation procedural failure caused
+by one forbidden read-only Git preflight in the prior validator-recovery
+attempt. It requires exact session segment/prefix hashes and tool-call
+identities, direct proof that Git was limited to `rev-parse`/`diff`/`show`,
+zero Git/worktree mutation and zero filesystem/runtime mutation. The later
+execution gate permits no Git and no tests; governance is verified only from
+independently frozen current `AGENTS.md` and policy-block raw-byte hashes plus
+direct filesystem evidence.
+
+Only capability PASS may open one root `0555 -> 0755 -> 0555` window, create
+the exact fresh staging-v2, complete blob/path/mode/owner/ACL/xattr raw-value
+validation and attempt one exclusive same-dirfd `renameatx_np`. Staging-v1
+remains evidence-only. Prior-policy reuse, fallback, retry, another recovery,
+cleanup, service/LaunchAgent/rebind, database/runtime/migration/evaluator/
+executor/N1-N6/trading activity, Git or tests are `REJECT`. This governance
+definition request cannot execute it.
+
+### Named policy: n4_lifecycle_deactivation_state_columns_controlled_promotion_v1
+
+Runtime Gate treats `6d1b7a24f2f6d6fa6ef5a4d675995c943703101e`
+and `a1ff8b0e0dbda579dd2cece1c5b84a10879293bc` only as fixed source
+evidence. Their eight-path allowlist, endpoint blobs, combined/rollback patch
+hashes and two exact label/original-plist path/SHA bindings cannot change.
+They are never accepted as the final execution targets.
+
+Before any bootout, an independent execution request must freeze the exact
+policy-definition commit plus two final promotion commits and one final
+rollback prepared from that commit. Runtime Gate recomputes that the policy
+commit is current Active HEAD with parent `8229124a`, the first promotion is
+its direct child, final tip is the first promotion's direct child, rollback is
+the final tip's direct child, and rollback tree equals the policy commit tree.
+It also recomputes the fixed combined/rollback patch hashes, exact eight-path
+set and equality of all eight final blobs to the source endpoint.
+
+Only tracked/index clean state, unchanged original plists, idle workers and
+idle children allow one bootout for each exact label, state-driven job/PID/
+child absence, one `git merge --ff-only` to the frozen final tip and one
+bootstrap from each original plist. Any other label/path/blob/patch/plist,
+busy child, fixed sleep, non-ff merge, kickstart, manual execute, retry, push,
+checkout/rebase/cherry-pick, automatic rollback, DB DML, message/queue,
+historical-event, N2/N3/N5/N6 or trading operation is `REJECT`. Failure may
+only report the frozen rollback target; rollback execution remains `REJECT`.
+This governance definition request cannot execute the policy.
+
+### Named policy: n4_lifecycle_inactive_mark_recovery_v1
+
+Runtime Gate accepts only one of three separately authorized phases in the
+exact post-policy chain: `rollback_restore`, `corrected_promotion`, or
+`corrected_code_only_rollback`. The frozen `cadbe91c` commit is content
+evidence, not an execution target. Before bootout, the gate freezes every
+direct-parent edge and verifies that rollback restore changes only the eight
+N4 files to the stable blobs; corrected promotion changes only those files;
+and its direct-child code rollback restores the rollback-restore N4 tree.
+
+The corrected inactive contract is current `trigger_mark_candidate=normal`,
+prior evidence in `previous_trigger_mark_candidate`, and projection
+`false/none`. Schema, constraints and event structure are immutable. Each
+phase permits only the two exact labels, one bootout each, state-driven
+absence, one ff-only merge and one original-plist bootstrap each. Combining
+phases, automatic continuation/rollback, retry, kickstart, manual execute,
+DB/message/history or N2/N3/N5/N6 work is `REJECT`. The governance-definition
+request cannot execute the policy.
+
+The current revision accepts only after the prior rollback-restore attempt is
+hash-bound as a Git metadata permission failure before any repository or
+business mutation and both original plists are restored. The prior execution
+chain is non-executable evidence. A fresh post-revision chain must reproduce
+the four frozen patch hashes, and escalated Git metadata write authority must
+be verified before any new bootout. Reusing the prior target, probing merge
+without authority, concealing the prior attempt, or executing this definition
+request is `REJECT`.
+
+### Named policy: n6_immutable_release_install_eacces_retry_v1
+
+Runtime Gate may accept one fresh artifact-only retry only after one verified
+initial `EACCES` rename failure whose target was absent, whose prior staging
+remains unchanged and whose Release root was restored to `0555`. It permits a
+new staging and target only. After all content checks, the new staging root
+may be owner-writable only for the one atomic rename and must end as the new
+target at `0555`; the Release root separately must end at `0555`. It never
+permits reuse or mutation of the prior staging, a second retry, LaunchAgent,
+service, database, evaluator/executor, migration, business or trading work.
+General runtime and database operations remain `REJECT`.
+
+### Named policy: n6_immutable_release_install_host_eacces_remediation_v1
+
+Runtime Gate accepts only one artifact-only remediation after a readable,
+hash-bound host-level `EACCES` trace. The trace must prove the source staging
+was `0555` and that moves to both the same parent and `/tmp` failed. It never
+permits mutation/reuse of the orphaned staging, another remediation, service,
+LaunchAgent, database, evaluator/executor, migration, business or trading work.
+
+### Named policy: n6_immutable_release_privileged_atomic_install_v1
+
+Runtime Gate accepts only one separately authorized, SHA- and signature-bound
+privileged helper invocation. It must atomically promote one verified direct
+child staging directory to one absent direct child target via parent-dirfd
+`renameatx_np` with `RENAME_EXCL`, `RENAME_NOFOLLOW_ANY` and
+`RENAME_RESOLVE_BENEATH`. Unsupported flags, arbitrary paths, shell/copy/
+delete/overwrite/chmod/xattr/ACL, services, database, evaluator/executor and
+all business or trading paths remain `REJECT`.
+
+### Named policy: n6_immutable_release_privileged_materialize_and_install_v1
+
+Runtime Gate accepts only one separately authorized, SHA/signature-attested
+root-only V2 invocation for the frozen
+`d85df6328bde223e912dabc3bd65e16df984aa45` archive and manifest. Exact
+archive/manifest paths and hashes, source tree, filesystem validation SHA,
+6240-file/45-directory counts, and helper attestation must match the
+machine-readable Kernel policy. V2 may create one new direct-child staging,
+accept only strictly framed PAX `g`/`x` records with `comment`/`path` keys,
+seal verified `0644`/`0664`/`0755`/`0775` file and `0755`/`0775` directory
+inputs to `0444`/`0555`, reject unsafe tar entries, and atomically promote it
+once with exclusive/no-follow/beneath flags. Old staging, all existing Releases, any
+other source/hash/count, shell/path escape, metadata mutation,
+service/database/evaluator and business/trading paths remain `REJECT`.
+
+### Named policy: n6_immutable_release_privileged_materialize_and_install_f67_v1
+
+Runtime Gate accepts only one separately authorized invocation of the dedicated
+SHA/signature-attested f67 helper at
+`/usr/local/libexec/ashare-v3/n6-immutable-release-materializer-f67`. The
+commit, tree, archive, git-ls-tree, manifest, filesystem validation and bundle
+hashes must exactly match the Kernel policy, as must 6240 files, 45
+directories, one PAX global header and 108 PAX extended headers. The helper
+may create one fresh direct-child staging, seal it to `0444/0555`, perform one
+exclusive/no-follow/beneath promotion to an absent commit-bound target, and
+write one immutable f67 attestation. Old staging, another input/path/hash,
+retry, shell/delete/overwrite/xattr/ACL, runtime, database, N1-N6 and trading
+operations remain `REJECT`. This definition gate cannot install or invoke it.

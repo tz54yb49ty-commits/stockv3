@@ -871,33 +871,32 @@ class MootdxAffairFinancialSource:
             "placeholder_filenames": [],
             "placeholder_manifest_sha256": _canonical_hash([]),
         }
+        manifest_request_count = 1
         try:
-            receipts, placeholder_lineage = _scan_local_affair_policy(
-                self.cache_dir,
-                source_trade_date=target,
+            remote_manifest = normalize_affair_manifest(
+                self._files_fn() or []
             )
-            local_cache_used = True
-        except MootdxFinancialSourceError as local_exc:
-            local_cache_error_code = str(local_exc)
-            if local_cache_error_code not in {
-                "affair_local_cache_directory_missing",
-                "affair_local_cache_recent_10_incomplete",
-            }:
-                raise
-            manifest_request_count = 1
+            packages = select_recent_affair_packages(
+                remote_manifest,
+                target_report_period=target,
+            )
+        except Exception as remote_exc:
+            remote_manifest_error_class = remote_exc.__class__.__name__
             try:
-                remote_manifest = normalize_affair_manifest(
-                    self._files_fn() or []
+                receipts, placeholder_lineage = _scan_local_affair_policy(
+                    self.cache_dir,
+                    source_trade_date=target,
                 )
-                packages = select_recent_affair_packages(
-                    remote_manifest,
-                    target_report_period=target,
-                )
-            except Exception as exc:
-                remote_manifest_error_class = exc.__class__.__name__
+            except MootdxFinancialSourceError as local_exc:
+                local_cache_error_code = str(local_exc)
                 raise MootdxFinancialSourceError(
                     "affair_remote_manifest_unavailable_and_local_cache_incomplete"
-                ) from exc
+                ) from remote_exc
+            local_cache_used = True
+            warning_codes.append(
+                AFFAIR_REMOTE_MANIFEST_FALLBACK_WARNING
+            )
+        else:
             remote_manifest_available = True
             remote_placeholders = [
                 item
@@ -1030,6 +1029,9 @@ class MootdxAffairFinancialSource:
             ),
             "package_download_count": sum(
                 1 for receipt in receipts if receipt.get("downloaded")
+            ),
+            "package_reuse_count": sum(
+                1 for receipt in receipts if not receipt.get("downloaded")
             ),
         }
         return rows

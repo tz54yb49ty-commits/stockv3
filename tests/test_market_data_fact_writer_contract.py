@@ -9,6 +9,10 @@ from ashare_v3.market.fact_writer import (
     write_market_snapshot_with_event,
     write_minute_bar_closed_with_event,
 )
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    with_batch_attempt_provenance,
+)
 from scripts.check_event_contract import run_check
 
 
@@ -146,6 +150,49 @@ class MarketDataFactWriterContractTest(unittest.TestCase):
             payload["normalized_event_time_reason"],
             "raw snapshot time label normalized to observed_at by explicit reviewed policy",
         )
+
+    def test_winning_batch_attempt_provenance_reaches_success_event_without_changing_identity(self) -> None:
+        conn = FakeConnection()
+        original = sample_snapshot()
+        outcome = MootdxBatchAttemptOutcome(
+            batch_id="snapshot-run",
+            status="passed",
+            result=[{"complete": True}],
+            winning_attempt_id="snapshot-run__attempt_2",
+            attempts=(
+                {
+                    "attempt_id": "snapshot-run__attempt_1",
+                    "endpoint_id": "primary",
+                    "status": "failed",
+                },
+                {
+                    "attempt_id": "snapshot-run__attempt_2",
+                    "endpoint_pool_version": "pool-v1",
+                    "endpoint_id": "secondary",
+                    "endpoint_host": "180.153.18.170",
+                    "endpoint_port": 7709,
+                    "transport": "mootdx",
+                    "failover_mode": "active",
+                    "failover_from": "primary",
+                    "failover_reason": "batch_transport_or_validation_failure",
+                    "failover_performed": True,
+                    "status": "passed",
+                },
+            ),
+        )
+
+        result = write_market_snapshot_with_event(
+            conn,
+            with_batch_attempt_provenance(original, outcome),
+        )
+        payload = result["event"].payload_json
+
+        self.assertEqual(payload["attempt_id"], "snapshot-run__attempt_2")
+        self.assertEqual(payload["endpoint_id"], "secondary")
+        self.assertEqual(payload["mootdx_batch_attempt"]["batch_status"], "passed")
+        self.assertEqual(result["event"].source_run_id, original["run_id"])
+        self.assertEqual(payload["source_adapter"], original["source_adapter"])
+        self.assertIn(f"source_adapter|{original['source_adapter']}", result["event"].dedup_key)
 
     def test_fact_writer_contract_scan_has_no_forbidden_names(self) -> None:
         for path in (

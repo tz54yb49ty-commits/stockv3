@@ -49,17 +49,30 @@ Final safety enforcement:
 - Cross-layer modification → REJECT
 - Runtime execution request → REJECT，除非精确满足以下任一 fail-closed policy：
   - `n6_strategy_center_display_only_bounded_run_once_v1`
-  - `n6_strategy_center_display_only_scheduled_evaluator_f464_v1`
+  - `n6_strategy_center_display_only_scheduled_evaluator_v1`
   - `n6_user_web_immutable_release_bounded_rebind_v1`
   - `n6_strategy_center_schema_migration_maintenance_window_v1`
   - `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`
+  - `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`
   - `n6_strategy_center_post_081_v2_catalog_migration_window_v1`
   - `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`
+  - `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`
   - `n6_strategy_center_pre_canary_web_write_quiesce_v1`
   - `n6_strategy_center_reviewed_view_date_authority_084_v1`
   - `n6_strategy_center_post_canary_web_write_restore_v1`
   - `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`
-  - `n6_strategy_center_shadow_activation_grant_v1`
+  - `n6_strategy_center_v1_retirement_after_all_users_v2_v1`
+  - `n6_immutable_release_install_bounded_v1`
+  - `n6_immutable_release_install_pre_rename_validator_recovery_v1`
+  - `n6_immutable_release_install_preflight_git_violation_recovery_v1`
+  - `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`
+  - `n4_lifecycle_inactive_mark_recovery_v1`
+  - `n4_lifecycle_inactive_projection_type_reset_v1`
+  - `n6_immutable_release_install_eacces_retry_v1`
+  - `n6_immutable_release_install_host_eacces_remediation_v1`
+  - `n6_immutable_release_privileged_atomic_install_v1`
+  - `n6_immutable_release_privileged_materialize_and_install_v1`
+  - `n6_immutable_release_privileged_materialize_and_install_f67_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -229,11 +242,12 @@ N1 -> N2 -> N3 -> N4 -> N5 -> N6 只能单向流动。
 下游不得回写、重算或重新解释上游职责；上游不得混入下游用户策略。
 N2 -> N4 只传买卖信号条件语义和触发阈值，不传 alert-only / display / voice / sim / trade intent。
 N4 只负责触发状态和触发结果，输出 TriggerStateChanged / TriggerMatched / TriggerPendingMarketData。
-TriggerMatched 是 N5 动作确认入口；TriggerPendingMarketData 只能作为 no-op / quality-only / state-gate，不允许 N5 开始动作确认；TriggerStateChanged 只做状态广播和 live/state gate，不写 common_trigger_match，也不作为动作入口。
+TriggerMatched 是 N5 新动作确认 episode 的唯一入口并负责生成 ActionEligible；TriggerPendingMarketData 只能作为 no-op / quality-only / state-gate，不允许 N5 开始动作确认；TriggerStateChanged 不写 common_trigger_match，也不得独立创建 episode 或 ActionEligible。
+同一 episode 已冻结 TriggerMatched entry 后，TriggerStateChanged(trigger_live=true) 可作为状态升级刷新 A、cursor、当前 N4 payload 和 current_active_source，并可成为后续 ActionExecuted 顶层 source_trigger_event_*；ActionExecuted 仍必须保留 action_entry_trigger_matched_ref=TriggerMatched，并且 final_market_proof 只能是 matching N3T_C1_CLOSED。TriggerStateChanged(trigger_live=true) 没有对应 TriggerMatched entry 时不得生成 ActionExecuted。
 pending_market_data 的 trigger_live=false；matched 的 trigger_live=true；inactive 的 trigger_live=false。
 TriggerCleared / TriggerLiveChanged 仅作为旧 run 证据或兼容项，新 runtime 清除统一用 TriggerStateChanged(trigger_live=false, current_status=inactive)。
 N5 只负责动作确认事实和动作事件，不负责用户展示策略。
-TriggerMatched 是 N5 唯一动作确认入口；TriggerPendingMarketData 和 TriggerStateChanged 不得创建动作确认。
+TriggerMatched 是 N5 唯一 episode_entry；TriggerPendingMarketData 和 TriggerStateChanged 不得独立创建动作确认 episode。TriggerStateChanged(trigger_live=true) 只允许刷新已有 episode 的 current_active_source，trigger_live=false 则终止该 episode。
 同一 TriggerMatched 重放必须幂等；TriggerStateChanged(trigger_live=false) 终止当前 tracking episode 后，同 action grain 的新 event_id TriggerMatched 必须开启新 episode，并生成以该 source trigger event 为幂等边界的新 ActionEligible；该语义在同一 planner batch 或跨 invocation 到达时必须一致。
 N5 canonical action_state 只能为 eligible / blocked / executed / skipped / expired。
 N5 internal confirmation_status=pending/passed/failed/expired、tracking_until、last_checked_minute_label 不是 canonical action_state。
@@ -260,28 +274,42 @@ stock / index / board 必须作为三个独立通道处理，N4/N5 不得把 ind
   `n6_user_web_immutable_release_bounded_rebind_v1` 的单个 N6 Web Release rebind，
   或精确满足 `n6_strategy_center_schema_migration_maintenance_window_v1` 的
   单次 081 prepare-only quiesce window，或在 081 已提交后精确满足
-  `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 的单个 V2 Web Release rebind；
+  `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 的单个 V2 Web Release
+  rebind，或在 081/082/083/084 已提交且 evaluator 已由独立 N6 gate 完全
+  quiesce 后精确满足 `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`，
+  将 exact Web 从唯一冻结 legacy 短名 source 有界切换到正式 40 位 immutable
+  Release；或独立 `runtime_control` 执行请求精确满足
+  `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`，且只对两个冻结
+  N4 proof-discovery label 做一次 bootout/absence wait/ff-only promotion/
+  original-plist bootstrap；或独立 `runtime_control` 执行请求精确满足
+  `n4_lifecycle_inactive_mark_recovery_v1`，且每个请求仅执行 rollback restore、
+  corrected promotion 或 corrected code-only rollback 三个阶段之一；
+  或独立 `runtime_control` 执行请求精确满足
+  `n4_lifecycle_inactive_projection_type_reset_v1`，且只对两个冻结 N4
+  proof-discovery label 做一次 idle/bootout/ff-only promotion/original-plist
+  bootstrap；
   082/083 仅允许独立 `N6_user` 请求按
   `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 严格分两次执行
 - N6 execute；仅可在独立 `N6_user` 会话中精确满足
   `n6_strategy_center_display_only_bounded_run_once_v1` 或
-  `n6_strategy_center_display_only_scheduled_evaluator_f464_v1`；另仅允许在 post-081
+  `n6_strategy_center_display_only_scheduled_evaluator_v1`；另仅允许在 post-081
   维护窗口中精确满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1`
   的单阶段 082 或 083 schema/catalog migration；083 已提交后另仅允许独立
   `N6_user` 请求精确满足
   `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`，在 strategy
   write=0、evaluator quiesced 下创建一个单用户 pending V2 revision
-  ；其余用户仅可在独立 `N6_user` 会话中精确满足
-  `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`，按
-  单 principal/user/predecessor CAS 创建一个 pending V2 revision；该策略不
-  允许 all-users、Web PUT、手工 DML 或复用首个用户的冻结 scope
+  ；后续剩余用户只能按
+  `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`
+  每个请求/事务迁移一个 scope；全部活动 scope 已为 V2 且 pending=0 后，
+  才可按 `n6_strategy_center_v1_retirement_after_all_users_v2_v1`
+  单独退休 V1 catalog
 - 语音播报
 - mobile projection
 - 模拟账户
 - 前端页面
 - 真实交易
 - 长期 worker 启动；唯一调度例外是独立 `N6_user` 请求完整满足
-  `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 的 exact-label、5 秒
+  `n6_strategy_center_display_only_scheduled_evaluator_v1` 的 exact-label、5 秒
   run-once LaunchAgent，且其前置 bounded canary 必须已通过
 
 ## 2. 必读文档
@@ -373,13 +401,13 @@ N6_user
 
 | layer_role | 允许写入/执行 | 允许只读 | 禁止事项 |
 |---|---|---|---|
-| `runtime_control` | runtime pipeline run/stage/command registry/rollback registry/timeline/dashboard 的文档、schema 草案、测试、只读 dashboard 输出；用户当前请求明确授权时，可修改控制面 Kernel/Compiler 合同及其静态测试，但不得在同一会话使用新增例外执行 N1-N6；精确满足 `n6_user_web_immutable_release_bounded_rebind_v1` 时，可对单个 `com.ashare-v3.n6.user-web` 执行一次 immutable Release rebind 和失败时的一次原 Release 恢复；精确满足 `n6_strategy_center_schema_migration_maintenance_window_v1` 时，可关闭 Strategy Center selection 写入口、有界重启该 Web、仅 quiesce exact evaluator，并写一个只读水位绑定的 immutable maintenance token；081 已提交后精确满足 `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 时，可保持 strategy write=0、evaluator quiesced、virtual executor 不被操作，仅对该 Web 执行一次 V2 immutable Release rebind | N1-N6 合同、报告、rollback SQL 路径、run_id lineage、quality gate 摘要 | 执行 registry command、执行 nightly run、执行 rollback SQL、连接数据库写 runtime 表、消费 outbox、启动业务 worker、写 N1-N6 事实；除命名策略外修改 LaunchAgent 或重启服务 |
+| `runtime_control` | runtime pipeline run/stage/command registry/rollback registry/timeline/dashboard 的文档、schema 草案、测试、只读 dashboard 输出；用户当前请求明确授权时，可修改控制面 Kernel/Compiler 合同及其静态测试，但不得在同一会话使用新增例外执行 N1-N6；精确满足 `n6_user_web_immutable_release_bounded_rebind_v1` 时，可对单个 `com.ashare-v3.n6.user-web` 执行一次 immutable Release rebind 和失败时的一次原 Release 恢复；精确满足 `n6_strategy_center_schema_migration_maintenance_window_v1` 时，可关闭 Strategy Center selection 写入口、有界重启该 Web、仅 quiesce exact evaluator，并写一个只读水位绑定的 immutable maintenance token；081 已提交后精确满足 `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 时，可保持 strategy write=0、evaluator quiesced、virtual executor 不被操作，仅对该 Web 执行一次 V2 immutable Release rebind；post-083 且 strategy write=1 时精确满足 `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`，可仅 bootout exact evaluator 一次并状态驱动等待 PID/job absence；081/082/083/084 已提交且 evaluator 由该独立 gate quiesce 后，精确满足 `n6_strategy_center_post_083_v2_web_bounded_rebind_v1` 时，可保持 strategy write=1、virtual executor 原 5 秒调度不被操作，仅将 exact Web 从唯一冻结 legacy 短名 rollback source 有界切换到一个正式 40 位 immutable Release | N1-N6 合同、报告、rollback SQL 路径、run_id lineage、quality gate 摘要 | 执行 registry command、执行 nightly run、执行 rollback SQL、连接数据库写 runtime 表、消费 outbox、启动业务 worker、写 N1-N6 事实；除命名策略外修改 LaunchAgent 或重启服务 |
 | `N1_ingestion` | raw ingest、source_version、quality gate、active source_version、PostgreSQL/Parquet fact、N3 sealed runtime 的归档执行、入库回滚与入库文档 | N2 readiness 缺口报告、N3 archive_request / sealed runtime 分区 | 运行 condition_basis/condition_pool execute、写 `condition_*`、盘中拉分钟 K、触发/动作/用户层、worker |
 | `N2_condition` | `condition_basis`、`condition_pool`、`minute_target_scope`、`condition_display_basis`、条件层质量项、条件层回滚 SQL、条件层文档 | N1 active source_version、N1 ready check、入库 fact | 外拉 Tushare/mootdx/实时行情、修 N1 fact、写 ingest 表、拉 1 分钟 K、进入 N3/N4/N5/N6 |
 | `N3_market_data` | market_data_subscription、market_data_pull_plan、`previous_day_minute_bar_1m`、今日分钟 K、实时日 K/快照、行情质量项、N3 标准行情事件、低频行情展示事件、盘后封账与 archive_request 元数据 | N2 active condition run 和 `minute_target_scope` | 改条件层、重新计算条件、写 trigger/action/user、写用户卡片、播放语音、直接写 Parquet 归档或外接盘、启动交易 worker |
 | `N4_trigger` | trigger event/state、trigger quality item、trigger dry-run/execute 合同 | N2 condition_pool、N3 行情快照/分钟 K | 拉行情、改条件、写 action、写 mobile/voice/sim |
 | `N5_action` | action event、hint/risk/action 归一化事件、position event、动作质量项 | N4 trigger、N3 分钟 K、必要的 N2 条件摘要 | 改 N1/N2/N3/N4、写用户投影、播放语音、写真实交易 |
-| `N6_user` | user projection、voice policy、mobile/card projection、sim shadow、用户偏好表；精确满足 `n6_strategy_center_display_only_bounded_run_once_v1` 时，可执行单 principal/user/revision/current reviewed-N6 trade-date 的策略中心 display-only bounded run-once；在 20260727 当前开放日自然 N6 input 的 exact F464 canary PASS 且精确满足 `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 时，可安装/启用唯一 exact-label、StartInterval=5、每 tick 单 scope 的 immutable-Release run-once 调度器；在 081 已提交、Web strategy write=0、evaluator quiesced 的维护窗口中，精确满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 时，可先单独执行一次 082，完成 postflight 后再由另一个独立请求单独执行一次 083；083 已提交后可按首用户及 remaining-user 命名 policy 每次创建一个 pending V2 revision；全部活动 scope 已为 V2 且 pending=0 后，可按命名 V1 retirement policy 单独退休 V1 catalog | N2 条件摘要、N5 输出事件 | 回写 N1-N5、直接改 trigger/action 事实、启动真实交易 |
+| `N6_user` | user projection、voice policy、mobile/card projection、sim shadow、用户偏好表；精确满足 `n6_strategy_center_display_only_bounded_run_once_v1` 时，可执行单 principal/user/revision/current reviewed-N6 trade-date 的策略中心 display-only bounded run-once；在当前日 canary PASS 且精确满足 `n6_strategy_center_display_only_scheduled_evaluator_v1` 时，可安装/启用唯一 exact-label、StartInterval=5、每 tick 单 scope 的 immutable-Release run-once 调度器；在 081 已提交、Web strategy write=0、evaluator quiesced 的维护窗口中，精确满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 时，可先单独执行一次 082，完成 postflight 后再由另一个独立请求单独执行一次 083；083 已提交后可按首用户及 remaining-user 命名 policy 每次创建一个 pending V2 revision；全部活动 scope 已为 V2 且 pending=0 后，可按命名 V1 retirement policy 单独退休 V1 catalog | N2 条件摘要、N5 输出事件 | 回写 N1-N5、直接改 trigger/action 事实、启动真实交易 |
 
 trigger / action 写入硬规则：
 
@@ -398,13 +426,237 @@ runtime_control 写入硬规则：
 
 ```text
 runtime_control 是总控控制面，不是 N1-N6 业务层。
+
+新增 artifact-only 例外 `n6_immutable_release_install_bounded_v1` 仅允许在
+用户明确授权的 runtime_control 请求中，将一个已完成 attestation 的 N6
+immutable Release 从唯一 staging 目录原子安装为一个新的 0555 root 子目录。
+当 Release root 初始为 0555 且无独立 privileged installer 时，只允许在冻结
+owner/group/ACL/xattr 后执行一次 owner-write `0555 -> 0755`，并在成功或失败
+路径中执行一次 `0755 -> 0555` 恢复；group/other write、第二次 mode 变更或
+结束时 root 仍可写都必须 `REJECT`。
+它不允许覆盖或删除既有 Release，不允许 LaunchAgent/service、数据库、
+evaluator/executor、migration、业务或 N1-N6 写入；失败清理只能删除本次
+创建的 staging/target 路径，否则必须 `REJECT`。
+
+`n6_immutable_release_install_pre_rename_validator_recovery_v1` 是只适用于
+`aa6d19c169df3837b3115d975587686cc726b87b` 一次冻结失败的 artifact-only
+恢复例外。它必须绑定 SHA-256
+`9594308305ff68a217d51f6071ded07e4c01892a3ed91227abea9f1586b2edf1`
+的 BLOCKED install attestation，证明 failure type 精确为
+`validation_tool_capability_missing`、atomic rename/fallback/retry/cleanup
+attempts 均为 `0`、target 不存在且 Release root 已恢复 `0555`；同时必须绑定
+exact source commit/tree/archive/manifest/filesystem/attestation hashes 和保留
+staging-v1 的 path/device/inode/owner/mode/count/ACL/xattr 指纹。保留
+staging-v1 永久 evidence-only，不得复用、修改、rename、删除或 cleanup。
+后续唯一独立恢复请求必须先在 exact 新 artifact 目录生成并封存 macOS xattr
+validator capability attestation 及 SHA sidecar，并冻结 attestation、
+`/usr/bin/xattr` 和 validator protocol 的相互绑定；只有 capability PASS 后
+才可创建唯一全新同父 staging-v2，重新 materialize 并完成
+blob/path/mode/ACL/xattr value 全量验证。xattr path authority 固定为
+`release-content-manifest.tsv` 的 6243 个 file path 加 45 个 derived
+directory/root，共 6288 个 path；每个且仅一个 `com.apple.provenance`、raw value SHA-256
+`29056cd65452fb0f6214e35e97e773d512c87f3bdd3577f2cc445b082ae19487`
+及 length-prefixed canonical fingerprint SHA-256
+`92d525c921324d35d82bc503142c5fe3bfab37fd09b199788053903013baa7ee`；
+全部匹配且 staging/target owner:group 均精确为 `501:20` 后，才可用同一
+Release-root dirfd 和 direct-child basenames 执行一次
+`renameatx_np(RENAME_EXCL|RENAME_NOFOLLOW_ANY|RENAME_RESOLVE_BENEATH)`；
+普通/覆盖 rename、flag 缺失、不支持或 fallback 均 `REJECT`。
+capability 失败必须在 Release root chmod 或 staging-v2
+创建前 fail-closed 停止；rename 前失败必须先把 staging-v2 已创建内容递归
+封存为 `0444/0555` 并写 identity/metadata evidence，不得返回可写 staging；
+rename 成功后的 postflight 失败则必须保留不可变 target 作为 evidence，不得
+修改或删除。Release root 必须在 rename attempt 后立即恢复为 `0555`，早于
+target postflight 或 attestation 写入。recovery validation/install attestation
+及 SHA sidecar 只能写入 Kernel 冻结的 exact 新 artifact 目录；该 output
+目录必须延后到 Release root 已恢复或确认保持 `0555` 且所选 recovery outcome
+分支已完成封存/postflight 后，才可在 FINALIZE 创建；capability 失败分支也
+必须在不 chmod root、不创建 staging-v2 的前提下写入并封存 recovery failure
+artifacts 后再 STOP。路径预存、
+覆盖、额外外部写入或未知请求字段全部 `REJECT`；任一目录/文件创建、写入或
+final seal 失败，都必须在 STOP 前把已创建 output 递归封存为 `0444/0555`，
+记录 partial identity/hash 并永久保留 evidence，不得返回可写残留。恢复只允许一次新的
+Release root `0555 -> 0755 -> 0555` 窗口和一次 recovery attempt；第二次恢复、
+policy fallback、自动 retry、旧 staging cleanup、LaunchAgent/service、数据库、
+evaluator/executor、migration、业务、N1-N6 或交易操作全部 `REJECT`。定义本
+policy 的治理会话不得使用它执行恢复。
+
+`n6_immutable_release_install_preflight_git_violation_recovery_v1` 是只适用于
+前述 validator recovery 在任何 mutation 前因误用只读 Git preflight 而
+fail-closed 的一次性程序恢复合同。它必须绑定 prior policy、治理
+commit/tree/patch、当时 `AGENTS.md` 原始字节 SHA、唯一 session JSONL 的冻结
+turn 字节区间及 SHA、exact Git tool-call identity/参数/输出 SHA 和完整命令
+时间线；摘要、转述或仍会追加的整份 JSONL 当前 hash 均不得替代原始区间证据。
+历史证据必须证明仅出现一次 Git tool call，且只含 `rev-parse`、`diff`、
+`show` 三个只读 subcommand；`apply_patch`、stage、commit、checkout、switch、
+branch、push、工作树写入及 capability/recovery artifact、Release-root chmod、
+staging-v2、target、cleanup/fallback/runtime/database/service mutation attempts
+全部为 `0`。后续独立执行请求完全禁止 Git 和测试，治理权威只能由独立 review
+冻结的当前 `AGENTS.md` 原始字节 SHA、Kernel policy block 原始字节 SHA、
+session turn segment/prefix SHA 及直接文件系统证据验证。
+
+该 policy 不得放宽或再次调用 prior policy。它仍须先生成并封存 SHA 绑定的
+`/usr/bin/xattr` capability attestation；capability PASS 后才允许唯一 fresh
+same-parent staging-v2、全量 blob/path/mode/owner/ACL/xattr raw-value 验证、
+一次 Release-root `0555 -> 0755 -> 0555` owner-write 窗口及一次同-dirfd
+`renameatx_np(RENAME_EXCL|RENAME_NOFOLLOW_ANY|RENAME_RESOLVE_BENEATH)`。
+preserved staging-v1 永久 evidence-only，不得复用、修改、rename、删除或
+cleanup；fallback、自动 retry、第二次 procedural recovery、LaunchAgent/
+rebind、DB、runtime、migration、evaluator/executor、N1-N6 与交易操作全部
+`REJECT`。定义本 policy 的治理会话不得执行它。
+
+`n4_lifecycle_deactivation_state_columns_controlled_promotion_v1` 是一次性
+N4 lifecycle/state-column 发布例外。它只把 source endpoint
+`6d1b7a24f2f6d6fa6ef5a4d675995c943703101e` 和 source rollback
+`a1ff8b0e0dbda579dd2cece1c5b84a10879293bc` 作为已验证内容证据，不得
+把它们当作后续执行 commit。它固定八个 N4 文件、combined/rollback
+patch SHA-256、source endpoint 八个 blob、两个精确 label 及原 plist
+path/SHA；这些范围不得动态放宽。本 policy 提交后，必须由独立
+`N4_trigger` 准备任务从 policy commit 的新 HEAD 生成两段 final
+promotion commit 和一个 tree-equal rollback；未生成的 final SHA 不得预写进
+policy。
+
+后续独立 `runtime_control` 执行 gate 必须在任何 bootout 前冻结并
+验证 exact policy commit/final commit/rollback SHA：final 第一段的父提交
+精确为 policy commit，final tip 是其直接子提交，roll back 是 final
+tip 的直接子提交且其 tree 精确等于 policy commit tree。final
+combined/rollback patch 和八个 blob 必须与冻结 source evidence 一致。
+只有 Active tracked worktree/index clean、原 plist 无漂移、两个 worker
+及 child idle 时，才允许对
+`com.ashare-v3.n4.proof-discovery-poller` 和
+`com.ashare-v3.n4.proof-discovery-poller.hint` 各 bootout 一次，状态驱动
+等待 job/PID/child absence，仅执行一次 `git merge --ff-only <final-tip>`，
+并仅用两份原 plist 各 bootstrap 一次。kickstart、手工 execute、retry、
+push、checkout/rebase/cherry-pick、plist 改写、其他 LaunchAgent、自动 rollback、
+N2/N3/N5/N6、DB DML、消息/队列、历史事件或交易操作全部 `REJECT`。
+失败只报告已冻结的 final rollback target，不得自动执行。定义本 policy
+的治理会话不得执行它。
+
+`n4_lifecycle_inactive_mark_recovery_v1` 是只适用于 2026-08-04 首个自然
+失活样本暴露 `trigger_mark_candidate=none` 约束失败的一次性恢复例外。它绑定
+Active `49fd0a6576d3f3f04c28c0ce65da95d6472931d7`、稳定基线
+`ae05d7f8c365d3d0ed807235ab124e0d4cdae28e`、冻结内容回滚
+`cadbe91c1d400a803dd678710a2733ac0e0d9f92`、八个 N4 文件、两个精确
+label 及原 plist path/SHA。冻结回滚只能作为内容证据，后续执行 commit 必须
+在本 policy commit 之后由独立 `N4_trigger` 准备任务重新生成。
+
+线性恢复链固定为 `policy -> rollback_restore -> fixed_lifecycle ->
+typed_columns -> fixed_code_rollback`。`rollback_restore` 只恢复八个 N4 文件
+到稳定内容；修复后的 inactive 当前值必须为 `trigger_mark_candidate=normal`，
+原激活候选继续保存在 `previous_trigger_mark_candidate`，且
+`projection_30m_flag=false`、`projection_30m_type=none`。不得修改数据库
+约束、schema、事件结构或历史 09:34 target。
+
+执行只能由三个彼此独立、逐次显式授权的 `runtime_control` 请求完成：先
+`rollback_restore`，自然轮次恢复 `exit=0/P0=0` 后才可
+`corrected_promotion`，严重失败时也只能由另一个请求执行
+`corrected_code_only_rollback`。每一阶段只允许两个冻结 N4 label 各一次
+bootout、状态驱动等待 job/PID/child absence、一次 `git merge --ff-only` 和
+两份原 plist 各一次 bootstrap。禁止阶段合并、自动继续、自动回滚、retry、
+kickstart、手工 execute、DB DML、消息/队列、历史 target、N2/N3/N5/N6 或
+交易操作。定义本 policy 的治理会话不得执行它。
+
+该 policy 的当前 revision 另精确绑定首次 `rollback_restore` 在任何 ref、
+tree、index 或 tracked-file 变化前因 `.git/ORIG_HEAD.lock` 沙箱写权限失败的
+证据。旧 `195ac3f3 -> 5bd53e75 -> 14786f73 -> 0f62f592` 链只作已验证内容
+证据，不得执行或重试。必须先从本 revision policy commit 重新生成 patch SHA
+完全相同的新四提交链；后续独立执行请求还必须在任何 bootout 前完成 Git
+metadata 写权限授权与验证，禁止以非授权 `git merge` 作为能力探针。本 policy
+revision 的定义会话同样不得执行 runtime。
+
+`n4_lifecycle_inactive_projection_type_reset_v1` 是一次性 N4 inactive
+projection type 最小修复发布例外。它绑定 Active 基线
+`d237e0ba09e38eab1993e921943b0fcf66332899`，并严格限定以下三个文件：
+`src/ashare_v3/trigger/provisional_trigger_lifecycle.py`、
+`tests/test_provisional_trigger_lifecycle.py`、
+`tests/test_provisional_projection_execute.py`。修复只能在合格
+`matched -> inactive` 输出中设置
+`projection_30m_type=none`；同时必须保持 `trigger_live=false`、
+`current_status=inactive`、`trigger_mark_candidate=normal`、
+`projection_30m_flag=false`、`n5_entry_allowed=false`，并保留
+`previous_projection_30m_flag`、`previous_projection_30m_type` 和
+`previous_trigger_mark_candidate`。不得修改 matcher、execute、schema、事件结构、
+历史事件或 N2/N3/N5/N6。
+
+本 policy 提交后，必须由独立 `N4_trigger` 任务从该 policy commit 生成一个
+三文件修复 commit 和一个直接子级的三文件 code-only rollback commit；rollback
+的三个文件必须逐一等于 policy commit。后续独立 `runtime_control` 执行请求必须
+在任何 runtime 操作前冻结并验证 exact policy/fix/rollback SHA、祖先链、三个
+文件 blob、Active target-path clean、index clean、worker/child idle，以及以下
+两份原 plist：
+`/Users/chuanfuchen/Library/LaunchAgents/com.ashare-v3.n4.proof-discovery-poller.plist`
+的 SHA-256
+`7c2f996985a5fb915f0dcd228c8cdd85e42cd79824af36eb0c2f8d6be13341c8`，以及
+`/Users/chuanfuchen/Library/LaunchAgents/com.ashare-v3.n4.proof-discovery-poller.hint.plist`
+的 SHA-256
+`8b7a824c23639be8c39788b835da854746e94820de0f6aad23f9b58f75c081d7`。
+
+全部前置通过后，仅允许对
+`com.ashare-v3.n4.proof-discovery-poller` 和
+`com.ashare-v3.n4.proof-discovery-poller.hint` 各 bootout 一次，状态驱动等待
+job/PID/child absence，仅执行一次 `git merge --ff-only <fixed-code-commit>`，
+再仅用两份原 plist 各 bootstrap 一次。若 Active HEAD 已前进，只允许其与三个
+目标文件零交集且 fix commit 是当前 HEAD 的线性后继；否则必须停止并从新 HEAD
+重建，不得 cherry-pick。kickstart、手工 execute、retry、自动 rollback、push、
+DB DML、消息/队列、历史事件重跑/补写、其他 LaunchAgent 或 N2/N3/N5/N6 操作
+全部 `REJECT`。定义本 policy 的治理会话不得执行它。
+
+`n6_immutable_release_install_eacces_retry_v1` 是前述初始安装发生 rename
+`EACCES` 时唯一的、单独授权的失败恢复例外：只在同一已 attest source 已有
+一份完整、可证明的
+`EACCES` rename 失败证据，且该失败没有 target、没有 attestation、并且
+Release root 已恢复为 `0555` 时适用。它不得复用、修改或删除旧 staging；
+只能创建一个新的同父 staging 和新 target。在验证新 staging 后，它只允许
+将 *新 staging 顶层目录* 临时从 `0555` 改为 owner-only `0755`，执行一次
+新的 atomic rename，并立即将 target root 固化为 `0555`。Release root 仍只
+允许一次 `0555 -> 0755 -> 0555` 窗口。任何非 `EACCES` 失败、旧 staging
+漂移、第二次 retry、现有 Release 改写，或服务、数据库、evaluator/executor、
+migration、业务或 N1-N6 写入都必须 `REJECT`。
+
+`n6_immutable_release_install_host_eacces_remediation_v1` 只处理已证明的
+host-level rename `EACCES`：它绑定一份可重读、可哈希的 host trace（同一
+Release root、`0555` staging、rename 到同父与 `/tmp` 都失败），同时要求
+当前候选的 orphaned staging 未被改动且 target 仍不存在。它允许一个全新的
+staging/target，且仅在内容验证后临时使新 staging 顶层 owner-writable 以完成
+一次 rename。旧 staging、既有 Release 和所有 runtime/database/N1-N6 业务
+对象均不可写；第二次 remediation 必须 `REJECT`。
+
+`n6_immutable_release_privileged_atomic_install_v1` 仅在当前用户明确授权、
+固定 SHA-256 的专用 helper 已完成签名 attestation 时，才允许独立执行会话调用
+一次。helper 只能在固定 Release root 的 parent dirfd 内，用
+`renameatx_np(RENAME_EXCL|RENAME_NOFOLLOW_ANY|RENAME_RESOLVE_BENEATH)` 将一个
+已验证 staging 变为一个不存在 target；不支持任一 flag 必须 fail-closed。不得
+调用 shell、复制、删除、覆盖、修改 xattr/ACL/mode、连接数据库、操作服务或触碰
+N1-N6 业务对象。本治理会话不得调用 helper。
+
+`n6_immutable_release_privileged_materialize_and_install_v1` 仅适用于固定
+`d85df6328bde223e912dabc3bd65e16df984aa45` archive/manifest 的独立 root-only
+V2 helper。它在一次调用中只能创建一个
+新的同父 staging、安全解包并按冻结 archive hash/entry 规则验证，然后用
+`renameatx_np` 原子晋升为一个不存在 target。失败必须保留本次 staging，旧 staging
+不可触碰；不得 shell、任意路径、覆盖/删除既有 Release、xattr/ACL、服务、数据库、
+evaluator 或 N1-N6 业务操作。本治理会话不得使用新 policy 执行安装。
+
+`n6_immutable_release_privileged_materialize_and_install_f67_v1` 是与前述
+d85 helper 完全隔离的 final-f67 artifact-only 例外。它只接受固定
+`f67be0f538f7fdc0fe413ac98bbdc5b32a29661a` commit/tree/archive/manifest、
+git-ls-tree、filesystem validation 和 bundle hashes，以及独立签名 attestation
+的 `/usr/local/libexec/ashare-v3/n6-immutable-release-materializer-f67`。
+helper 只能在固定 Release root 内 `mkdirat` 一个全新 direct-child staging，
+安全解包固定 PAX archive，验证 6240 files/45 directories、mode/link/path/PAX
+合同，封存为 `0444/0555` 后用 parent-dirfd `renameatx_np` 的
+EXCL/NOFOLLOW/BENEATH flags 原子晋升一次，并写不可变 f67 attestation。任何旧
+staging 复用、其他 path/hash/count、retry、shell/delete/overwrite、xattr/ACL、
+Release runtime、数据库、N1-N6 或交易操作都必须 `REJECT`。治理定义会话不得
+安装、调用或执行该 helper。
 runtime_control 只允许登记 pipeline_run / pipeline_stage / execute command registry / rollback registry / pipeline timeline / dashboard v0 的文档、schema 草案和只读输出。
 runtime_control 不得执行 registry command，不得执行 rollback SQL，不得执行 nightly run，不得连接数据库写 runtime 表，除非用户另行明确授权 runtime_control schema migration 且已有 preflight / rollback。
 runtime_control 默认不得修改 N1-N6 execute contract；只有用户在当前请求明确授权的控制合同治理 gate，才可修改 Kernel/Compiler 合同与静态测试。该治理 gate 不得在同一会话执行新增例外，不得消费 outbox，不得启动 worker，不得写 trigger/action/user/sim/voice/mobile/real trade。
-runtime_control 默认不得修改 LaunchAgent 或重启服务。唯一例外是独立请求明确授权且完整满足 `n6_user_web_immutable_release_bounded_rebind_v1`；该例外仅允许对精确 label `com.ashare-v3.n6.user-web` 执行一次有界 immutable Release rebind，并在失败时恢复冻结的原 plist/Release。它不允许连接数据库、执行 migration/evaluator、启动长期 worker、操作其他 LaunchAgent 或触碰任何交易路径。
-`n6_strategy_center_shadow_activation_grant_v1` 只允许后续独立 `runtime_control` 会话在 parent approval `N6_AI_SIMULATED_INVESTOR_RESUMABLE_ACTIVATION` 下续跑。四个用户可见阶段保持不变，但 `BOUNDED_REBIND` 内部分为 `BOUNDED_REBIND_WEB_TARGET` 与 `BOUNDED_REBIND_EVALUATOR_TARGET`。WEB_TARGET 只允许安装 immutable f464 Release 并把 exact Web 从 d85 rebind 到 f464，strategy-write 必须始终为 `0`，Evaluator job/runner 必须保持 absent/0；EVALUATOR_TARGET 在 WEB_TARGET passed 且后续 current-date bounded canary PASS 前必须保持 `blocked_pending_canary`，不得提前 planned、发 lease 或 bootstrap。执行前必须具备第二级不可变 supersession、完整 manifest SHA 链、最终治理提交的外部 attestation、failed checkpoint 的 resume evidence、内部 checkpoint 与匹配短 lease。禁止 kickstart、runner、同会话 canary、空状态恢复、Virtual Executor、数据库、N1-N5、业务、broker 与交易写入。
+runtime_control 默认不得修改 LaunchAgent 或重启服务；仅限本文件逐项列明且由独立请求明确授权的命名 policy。`n6_user_web_immutable_release_bounded_rebind_v1` 仅允许对精确 label `com.ashare-v3.n6.user-web` 执行一次有界 immutable Release rebind，并在失败时恢复冻结的原 plist/Release。它不允许连接数据库、执行 migration/evaluator、启动长期 worker、操作其他 LaunchAgent 或触碰任何交易路径。
 第二个且仅有的维护窗口例外是独立请求明确授权且完整满足 `n6_strategy_center_schema_migration_maintenance_window_v1`。它只允许把 Web 的 `ASHARE_V3_N6_STRATEGY_CENTER_WRITE_ENABLED` 从 `1` 置为 `0` 并有界重启 exact Web、bootout exact Strategy Center evaluator 一次、只读冻结四张 strategy 表水位并写一个 immutable maintenance token。它不执行 081/082/083，不 bootstrap evaluator，不操作 virtual executor，不写数据库或业务/交易表。正常 5 秒 PID/runs 变化不构成配置漂移；label/plist/Release/runner/role/ACL/ownership/hash/object 变化才构成漂移。
 第三个且仅用于 081 已提交维护阶段的 Web 例外是独立请求明确授权且完整满足 `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`。它要求 strategy write 在 rebind 前、目标 plist、rebind 后及回滚后始终为 `0`，要求 exact Strategy Center evaluator 的 job/PID 均不存在，并且只允许对 exact Web 执行一次 V2 immutable Release bootout/bootstrap。virtual executor 不得被停止、启动或修改；只冻结其 plist/Release/runner/role/ACL/object-boundary hashes，正常 StartInterval PID/runs 变化不构成配置漂移。该例外不连接数据库，不执行 migration/evaluator，不触碰 N1-N5、queue 或任何业务/交易路径，也不放宽普通 `n6_user_web_immutable_release_bounded_rebind_v1`。
+post-083 且 strategy write 已为 `1` 时，Web rebind 前 quiesce evaluator 的唯一例外是独立请求明确授权且完整满足 `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`。它只允许对 exact label `com.ashare-v3.n6.strategy-center-evaluator-v1` 执行一次 bootout，并状态驱动等待 evaluator PID 和 job 均不存在；bootstrap、kickstart、kill/signal、重试和自动恢复均禁止。evaluator plist/path/runner/Release/role/ACL/state 必须冻结；Web 与 virtual executor 不得被操作，virtual executor 的正常 5 秒 PID/runs 变化不构成配置漂移。该例外不连接数据库、不执行 evaluator/migration、业务 DML、交易或 N1-N5 写入；失败只保留证据，后续恢复或 rebind 需要新的独立授权。
+第四个且仅用于 post-083/084、strategy write 已恢复为 `1` 后的 Web 例外是独立请求明确授权且完整满足 `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`。它只接受当前 legacy 短名 source `20260724_042200__a1dc7350`，且必须将其关闭到 full commit `a1dc73503a07055f7bdb9cd29b378d1272642473`、tree/archive/git-ls-tree/manifest/filesystem/blob-mode-path attestation；该 source 只能作为本次冻结 rollback source，不能复用、修改或作为 target。target 必须是名称绑定 40 位 commit 的正式 immutable Release，并证明不回退 source 的有效 N6 增量。Web strategy write 在 before/target/after/rollback 始终为 `1`；exact evaluator 必须已由独立 N6 gate quiesce，本 policy 对 evaluator operation attempts=0。virtual executor 可保持 exact `StartInterval=5` 周期调度，但只能冻结 label/plist/Release/runner/role-ACL/object-boundary 并证明与 Web/Strategy Center 写对象无冲突；本 policy 对其 operation attempts=0，正常 PID/runs 周期变化不是配置漂移。它只允许 exact Web 一次 bootout/bootstrap、60 秒 readiness、30 秒稳定观察和一次条件 rollback，不连接数据库、不执行 migration/evaluator/executor、不触碰 N1-N5 或业务/交易路径。
 082/083 的唯一迁移例外是独立 `N6_user` 请求明确授权且完整满足 `n6_strategy_center_post_081_v2_catalog_migration_window_v1`。082 和 083 必须是两个独立 gate、两个独立事务并严格按顺序执行；不得捎带、跳过、合并或重试。082 只安装 lifecycle constraint、唯一索引和 owner-only compensation functions，不得调用函数或写 revision/catalog/projection/change。083 只在 082 postflight 完成、开放交易日、pending=0、V2 selection item=0 且每个活动 principal 仍有唯一 active V1 时切换 catalog authority，不得修改已有 selection revision。两阶段均要求 strategy write=0、evaluator quiesced、virtual executor 未操作；rollback 需要独立授权。
 083 后的首个 pending V2 selection 创建例外 `n6_strategy_center_post_083_single_user_pending_v2_revision_v1` 仅保留为已经完成的一次性历史恢复合同：其 principal/user、revision 15、revision 20 和交易日 20260723 固定值不得再次授权任何 Gate3+ 请求。后续用户迁移必须使用 `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`，由 reviewed N6 display-basis `for_trade_date` 共识和现场冻结的单一 predecessor CAS 动态确定 scope/date；禁止复用历史固定 revision/date。首个历史 gate 的恢复证据仍要求 `recovery_contract_version=pre_dml_guard_harness_recovery_v2`，并只承认两个按序且证据完整的历史 pre-DML harness transaction：第一次 SQLSTATE=42704，ACL guard 把 `PUBLIC` 当作 role；第二次 SQLSTATE=42601，psql `request_id` 变量位于 dollar-quoted `DO` 内未展开。两次都必须自动中止、正式 selection 函数调用=0、revision/item DML=0、commit=0、request_id 未落库、mutation_attempts=0 且全部冻结 before/after hash 相等。历史合同不得激活 revision，不得开放 Web strategy write，不得运行 evaluator，不得调用 082 compensation function，不得写 projection/change，不得操作 virtual executor、N1-N5 或任何交易对象。
 Strategy Center 的当前业务日权威只能来自
@@ -416,16 +668,13 @@ Strategy Center 日期选择；membership 只能按
 使用当前 reviewed-N6 日期的自然事件和动态正整数 principal/user/revision scope，
 不得再绑定历史 `20260723` 或 revision 15/20。
 
-`n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 不扩展 runtime_control
+`n6_strategy_center_display_only_scheduled_evaluator_v1` 不扩展 runtime_control
 业务执行权；本层只可在用户当前请求明确授权时治理其 Kernel/Compiler 合同。
 安装/启用该调度器必须切换到独立 `N6_user` gate，且治理会话不得在同一会话
 使用新例外。调度器固定 StartInterval=5，每 tick 只处理一个
 principal/user/revision，pending 优先、active round-robin，并在激活后至少观察
 12 tick，无重叠、deadline、backoff、重启循环或跨用户写入。canary 与 evaluator
-均使用 reviewed-N6 `for_trade_date` 共识。20260727 F464 canary 的 exact scope
-固定为 principal_id=12、principal_type=human_user、user_id=11、
-selection_revision_id=22、revision_no=1、package_1=v2；`user`、`admin` 或未知
-principal_type 均不得替代该 revision 22 scope。
+均使用 reviewed-N6 `for_trade_date` 共识。
 
 canary 与 12 tick 稳定观察通过且 pending=0 后，
 `n6_strategy_center_post_canary_web_write_restore_v1` 仅允许 exact Web
@@ -438,32 +687,14 @@ catalog-only V1 retirement。上述 gate 均默认 `REJECT`，禁止 N1-N5、交
 virtual executor 操作及一般数据库/runtime execute。
 
 Gate3 bounded canary 与 Gate4 scheduled evaluator 都要求 Web strategy-write
-严格为 `0`。若 flag 为 `1` 且 evaluator 已 quiesced，只能先由独立
-`runtime_control` 请求完整满足
-`n6_strategy_center_pre_canary_web_write_quiesce_v1`：保持同一 immutable
-Release、WorkingDirectory、PYTHONPATH 和其他环境不变，仅对 exact Web 执行
-一次 flag `1 -> 0` 的有界 bootout/bootstrap；失败最多恢复冻结 plist 一次。
-该 policy 不操作 evaluator 或 virtual executor，不连接数据库，也不执行
+严格为 `0`。若当前 d85 Web flag 为 `1` 且 evaluator 已 quiesced，只能先由
+独立 `runtime_control` 请求完整满足
+`n6_strategy_center_pre_canary_web_write_quiesce_v1`：保持 d85 Release、
+WorkingDirectory、PYTHONPATH 和其他环境不变，仅对 exact Web 执行一次
+flag `1 -> 0` 的有界 bootout/bootstrap；失败最多恢复冻结 plist 和 flag `1`
+一次。该 policy 不操作 evaluator 或 virtual executor，不连接数据库，也不执行
 canary、N1-N5 或交易。
 runtime_control 需要推进某个 stage execute 时，必须停下并交接到对应 N1-N6 layer_role。
-```
-
-N6 reviewed-view 日期权威补充合同（20260724 起生效）：
-
-```text
-policy_id=n6_strategy_center_reviewed_view_date_authority_084_v1
-仅允许 N6_user 独立会话执行一次 084 forward；日期只能来自三张 reviewed
-display view 的最新完整批次 for_trade_date 共识。source_trade_date、
-source_run_id、批次与 projection/card watermark 必须冻结。不得修改
-selection/projection/change/catalog 或调用补偿函数；082/083、evaluator、Web、
-交易与 N1-N5 均不在该 policy 范围内。
-
-policy_id=n6_strategy_center_post_canary_web_write_restore_v1
-仅允许在 display-only canary PASS、5 秒 evaluator 已观察至少 12 tick、pending=0、
-目标 Release/ACL/ownership/hash 无漂移且 evaluator 稳定时，把精确 Web 的
-ASHARE_V3_N6_STRATEGY_CENTER_WRITE_ENABLED 从 0 改回 1；仅一次 bootout/bootstrap，
-失败只恢复冻结 plist 且 flag=0。不得启动/恢复 evaluator、virtual executor、migration、
-数据库业务 DML 或交易路径。
 ```
 
 跨层交接必须使用明确的交接文本，至少包含：
@@ -882,7 +1113,7 @@ v3 入库层的数据文件根目录：
 - 修改 LaunchAgent；只有独立 `runtime_control` 请求完整满足
   `n6_user_web_immutable_release_bounded_rebind_v1`，或独立 `N6_user` 请求在
   bounded canary PASS 后完整满足
-  `n6_strategy_center_display_only_scheduled_evaluator_f464_v1`，才可触发各自的唯一命名例外；
+  `n6_strategy_center_display_only_scheduled_evaluator_v1`，才可触发各自的唯一命名例外；
   另仅允许独立 `runtime_control` 请求完整满足
   `n6_strategy_center_schema_migration_maintenance_window_v1` 时准备一次
   081 quiesce window，但该例外不执行 migration
@@ -907,6 +1138,44 @@ board official daily 缺失 = 0
 source_batch_id 可追溯
 source_version 可激活/回滚
 ```
+
+## N6 Strategy Center 30 天隔离退役治理
+
+当前唯一 ACTIVE 的 Strategy Center 退役 runtime policies 为：
+
+```text
+n6_strategy_center_decommission_web_runtime_v1
+n6_strategy_center_decommission_schema_archive_v1
+```
+
+所有既有 `n6_strategy_center_*` execute、scheduled evaluator、maintenance、
+Web rebind/quiesce、migration、date-authority、write-toggle、remaining-user 和
+V1-retirement policies 均已标记为 `RETIRED`。retirement lifecycle registry
+拥有最高判定优先级；后续请求命中任一 retired policy 必须统一返回 `REJECT`，
+不得读取历史 policy 块中的 `ACCEPT` 作为重新授权。历史文档、SQL、trace 和提交
+必须保留审计，不得删除或静默改写。
+
+`n6_strategy_center_decommission_web_runtime_v1` 只能由独立、明确授权的
+`runtime_control` 请求执行：before/after/rollback 的 Strategy Center write flag
+均必须为 `0`；exact evaluator job/PID 必须始终 absent 且不得恢复；只允许 exact
+`com.ashare-v3.n6.user-web` 一次 bootout/bootstrap、readiness/stability 和主
+rebind 失败时恢复冻结原 Release。Web 稳定后才可把 evaluator plist/state/log/
+history 归档到新的只读退役目录。Virtual Executor、数据库和其他服务操作次数
+必须为 0。
+
+`n6_strategy_center_decommission_schema_archive_v1` 只能由后续独立、明确授权的
+`N6_user` 单事务执行：将六张 Strategy Center 核心表及所属 sequence/index 移入
+新的 owner-only archive schema，撤销冻结 Web runtime role、`n6_strategy_worker`
+和 `PUBLIC` 对 archive schema 的 `USAGE`，并删除仅属于 Strategy Center 的
+trigger/functions。必须逐表保留 before/after row count、content hash、DDL、ACL
+和 dependency inventory，并提供绑定 hash、30 天内有效的专用 rollback。禁止
+drop/truncate/数据 DML，禁止修改 `n6_strategy_worker` 角色本身、079 canonical
+reviewed-view ACL、`n6_strategy`/`n6_ai_strategy_*`、Virtual Executor、N1-N5 或
+任何交易对象。
+
+30 天只定义最短隔离保留期，不创建自动删除任务。期满后的物理删除必须由新的、
+独立、明确授权 gate 再决定；本治理线程不得执行。canary heartbeat 的暂停或删除
+同样属于后续 runtime gate，本线程不执行。
 
 ## Evidence-Bound Modification Guard
 
@@ -1029,8 +1298,9 @@ runtime_gate_decision = ACCEPT
 的幂等验证；只写 N6 strategy selection/projection/change 表。任一条件缺失、
 all-users、多 scope、非当前交易日、Release/ACL/watermark 漂移、长期 worker、
 LaunchAgent、proposal/order/trade/position/cash、真实券商或 N1-N5 写入均返回
-`REJECT`。仅 post-083 maintenance Gate2 的单 scope revision 20、当前交易日
-20260723、pre-Gate2 dry-run/primary/replay attempts 均为 0 的 canary 可与既有
+`REJECT`。仅 post-083 maintenance Gate2 的动态单 scope、当前 reviewed-N6
+`for_trade_date` 共识、pre-Gate2 dry-run/primary/replay attempts 均为 0 的
+canary 可与既有
 `StartInterval=5` virtual executor 共存：必须冻结 exact label/plist/immutable
 Release/runner/`PGSERVICE=n6_virtual_executor`/role ACL/object-boundary hashes，
 证明该 role 对 Strategy Center selection/catalog/projection/observation/change
@@ -1053,14 +1323,14 @@ Web/virtual executor observation 表写权或 executor observation 代码引用�
 唯一的 N6 strategy-center 持续调度例外为：
 
 ```text
-policy_id = n6_strategy_center_display_only_scheduled_evaluator_f464_v1
+policy_id = n6_strategy_center_display_only_scheduled_evaluator_v1
 kernel_decision = ACCEPT
 runtime_gate_decision = ACCEPT
 ```
 
 该例外必须在独立 `N6_user` 会话中由用户当前请求明确授权，
-且 20260722 单用户 bounded dry-run + primary + same-input replay、projection
-和 SSE 验收已全部 PASS。它只允许 exact label
+且当前 reviewed-N6 日期的单用户 bounded dry-run + primary + same-input
+replay、projection 和 SSE 验收已全部 PASS。它只允许 exact label
 `com.ashare-v3.n6.strategy-center-evaluator-v1` 从已验证 immutable Release 以
 `StartInterval=5` 调用 `run_n6_strategy_center_auto_once.py`；数据库身份
 只能是 `PGSERVICE=n6_strategy_worker`。唯一 plist planner 是
@@ -1068,7 +1338,10 @@ runtime_gate_decision = ACCEPT
 Python 3.11 runtime env 和 exact argv 必须同时验证。runner 必须自行绑定
 `Asia/Shanghai` 当前交易日，并由 trade_date/source fingerprint/Release/
 policy/pending revisions 生成稳定 attempt-scoped run_id，拒绝外部历史交易日/
-scope 参数；非当前开放交易日必须 fail-closed/no-op。all-users
+scope 参数。planner 对 immutable Release 的 owner 只接受两种全树一致 authority：
+当前 uid 或 `uid=0`；Release root、全部目录和全部文件必须使用同一 owner，
+混合 owner、其他 uid、可写 mode、symlink、异常 hardlink 或 blob/mode/manifest
+不闭合均 fail-closed。非当前开放交易日必须 fail-closed/no-op。all-users
 仅表示逐 principal/user 隔离计算和 selection 激活，DML 仅可命中
 `n6_user_strategy_selection_revision`、`n6_strategy_match_projection`、
 `n6_strategy_observation_projection`、`n6_strategy_match_change`。observation
@@ -1356,7 +1629,7 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
   frozen/disjoint/zero-operation 合同与既有 virtual executor 共存，不获得任何
   executor 操作权或额外 evaluator DML 表权限。
 - 仍禁止一般性 N6 长期 worker/LaunchAgent；
-  `n6_strategy_center_display_only_scheduled_evaluator_f464_v1` 仅在当前
+  `n6_strategy_center_display_only_scheduled_evaluator_v1` 仅在当前
   reviewed-N6 日期 bounded canary 完整 PASS 后，由独立、明确授权的
   `N6_user` gate 对唯一
   exact label 和 immutable scheduled run-once 例外。
@@ -1369,6 +1642,12 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
   `n6_strategy_center_post_081_v2_web_bounded_rebind_v1` 在独立、明确授权的
   `runtime_control` gate 中执行；strategy write 必须保持 0，evaluator 必须
   保持 quiesced，virtual executor 只能冻结配置证据而不得被操作。
+- 083/084 提交且 strategy write 已恢复为 1 后，从唯一 legacy 短名 source
+  切换到正式 40 位 immutable Release，仅可由
+  `n6_strategy_center_post_083_v2_web_bounded_rebind_v1` 在独立、明确授权的
+  `runtime_control` gate 中执行；legacy source 必须逐 blob 完整 attest 且只作
+  一次 rollback source，evaluator 必须先由独立 N6 gate quiesce，virtual
+  executor 可保持既有 5 秒周期但不得被本 policy 操作。
 - 081 提交后的 082/083 仅可由
   `n6_strategy_center_post_081_v2_catalog_migration_window_v1` 在两个独立、
   明确授权的 `N6_user` gate 中严格按 082 后 083 执行；不得合并、跳过、
@@ -1384,6 +1663,11 @@ AGENTS.md 不维护当前 active run_id、current-real lineage、outbox 数量�
   新 request_id 仅由 shell/driver 参数绑定并只审计 hash，最多一次 mutation、
   零重试；第三种错误或第三次 harness transaction 必须拒绝。strategy write 保持
   0，Web PUT、激活、projection/change、evaluator 和 virtual executor 操作均禁止。
+- post-083、strategy write=1 时，为后续独立 Web rebind quiesce evaluator 仅可由
+  `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1` 在独立、明确授权的
+  `runtime_control` gate 中执行；只允许 exact evaluator 一次 bootout 和状态驱动
+  PID/job absence，零 bootstrap/kickstart/kill/retry/自动恢复。Web 与 virtual
+  executor 均不得操作，数据库、migration、业务 DML、交易和 N1-N5 写入均禁止。
 - 除上述唯一 N6 strategy-center 调度例外外，长期 worker 始终后置，
   必须先有 run-once 和 bounded worker smoke 的单独授权。
 
@@ -1440,97 +1724,3 @@ condition_display_basis 不得命名为 user_condition_basis。
 ```
 
 `condition_display_basis` 可以聚合 condition_pool / minute_target_scope 的多行条件来源，但输出粒度应面向 N6 展示，默认一对象一行，保留 source_condition_basis_id、source_condition_pool_ids_json、source_minute_target_scope_ids_json、selected_condition_keys_json、selected_signal_types_json 等追溯字段。
-
-# v3 Execution Protocol (UNIFIED CONTROL SYSTEM)
-
-Before ANY modification in A股监控系统 v3, Codex MUST follow this strict pipeline:
-
-================================================
-STEP 1 — TASK NORMALIZATION
-================================================
-Convert user request into structured intent:
-- intent
-- affected_files
-- layer_role (N1-N6)
-- risk_level
-
-If cannot normalize → STOP
-
-================================================
-STEP 2 — EXECUTION COMPILER
-================================================
-Convert task into execution plan (DAG):
-
-MUST include:
-PLAN → VALIDATE → MODIFY → VERIFY → FINALIZE
-
-Rules:
-- MODIFY must always be preceded by VALIDATE
-- No cycles allowed
-- No cross-layer operations allowed
-
-If DAG invalid → STOP
-
-================================================
-STEP 3 — KERNEL CHECK
-================================================
-Evaluate:
-- Is operation allowed in layer_role?
-- Does it violate N1-N6 boundaries?
-- Is risk acceptable?
-
-Output:
-ACCEPT / REJECT / BLOCK / ESCALATE
-
-If not ACCEPT → STOP
-
-================================================
-STEP 4 — RUNTIME GATE
-================================================
-Final safety enforcement:
-
-- Cross-layer modification → REJECT
-- Runtime execution request → REJECT，除非精确满足以下任一 fail-closed policy：
-  - `n6_strategy_center_display_only_bounded_run_once_v1`
-  - `n6_strategy_center_display_only_scheduled_evaluator_v1`
-  - `n6_user_web_immutable_release_bounded_rebind_v1`
-  - `n6_strategy_center_schema_migration_maintenance_window_v1`
-  - `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`
-  - `n6_strategy_center_post_081_v2_catalog_migration_window_v1`
-  - `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`
-  - `n6_strategy_center_post_083_multi_user_pending_v2_revision_v1`
-  - `n6_strategy_center_pre_canary_web_write_quiesce_v1`
-  - `n6_strategy_center_reviewed_view_date_authority_084_v1`
-  - `n6_strategy_center_post_canary_web_write_restore_v1`
-  - `n6_strategy_center_shadow_activation_grant_v1`
-- Missing kernel decision → REJECT
-
-If not ACCEPT → STOP
-
-================================================
-STEP 5 — SANDBOX SIMULATION
-================================================
-Simulate:
-
-- file changes
-- system impact
-- DAG execution
-
-If unsafe → STOP
-
-================================================
-STEP 6 — FINAL EXECUTION
-================================================
-Only if ALL steps passed:
-
-→ Apply changes
-→ Output diff
-→ Log trace
-
-================================================
-HARD RULE
-================================================
-
-NO STEP CAN BE SKIPPED.
-
-If any step is missing → TASK IS INVALID.

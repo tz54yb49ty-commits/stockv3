@@ -302,6 +302,33 @@ class N3TActionConfirmationMetricContractTest(unittest.TestCase):
             },
         )
 
+    def test_n3t_blocks_non_null_not_available_previous_period_source(self) -> None:
+        metric_values = self._complete_metric_values()
+        metric_values["previous_120m_period_source"] = "not_available"
+
+        row = build_n3t_action_confirmation_metric_row(
+            projection_run_id=build_n3t_metric_run_id("20260721", "0931", "fixed_period_source"),
+            asset_kind="index",
+            identity_key="index:SH:000688",
+            trade_date="20260721",
+            metric_minute_label="09:31",
+            as_of_time="2026-07-21T09:32:00+08:00",
+            metric_values=metric_values,
+            source_closed_minute_bar_ids=[101],
+            previous_day_minute_refs=[201],
+        )
+
+        self.assertFalse(row["metric_ready"])
+        self.assertEqual(row["metric_quality_status"], "blocked")
+        self.assertIn(
+            "BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE",
+            row["blocked_reasons"],
+        )
+        self.assertEqual(
+            row["trace_json"]["previous_period_sources"]["120m"],
+            "not_available",
+        )
+
     def test_forbidden_n3p_trace_cannot_override_n3t_lineage(self) -> None:
         row = build_n3t_action_confirmation_metric_row(
             projection_run_id=build_n3t_metric_run_id("20260701", "1412", "scope"),

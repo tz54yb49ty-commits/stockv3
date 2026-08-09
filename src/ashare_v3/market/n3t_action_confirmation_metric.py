@@ -11,6 +11,10 @@ import re
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from ashare_v3.market.c1_scoped_artifact import (
+    BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE,
+    previous_period_sources_are_valid,
+)
 from ashare_v3.market.minute_label_normalization import (
     BLOCKED_C1_MINUTE_LABEL_NOT_TRADABLE,
     MinuteLabelNormalizationError,
@@ -507,6 +511,8 @@ def build_n3t_action_confirmation_metric_row(
     missing_fields = [field for field in N3T_READY_REQUIRED_FIELDS if values.get(field) is None]
     if missing_fields:
         blocked_reasons.append("BLOCKED_N3T_METRIC_FIELDS_INCOMPLETE")
+    if not previous_period_sources_are_valid(values):
+        blocked_reasons.append(BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE)
 
     metric_ready = not blocked_reasons
     trace_payload = {

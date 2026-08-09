@@ -279,6 +279,24 @@ artifact、N3T metric context 或 N5 ActionExecuted proof；这些路径必须�
 normalizer，current-day raw/canonical `11:30` 必须 fail closed。
 N3T failure 只阻断 N5 ActionExecuted，不影响 N5 ActionEligible、N3 worker、N4 worker。
 
+N3T fixed-period resolver 必须按 source layout 解释午间 close label，不得仅凭是否出现
+`raw 11:30` 推断上一交易日 preload 的 afternoon ordinal：
+
+```text
+intraday:  physical 13:00 / raw 13:00 -> ordinal 120
+           physical 13:01 / raw 13:01 -> ordinal 121
+post-close: physical 13:00 / raw 11:30 -> ordinal 120
+            physical 13:00 / raw 13:00 -> ordinal 121
+preload close-label: physical 13:00 / raw 13:01 -> ordinal 121
+                     physical 14:59 / raw 15:00 -> ordinal 240
+```
+
+该 ordinal 只服务固定 1m/5m/30m/120m 窗口，不创建 physical `11:30`。上一交易日周期窗口
+必须完整；缺行、重复或 layout 冲突时返回 `not_available`。四个
+`previous_*_period_source` 只有 `same_trade_date_previous_period` 或
+`previous_trade_date_last_period` 才允许 `metric_ready=true`；否则固定使用
+`BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE` fail closed。
+
 N3 combined run-once child runner contract:
   combined N3 child wrappers 必须接入受审计 N3 real I/O adapter seam，不得再以 dry-run
   dependency seam 或 contract-only adapter 作为 confirmed execute 成功条件。patch/test gate 中默认
@@ -1273,7 +1291,48 @@ must not request raw `11:30`, create a synthetic `11:30` row, or bridge raw
 N3T context construction. Afternoon plans continue with physical `13:00`
 requiring raw close label `13:01`. A source-run label of `15:00` is only a
 session close boundary for C1 scoped pull planning and maps to physical target
-`14:59` under `session_close_boundary_latest_physical_label_v1`.
+`14:59` under `session_close_boundary_latest_physical_label_v1`. The
+post-close final-A path must wait until at least `15:01` and use raw source
+label `15:00` as physical C1 label `14:59`. If mootdx returns both raw `14:59`
+and raw `15:00`, the final-A path keeps raw `15:00`; it must not create a
+physical `15:00` row. The C1 pull selection uses the complete explicit final-A
+object scope and is independent from the bounded N3T evaluation chunk.
+
+Final-A capacity is resumable by object. Each invocation may fetch at most 64
+objects that do not yet have a validated final source cache. Eight provider
+workers are retained. A successful object fetch is atomically persisted under
+a stable `(trade_date, asset_kind, identity_key, direction)` cache key; later
+cursor chunks must reuse that cache and must not pull the same object's closing
+series again. Each invocation may process at most `64 * 16 = 1024` cursor
+proofs through the existing inline source -> staging -> previous-context ->
+metric-context -> N3T writer pipeline. A provider failure is object-local and
+remains retryable; it must not block successful objects in the same chunk.
+
+The scheduler post-close final-A pass must use the same inline
+`n3_c1_n3t_object_cursor_batch_v1` source -> staging -> previous-context -> proof
+pipeline as the intraday hot path. It must not require or recreate the legacy
+`current_day_source` / `current_day_staging` directories when the active day was
+processed entirely through inline object batches. A compact progress marker
+records the current A object-set hash, per-object source-cache state, contiguous
+proof high-water mark, failures, and remaining source/proof counts. New A
+objects are appended to the current completion scope; objects removed from A no
+longer count toward completion. The marker may become `completed` only when all
+objects in the current A have a valid final source cache and contiguous proof
+coverage through physical `14:59`. A completed, unchanged scope is a quiet
+no-op on later scheduler invocations.
+
+An active ref whose earliest confirmation cursor is later than physical
+`14:59` has no evaluable minute in the current session. Final-A must retain its
+state key, source trigger event/run IDs, condition key, trigger time, and cursor
+in `no_evaluable_after_close_refs` with
+`reason=trigger_after_final_evaluable_minute`, but it must not request source,
+generate a proof, or count toward source/proof completion. If another ref for
+the same object/direction remains evaluable, that object is processed once and
+only the late ref is excluded. Excluded refs participate in the scope hash so
+a newly observed late ref supersedes an otherwise unchanged completed marker.
+An excluded-only active scope is a completed quiet no-op, not an empty-scope
+waiting state. This rule preserves the trigger-time lower bound; Final-A must
+never synthesize a physical `14:59` proof for a `15:00` trigger.
 
 ```text
 empty scope -> explicit no-op pull plan.
