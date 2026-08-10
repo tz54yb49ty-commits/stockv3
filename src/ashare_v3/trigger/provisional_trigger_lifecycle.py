@@ -100,6 +100,7 @@ def build_lifecycle_output_plans(
             inactive["current_status"] = "inactive"
             inactive["trigger_mark_candidate"] = "normal"
             inactive["projection_30m_flag"] = False
+            inactive["projection_30m_type"] = "none"
             outputs.append(
                 annotate_lifecycle_plan(inactive, event_type=TRIGGER_STATE_CHANGED_EVENT_TYPE, previous_state=previous)
             )
