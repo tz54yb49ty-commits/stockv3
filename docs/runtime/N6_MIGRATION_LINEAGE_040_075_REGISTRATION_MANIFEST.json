@@ -1,0 +1,1171 @@
+{
+  "manifest_version": "N6_MIGRATION_LINEAGE_040_075_REGISTRATION_MANIFEST_V1",
+  "layer_role": "runtime_control",
+  "mode": "FULL",
+  "risk_level": "high",
+  "result": "REGISTRATION_IMPLEMENTED_IN_ISOLATED_WORKTREE_REVIEW_REQUIRED",
+  "evidence_time": "2026-07-22T11:00:00+08:00",
+  "authority_boundary": {
+    "registration_only": true,
+    "modifies_n6_code_or_sql": false,
+    "executes_migration": false,
+    "connects_database": false,
+    "starts_runtime": false,
+    "integration_authorized": false
+  },
+  "remote_main": {
+    "commit": "1a4fd887b253474827bca91147e5d8e3d64c351e",
+    "tree": "bc691336fe4e4eabddb3bc6ef1e307eb34a8ea92",
+    "proof": "GitHub connected read-only fetch during implementation preflight",
+    "candidate_restoration_base_only": true,
+    "approved_n6_integration_base_commit": null
+  },
+  "source_lineage": [
+    {
+      "scope": "040-073",
+      "commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c"
+    },
+    {
+      "scope": "074",
+      "commit": "8c0aa5a284fc07f30531aad275c8ba140e82ff23",
+      "tree": "f8812287e489dc83203f012f60f0a6ce4c5e3b97"
+    },
+    {
+      "scope": "075",
+      "commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "tree": "c10ddfcac50ec34edf1630f39fbd50499ddb6470"
+    }
+  ],
+  "active_release_observation": {
+    "pid": 44175,
+    "release_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/n6-b-track/20260722_104100__af16803fd0f3411ad302b0df36b46b995c9c284c",
+    "commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+    "tree": "c10ddfcac50ec34edf1630f39fbd50499ddb6470",
+    "read_only_observation": true
+  },
+  "inventory": {
+    "migration_identity_count": 36,
+    "sql_file_count": 71,
+    "introduction_commit_count": 34,
+    "direct_bundle_path_count": 176
+  },
+  "numbering_anomalies": {
+    "missing_050": {
+      "present": true,
+      "interpretation": "recorded_gap_no_intent_inferred"
+    },
+    "040_missing_rollback": {
+      "present": true,
+      "interpretation": "fail_closed_registration_only"
+    },
+    "073_duplicate_number": {
+      "present": true,
+      "families": [
+        "projection_read_performance",
+        "strategy_center_schema"
+      ]
+    }
+  },
+  "execution_status_policy": {
+    "allowed": [
+      "executed_historical",
+      "not_applied_as_of_contract",
+      "unknown"
+    ],
+    "unknown_blocks_execution_claim": true,
+    "release_presence_is_execution_proof": false,
+    "current_live_state_requires_separate_N6_user_readonly_DB_attestation": true
+  },
+  "dependency_closure": {
+    "path": "docs/runtime/N6_MIGRATION_LINEAGE_040_075_DEPENDENCY_CLOSURE.json",
+    "direct_bundle_complete": true,
+    "transitive_runtime_closure_complete": false,
+    "integration_blocked_until_transitive_closure_review": true
+  },
+  "migrations": [
+    {
+      "identity": "040_n6_virtual_quote_snapshot_schema",
+      "number": "040",
+      "family": "n6_virtual_quote_snapshot_schema",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/040_n6_virtual_quote_snapshot_schema.sql",
+        "git_blob": "1f297be923d59c2490b71e1e469a01838a7f6029",
+        "sha256": "9b22b4b41ecfad08da28a0fd74ae23c1d1af8803377368e97e329a79c97bcfd1",
+        "size_bytes": 4727
+      },
+      "rollback": null,
+      "introduction_commit": "2011e7ca0167042f46e350a1ae0b1860b54b1977",
+      "introduction_bundle_path_count": 4,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "041_n6_b_track_product_v3_schema",
+      "number": "041",
+      "family": "n6_b_track_product_v3_schema",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/041_n6_b_track_product_v3_schema.sql",
+        "git_blob": "a6f3c1ff0120b70bc48e712b417ea8fdb1a4ccec",
+        "sha256": "66570d441cfe6249389d2bfb5412d2fe76b3e9e3bc1cbb6d9a54859bab068c67",
+        "size_bytes": 10038
+      },
+      "rollback": {
+        "path": "sql/041_n6_b_track_product_v3_schema_rollback.sql",
+        "git_blob": "1bae7d2fcc8531c4f2a1d0faa698067a33289a61",
+        "sha256": "6e5713399786a11933d99a931d0ed440835dcb68113e9f52f09fda5b041ac567",
+        "size_bytes": 3059
+      },
+      "introduction_commit": "a01afad60ce6458fcf2e227d4e260e0607ead249",
+      "introduction_bundle_path_count": 11,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "042_n6_b_track_db_role_policy_schema",
+      "number": "042",
+      "family": "n6_b_track_db_role_policy_schema",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/042_n6_b_track_db_role_policy_schema.sql",
+        "git_blob": "9820eebae305fc27f7f0dbb8d012e7b4a2286ef8",
+        "sha256": "0c2cb29d938390178201d865f815294e6e399625e60951dc1f75c81848e4a561",
+        "size_bytes": 37029
+      },
+      "rollback": {
+        "path": "sql/042_n6_b_track_db_role_policy_rollback.sql",
+        "git_blob": "8be5635f901ab671a49a1d7d9fe44e46b499ba72",
+        "sha256": "19223cebc3953089e6cc1b705cc4c6eacaede994656f9061a27d4f15fcdeb1aa",
+        "size_bytes": 3503
+      },
+      "introduction_commit": "cbf416e41c3a3692885622f39811954508250181",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "043_n6_btrack_legacy_principal_registration",
+      "number": "043",
+      "family": "n6_btrack_legacy_principal_registration",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/043_n6_btrack_legacy_principal_registration.sql",
+        "git_blob": "6f51ca6d308fb3c2a89e91176f5cba6e1391b0b6",
+        "sha256": "c6bd6e3589196849ceab9b481b7741219900932c5e3f5afd683fbcb9041f2f5c",
+        "size_bytes": 9119
+      },
+      "rollback": {
+        "path": "sql/043_n6_btrack_legacy_principal_registration_rollback.sql",
+        "git_blob": "d4e08352c60cd63313e97de0e1aa4ca45bf15fa8",
+        "sha256": "c9193dba8eae96def0b1e4e77cf03b128b8ec56a01b944109875dab46eec7b6f",
+        "size_bytes": 7877
+      },
+      "introduction_commit": "996b93356cfc3981efec3adaf44ffdf4ecd7825c",
+      "introduction_bundle_path_count": 4,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "044_n6_btrack_scope_write_source_validation",
+      "number": "044",
+      "family": "n6_btrack_scope_write_source_validation",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/044_n6_btrack_scope_write_source_validation.sql",
+        "git_blob": "255a8647de2ebbf70c1a4a7b6f1cd8a53ceddf35",
+        "sha256": "a86e69805fa50f7393df009b440064d269cfa3affaf2d994daf78ec7b73e757f",
+        "size_bytes": 11665
+      },
+      "rollback": {
+        "path": "sql/044_n6_btrack_scope_write_source_validation_rollback.sql",
+        "git_blob": "d3de8e983754a05e375da568f5d0c02ca8916240",
+        "sha256": "b7bdaec3074fe13e136a02ac53bda0d95f53bd97bba1ddcafa5d80266045ac0f",
+        "size_bytes": 6363
+      },
+      "introduction_commit": "922025982fff593b1067244d84b228448d02012f",
+      "introduction_bundle_path_count": 9,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "045_n6_btrack_monitor_lineage_freeze",
+      "number": "045",
+      "family": "n6_btrack_monitor_lineage_freeze",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/045_n6_btrack_monitor_lineage_freeze.sql",
+        "git_blob": "074284465ad14211cae513da7f07ae9a503968c9",
+        "sha256": "130ea00a00569b52cbac6c723042ae4b539db1b80c89be6022fa60697978c61a",
+        "size_bytes": 9333
+      },
+      "rollback": {
+        "path": "sql/045_n6_btrack_monitor_lineage_freeze_rollback.sql",
+        "git_blob": "984dc042b1ab2f05cb405fd3c6c369363f88ccd9",
+        "sha256": "a9cfcad841e5efd8893b1442f65db5353afb50c3e99a872e059e2fbf01ebb833",
+        "size_bytes": 5898
+      },
+      "introduction_commit": "e5e531c6af9ae87dd43d479e1844e70f67b86d73",
+      "introduction_bundle_path_count": 7,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "046_n6_btrack_virtual_executor_apply",
+      "number": "046",
+      "family": "n6_btrack_virtual_executor_apply",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/046_n6_btrack_virtual_executor_apply.sql",
+        "git_blob": "8d5805ba6c24dc871a39ebdc03d42e347229c5bb",
+        "sha256": "94d6c73de0e11b5ffda50a42650405baa34f6ebfacee5d97a5b8aa42272a3eb5",
+        "size_bytes": 26802
+      },
+      "rollback": {
+        "path": "sql/046_n6_btrack_virtual_executor_apply_rollback.sql",
+        "git_blob": "7dfda60cdb2a9c0332c5f0077c277f7fe3889a39",
+        "sha256": "a63b874f33914ea0246c3ded6c7905fd38c04526357fecc80379704613afb388",
+        "size_bytes": 342
+      },
+      "introduction_commit": "d754e308324a004ce8eb1c3fc8f01df5b3535660",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "047_n6_virtual_account_bootstrap",
+      "number": "047",
+      "family": "n6_virtual_account_bootstrap",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/047_n6_virtual_account_bootstrap.sql",
+        "git_blob": "09e6ac4dd2b746289b9f5c6d649f30146dee5859",
+        "sha256": "8cae88f049292041a6e844bee8f66c7332ee9ac1911a4facc9f15799bb1de2bf",
+        "size_bytes": 23570
+      },
+      "rollback": {
+        "path": "sql/047_n6_virtual_account_bootstrap_rollback.sql",
+        "git_blob": "0e2bd35ba7e536378fd6e6e38371d2871adf1915",
+        "sha256": "0e96b2e6b9b66b1f3489696b997c8320e7e72729a06a1d80da6897d5f3aa92d8",
+        "size_bytes": 18041
+      },
+      "introduction_commit": "a959510206211fdbdae03abfda4766b19195d9fb",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "048_n6_btrack_proposal_scope_and_executor_claim_next",
+      "number": "048",
+      "family": "n6_btrack_proposal_scope_and_executor_claim_next",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/048_n6_btrack_proposal_scope_and_executor_claim_next.sql",
+        "git_blob": "12bb9680f838a095def309ad26a48ad84678ff91",
+        "sha256": "6e2f785a51e5b04810ed1d956074bdf32c6a1e3614d493cd77fd741b25f9b573",
+        "size_bytes": 19355
+      },
+      "rollback": {
+        "path": "sql/048_n6_btrack_proposal_scope_and_executor_claim_next_rollback.sql",
+        "git_blob": "37230975487d186eb1e75c769c80bbb25fba27c2",
+        "sha256": "acfa04572c93287c79c35db499bdeed2c1cec4335e0c4c6f54a4ac70aaab43b1",
+        "size_bytes": 6447
+      },
+      "introduction_commit": "8d28e89a97c1b958344208d0f9113ff3182d56f5",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "049_n6_virtual_stop_loss_freeze_evaluate_execute",
+      "number": "049",
+      "family": "n6_virtual_stop_loss_freeze_evaluate_execute",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/049_n6_virtual_stop_loss_freeze_evaluate_execute.sql",
+        "git_blob": "6102fe00795fe79e1135b550b2729bdbfa7a5539",
+        "sha256": "acdd1c1401399ab92bdf6dc0b1d48d91c82893aae9b9146d17441a0614f333e0",
+        "size_bytes": 54617
+      },
+      "rollback": {
+        "path": "sql/049_n6_virtual_stop_loss_freeze_evaluate_execute_rollback.sql",
+        "git_blob": "ffc0283d0a9c784061113eadd1003914a70fee5d",
+        "sha256": "f6149e6a7af77ab620dd05fac8d6e9bd9ff36e4ac0b17ac1ca2199e3b3b5d11e",
+        "size_bytes": 27100
+      },
+      "introduction_commit": "e3c379fb93b32a1a5dc2da3dfa605f45b5dce66a",
+      "introduction_bundle_path_count": 9,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "051_n6_virtual_quote_writer_policy",
+      "number": "051",
+      "family": "n6_virtual_quote_writer_policy",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/051_n6_virtual_quote_writer_policy.sql",
+        "git_blob": "d9b7d34768d343091c5f5422c16517ceb78a2b61",
+        "sha256": "cb4957f79f65258111c3953b5ed9fcdd33258d0bc3c5dfd7107446e2864059f0",
+        "size_bytes": 33192
+      },
+      "rollback": {
+        "path": "sql/051_n6_virtual_quote_writer_policy_rollback.sql",
+        "git_blob": "a76ab346bd58e6b61826e746a50a5a7d57615cce",
+        "sha256": "56ba8aaed3870789fad6ca6a0cc83dd2ceba1c6dc4b5bc99e308601589139440",
+        "size_bytes": 1270
+      },
+      "introduction_commit": "539bd7895a54211770b2c11d87d676c7c73bf9a3",
+      "introduction_bundle_path_count": 7,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "052_n6_btrack_proposal_trading_session",
+      "number": "052",
+      "family": "n6_btrack_proposal_trading_session",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/052_n6_btrack_proposal_trading_session.sql",
+        "git_blob": "fe3e9b31ffd49645892fcb025a066a860cb23677",
+        "sha256": "990f76424fa381cb2cd15777a1b91a6eb18c220a0697d7d6faa9b8b9183e9d1b",
+        "size_bytes": 15828
+      },
+      "rollback": {
+        "path": "sql/052_n6_btrack_proposal_trading_session_rollback.sql",
+        "git_blob": "7361cc18516f019705d45ff6258747239318b323",
+        "sha256": "0ade16f033c1531271e84f402eadd36def02abb2821b60401dcdd5325b07f511",
+        "size_bytes": 15402
+      },
+      "introduction_commit": "5ccdabdffee20c8d6fdf61f9aa1b03efefebe497",
+      "introduction_bundle_path_count": 6,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "053_n6_btrack_proposal_timestamp_syntax_fix",
+      "number": "053",
+      "family": "n6_btrack_proposal_timestamp_syntax_fix",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/053_n6_btrack_proposal_timestamp_syntax_fix.sql",
+        "git_blob": "453e06f2e49de7c5964ba63029123411c23a0aa7",
+        "sha256": "386d26dbf8614f619240ccf5f258b318f6ca258f7d339e2f9818bd181c5f9317",
+        "size_bytes": 15826
+      },
+      "rollback": {
+        "path": "sql/053_n6_btrack_proposal_timestamp_syntax_fix_rollback.sql",
+        "git_blob": "c4d24c6a180a7a5516f0d70c2437708b4b4a513f",
+        "sha256": "4c9962f2fc5e8c7dc69da358218cd4d98b4d011e367e4acec75d05b7bcbd8b05",
+        "size_bytes": 15848
+      },
+      "introduction_commit": "5cce7d3835bb129547165d7573d1f90a8d6d7b0c",
+      "introduction_bundle_path_count": 7,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "054_n6_btrack_filter_bulk_scope",
+      "number": "054",
+      "family": "n6_btrack_filter_bulk_scope",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/054_n6_btrack_filter_bulk_scope.sql",
+        "git_blob": "3aa4154de841b8444c31cb09d5352c89cf3d16a0",
+        "sha256": "728e5b4defc6ed5c2d79db4dbf27a8741244d0d8a34131cbd3a6d3edaccab292",
+        "size_bytes": 24288
+      },
+      "rollback": {
+        "path": "sql/054_n6_btrack_filter_bulk_scope_rollback.sql",
+        "git_blob": "aca949adf4e401d385f5b31c36407dfcdaf3e375",
+        "sha256": "4759ddd8082b21c40f97a23415bb933da28a5a7f44ad66593f9feb5dada6b8db",
+        "size_bytes": 796
+      },
+      "introduction_commit": "f1f54c9153fdead1ff9e14609503e3e7e2197ec4",
+      "introduction_bundle_path_count": 9,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "055_n6_ai_agent_v1_schema",
+      "number": "055",
+      "family": "n6_ai_agent_v1_schema",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/055_n6_ai_agent_v1_schema.sql",
+        "git_blob": "edb85c3f7058884aeb20e101108ed6e6dd8bd07a",
+        "sha256": "ad13f8d0a1db3a91b01dd154e69f74abf1cee5458572f2210343f5d3c07d34a8",
+        "size_bytes": 173661
+      },
+      "rollback": {
+        "path": "sql/055_n6_ai_agent_v1_schema_rollback.sql",
+        "git_blob": "42a52562d874b15b1f1844aa2efba8b7491e1959",
+        "sha256": "ade3a697305bff71c3f2edff6ac023451a016abd3acdaa5c9440f5ec64d7f653",
+        "size_bytes": 16911
+      },
+      "introduction_commit": "e2263341588709516eaf35746dde6d0022e1deab",
+      "introduction_bundle_path_count": 24,
+      "execution": {
+        "status": "executed_historical",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_AI_AGENT_V1_055_058_RUNTIME_ACTIVATION_CLOSEOUT.json",
+          "git_blob": "0e834f61f2fe649f488230a3a15f5f4548cb4c9e",
+          "sha256": "6f9a6fff15b59ce072b046dfb9035ea91945ba5cb7537aee7d0b993bf27cb227",
+          "size_bytes": 3892,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "056_n6_ai_agent_v1_identity_account_seed",
+      "number": "056",
+      "family": "n6_ai_agent_v1_identity_account_seed",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/056_n6_ai_agent_v1_identity_account_seed.sql",
+        "git_blob": "b51847637459fa9f3f99245092d2cd1af1f14426",
+        "sha256": "5cb4cc1fb2997bdf817043e36fff83adfe6e6d01fc3c61a4cacc79db03150cef",
+        "size_bytes": 13307
+      },
+      "rollback": {
+        "path": "sql/056_n6_ai_agent_v1_identity_account_seed_rollback.sql",
+        "git_blob": "5f4d954e7e5c2c24be07198e64ee94fc64896de1",
+        "sha256": "27bfafbde2da719bbbaf3e1224fd1d62d6bf29466e0ae5cc9e0992eea23cdd28",
+        "size_bytes": 9818
+      },
+      "introduction_commit": "e2263341588709516eaf35746dde6d0022e1deab",
+      "introduction_bundle_path_count": 24,
+      "execution": {
+        "status": "executed_historical",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_AI_AGENT_V1_055_058_RUNTIME_ACTIVATION_CLOSEOUT.json",
+          "git_blob": "0e834f61f2fe649f488230a3a15f5f4548cb4c9e",
+          "sha256": "6f9a6fff15b59ce072b046dfb9035ea91945ba5cb7537aee7d0b993bf27cb227",
+          "size_bytes": 3892,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "057_n6_ai_agent_execution_compat",
+      "number": "057",
+      "family": "n6_ai_agent_execution_compat",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/057_n6_ai_agent_execution_compat.sql",
+        "git_blob": "ed8eb910d7060fcf0b3777f758b36b871a5fa5a4",
+        "sha256": "4088461ce77de9cd1d6cfd084c51d34b0ff9ccf79fb6310e657345ef5f8b7da8",
+        "size_bytes": 82339
+      },
+      "rollback": {
+        "path": "sql/057_n6_ai_agent_execution_compat_rollback.sql",
+        "git_blob": "cdee4cf93e772c0f195f7aa233b11609d6a93a0f",
+        "sha256": "a2ac36417f40846f71afc3f12a0e658a78e1a8133bfbd2c84fac599d1d7d0b20",
+        "size_bytes": 72135
+      },
+      "introduction_commit": "e2263341588709516eaf35746dde6d0022e1deab",
+      "introduction_bundle_path_count": 24,
+      "execution": {
+        "status": "executed_historical",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_AI_AGENT_V1_055_058_RUNTIME_ACTIVATION_CLOSEOUT.json",
+          "git_blob": "0e834f61f2fe649f488230a3a15f5f4548cb4c9e",
+          "sha256": "6f9a6fff15b59ce072b046dfb9035ea91945ba5cb7537aee7d0b993bf27cb227",
+          "size_bytes": 3892,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "058_n6_ai_context_memory_hash_contract",
+      "number": "058",
+      "family": "n6_ai_context_memory_hash_contract",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/058_n6_ai_context_memory_hash_contract.sql",
+        "git_blob": "564da2aaa398aa2616dfbab09e828945e4dc6886",
+        "sha256": "e9be877e437d471b63181f0bf1e1d14c10373f184a0ba2cf104bd1e9ef80d4e0",
+        "size_bytes": 9680
+      },
+      "rollback": {
+        "path": "sql/058_n6_ai_context_memory_hash_contract_rollback.sql",
+        "git_blob": "207c4f72918755f43593d194b856d99b6be77a17",
+        "sha256": "33385a23448ca700d58443f7e572e30c5f7813ac0c4980a629222861aa140ba9",
+        "size_bytes": 1252
+      },
+      "introduction_commit": "2a8fc45e2f0003fc781519780eb20fae6d08c4f6",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "executed_historical",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_AI_AGENT_V1_055_058_RUNTIME_ACTIVATION_CLOSEOUT.json",
+          "git_blob": "0e834f61f2fe649f488230a3a15f5f4548cb4c9e",
+          "sha256": "6f9a6fff15b59ce072b046dfb9035ea91945ba5cb7537aee7d0b993bf27cb227",
+          "size_bytes": 3892,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "059_n6_ai_investor_strategy_policy_v1",
+      "number": "059",
+      "family": "n6_ai_investor_strategy_policy_v1",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/059_n6_ai_investor_strategy_policy_v1.sql",
+        "git_blob": "dba40a6ecbf5756cbe0e7f7c00d6d5214597f707",
+        "sha256": "783c7abbefdb1f28bf950a48a731fe560cd9f10f9aa6bdf3189e25ab098c8d0f",
+        "size_bytes": 103680
+      },
+      "rollback": {
+        "path": "sql/059_n6_ai_investor_strategy_policy_v1_rollback.sql",
+        "git_blob": "d700a04a5d40d730a9c546408cfe6d7d20e55c70",
+        "sha256": "d1f0f17cd17fac28397be86822c210e002a54e23d68bb7d338a4166d654c4b01",
+        "size_bytes": 6704
+      },
+      "introduction_commit": "aacd48d74a57814837b7415ea1014c1b09e56d8a",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "060_n6_ai_qualified_extrema_function_fix",
+      "number": "060",
+      "family": "n6_ai_qualified_extrema_function_fix",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/060_n6_ai_qualified_extrema_function_fix.sql",
+        "git_blob": "6edd623ce0ba774f63971210048f3b300561e81b",
+        "sha256": "1b19618c87fb74442dc0d80bab76dc13df12e6e259f35f14f9b5ce65a139a865",
+        "size_bytes": 114675
+      },
+      "rollback": {
+        "path": "sql/060_n6_ai_qualified_extrema_function_fix_rollback.sql",
+        "git_blob": "97495ca0bb4aacea4dbeea78a0a26cb3a178c0cf",
+        "sha256": "c373016295aa1fec2be1f77873add7f337980547af715a563c4aa87959a0c2f6",
+        "size_bytes": 114846
+      },
+      "introduction_commit": "1052e14ab236d2406ca932d1311b91f01dff3a73",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix",
+      "number": "061",
+      "family": "n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix.sql",
+        "git_blob": "d435101dd78850cce24fe51b28d358c030f2887c",
+        "sha256": "be7b28e8771877af5a928cac94d27a6799c6b70db0ec3ba8f39d7084663f57d8",
+        "size_bytes": 138086
+      },
+      "rollback": {
+        "path": "sql/061_n6_ai_shadow_decision_risk_state_and_qualified_extrema_fix_rollback.sql",
+        "git_blob": "2d0cda80471dcb9da2aaed9b272f0bac31cd8d76",
+        "sha256": "0fcdbb531dc78d329e5862c9c87324ea259dd498a69666e4e5676fdf1517912c",
+        "size_bytes": 137153
+      },
+      "introduction_commit": "c0795fa1dce4a9a9ff5222bed9d60161a0a83f6b",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "062_n6_ai_shadow_observation_run_audit",
+      "number": "062",
+      "family": "n6_ai_shadow_observation_run_audit",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/062_n6_ai_shadow_observation_run_audit.sql",
+        "git_blob": "d18c880851bd1c634f76f1b58983c17a7360ae54",
+        "sha256": "69e7c9b882b397aa419e26e6f96e512939db857cb2cbd4d7627415202fe3628c",
+        "size_bytes": 41643
+      },
+      "rollback": {
+        "path": "sql/062_n6_ai_shadow_observation_run_audit_rollback.sql",
+        "git_blob": "3037b9b0287d31509bfc53cf1d90ac29345b36e8",
+        "sha256": "5be8b6f37e6afc37d7e89bbb3ab4a3f2125ee4ef96fa6ec41e7d8545d652a173",
+        "size_bytes": 5028
+      },
+      "introduction_commit": "eb5aa7ce01ec145ed016f8fed3f347ef73bb4aeb",
+      "introduction_bundle_path_count": 9,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "063_n6_btrack_manual_actionable_buy",
+      "number": "063",
+      "family": "n6_btrack_manual_actionable_buy",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/063_n6_btrack_manual_actionable_buy.sql",
+        "git_blob": "44699fdd9cb8bd8ba9ac0359d3e9d28f2d9f29c4",
+        "sha256": "7fad2da102226d23c4416cf7791c27b73be60bc137b2f8f77f75d9d2e1289822",
+        "size_bytes": 54511
+      },
+      "rollback": {
+        "path": "sql/063_n6_btrack_manual_actionable_buy_rollback.sql",
+        "git_blob": "66af727be6f2b35278ec5baba33f6f395040c38f",
+        "sha256": "a89d777b3ec7e7452a03dd1b0cb37987b1985e3f7676080585211fdd936f6dee",
+        "size_bytes": 50066
+      },
+      "introduction_commit": "614e897c2264964e6955f574a3a2c5a5f6b9a27b",
+      "introduction_bundle_path_count": 7,
+      "execution": {
+        "status": "executed_historical",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_B_TRACK_PRODUCT_V3_MANUAL_ACTIONABLE_BUY_063_CONTRACT.json",
+          "git_blob": "1029d1d43a18d7afd112228282cc5de2cc6f2b16",
+          "sha256": "95afd4b61f2944b8577fcc3fae56b0518790f950fd2ea5a48706486fcf933948",
+          "size_bytes": 6759,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "064_n6_btrack_trade_date_all_day_buy",
+      "number": "064",
+      "family": "n6_btrack_trade_date_all_day_buy",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/064_n6_btrack_trade_date_all_day_buy.sql",
+        "git_blob": "33b8250be2d0b242d3e791efa158590b23214cde",
+        "sha256": "e08b86989b8897ecc3d4b2f1a748bc7d876e6c8e95c4abda2899bcc41b76f494",
+        "size_bytes": 65469
+      },
+      "rollback": {
+        "path": "sql/064_n6_btrack_trade_date_all_day_buy_rollback.sql",
+        "git_blob": "3114d63183948d167823ae9294ed6789dcd603dd",
+        "sha256": "d4930a866ce48b2e51fe1a090be55ee9e49552cafc56811b23ae20456fcd9fef",
+        "size_bytes": 50559
+      },
+      "introduction_commit": "4a23ea9e0160ca0bff1315a0d28f391425587d1e",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "065_n6_btrack_current_date_batch_scope_fix",
+      "number": "065",
+      "family": "n6_btrack_current_date_batch_scope_fix",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/065_n6_btrack_current_date_batch_scope_fix.sql",
+        "git_blob": "720cbcc0a2c3834d0738996bb1f4598f0ffc67f5",
+        "sha256": "fdd2bd299e7c4e862dd8c86b9bbbde273b72fb7a8939da50cbc2ed96d7894040",
+        "size_bytes": 10676
+      },
+      "rollback": {
+        "path": "sql/065_n6_btrack_current_date_batch_scope_fix_rollback.sql",
+        "git_blob": "7abf6fed1215bba21be9b8ba7f59f5ada69cad17",
+        "sha256": "f7f39a000dc8058d2f9e21e44270337bb3f702a59478628ed8c827f9ccdb6dbd",
+        "size_bytes": 7957
+      },
+      "introduction_commit": "8ec816df97ba1cb45bd2066b631ac18fcd4cfe41",
+      "introduction_bundle_path_count": 5,
+      "execution": {
+        "status": "not_applied_as_of_contract",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_B_TRACK_CURRENT_DATE_BATCH_SCOPE_FIX_065_CONTRACT.json",
+          "git_blob": "c966ef9597017b50a33b474533e422033d816168",
+          "sha256": "2cb5315112631db9217195c42521d3860e2a5c164d4df8a0e77f84e6039c01f8",
+          "size_bytes": 1416,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "066_n6_btrack_regular_session_manual_buy",
+      "number": "066",
+      "family": "n6_btrack_regular_session_manual_buy",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/066_n6_btrack_regular_session_manual_buy.sql",
+        "git_blob": "5e9083916e56f3f3bc5ab0af81f77c40c2f33613",
+        "sha256": "fe8e03b31e98cfbccd4f58097b31b2286a33c868abf19d31f21b1e6ee4e8e5fc",
+        "size_bytes": 19815
+      },
+      "rollback": {
+        "path": "sql/066_n6_btrack_regular_session_manual_buy_rollback.sql",
+        "git_blob": "82697dbefcc3d5586d4aab9a43e9cd3573426d45",
+        "sha256": "f71c877e73bf1cbb67d1d0fad3a009b6230fa84e2be4790b33e835696f3360f2",
+        "size_bytes": 18877
+      },
+      "introduction_commit": "e5f4b2737b2f801767a810d68471e5fc6011d5e3",
+      "introduction_bundle_path_count": 7,
+      "execution": {
+        "status": "not_applied_as_of_contract",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_B_TRACK_REGULAR_SESSION_MANUAL_BUY_066_CONTRACT.json",
+          "git_blob": "eae57d5e673f9ae3752dd4c79552656e4b35de02",
+          "sha256": "2e4ea77195bfc43b1acd438f79dc183d42b11302881a14bf1314b6bde98a332a",
+          "size_bytes": 2590,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "067_n6_ai_shadow_schedule_preflight",
+      "number": "067",
+      "family": "n6_ai_shadow_schedule_preflight",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/067_n6_ai_shadow_schedule_preflight.sql",
+        "git_blob": "a52e5a04805b872610f116ea547a5e6c5b758907",
+        "sha256": "b06dd8574b1dfd736cc07809f059969ced41f52beb116a3c72792a5700ed7c0c",
+        "size_bytes": 11122
+      },
+      "rollback": {
+        "path": "sql/067_n6_ai_shadow_schedule_preflight_rollback.sql",
+        "git_blob": "14cdd6b0f861f0d2e1b89e8ac7463798d3cb02b8",
+        "sha256": "03b9ea5c28b53d50b7aa097e95d5f08504b6554aa74e816e7a4d9f85bef31dcf",
+        "size_bytes": 4751
+      },
+      "introduction_commit": "030a4b7b3c7b795575139dde3579ca82b0894b0c",
+      "introduction_bundle_path_count": 13,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "068_n6_quote_writer_mootdx_compat",
+      "number": "068",
+      "family": "n6_quote_writer_mootdx_compat",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/068_n6_quote_writer_mootdx_compat.sql",
+        "git_blob": "1dc420093fded0ae379647e05e443d76b128add2",
+        "sha256": "53680e3f800939b4e8edf0b11f0175c44f373205475f9fea382ed7485c992f34",
+        "size_bytes": 11416
+      },
+      "rollback": {
+        "path": "sql/068_n6_quote_writer_mootdx_compat_rollback.sql",
+        "git_blob": "9c564ceacc54455dc3321bc5029108327efd2753",
+        "sha256": "583656665b585823c58e90aa8c55453e84145f37fb88513e557108ebfbcef64e",
+        "size_bytes": 9419
+      },
+      "introduction_commit": "a5e2e899e0c5577a41567680094386110d0cd4c6",
+      "introduction_bundle_path_count": 6,
+      "execution": {
+        "status": "not_applied_as_of_contract",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_QUOTE_WRITER_MOOTDX_COMPAT_068_CONTRACT.json",
+          "git_blob": "8459e073060ae5f6909387bb23be5470764be50c",
+          "sha256": "1158f276a04851c2b2afc7b654f54639b95515cee233b6274ead99bbc4c6d923",
+          "size_bytes": 2233,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "069_n6_btrack_t1_natural_day_unlock",
+      "number": "069",
+      "family": "n6_btrack_t1_natural_day_unlock",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/069_n6_btrack_t1_natural_day_unlock.sql",
+        "git_blob": "27c2f8d81439afdc7f3894dc405582460d1e60b0",
+        "sha256": "a7ac5d6016503891b011f75034339425b83179f44870ec238199e6c13a33eee1",
+        "size_bytes": 10433
+      },
+      "rollback": {
+        "path": "sql/069_n6_btrack_t1_natural_day_unlock_rollback.sql",
+        "git_blob": "da802407938dcba791b9cb7957b97743407f59ca",
+        "sha256": "c3bbb9684fbeb88db2c213c527b2029c99cd8bea96fc48a6720c2a964691b780",
+        "size_bytes": 10734
+      },
+      "introduction_commit": "d4c290699b236d1b277cadbd420fe4467492b712",
+      "introduction_bundle_path_count": 4,
+      "execution": {
+        "status": "not_applied_as_of_contract",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_B_TRACK_T1_NATURAL_DAY_UNLOCK_069_CONTRACT.json",
+          "git_blob": "9b5100edf8fd4f673968f9886ab42fa0ebb82080",
+          "sha256": "b9fb016e88cbbcdce5adbc5b415af549ab1543005de1c7f269dd315c245a1efb",
+          "size_bytes": 3623,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "070_n6_ai_shadow_context_latest_grain_and_strategy_scope",
+      "number": "070",
+      "family": "n6_ai_shadow_context_latest_grain_and_strategy_scope",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/070_n6_ai_shadow_context_latest_grain_and_strategy_scope.sql",
+        "git_blob": "f46752f3e2ed8228852a1ee66396e178ea0aa0dc",
+        "sha256": "db379013dd33e7ee3c66ebfe40f660c9fba92ef2553fef1e149fcc08655204cc",
+        "size_bytes": 60216
+      },
+      "rollback": {
+        "path": "sql/070_n6_ai_shadow_context_latest_grain_and_strategy_scope_rollback.sql",
+        "git_blob": "5832828d97d6d42df37de901f05bb8cd2d75e631",
+        "sha256": "6cd5f755901ad9f01928f5740752a66dbd7e89d7cf3821129cb78f3d498d026d",
+        "size_bytes": 60663
+      },
+      "introduction_commit": "384e85a02ebfe3d3dece371e20a795331116e60a",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "071_n6_ai_shadow_nine_slot_schedule_preflight",
+      "number": "071",
+      "family": "n6_ai_shadow_nine_slot_schedule_preflight",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight.sql",
+        "git_blob": "cb064dd13c42ebb2c4edebae92f6d51a0d29fab5",
+        "sha256": "801e0a0f174c3969fc71e03850e54ea08cfecddb66d3ea14543e5176b74c1fd7",
+        "size_bytes": 18061
+      },
+      "rollback": {
+        "path": "sql/071_n6_ai_shadow_nine_slot_schedule_preflight_rollback.sql",
+        "git_blob": "90be342a521e5855291a1b94f135229faeb9af6b",
+        "sha256": "4526267b2ce54df8ad09e89249f9489af78a447a552b57e40a19dcb826f0806b",
+        "size_bytes": 13708
+      },
+      "introduction_commit": "d763c713ed9ab7d2e2bac9c7ef3b13a0dde4c1bb",
+      "introduction_bundle_path_count": 3,
+      "execution": {
+        "status": "not_applied_as_of_contract",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": {
+          "path": "docs/N6_AI_SHADOW_OPEN_TRADE_DATE_NINE_SLOTS_071_CONTRACT.json",
+          "git_blob": "ffce9b5ca432695cae343217023ab2f0088ffcf3",
+          "sha256": "86abe4c117b00b739e29a607ecc629c1b44fa0ddd691b26968843a7f9db51781",
+          "size_bytes": 8295,
+          "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711"
+        },
+        "note": "Historical or as-of-contract evidence only; no current-live inference."
+      }
+    },
+    {
+      "identity": "072_n6_web_user_principal_backfill",
+      "number": "072",
+      "family": "n6_web_user_principal_backfill",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/072_n6_web_user_principal_backfill.sql",
+        "git_blob": "4731ed76d77467470d7d331b8a6b45b3a79c471c",
+        "sha256": "446ce5d7043cc6fada675f9489582128facf8d899cd8211dc134ce9e9d49674a",
+        "size_bytes": 5069
+      },
+      "rollback": {
+        "path": "sql/072_n6_web_user_principal_backfill_rollback.sql",
+        "git_blob": "1fcad1d79b752576610e52a8d43c15834d0f8757",
+        "sha256": "3d4b0fa15074a5cfeda95060c4ad230c211789ac41c23308a5476a7c69e3cf8a",
+        "size_bytes": 10329
+      },
+      "introduction_commit": "c9f0f2109f9bdabb654f874429b508298f0b1dd9",
+      "introduction_bundle_path_count": 4,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "073_projection_read_performance",
+      "number": "073",
+      "family": "projection_read_performance",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/073_n6_projection_read_performance.sql",
+        "git_blob": "92e558403de209772018dbd92fa208e659788810",
+        "sha256": "6ac1ab048e64defe75a9641ef2dc2c48f9294fad600991adb801668843be0c1e",
+        "size_bytes": 14643
+      },
+      "rollback": {
+        "path": "sql/073_n6_projection_read_performance_rollback.sql",
+        "git_blob": "9c2a4f28c3e211c41172305cb5be131a7143786e",
+        "sha256": "ae5f8fa781f886d2111e8f7fae3176161d47ca6a0ea879e11174c0246615d1ce",
+        "size_bytes": 1113
+      },
+      "introduction_commit": "78bea7c61e560d01cb781b07f682ffc17e0125c8",
+      "introduction_bundle_path_count": 8,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "073_strategy_center_schema",
+      "number": "073",
+      "family": "strategy_center_schema",
+      "source_commit": "c188a7fc2489fcc9d7d870260168dafd132d8711",
+      "source_tree": "fbf7d6d6b32f7720e1113edbf20a32ac6ed3076c",
+      "forward": {
+        "path": "sql/073_n6_strategy_center_schema.sql",
+        "git_blob": "45592977614ada18ef1515c49540b3ef90ef4904",
+        "sha256": "1a13caa8f6baa91a18fdfbc7c6a349bd6a2a7ecf40da598b2327965771220bb6",
+        "size_bytes": 45869
+      },
+      "rollback": {
+        "path": "sql/073_n6_strategy_center_schema_rollback.sql",
+        "git_blob": "63a28c38cb1f8fd17bb6c42f82e20421b361eefc",
+        "sha256": "25a32840d2d14478aa730a10e1a15ab28e94b248bc3d72860f8d8952dc2fa637",
+        "size_bytes": 4346
+      },
+      "introduction_commit": "8f4b9d5fb67a635e2d594660f942f09a2dda67ff",
+      "introduction_bundle_path_count": 14,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    },
+    {
+      "identity": "074_n6_human_virtual_account_provisioning",
+      "number": "074",
+      "family": "n6_human_virtual_account_provisioning",
+      "source_commit": "8c0aa5a284fc07f30531aad275c8ba140e82ff23",
+      "source_tree": "f8812287e489dc83203f012f60f0a6ce4c5e3b97",
+      "forward": {
+        "path": "sql/074_n6_human_virtual_account_provisioning.sql",
+        "git_blob": "b540e3aeffe92120d8956babb84476b23e1ca38b",
+        "sha256": "3bfc3eb7ee3b12a1793ed1f6c60171d9eb1adbf3ebae1d1e9eb92a181560ec9d",
+        "size_bytes": 12829
+      },
+      "rollback": {
+        "path": "sql/074_n6_human_virtual_account_provisioning_rollback.sql",
+        "git_blob": "e5f5f559dd550a062068f581935bd7455239c361",
+        "sha256": "5fd07252f81c610b99a4d58cb2e59f5d46dd68a2fada094b778775ccea8af8c6",
+        "size_bytes": 16345
+      },
+      "introduction_commit": "4186e12e0cccfae5dba5be7d1b276a8fd9d83884",
+      "introduction_bundle_path_count": 10,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "Operator transcript reported execution, but no durable repository artifact exists in approved source commits."
+      }
+    },
+    {
+      "identity": "075_n6_executor_quote_ready_claim",
+      "number": "075",
+      "family": "n6_executor_quote_ready_claim",
+      "source_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "source_tree": "c10ddfcac50ec34edf1630f39fbd50499ddb6470",
+      "forward": {
+        "path": "sql/075_n6_executor_quote_ready_claim.sql",
+        "git_blob": "6daf5e4aafa487de4e3641a179e8df4390eb5935",
+        "sha256": "c17ec2ef97a6eb9001ce9945344314633520c8d2586581eb8ad874f3271f492a",
+        "size_bytes": 8228
+      },
+      "rollback": {
+        "path": "sql/075_n6_executor_quote_ready_claim_rollback.sql",
+        "git_blob": "4289767511c27442fb56c506134fd3452397c10c",
+        "sha256": "5c61fde1112249297380ad5f90a784c7b4e8d349957f0f53925fc4e16e36e56c",
+        "size_bytes": 6874
+      },
+      "introduction_commit": "af16803fd0f3411ad302b0df36b46b995c9c284c",
+      "introduction_bundle_path_count": 6,
+      "execution": {
+        "status": "unknown",
+        "current_live_claim": false,
+        "database_verified_this_gate": false,
+        "evidence": null,
+        "note": "No durable per-migration repository execution artifact; release presence is not proof."
+      }
+    }
+  ],
+  "approved_document_allowlist": [
+    "docs/runtime/N6_MIGRATION_LINEAGE_040_075_REGISTRATION_MANIFEST.json",
+    "docs/runtime/N6_MIGRATION_LINEAGE_040_075_DEPENDENCY_CLOSURE.json",
+    "docs/runtime/N6_MIGRATION_LINEAGE_040_075_REGISTRATION_DECISION.md"
+  ],
+  "forbidden_paths": [
+    "AGENTS.md",
+    "docs/Architecture.md",
+    "docs/Roadmap.md",
+    "docs/Tasks.md",
+    "sql/**",
+    "src/**",
+    "scripts/**",
+    "tests/**"
+  ],
+  "next_gate": {
+    "name": "N6_MIGRATION_LINEAGE_040_075_REGISTRATION_REVIEW",
+    "stage_commit_push_pr_merge_authorized": false,
+    "n6_user_restoration_authorized": false
+  }
+}
