@@ -431,6 +431,24 @@ Detailed rules:
     migration, manual DML, Action* creation, N4/N6/service expansion, kickstart,
     retry, or existing Signals/Messages/Cards/trading effect returns `REJECT`.
     The `runtime_control` governance session cannot use this recovery phase.
+19e. Policy `n6_trigger_status_late_commit_gap_recovery_20260824_v1` accepts
+    only the exact recovery object for the 20260824 late-visible lower-ID N5
+    outbox gap and the resulting N6 09:43 blocker. It requires the local open
+    date to remain exactly `20260824`, fresh SELECT-only proof that the failed
+    transaction committed no checkpoint/inbox/current mutation, the frozen
+    parent `b30ace6b...`, the four-file N6 diff allowlist, one immutable Release,
+    and one bootout/bootstrap of exact label
+    `com.ashare-v3.n6.trigger-status-projection-v1`. Candidate authority must
+    be same-date events absent from this consumer's processed inbox, ordered by
+    outbox ID, with checkpoint monotonicity preserved. A deterministic
+    `TriggerStatusProjectionError` must return
+    `BLOCKED_CORE_PROJECTION_INPUT` / `requires_post_check=false`; actual
+    commit ambiguity alone may return `BLOCKED_COMMIT_UNKNOWN` and must persist
+    an immutable incident. Any date/zero-commit/input-limit drift, schema/index/
+    migration, manual runner/checkpoint/episode mutation, N4/N5/Web/other-
+    service operation, kickstart/retry, or protected projection/trading effect
+    returns `REJECT`. The `runtime_control` governance session cannot use this
+    recovery phase.
 19a. The L2 `phase_id=trigger_status_web_immutable_release_rebind` accepts only
     the exact machine object under
     `n6_btrack_delivery_l2_n6_business_v1`, in a later independently authorized

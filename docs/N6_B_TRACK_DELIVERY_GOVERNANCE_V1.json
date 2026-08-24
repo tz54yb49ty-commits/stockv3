@@ -846,6 +846,129 @@
             "operation_count_drift",
             "forbidden_effect_present"
           ]
+        },
+        "trigger_status_n6_late_commit_gap_recovery_20260824": {
+          "phase_id": "trigger_status_n6_late_commit_gap_recovery_20260824",
+          "policy_id": "n6_trigger_status_late_commit_gap_recovery_20260824_v1",
+          "layer_role": "N6_user",
+          "default_decision": "REJECT",
+          "separate_current_request_authorization_required": true,
+          "governance_session_cannot_execute": true,
+          "incident_contract": {
+            "for_trade_date": "20260824",
+            "target_identity_key": "board:TDX:881002",
+            "target_trigger_matched_outbox_id": 4221256,
+            "target_action_eligible_outbox_id": 4221622,
+            "checkpoint_after_skip": 4221894,
+            "checkpoint_updated_at": "2026-08-24T09:42:43+08:00",
+            "first_failed_tick_started_at": "2026-08-24T09:43:14+08:00",
+            "original_verdict": "BLOCKED_COMMIT_UNKNOWN",
+            "original_reason": "TriggerStatusProjectionError:missing_status_update_target",
+            "classification_correction": "deterministic_projection_error_transaction_rolled_back",
+            "checkpoint_below_gap_action_eligible_count": 249,
+            "gap_min_outbox_id": 4221396,
+            "gap_max_outbox_id": 4221644,
+            "snapshot_total_unprocessed_input_count": 1957,
+            "snapshot_total_unprocessed_is_dynamic": true
+          },
+          "root_cause_contract": {
+            "outbox_id_allocation_is_not_commit_visibility_order": true,
+            "checkpoint_only_selection_is_complete": false,
+            "late_visible_lower_outbox_id_can_be_skipped": true,
+            "missing_status_update_target_remains_fail_closed": true
+          },
+          "preflight_contract": {
+            "local_open_trade_date_must_equal": "20260824",
+            "date_drift_decision": "BLOCKED_DATE_DRIFT",
+            "incident_zero_commit_must_be_proven_fresh": true,
+            "database_post_check_access": "SELECT_ONLY",
+            "protected_projection_fingerprints_must_be_frozen": true,
+            "maximum_unprocessed_events_per_tick": 5000
+          },
+          "implementation_contract": {
+            "frozen_parent_commit": "b30ace6b81241fec81dfb817bc5e16d34058f4e4",
+            "gate1_base": "this_runtime_control_gate_commit",
+            "exact_diff_allowlist": [
+              "src/ashare_v3/user/trigger_status_projection.py",
+              "scripts/run_n6_trigger_status_projection_current_once.py",
+              "tests/test_n6_trigger_status_projection.py",
+              "tests/test_n6_trigger_status_projection_current.py"
+            ],
+            "candidate_authority": "same_trade_date_unprocessed_consumer_inbox",
+            "candidate_event_types": [
+              "ActionEligible",
+              "ActionBlocked",
+              "ActionExecuted",
+              "ActionSkipped",
+              "TriggerStatusUpdated",
+              "TriggerStatusInvalidated"
+            ],
+            "candidate_order": "outbox_id_asc",
+            "checkpoint_update": "monotonic_max_existing_and_processed_outbox_id",
+            "missing_status_update_target_decision": "fail_closed_whole_batch",
+            "projection_error_failure_phase": "projection_rolled_back",
+            "projection_error_verdict": "BLOCKED_CORE_PROJECTION_INPUT",
+            "projection_error_requires_post_check": false,
+            "commit_ambiguity_verdict": "BLOCKED_COMMIT_UNKNOWN",
+            "commit_ambiguity_requires_post_check": true,
+            "immutable_incident_file_required_for_commit_ambiguity": true,
+            "new_rolling_report_path_required": true,
+            "schema_or_index_change_allowed": false
+          },
+          "runtime_contract": {
+            "label": "com.ashare-v3.n6.trigger-status-projection-v1",
+            "runner": "scripts/run_n6_trigger_status_projection_current_once.py",
+            "consumer_name": "n6_trigger_status_projection_v1",
+            "partition_key": "trigger-status:20260824",
+            "start_interval_seconds": 30,
+            "run_at_load": false,
+            "keep_alive": false,
+            "singleton_required": true,
+            "immutable_release_required": true,
+            "bootout_attempts": 1,
+            "bootstrap_attempts": 1,
+            "kickstart_attempts": 0,
+            "retry_attempts": 0,
+            "manual_runner_invocations": 0,
+            "manual_checkpoint_reset_allowed": false,
+            "manual_episode_insert_allowed": false,
+            "natural_recovery_tick_limit": 3,
+            "stability_observation_ticks": 10
+          },
+          "allowed_effects": [
+            "archive_exact_legacy_incident_evidence",
+            "build_one_immutable_trigger_status_release",
+            "rebind_exact_n6_trigger_status_label_once",
+            "write_n6_trigger_status_current_from_canonical_events",
+            "write_exact_trigger_status_consumer_inbox_checkpoint",
+            "write_exact_n6_report_history_and_incident"
+          ],
+          "rollback_contract": {
+            "code_and_service": "restore_exact_frozen_n6_release_once",
+            "valid_projected_status_data_preserved": true,
+            "database_rollback_requires_separate_authorization_and_backup": true
+          },
+          "forbidden_effects": [
+            "manual_database_write_or_delete",
+            "migration_or_index_change",
+            "n4_or_n5_write",
+            "common_event_outbox_status_update",
+            "other_consumer_or_checkpoint_change",
+            "signal_message_card_or_decision_projection_change",
+            "n5_label_or_web_or_other_service_operation",
+            "strategy_or_executor_or_trade",
+            "kickstart_or_retry"
+          ],
+          "reject_on": [
+            "incident_identity_or_fresh_zero_commit_proof_drift",
+            "date_drift",
+            "base_or_diff_allowlist_drift",
+            "candidate_authority_or_checkpoint_monotonicity_drift",
+            "unprocessed_input_limit_exceeded",
+            "release_or_plist_drift",
+            "operation_count_drift",
+            "forbidden_effect_present"
+          ]
         }
       },
       "deployment_phases": {

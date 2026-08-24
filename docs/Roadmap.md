@@ -1,9 +1,24 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-08-04
+更新日期：2026-08-24
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
+
+### 2026-08-24 N6 trigger-status late-commit gap recovery
+
+Status: `GOVERNANCE_REGISTERED / N6_USER_PENDING`. Read-only evidence records
+that the N6 trigger-status checkpoint advanced past 249 later-visible,
+lower-ID `ActionEligible` rows. `board:TDX:881002` is one affected episode:
+N4/N5 inputs exist, its N6 inbox/current row does not, and the later
+`missing_status_update_target` transaction was misclassified as
+`COMMIT_UNKNOWN`, locking subsequent ticks. Policy
+`n6_trigger_status_late_commit_gap_recovery_20260824_v1` authorizes only a
+later independent `N6_user` code/test, immutable-Release, exact-label rebind,
+and natural-tick recovery gate. This registration performs none of those
+operations. It adds no schema/index/migration and changes no N4/N5, Web, or
+existing projection behavior. Frozen registration artifact:
+`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_REGISTRATION.json`.
 
 ### 2026-08-04 N5 trigger-status timeout recovery
 

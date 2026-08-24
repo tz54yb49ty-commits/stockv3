@@ -66,6 +66,7 @@ Final safety enforcement:
   - `n5_n6_trigger_status_current_day_bounded_recovery_20260803_v1`
   - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
   - `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
+  - `n6_trigger_status_late_commit_gap_recovery_20260824_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -1511,6 +1512,23 @@ L2 trigger-status N5 调度超时恢复 phase：
   `TriggerStatusInvalidated`。禁止 Action*、action fact/tracking、N4、现有
   Signals/Messages/Cards、Web/SSE、Strategy Center、executor 与任何交易副作用。
 
+L2 trigger-status N6 晚提交缺口恢复 phase：
+
+- `policy_id=n6_trigger_status_late_commit_gap_recovery_20260824_v1` 仅处理
+  `20260824` N5 outbox 低 ID 在 N6 checkpoint 越过后才提交可见所形成的漏消费，
+  以及后续 `missing_status_update_target` 被误分类为 `COMMIT_UNKNOWN` 的锁死。
+- `runtime_control` 只登记冻结证据和 machine contract；不得连接数据库、修改 N6
+  业务代码、构建 Release、操作 plist/service 或浏览器。实现、一次 exact N6 label
+  rebind 与自然 tick 验收只属于后续独立 `N6_user` gate。
+- N6 候选权威必须为同交易日、六类允许事件中未存在该 consumer `processed` inbox
+  的事件，并按 `outbox_id ASC` 消费；checkpoint 只能单调前进。缺失 update target
+  仍须整批回滚，但明确的 `TriggerStatusProjectionError` 不得再标为 commit unknown。
+- 后续代码 diff 仅限 N6 trigger-status core、current runner 和聚焦测试；禁止 schema、
+  index、migration、手工 checkpoint reset、手工 episode 插入或其他 consumer 变更。
+- runtime 最多一次 exact label `com.ashare-v3.n6.trigger-status-projection-v1`
+  bootout/bootstrap；禁止 kickstart、手工 runner 和 retry。日期不再为 `20260824`、
+  fresh zero-commit 证明或保护投影指纹漂移时必须停止。
+
 Git 与 Release 规则：
 
 - canonical branch/worktree 固定为
@@ -1686,6 +1704,7 @@ Final safety enforcement:
   - `n6_btrack_delivery_l3_virtual_runtime_v1`
   - `n5_n6_trigger_status_scheduled_convergence_30s_v1`
   - `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
+  - `n6_trigger_status_late_commit_gap_recovery_20260824_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP

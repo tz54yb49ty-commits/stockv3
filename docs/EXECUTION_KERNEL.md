@@ -2665,6 +2665,15 @@ side-effect, or operation-count drift returns `REJECT`.
     "missing_or_source_mismatch_decision": "REJECT",
     "governance_session_runtime_operation_allowed": false
   },
+  "trigger_status_n6_late_commit_gap_recovery_contract": {
+    "phase_id": "trigger_status_n6_late_commit_gap_recovery_20260824",
+    "policy_id": "n6_trigger_status_late_commit_gap_recovery_20260824_v1",
+    "layer_role": "N6_user",
+    "source": "docs/N6_B_TRACK_DELIVERY_GOVERNANCE_V1.json#/lanes/L2/scheduled_recovery_phases/trigger_status_n6_late_commit_gap_recovery_20260824",
+    "exact_source_object_required": true,
+    "missing_or_source_mismatch_decision": "REJECT",
+    "governance_session_runtime_operation_allowed": false
+  },
   "web_deployment_phase_contract": {
     "phase_id": "trigger_status_web_immutable_release_rebind",
     "operation_class": "single_web_immutable_release_rebind",

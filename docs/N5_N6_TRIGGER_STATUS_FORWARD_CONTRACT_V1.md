@@ -392,3 +392,66 @@ the accepted historical closeout only. It does not authorize a rerun, database
 connection, Release/plist/service operation, browser action, N1-N6 write, or
 trade operation, and it does not replace fresh read-only verification for a
 future live-runtime status question.
+
+### 4.5 20260824 N6 Late-Commit Gap Recovery Registration
+
+The exact forward-only recovery policy is:
+
+```text
+policy_id=n6_trigger_status_late_commit_gap_recovery_20260824_v1
+phase_id=trigger_status_n6_late_commit_gap_recovery_20260824
+for_trade_date=20260824
+consumer_name=n6_trigger_status_projection_v1
+partition_key=trigger-status:20260824
+label=com.ashare-v3.n6.trigger-status-projection-v1
+```
+
+The registered read-only incident snapshot shows that
+`board:TDX:881002` has N4 `TriggerMatched` outbox `4221256` and N5
+`ActionEligible` outbox `4221622`, but no N6 trigger-status inbox/current row.
+The consumer checkpoint had already advanced to `4221894`. There are 249
+unprocessed `ActionEligible` rows at or below that checkpoint in the frozen
+snapshot (`4221396..4221644`). This is a batch completeness defect: outbox
+sequence allocation order is not transaction commit-visibility order.
+
+The N6 implementation must select the same-date, N5-owned, six allowed event
+types that do not yet have a `processed` inbox row for this consumer, ordered
+by `outbox_id ASC`. Checkpoint advancement is audit-only and must be monotonic:
+processing a lower-id gap must not lower the existing checkpoint.
+`missing_status_update_target` remains a whole-batch fail-closed condition.
+
+A deterministic `TriggerStatusProjectionError` must be reported as:
+
+```text
+failure_phase=projection_rolled_back
+verdict=BLOCKED_CORE_PROJECTION_INPUT
+requires_post_check=false
+```
+
+Only actual writer/commit ambiguity may report `BLOCKED_COMMIT_UNKNOWN` with
+`requires_post_check=true` and an immutable incident file. The new Release
+must use a fresh rolling-report path so that the reviewed legacy sticky report
+remains append-only evidence rather than blocking the corrected runner.
+
+This `runtime_control` gate only registers the contract. A later independent
+`N6_user` gate must first prove the 09:43 failed batch has zero committed
+checkpoint/inbox/current mutation using SELECT-only evidence. If the local open
+date is no longer exactly `20260824`, it must stop and register a historical
+bounded recovery instead. If accepted, it may build one immutable Release and
+perform one bootout/bootstrap of only the exact N6 trigger-status label, then
+observe at most three natural recovery ticks and ten stability ticks. It must
+not kickstart, manually invoke the runner, reset a checkpoint, insert an
+episode manually, or retry.
+
+No N4/N5 code or data, schema, index, migration, Web/API, existing
+Signals/Messages/Cards/Decisions, other consumer/checkpoint, outbox status,
+Strategy Center, executor, voice, mobile, sim, cash, position, proposal, order,
+broker, or trade path is authorized. Release rollback may restore only the
+frozen N6 label once. Valid status data is preserved; database rollback needs
+separate authorization and a pre-rollback backup.
+
+The registration evidence artifact is:
+
+```text
+docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_REGISTRATION.json
+```

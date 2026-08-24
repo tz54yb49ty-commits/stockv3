@@ -798,6 +798,23 @@ commit proof, schema/index/migration work, an expanded diff, N6 operations,
 kickstart/retry, manual DML, or existing projection/trading effects. The
 governance session may register this DAG but cannot compile or execute it.
 
+For policy `n6_trigger_status_late_commit_gap_recovery_20260824_v1`, L2 may
+compile one later independent `N6_user` recovery DAG only when the exact
+scheduled-recovery phase object matches the governance JSON. The DAG freezes
+the 20260824 late-visible lower-ID gap and the 09:43 deterministic rollback,
+proves zero commit and the current open date with SELECT-only evidence, changes
+only the N6 trigger-status core/current runner and focused tests, builds one
+immutable Release, rebinds only
+`com.ashare-v3.n6.trigger-status-projection-v1`, and observes natural ticks.
+Selection must use the same-date unprocessed inbox authority, preserve
+`outbox_id ASC` ordering, and keep checkpoint advancement monotonic. A known
+`TriggerStatusProjectionError` must remain a rolled-back input blocker; only
+writer/commit ambiguity may create an immutable unresolved incident.
+Compilation rejects date or zero-commit drift, schema/index/migration work, an
+expanded diff, manual runner/checkpoint/episode mutation, N4/N5/Web/other-
+service operations, kickstart/retry, or existing projection/trading effects.
+The governance session may register this DAG but cannot compile or execute it.
+
 For `phase_id=trigger_status_web_immutable_release_rebind`, L2 may compile one
 later independent `runtime_control` Web deployment gate only when the complete
 phase object exactly matches

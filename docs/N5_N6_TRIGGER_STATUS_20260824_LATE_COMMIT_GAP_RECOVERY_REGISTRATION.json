@@ -1,0 +1,126 @@
+{
+  "artifact_version": "n5-n6-trigger-status-20260824-late-commit-gap-recovery-registration-v1",
+  "title": "20260824 N6 trigger-status late-commit gap recovery registration",
+  "policy_id": "n6_trigger_status_late_commit_gap_recovery_20260824_v1",
+  "phase_id": "trigger_status_n6_late_commit_gap_recovery_20260824",
+  "layer_role": "runtime_control",
+  "for_trade_date": "20260824",
+  "status": "GOVERNANCE_REGISTERED_RUNTIME_PENDING",
+  "result": "REGISTRATION_PASS",
+  "runtime_recovery_completed": false,
+  "recommended_next_gate": "N6_USER_LATE_COMMIT_GAP_IMPLEMENTATION_AND_BOUNDED_RECOVERY",
+  "summary": "The frozen read-only investigation records a systemic N6 trigger-status completeness gap: lower outbox IDs committed visible after checkpoint advancement, were skipped by checkpoint-only selection, and later caused a deterministic missing-target rollback that the wrapper misclassified as commit unknown. This artifact registers the bounded N6-only repair; it is not runtime acceptance.",
+  "evidence_provenance": {
+    "source": "user_approved_plan_and_prior_read_only_investigation",
+    "frozen_parent_commit": "b30ace6b81241fec81dfb817bc5e16d34058f4e4",
+    "fresh_database_verification_performed_by_this_gate": false,
+    "service_or_browser_verification_performed_by_this_gate": false,
+    "dynamic_counts_must_be_refrozen_before_runtime": true
+  },
+  "target_881002": {
+    "identity_key": "board:TDX:881002",
+    "asset_name": "煤炭开采",
+    "n4_trigger_matched_outbox_id": 4221256,
+    "n4_trigger_matched_event_id": "evt_57ba6279a906ef6ba5b6804c49e7abd2bee73b54",
+    "n5_action_eligible_outbox_id": 4221622,
+    "n5_action_eligible_event_id": "evt_d4dd82c8f5eb19af03090db4ef8f1d485224d01e",
+    "n5_action_executed_outbox_id": 4223108,
+    "n6_trigger_status_inbox_count": 0,
+    "n6_current_episode_count": 0,
+    "ccf_effective_monitor_scope_contains_target": true
+  },
+  "gap_snapshot": {
+    "consumer_name": "n6_trigger_status_projection_v1",
+    "partition_key": "trigger-status:20260824",
+    "checkpoint_outbox_id": 4221894,
+    "checkpoint_updated_at": "2026-08-24T09:42:43+08:00",
+    "checkpoint_below_unprocessed_action_eligible_count": 249,
+    "gap_min_outbox_id": 4221396,
+    "gap_max_outbox_id": 4221644,
+    "snapshot_total_unprocessed_input_count": 1957,
+    "snapshot_total_unprocessed_is_dynamic": true,
+    "candidate_query_observed_milliseconds": 17,
+    "new_index_or_migration_required": false
+  },
+  "scheduler_incident": {
+    "first_failed_tick_started_at": "2026-08-24T09:43:14+08:00",
+    "original_result": "COMMIT_UNKNOWN",
+    "original_verdict": "BLOCKED_COMMIT_UNKNOWN",
+    "original_reason": "TriggerStatusProjectionError:missing_status_update_target",
+    "later_ticks": "BLOCKED_PRIOR_COMMIT_UNKNOWN",
+    "registered_correction": "deterministic_projection_error_transaction_rolled_back",
+    "zero_commit_must_be_proven_fresh_before_recovery": true
+  },
+  "root_cause": {
+    "checkpoint_only_query": "outbox_id > checkpoint",
+    "outbox_sequence_allocation_equals_commit_visibility_order": false,
+    "late_visible_lower_ids_can_be_permanently_skipped": true,
+    "example_missing_target_action_eligible_outbox_id": 4221403,
+    "example_later_trigger_status_updated_outbox_id": 4222358,
+    "missing_status_update_target_fail_closed_retained": true
+  },
+  "registered_implementation_boundary": {
+    "owner_layer_role": "N6_user",
+    "candidate_authority": "same_trade_date_allowed_event_without_processed_consumer_inbox",
+    "candidate_order": "outbox_id_asc",
+    "checkpoint_update": "monotonic_max_existing_and_processed_outbox_id",
+    "allowed_event_types": [
+      "ActionEligible",
+      "ActionBlocked",
+      "ActionExecuted",
+      "ActionSkipped",
+      "TriggerStatusUpdated",
+      "TriggerStatusInvalidated"
+    ],
+    "projection_error": {
+      "failure_phase": "projection_rolled_back",
+      "verdict": "BLOCKED_CORE_PROJECTION_INPUT",
+      "requires_post_check": false
+    },
+    "commit_ambiguity": {
+      "verdict": "BLOCKED_COMMIT_UNKNOWN",
+      "requires_post_check": true,
+      "immutable_incident_required": true
+    },
+    "schema_or_index_change_allowed": false,
+    "manual_checkpoint_reset_allowed": false,
+    "manual_episode_insert_allowed": false
+  },
+  "future_runtime_boundary": {
+    "separate_current_request_authorization_required": true,
+    "local_open_date_must_equal": "20260824",
+    "date_drift_decision": "BLOCKED_DATE_DRIFT",
+    "exact_label": "com.ashare-v3.n6.trigger-status-projection-v1",
+    "immutable_release_count": 1,
+    "bootout_attempts": 1,
+    "bootstrap_attempts": 1,
+    "kickstart_attempts": 0,
+    "manual_runner_invocations": 0,
+    "retry_attempts": 0,
+    "natural_recovery_tick_limit": 3,
+    "stability_observation_ticks": 10,
+    "maximum_events_per_tick": 5000
+  },
+  "protected_boundaries": {
+    "n4_or_n5_changes": 0,
+    "schema_index_or_migration_changes": 0,
+    "web_or_api_changes": 0,
+    "other_service_operations": 0,
+    "outbox_status_updates": 0,
+    "signal_message_card_or_decision_projection_changes": 0,
+    "other_consumer_or_checkpoint_changes": 0,
+    "strategy_executor_or_trade_effects": 0
+  },
+  "registration_boundary": {
+    "documentation_and_static_governance_only": true,
+    "database_connections": 0,
+    "database_writes": 0,
+    "runtime_execute": 0,
+    "release_builds": 0,
+    "release_or_plist_changes": 0,
+    "service_operations": 0,
+    "browser_operations": 0,
+    "n1_n6_business_changes": 0,
+    "real_trade_operations": 0
+  }
+}

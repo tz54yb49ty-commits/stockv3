@@ -1,13 +1,13 @@
 # A股监控系统 v3 当前任务看板
 
-更新日期：2026-08-04
+更新日期：2026-08-24
 范围：最小可落地任务看板。本文档不授权数据库写入、行情 execute、worker、语音、sim、前端或真实交易。
 
 ## P0 当前优先级
 
 ### T0.N5-N6-TRIGGER-STATUS. 当前触发状态支线
 
-状态：`20260804_TIMEOUT_RECOVERY_AND_881139_CLOSEOUT_PASS`；
+状态：`20260824_N6_LATE_COMMIT_GAP_GOVERNANCE_REGISTERED`；
 分类：`n6_btrack_delivery_l2_n6_business_v1`。089 schema migration 与
 `n6_trigger_status_projection_20260731_backfill_v1` 2296-row consumer 已有 PASS
 证据；目标 canonical commit/tree 为
@@ -42,6 +42,9 @@ runtime_control 合同登记
 -> runtime_control 登记 `n5_trigger_status_scheduler_timeout_recovery_20260804_v1`
 -> N5_action 修复 plan/write 失败分类并一次 rebind exact N5 label（PASS）
 -> N6_user 只读验收 881139 精确失效与 10 tick 稳定性（PASS/CLOSED）
+-> runtime_control 登记 `n6_trigger_status_late_commit_gap_recovery_20260824_v1`（本 gate）
+-> N6_user 修复 late-visible lower-ID 消费与投影错误分类（pending separate gate）
+-> N6_user 一次 exact-label rebind、自然恢复与 10 tick 验收（pending）
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -75,6 +78,18 @@ checkpoint 与 20260731 历史状态保持不变。已登录 Safari 只读验收
 `docs/N5_N6_TRIGGER_STATUS_20260804_TIMEOUT_RECOVERY_CLOSEOUT.json`。该登记是历史
 closeout 证据，不替代后续 live/process/DB 问题的实时只读核对，也不授权 rerun、
 数据库、Release、service 或业务层操作。
+
+20260824 新的 P0 是 N6 trigger-status 晚提交缺口。冻结调查显示 checkpoint
+`4221894` 已越过 249 条尚无本 consumer `processed` inbox 的 ActionEligible
+（`4221396..4221644`）；`board:TDX:881002` 的 ActionEligible `4221622` 在其中。
+随后 `missing_status_update_target` 事务回滚却被 runner 标成 `COMMIT_UNKNOWN`，
+导致 30 秒任务持续阻断。当前只完成
+`n6_trigger_status_late_commit_gap_recovery_20260824_v1` 治理登记，状态不是运行
+PASS。下一步只能切换独立 `N6_user`：先做代码与聚焦测试，再在 fresh date/
+zero-commit/保护指纹检查通过后构建一个 immutable Release、一次 rebind exact N6
+label，并等待自然 tick。禁止手工插入 881002、重置 checkpoint、kickstart、重试、
+schema/index/migration、N4/N5/Web 或现有投影变更。冻结 RAG artifact：
+`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_REGISTRATION.json`。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 
