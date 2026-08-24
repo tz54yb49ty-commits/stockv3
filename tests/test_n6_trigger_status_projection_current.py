@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -11,7 +12,10 @@ from unittest.mock import MagicMock, patch
 
 from ashare_v3.runtime.bounded_worker_control import SingletonLockHeld
 from ashare_v3.runtime.intraday_worker_lineage import ASIA_SHANGHAI, LineageConfigError
-from ashare_v3.user.trigger_status_projection import CONSUMER_NAME
+from ashare_v3.user.trigger_status_projection import (
+    CONSUMER_NAME,
+    TriggerStatusProjectionError,
+)
 from scripts.run_n6_trigger_status_projection_current_once import (
     FORBIDDEN_FIELD,
     HISTORY_MAX_LINES,
@@ -212,19 +216,48 @@ class CurrentTriggerStatusProjectionRunnerTest(unittest.TestCase):
         self.assertTrue(result["requires_post_check"])
         self.assertEqual(called, [])
 
-    def test_execute_exception_is_commit_unknown_and_blocks_next_tick(self) -> None:
+    def test_projection_error_is_rolled_back_without_sticky_post_check(self) -> None:
+        result = self.run_tick(
+            core=lambda _args: (_ for _ in ()).throw(
+                TriggerStatusProjectionError("missing_status_update_target")
+            ),
+            extra=("--execute", "--user-confirmed"),
+        )
+        self.assertEqual(result["result"], "BLOCKED")
+        self.assertEqual(result["verdict"], "BLOCKED_CORE_PROJECTION_INPUT")
+        self.assertEqual(result["failure_phase"], "projection_rolled_back")
+        self.assertFalse(result["requires_post_check"])
+        self.assertIsNone(result["incident_id"])
+        self.assertIsNone(result["incident_path"])
+
+        recovered = self.run_tick()
+        self.assertEqual(
+            recovered["verdict"],
+            "N6_TRIGGER_STATUS_PROJECTION_CURRENT_PLAN_ONLY_PASS",
+        )
+
+    def test_execute_exception_creates_immutable_incident_and_blocks_next_tick(self) -> None:
         result = self.run_tick(
             core=lambda _args: (_ for _ in ()).throw(RuntimeError("socket lost")),
             extra=("--execute", "--user-confirmed"),
         )
         self.assertEqual(result["verdict"], "BLOCKED_COMMIT_UNKNOWN")
         self.assertEqual(result["result"], "COMMIT_UNKNOWN")
+        self.assertEqual(result["failure_phase"], "write")
         self.assertTrue(result["requires_post_check"])
+        incident_path = Path(result["incident_path"])
+        self.assertTrue(incident_path.is_file())
+        self.assertEqual(stat.S_IMODE(incident_path.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(incident_path.stat().st_mode), 0o444)
+        first_bytes = incident_path.read_bytes()
 
         called = []
         result = self.run_tick(core=lambda args: called.append(args))
         self.assertEqual(result["verdict"], "BLOCKED_PRIOR_COMMIT_UNKNOWN")
+        self.assertEqual(result["failure_phase"], "write")
+        self.assertEqual(result["incident_path"], str(incident_path))
         self.assertEqual(called, [])
+        self.assertEqual(incident_path.read_bytes(), first_bytes)
 
     def test_report_and_capped_history_are_written(self) -> None:
         self.history.write_text(

@@ -304,19 +304,31 @@ class PostgresTriggerStatusProjectionConsumer:
                 after_outbox_id = int(checkpoint["last_outbox_id"] or 0) if checkpoint else 0
                 cur.execute(
                     """
-                    SELECT outbox_id, event_id, event_type, event_schema_version,
-                           trade_date, asset_kind, identity_key, event_time,
-                           source_layer, source_run_id, dedup_key, partition_key,
-                           payload_json, status
-                    FROM common_event_outbox
-                    WHERE outbox_id > %s
-                      AND trade_date = %s
-                      AND source_layer = 'N5_action'
-                      AND event_type = ANY(%s)
-                    ORDER BY outbox_id ASC
+                    SELECT event.outbox_id, event.event_id, event.event_type,
+                           event.event_schema_version, event.trade_date,
+                           event.asset_kind, event.identity_key, event.event_time,
+                           event.source_layer, event.source_run_id, event.dedup_key,
+                           event.partition_key, event.payload_json, event.status
+                    FROM common_event_outbox AS event
+                    WHERE event.trade_date = %s
+                      AND event.source_layer = 'N5_action'
+                      AND event.event_type = ANY(%s)
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM common_event_inbox AS inbox
+                        WHERE inbox.consumer_name = %s
+                          AND inbox.event_id = event.event_id
+                          AND inbox.status = 'processed'
+                      )
+                    ORDER BY event.outbox_id ASC
                     LIMIT %s
                     """,
-                    (after_outbox_id, trade_date, list(CONSUMED_EVENT_TYPES), max(1, min(int(limit), 5000))),
+                    (
+                        trade_date,
+                        list(CONSUMED_EVENT_TYPES),
+                        CONSUMER_NAME,
+                        max(1, min(int(limit), 5000)),
+                    ),
                 )
                 rows = [dict(row) for row in cur.fetchall()]
                 for row in rows:
@@ -341,7 +353,7 @@ class PostgresTriggerStatusProjectionConsumer:
                     else:
                         counts["ignored_action_outcomes"] += 1
                     self._record_inbox(cur, row)
-                if last_outbox_id is not None:
+                if last_outbox_id is not None and last_outbox_id > after_outbox_id:
                     last = rows[-1]
                     cur.execute(
                         """

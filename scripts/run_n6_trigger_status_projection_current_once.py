@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,10 @@ from ashare_v3.runtime.intraday_worker_lineage import (
     LineageConfigError,
     load_intraday_worker_lineage_config,
 )
-from ashare_v3.user.trigger_status_projection import CONSUMER_NAME
+from ashare_v3.user.trigger_status_projection import (
+    CONSUMER_NAME,
+    TriggerStatusProjectionError,
+)
 from scripts.run_n6_trigger_status_projection_once import run as run_projection_once
 
 
@@ -94,16 +98,19 @@ def run_n6_trigger_status_projection_current_once(
             args.singleton_lock_path,
             metadata={"policy_id": POLICY_ID, "consumer_name": CONSUMER_NAME},
         ):
-            prior_blocker = _prior_commit_unknown(Path(args.json_report_path))
-            if prior_blocker:
+            unresolved_incident = _unresolved_incident(Path(args.json_report_path))
+            if unresolved_incident:
                 return _finalize(
                     report,
                     result="BLOCKED",
                     verdict="BLOCKED_PRIOR_COMMIT_UNKNOWN",
-                    reason=prior_blocker,
+                    reason=str(unresolved_incident["reason"]),
                     args=args,
                     report_writer=report_writer,
+                    failure_phase="write",
                     requires_post_check=True,
+                    incident_id=str(unresolved_incident["incident_id"]),
+                    incident_path=str(unresolved_incident["incident_path"]),
                 )
 
             try:
@@ -190,8 +197,45 @@ def run_n6_trigger_status_projection_current_once(
 
             try:
                 core_result = dict(core_runner(core_args))
+            except TriggerStatusProjectionError as exc:
+                return _finalize(
+                    report,
+                    result="BLOCKED",
+                    verdict="BLOCKED_CORE_PROJECTION_INPUT",
+                    reason=f"{type(exc).__name__}:{exc}",
+                    args=args,
+                    report_writer=report_writer,
+                    failure_phase="projection_rolled_back",
+                )
             except Exception as exc:
                 if args.execute:
+                    try:
+                        incident = _write_commit_unknown_incident(
+                            Path(args.json_report_path),
+                            report,
+                            reason=f"{type(exc).__name__}:{exc}",
+                        )
+                    except Exception as incident_exc:
+                        fallback_id = (
+                            "n6_trigger_status_write_ambiguity_fallback_"
+                            f"{local_trade_date}_{projection_run_id}"
+                        )
+                        return _finalize(
+                            report,
+                            result="COMMIT_UNKNOWN",
+                            verdict="BLOCKED_COMMIT_UNKNOWN",
+                            reason=(
+                                f"{type(exc).__name__}:{exc};"
+                                "incident_persistence_failed:"
+                                f"{type(incident_exc).__name__}:{incident_exc}"
+                            ),
+                            args=args,
+                            report_writer=report_writer,
+                            failure_phase="write",
+                            requires_post_check=True,
+                            incident_id=fallback_id,
+                            incident_path=str(args.json_report_path),
+                        )
                     return _finalize(
                         report,
                         result="COMMIT_UNKNOWN",
@@ -199,7 +243,10 @@ def run_n6_trigger_status_projection_current_once(
                         reason=f"{type(exc).__name__}:{exc}",
                         args=args,
                         report_writer=report_writer,
+                        failure_phase="write",
                         requires_post_check=True,
+                        incident_id=str(incident["incident_id"]),
+                        incident_path=str(incident["incident_path"]),
                     )
                 return _finalize(
                     report,
@@ -208,6 +255,7 @@ def run_n6_trigger_status_projection_current_once(
                     reason=f"{type(exc).__name__}:{exc}",
                     args=args,
                     report_writer=report_writer,
+                    failure_phase="plan",
                 )
 
             core_error = _validate_core_result(
@@ -352,18 +400,102 @@ def _validate_core_result(
     return ""
 
 
-def _prior_commit_unknown(path: Path) -> str:
-    if not path.exists():
-        return ""
+def _incident_directory(report_path: Path) -> Path:
+    return report_path.with_name(f"{report_path.stem}.incidents")
+
+
+def _unresolved_incident(report_path: Path) -> dict[str, str] | None:
+    incident_directory = _incident_directory(report_path)
+    if incident_directory.exists():
+        for incident_path in sorted(incident_directory.glob("*.json")):
+            try:
+                payload = json.loads(incident_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return {
+                    "incident_id": incident_path.stem,
+                    "incident_path": str(incident_path),
+                    "reason": f"incident_unreadable:{type(exc).__name__}",
+                }
+            if bool(payload.get("requires_post_check")):
+                return {
+                    "incident_id": str(payload.get("incident_id") or incident_path.stem),
+                    "incident_path": str(incident_path),
+                    "reason": "unresolved_write_incident",
+                }
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return f"prior_report_unreadable:{type(exc).__name__}"
-    if bool(payload.get("requires_post_check")):
-        return "prior_report_requires_post_check"
-    if str(payload.get("verdict") or "") == "BLOCKED_COMMIT_UNKNOWN":
-        return "prior_report_commit_unknown"
-    return ""
+        rolling_report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    if bool(rolling_report.get("requires_post_check")) or str(
+        rolling_report.get("verdict") or ""
+    ) == "BLOCKED_COMMIT_UNKNOWN":
+        return {
+            "incident_id": str(
+                rolling_report.get("incident_id") or "rolling_report_write_fallback"
+            ),
+            "incident_path": str(
+                rolling_report.get("incident_path") or report_path
+            ),
+            "reason": "unresolved_write_fallback_report",
+        }
+    return None
+
+
+def _write_commit_unknown_incident(
+    report_path: Path,
+    report: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    created_at = datetime.now(ASIA_SHANGHAI)
+    incident_id = (
+        "n6_trigger_status_write_ambiguity_"
+        f"{created_at.strftime('%Y%m%dT%H%M%S%f%z')}_{uuid.uuid4().hex}"
+    )
+    incident_directory = _incident_directory(report_path)
+    incident_directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(incident_directory, 0o700)
+    incident_path = incident_directory / f"{incident_id}.json"
+    incident = {
+        "incident_version": "n6-trigger-status-write-ambiguity-v1",
+        "incident_id": incident_id,
+        "incident_path": str(incident_path),
+        "rolling_report_path": str(report_path),
+        "policy_id": POLICY_ID,
+        "layer_role": "N6_user",
+        "created_at": created_at.isoformat(),
+        "failure_phase": "write",
+        "requires_post_check": True,
+        "reason": reason,
+        "local_trade_date": str(report.get("local_trade_date") or ""),
+        "projection_run_id": str(report.get("projection_run_id") or ""),
+        "partition_key": str(report.get("partition_key") or ""),
+        "core_args": dict(report.get("core_args") or {}),
+        "execute_requested": bool(report.get("execute_requested")),
+    }
+    encoded = (
+        json.dumps(incident, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+        + "\n"
+    ).encode("utf-8")
+    tmp_path = incident_directory / f".{incident_id}.tmp.{os.getpid()}"
+    try:
+        with tmp_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, 0o444)
+        os.link(tmp_path, incident_path)
+        directory_fd = os.open(incident_directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return incident
 
 
 def _base_report(
@@ -378,6 +510,10 @@ def _base_report(
         "user_confirmed": bool(args.user_confirmed),
         "consumer_name": CONSUMER_NAME,
         "bounded": {"limit": int(args.limit)},
+        "failure_phase": None,
+        "requires_post_check": False,
+        "incident_id": None,
+        "incident_path": None,
         "write_boundary": {
             "allowed_tables": [
                 "n6_trigger_status_current",
@@ -400,9 +536,12 @@ def _finalize(
     reason: str,
     args: argparse.Namespace,
     report_writer: Callable[[str | Path, Mapping[str, Any]], None],
+    failure_phase: str | None = None,
     requires_post_check: bool = False,
     counts: Mapping[str, int] | None = None,
     last_outbox_id: Any = None,
+    incident_id: str | None = None,
+    incident_path: str | None = None,
 ) -> dict[str, Any]:
     final_counts = {field: int((counts or {}).get(field, 0)) for field in COUNT_FIELDS}
     report.update(
@@ -410,7 +549,10 @@ def _finalize(
             "result": result,
             "verdict": verdict,
             "reason": reason,
+            "failure_phase": failure_phase,
             "requires_post_check": bool(requires_post_check),
+            "incident_id": incident_id,
+            "incident_path": incident_path,
             "counts": final_counts,
             "last_outbox_id": last_outbox_id,
             "finished_at": datetime.now(ASIA_SHANGHAI).isoformat(),

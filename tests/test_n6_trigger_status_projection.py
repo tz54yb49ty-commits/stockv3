@@ -6,8 +6,10 @@ from hashlib import sha256
 from pathlib import Path
 import inspect
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ashare_v3.user import projection_plan
+from ashare_v3.user import trigger_status_projection as trigger_status_projection_module
 from ashare_v3.user.trigger_status_projection import (
     ACTION_EVENT_TYPES,
     CONSUMER_NAME,
@@ -466,8 +468,98 @@ class N6TriggerStatusProjectionTests(unittest.TestCase):
         consume_source = inspect.getsource(
             PostgresTriggerStatusProjectionConsumer.consume_once
         )
-        self.assertIn("AND trade_date = %s", consume_source)
+        self.assertIn("WHERE event.trade_date = %s", consume_source)
         self.assertIn("episode_from_action_eligible(row", consume_source)
+
+    def test_late_visible_lower_id_is_consumed_without_checkpoint_regression(self) -> None:
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        transaction = MagicMock()
+        transaction.__enter__.return_value = transaction
+        connection.transaction.return_value = transaction
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        connection.cursor.return_value = cursor
+        cursor.fetchone.return_value = {"last_outbox_id": 100}
+        cursor.fetchall.return_value = [eligible_event(outbox_id=50)]
+
+        consumer = PostgresTriggerStatusProjectionConsumer("not-used")
+        with (
+            patch.object(
+                trigger_status_projection_module.psycopg,
+                "connect",
+                return_value=connection,
+            ),
+            patch.object(consumer, "_already_processed", return_value=False),
+            patch.object(consumer, "_insert_episode", return_value=True),
+            patch.object(consumer, "_record_inbox"),
+        ):
+            result = consumer.consume_once(
+                trade_date="20260731",
+                projection_run_id="late-visible-gap",
+            )
+
+        self.assertEqual(result.selected, 1)
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.last_outbox_id, 50)
+        statements = [str(call.args[0]) for call in cursor.execute.call_args_list]
+        candidate_sql = next(
+            statement
+            for statement in statements
+            if "FROM common_event_outbox AS event" in statement
+        )
+        self.assertIn("NOT EXISTS", candidate_sql)
+        self.assertIn("inbox.status = 'processed'", candidate_sql)
+        self.assertIn("ORDER BY event.outbox_id ASC", candidate_sql)
+        self.assertNotIn("outbox_id >", candidate_sql)
+        self.assertFalse(
+            any(
+                "INSERT INTO common_event_consumer_checkpoint" in statement
+                for statement in statements
+            )
+        )
+
+    def test_higher_id_advances_checkpoint_and_unprocessed_inbox_fails_closed(self) -> None:
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        transaction = MagicMock()
+        transaction.__enter__.return_value = transaction
+        connection.transaction.return_value = transaction
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        connection.cursor.return_value = cursor
+        cursor.fetchone.return_value = {"last_outbox_id": 100}
+        cursor.fetchall.return_value = [eligible_event(outbox_id=150)]
+
+        consumer = PostgresTriggerStatusProjectionConsumer("not-used")
+        with (
+            patch.object(
+                trigger_status_projection_module.psycopg,
+                "connect",
+                return_value=connection,
+            ),
+            patch.object(consumer, "_already_processed", return_value=False),
+            patch.object(consumer, "_insert_episode", return_value=True),
+            patch.object(consumer, "_record_inbox"),
+        ):
+            consumer.consume_once(
+                trade_date="20260731",
+                projection_run_id="new-high-watermark",
+            )
+        statements = [str(call.args[0]) for call in cursor.execute.call_args_list]
+        self.assertTrue(
+            any(
+                "INSERT INTO common_event_consumer_checkpoint" in statement
+                for statement in statements
+            )
+        )
+
+        existing = MagicMock()
+        existing.fetchone.return_value = {"status": "processing"}
+        with self.assertRaisesRegex(
+            TriggerStatusProjectionError, "existing_inbox_not_processed"
+        ):
+            consumer._already_processed(existing, eligible_event())
 
     def test_invalid_status_contract_fails_closed(self) -> None:
         event = status_event()
