@@ -7,18 +7,26 @@
 
 ### 2026-08-24 N6 trigger-status late-commit gap recovery
 
-Status: `GOVERNANCE_REGISTERED / N6_USER_PENDING`. Read-only evidence records
-that the N6 trigger-status checkpoint advanced past 249 later-visible,
-lower-ID `ActionEligible` rows. `board:TDX:881002` is one affected episode:
-N4/N5 inputs exist, its N6 inbox/current row does not, and the later
-`missing_status_update_target` transaction was misclassified as
-`COMMIT_UNKNOWN`, locking subsequent ticks. Policy
-`n6_trigger_status_late_commit_gap_recovery_20260824_v1` authorizes only a
-later independent `N6_user` code/test, immutable-Release, exact-label rebind,
-and natural-tick recovery gate. This registration performs none of those
-operations. It adds no schema/index/migration and changes no N4/N5, Web, or
-existing projection behavior. Frozen registration artifact:
-`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_REGISTRATION.json`.
+Status: `FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP / CLOSED`.
+Policy `n6_trigger_status_late_commit_gap_recovery_20260824_v1` completed its
+independent `N6_user` gate, repairing late-visible lower-ID completeness and
+the deterministic projection-error classification, then rebound only the exact
+N6 trigger-status label once. Two natural recovery ticks cleared all candidates
+and the 249-row low-ID gap; ten stability ticks passed without post-check,
+sticky blocker, duplicate replay, or checkpoint regression. While N4 remained
+live, `board:TDX:881002` was restored as exactly one episode and joined the
+`ccf` effective scope once.
+
+Frozen pre-existing Signals/Cards/shared-message/Decisions prefixes are
+byte-identical. Literal whole-table and non-trigger checkpoint hash equality is
+not claimed: untouched natural services appended 44 attributable rows to each
+of the three active projection surfaces and advanced their own checkpoints
+during observation. The exact-runtime runner suite passed 15 tests and the
+focused system-Python suite passed 35; the broader runtime suite's missing
+`openpyxl` remains an explicit environment evidence gap. N5 and Web were not
+operated, and browser acceptance was not run. `rerun_required=false`.
+Frozen RAG evidence:
+`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json`.
 
 ### 2026-08-04 N5 trigger-status timeout recovery
 

@@ -18,6 +18,9 @@ RECOVERY_PHASE = "trigger_status_n5_scheduler_timeout_recovery_20260804"
 N6_GAP_RECOVERY_PHASE = "trigger_status_n6_late_commit_gap_recovery_20260824"
 RECOVERY_PHASE_HASH = "be588f7842e0f0d0667a9113c6d446f5db94b15755f51da87bfe0da63e1f75f6"
 N6_GAP_RECOVERY_PHASE_HASH = "e7dc55d1eabe8396a7e74ea7a3fa22352179eca68f6130a56177975c417c7eb3"
+N6_GAP_RECOVERY_CLOSEOUT_HASH = (
+    "2a42a154a57fce62a6d44c5183a33655308a8278be182b9b9e0d7d275a1e05df"
+)
 PHASE_HASHES = {
     N5_PHASE: "8acdfe1a7dea74cab97224fab0dc1775fafd83e61e9cf1ded280b0b7ef023215",
     N6_PHASE: "083acdcce8df5e9f845785a1136e758fbc0ae1f00f3fc0e35021acce6d709e81",
@@ -176,6 +179,71 @@ class TriggerStatusSchedulerGovernanceTest(unittest.TestCase):
             canonical_hash(missing_authority), N6_GAP_RECOVERY_PHASE_HASH
         )
 
+    def test_n6_gap_recovery_closeout_is_hash_linked_and_not_overclaimed(self) -> None:
+        path = (
+            ROOT
+            / "docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json"
+        )
+        raw = path.read_bytes()
+        self.assertEqual(sha256(raw).hexdigest(), N6_GAP_RECOVERY_CLOSEOUT_HASH)
+        closeout = json.loads(raw)
+        self.assertEqual(closeout["policy_id"], N6_GAP_RECOVERY_POLICY_ID)
+        self.assertEqual(
+            closeout["status"],
+            "FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP",
+        )
+        self.assertEqual(closeout["runtime_functional_acceptance"], "PASS")
+        self.assertFalse(closeout["strict_whole_protected_fingerprint_equality"])
+        self.assertFalse(closeout["rerun_required"])
+        self.assertEqual(
+            closeout["gate2_report"]["sha256"],
+            "66aa7e8391a1fb77c251665b8871515d64d7717e56c70db613d5bbb3c7675010",
+        )
+        self.assertEqual(
+            closeout["immutable_release_and_service"]["release_manifest_sha256"],
+            "82790c22dfad0506bae03bf7ef2e81d5f850a354c00e5e3bf4e48744364e2238",
+        )
+        self.assertEqual(
+            closeout["immutable_release_and_service"]["target_plist_sha256"],
+            "f0e7a15d8a9e17617ac5bb5e4ac5b85fd4440d2ef0aca7440f6edd31a2a0b732",
+        )
+        self.assertTrue(
+            closeout["protected_projection_evidence"][
+                "frozen_preexisting_prefix_hashes_equal"
+            ]
+        )
+        self.assertFalse(
+            closeout["protected_projection_evidence"][
+                "strict_whole_table_hash_equality"
+            ]
+        )
+        self.assertEqual(
+            closeout["protected_projection_evidence"][
+                "attributed_natural_projection_appends"
+            ],
+            44,
+        )
+        self.assertEqual(closeout["natural_recovery"]["recovery_ticks_used"], 2)
+        self.assertEqual(closeout["natural_stability"]["observed_ticks"], 10)
+        self.assertEqual(
+            closeout["exact_881002_acceptance"]["n6_episode_count"], 1
+        )
+        self.assertEqual(
+            closeout["exact_881002_acceptance"]["ccf_effective_scope_join_count"],
+            1,
+        )
+        self.assertEqual(
+            closeout["natural_recovery"]["postflight_unprocessed_candidate_count"],
+            0,
+        )
+        self.assertFalse(closeout["browser_acceptance"]["performed"])
+        self.assertFalse(
+            closeout["browser_acceptance"]["blocks_runtime_functional_closeout"]
+        )
+        self.assertEqual(closeout["untouched_boundaries"]["n5_service_operations"], 0)
+        self.assertEqual(closeout["untouched_boundaries"]["web_service_operations"], 0)
+        self.assertEqual(len(closeout["evidence_gaps"]), 2)
+
     def test_policy_is_synchronized_across_control_documents(self) -> None:
         paths = (
             ROOT / "AGENTS.md",
@@ -200,6 +268,13 @@ class TriggerStatusSchedulerGovernanceTest(unittest.TestCase):
         )
         self.assertIn(
             N6_GAP_RECOVERY_POLICY_ID, artifact.read_text(encoding="utf-8")
+        )
+        closeout = (
+            ROOT
+            / "docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json"
+        )
+        self.assertIn(
+            N6_GAP_RECOVERY_POLICY_ID, closeout.read_text(encoding="utf-8")
         )
 
 

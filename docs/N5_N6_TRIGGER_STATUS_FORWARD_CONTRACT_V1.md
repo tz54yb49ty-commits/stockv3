@@ -455,3 +455,56 @@ The registration evidence artifact is:
 ```text
 docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_REGISTRATION.json
 ```
+
+### 4.6 20260824 N6 Late-Commit Gap Recovery Closeout
+
+The independent `N6_user` implementation and bounded recovery gate completed
+with the exact status:
+
+```text
+FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP
+```
+
+The repaired consumer commit/tree are
+`e98aa6887dcbbe92d0cdf664ba700fa2f49c9059` /
+`41e158492ea7e6c1dc407bf51747c303b9f003dc`. One immutable Release was built
+and only `com.ashare-v3.n6.trigger-status-projection-v1` was rebound once.
+There was no kickstart, manual runner, retry, N5 operation, Web operation,
+schema/index migration, manual checkpoint/episode mutation, browser action, or
+trade action.
+
+Natural recovery used two of the three allowed ticks. The first selected 2697
+events and advanced checkpoint `4221894 -> 4226270`; the second selected two
+events and advanced it to `4226272`. Final read-only evidence at checkpoint
+`4226413` records both current-day candidate count and low-ID gap count as zero.
+Ten subsequent natural ticks all passed with no post-check requirement, sticky
+blocker, replay skip, or checkpoint regression.
+
+While N4 still reported `board:TDX:881002` live, the N6 current projection held
+exactly one episode for `煤炭开采`, and the `ccf` effective-scope join count was
+one. This is functional recovery acceptance; authenticated browser acceptance
+was not run and remains optional after new explicit authorization.
+
+Protected evidence is deliberately bounded. Every frozen pre-existing Signals,
+Cards, shared-message, and Decisions prefix hash remained byte-identical. The
+mandatory natural observation window also produced 44 independently attributed
+Signals, 44 Cards, and 44 shared-message appends and advanced two untouched
+consumer checkpoints. Therefore literal whole-table/non-trigger-checkpoint hash
+equality is not claimed. The missing `openpyxl` broader-runtime-suite result is
+also retained as a test-environment evidence gap; focused system-Python tests
+passed 35 and exact-runtime runner tests passed 15.
+
+The frozen RAG closeout artifact is:
+
+```text
+docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json
+```
+
+Its only runtime report authority is the immutable Gate2 report
+`/private/tmp/N6_TRIGGER_STATUS_LATE_COMMIT_GAP_RECOVERY_20260824_GATE2_FINAL.json`
+with SHA-256
+`66aa7e8391a1fb77c251665b8871515d64d7717e56c70db613d5bbb3c7675010`.
+`rerun_required=false`. This historical closeout does not authorize a rerun,
+database connection, Release/plist/service operation, browser action, N1-N6
+write, or trade operation, and it does not replace fresh evidence for a later
+live-runtime question.

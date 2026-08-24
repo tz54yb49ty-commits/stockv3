@@ -1,0 +1,150 @@
+{
+  "artifact_version": "n5-n6-trigger-status-20260824-late-commit-gap-recovery-closeout-v1",
+  "title": "20260824 N6 trigger-status late-commit gap recovery closeout",
+  "policy_id": "n6_trigger_status_late_commit_gap_recovery_20260824_v1",
+  "layer_role": "runtime_control",
+  "for_trade_date": "20260824",
+  "status": "FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP",
+  "result": "FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP",
+  "runtime_functional_acceptance": "PASS",
+  "strict_whole_protected_fingerprint_equality": false,
+  "rerun_required": false,
+  "recommended_next_gate": "NONE_RUNTIME_RECOVERY_CLOSED_BROWSER_ACCEPTANCE_OPTIONAL",
+  "summary": "The fixed N6 trigger-status consumer recovered the late-visible lower-ID gaps through natural ticks, cleared all current-day candidates, restored board:TDX:881002 exactly once while N4 remained live, and completed ten stable ticks. Frozen pre-existing protected rows are unchanged; literal whole-table and non-trigger checkpoint equality is not claimed because untouched natural services appended attributable rows during observation.",
+  "source": {
+    "gate0_contract_commit": "7321f8b410b2f0511e22a939f449e314e0c333c5",
+    "n6_code_commit": "e98aa6887dcbbe92d0cdf664ba700fa2f49c9059",
+    "n6_code_tree": "41e158492ea7e6c1dc407bf51747c303b9f003dc",
+    "n6_code_diff_allowlist": [
+      "scripts/run_n6_trigger_status_projection_current_once.py",
+      "src/ashare_v3/user/trigger_status_projection.py",
+      "tests/test_n6_trigger_status_projection.py",
+      "tests/test_n6_trigger_status_projection_current.py"
+    ]
+  },
+  "gate2_report": {
+    "original_path": "/private/tmp/N6_TRIGGER_STATUS_LATE_COMMIT_GAP_RECOVERY_20260824_GATE2_FINAL.json",
+    "mode": "0444",
+    "sha256": "66aa7e8391a1fb77c251665b8871515d64d7717e56c70db613d5bbb3c7675010",
+    "result": "FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP"
+  },
+  "implementation_verification": {
+    "git_diff_check": "PASS",
+    "system_python_focused_tests_passed": 35,
+    "exact_runtime_runner_tests_passed": 15,
+    "runtime_full_core_suite": "NOT_RUN_MISSING_OPENPYXL"
+  },
+  "natural_recovery": {
+    "preflight_checkpoint": 4221894,
+    "preflight_low_id_action_eligible_gap_count": 249,
+    "preflight_unprocessed_candidate_count_immediate_pre_service": 2696,
+    "recovery_ticks_used": 2,
+    "recovery_ticks_allowed": 3,
+    "first_tick_selected": 2697,
+    "first_tick_checkpoint_after": 4226270,
+    "second_tick_selected": 2,
+    "second_tick_checkpoint_after": 4226272,
+    "postflight_checkpoint": 4226413,
+    "postflight_unprocessed_candidate_count": 0,
+    "postflight_low_id_gap_count": 0,
+    "checkpoint_regression_count": 0
+  },
+  "natural_stability": {
+    "required_ticks": 10,
+    "observed_ticks": 10,
+    "all_pass": true,
+    "all_requires_post_check_false": true,
+    "sticky_blocker_count": 0,
+    "replay_skipped_total": 0,
+    "checkpoint_regression_count": 0
+  },
+  "exact_881002_acceptance": {
+    "identity_key": "board:TDX:881002",
+    "asset_name": "煤炭开采",
+    "latest_n4_event_type": "TriggerMatched",
+    "latest_n4_trigger_live": true,
+    "n6_episode_count": 1,
+    "n6_action_eligible_outbox_id": 4221622,
+    "ccf_effective_scope_join_count": 1,
+    "result": "PASS"
+  },
+  "immutable_release_and_service": {
+    "exact_label": "com.ashare-v3.n6.trigger-status-projection-v1",
+    "release_path": "/Users/chuanfuchen/.local/share/ashare-v3/releases/trigger-status/20260824_111540__e98aa6887dcbbe92d0cdf664ba700fa2f49c9059",
+    "release_manifest_sha256": "82790c22dfad0506bae03bf7ef2e81d5f850a354c00e5e3bf4e48744364e2238",
+    "release_writable_objects": 0,
+    "target_plist_sha256": "f0e7a15d8a9e17617ac5bb5e4ac5b85fd4440d2ef0aca7440f6edd31a2a0b732",
+    "bootout_count": 1,
+    "bootstrap_count": 1,
+    "kickstart_count": 0,
+    "manual_runner_count": 0,
+    "retry_count": 0
+  },
+  "protected_projection_evidence": {
+    "strict_whole_table_hash_equality": false,
+    "frozen_preexisting_prefix_hashes_equal": true,
+    "frozen_user_signal_projection_rows": 2270,
+    "frozen_user_signal_card_rows": 2270,
+    "frozen_n6_ai_shared_signal_projection_rows": 2270,
+    "frozen_user_signal_decision_rows": 0,
+    "attributed_natural_projection_appends": 44,
+    "attributed_natural_card_appends": 44,
+    "attributed_natural_shared_message_appends": 44,
+    "attributed_source_outbox_range": [
+      4226258,
+      4226370
+    ],
+    "attributed_non_trigger_checkpoint_consumers": [
+      "n5_live_tracking_poller_v2_fastlane",
+      "n6_b_track_signal_projection_poller_v1"
+    ],
+    "conclusion": "All frozen pre-existing protected projection prefixes are byte-identical. Whole-table and non-trigger checkpoint hashes changed only through attributed natural appends and checkpoint advancement by untouched services."
+  },
+  "evidence_gaps": [
+    {
+      "id": "live_full_fingerprint_not_static",
+      "severity": "nonfunctional_acceptance_gap",
+      "detail": "Literal whole-table and all-non-trigger-checkpoint equality was not observable while unrelated natural services remained active; row-bounded prefix hashes and ownership attribution preserve the exact evidence limit."
+    },
+    {
+      "id": "runtime_full_core_suite_missing_openpyxl",
+      "severity": "test_environment_gap",
+      "detail": "The exact runtime interpreter lacked openpyxl for a broader imported module; the exact runner suite passed 15 tests and the system Python focused implementation suite passed 35 tests."
+    }
+  ],
+  "browser_acceptance": {
+    "performed": false,
+    "fresh_explicit_authorization_required": true,
+    "blocks_runtime_functional_closeout": false
+  },
+  "untouched_boundaries": {
+    "n5_service_operations": 0,
+    "web_service_operations": 0,
+    "other_service_operations": 0,
+    "n5_plist_sha256_before_after_equal": true,
+    "web_plist_sha256_before_after_equal": true,
+    "n4_writes": 0,
+    "n5_writes_by_gate": 0,
+    "browser_operations": 0,
+    "trading_operations": 0,
+    "schema_index_migration_operations": 0,
+    "manual_checkpoint_or_episode_operations": 0
+  },
+  "rollback": {
+    "performed": false,
+    "valid_recovered_status_data_preserved": true,
+    "available": "One exact N6-only restoration to the frozen ba82 plist/release remains available only for a separately authorized failure rollback."
+  },
+  "registration_boundary": {
+    "historical_closeout_only": true,
+    "replaces_fresh_live_verification": false,
+    "database_connections": 0,
+    "database_writes": 0,
+    "runtime_execute": 0,
+    "release_or_plist_changes": 0,
+    "service_operations": 0,
+    "browser_operations": 0,
+    "n1_n6_business_changes": 0,
+    "real_trade_operations": 0
+  }
+}
