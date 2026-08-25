@@ -393,6 +393,39 @@ connection, Release/plist/service operation, browser action, N1-N6 write, or
 trade operation, and it does not replace fresh read-only verification for a
 future live-runtime status question.
 
+### 4.7 20260824 881002 Authenticated Browser Acceptance Supplement
+
+After the runtime closeout above, the user separately authorized only the
+existing logged-in Safari N6 tab, GET/reload, and read-only DOM inspection. The
+tab was switched into view and reloaded exactly once. The refreshed
+`/n6/app/status-monitor` page resolved trade date `20260824`, displayed
+`admin · 管理员`, and reported 189 current trigger rows. Its exact eight-cell row
+for `board:TDX:881002` was:
+
+```text
+2026-08-24 09:34:00+08 | 板块 | 881002 | 煤炭开采 | 买向观察 |
+2550.000000 | D | D
+```
+
+The page retained the fixed eight-column contract and exposed no
+`trigger_pct` column. The browser operation budget was one tab switch and one
+reload, with zero business-button clicks, POST requests, form submissions, or
+DOM mutations. This acceptance performed no database, Release/plist, service,
+runtime execute, N1-N6 business, or trade operation.
+
+The original closeout artifact remains byte-preserved and correctly records
+that browser acceptance had not yet run at the time it was created. The later
+append-only supplement is:
+
+```text
+docs/N5_N6_TRIGGER_STATUS_20260824_881002_AUTHENTICATED_BROWSER_ACCEPTANCE_SUPPLEMENT.json
+```
+
+The combined status is
+`authenticated_browser_acceptance=PASS`, `recovery_status=CLOSED`, and
+`rerun_required=false`. This supplement does not authorize another browser
+session or replace fresh live verification for a future runtime question.
+
 ### 4.5 20260824 N6 Late-Commit Gap Recovery Registration
 
 The exact forward-only recovery policy is:

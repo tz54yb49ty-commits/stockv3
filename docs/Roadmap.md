@@ -1,6 +1,6 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-08-24
+更新日期：2026-08-26
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
@@ -24,9 +24,14 @@ of the three active projection surfaces and advanced their own checkpoints
 during observation. The exact-runtime runner suite passed 15 tests and the
 focused system-Python suite passed 35; the broader runtime suite's missing
 `openpyxl` remains an explicit environment evidence gap. N5 and Web were not
-operated, and browser acceptance was not run. `rerun_required=false`.
+operated. The original closeout correctly records that browser acceptance had
+not yet run; a later explicitly authorized Safari GET/reload/read-only DOM gate
+passed for `881002 / 煤炭开采` with one reload, eight expected columns, and zero
+business-button/POST/DOM mutations. `authenticated_browser_acceptance=PASS`,
+`recovery_status=CLOSED`, and `rerun_required=false`.
 Frozen RAG evidence:
-`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json`.
+`docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json` and
+`docs/N5_N6_TRIGGER_STATUS_20260824_881002_AUTHENTICATED_BROWSER_ACCEPTANCE_SUPPLEMENT.json`.
 
 ### 2026-08-04 N5 trigger-status timeout recovery
 

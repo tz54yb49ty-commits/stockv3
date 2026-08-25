@@ -1,0 +1,90 @@
+{
+  "artifact_version": "n5-n6-trigger-status-20260824-881002-authenticated-browser-acceptance-supplement-v1",
+  "title": "20260824 N6 trigger-status 881002 authenticated browser acceptance supplement",
+  "policy_id": "n6_trigger_status_late_commit_gap_recovery_20260824_v1",
+  "layer_role": "runtime_control",
+  "for_trade_date": "20260824",
+  "registration_date": "20260826",
+  "status": "AUTHENTICATED_BROWSER_ACCEPTANCE_PASS",
+  "result": "AUTHENTICATED_BROWSER_ACCEPTANCE_PASS",
+  "recovery_status": "CLOSED",
+  "rerun_required": false,
+  "recommended_next_gate": "NONE_RUNTIME_RECOVERY_CLOSED",
+  "summary": "After explicit user authorization, the existing logged-in Safari N6 tab was switched into view, reloaded exactly once, and inspected through read-only DOM. The refreshed status-monitor page displayed board 881002 煤炭开采 with the expected active trigger fields. No business button, POST, form submission, DOM mutation, database, service, Release, or N1-N6 business operation was performed.",
+  "supplements": {
+    "runtime_closeout_artifact": "docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json",
+    "runtime_closeout_artifact_sha256": "2a42a154a57fce62a6d44c5183a33655308a8278be182b9b9e0d7d275a1e05df",
+    "runtime_closeout_commit": "308e4170e84374c8a74c393c4b767efd5f711ca4",
+    "runtime_closeout_status_preserved": "FUNCTIONAL_PASS_WITH_ATTRIBUTED_NATURAL_DRIFT_EVIDENCE_GAP",
+    "historical_browser_not_run_statement_preserved": true
+  },
+  "authorization": {
+    "explicit_user_authorization": true,
+    "authorized_browser": "Safari",
+    "bundle_identifier": "com.apple.Safari",
+    "authorized_scope": [
+      "existing_logged_in_n6_tab",
+      "GET_or_reload",
+      "read_only_DOM"
+    ],
+    "business_button_authorized": false,
+    "POST_authorized": false
+  },
+  "authenticated_page": {
+    "application": "N6 多用户前台",
+    "principal_display": "admin · 管理员",
+    "route": "/n6/app/status-monitor",
+    "resolved_trade_date": "20260824",
+    "manual_refresh_href": "/n6/app/status-monitor?trade_date=20260824",
+    "readonly_label_visible": true,
+    "current_trigger_row_count": 189,
+    "columns": [
+      "触发时间",
+      "资产类型",
+      "代码",
+      "名称",
+      "方向",
+      "触发价格",
+      "当前周期",
+      "已触发周期"
+    ],
+    "trigger_pct_column_present": false
+  },
+  "exact_881002_dom_row": {
+    "trigger_time": "2026-08-24 09:34:00+08",
+    "asset_kind": "板块",
+    "asset": "881002",
+    "name": "煤炭开采",
+    "direction": "买向观察",
+    "trigger_price": "2550.000000",
+    "trigger_period": "D",
+    "triggered_periods_display": "D",
+    "result": "PASS"
+  },
+  "browser_operation_budget": {
+    "tab_switch_count": 1,
+    "reload_count": 1,
+    "read_only_dom_inspection_performed": true,
+    "business_button_click_count": 0,
+    "post_request_count": 0,
+    "form_submission_count": 0,
+    "dom_mutation_count": 0
+  },
+  "untouched_boundaries": {
+    "database_connections": 0,
+    "database_writes": 0,
+    "runtime_execute": 0,
+    "release_or_plist_changes": 0,
+    "service_operations": 0,
+    "n1_n6_business_changes": 0,
+    "trading_operations": 0
+  },
+  "registration_boundary": {
+    "append_only_supplement": true,
+    "rewrites_runtime_closeout_artifact": false,
+    "replaces_fresh_future_live_verification": false,
+    "authorizes_rerun": false,
+    "authorizes_browser_reuse": false,
+    "authorizes_database_or_service_operation": false
+  }
+}

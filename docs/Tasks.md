@@ -1,6 +1,6 @@
 # A股监控系统 v3 当前任务看板
 
-更新日期：2026-08-24
+更新日期：2026-08-26
 范围：最小可落地任务看板。本文档不授权数据库写入、行情 execute、worker、语音、sim、前端或真实交易。
 
 ## P0 当前优先级
@@ -45,7 +45,9 @@ runtime_control 合同登记
 -> runtime_control 登记 `n6_trigger_status_late_commit_gap_recovery_20260824_v1`（done）
 -> N6_user 修复 late-visible lower-ID 消费与投影错误分类（done）
 -> N6_user 一次 exact-label rebind、2 recovery tick 与 10 stability tick（functional PASS）
--> runtime_control 登记 bounded evidence-gap closeout（本 gate）
+-> runtime_control 登记 bounded evidence-gap closeout（done）
+-> 用户授权 Safari GET/reload/只读 DOM 验收 881002（PASS）
+-> runtime_control 登记 append-only browser acceptance supplement（本 gate）
 ```
 
 该 Web phase 只允许 `single_web_immutable_release_rebind`：精确 Web label、一个
@@ -96,6 +98,17 @@ runtime suite 缺 `openpyxl` 的环境缺口继续保留。N5/Web 操作均为 0
 `rerun_required=false`。冻结 RAG artifact：
 `docs/N5_N6_TRIGGER_STATUS_20260824_LATE_COMMIT_GAP_RECOVERY_CLOSEOUT.json`。浏览器
 验收仅可在用户新的明确授权后执行，且不影响本次功能恢复收口。
+
+上述“浏览器未运行”是原 closeout 创建时的历史事实，保持不改写。其后用户明确
+授权当前已登录 Safari N6 标签仅执行 GET/reload/只读 DOM，验收已 PASS：页面用户为
+`admin · 管理员`，当前触发行 189；`881002 / 煤炭开采 / 板块 / 买向观察` 的触发
+时间、价格、当前周期、已触发周期分别为 `2026-08-24 09:34:00+08`、
+`2550.000000`、`D`、`D`。本次浏览器预算为一次 tab switch、一次 reload，业务按钮、
+POST、表单提交、DOM mutation 均为 0；数据库、Release/plist、service、runtime execute、
+N1-N6 和交易操作均为 0。append-only RAG supplement 为
+`docs/N5_N6_TRIGGER_STATUS_20260824_881002_AUTHENTICATED_BROWSER_ACCEPTANCE_SUPPLEMENT.json`。
+最终登记：`authenticated_browser_acceptance=PASS`、`recovery_status=CLOSED`、
+`rerun_required=false`。
 
 ### T0.GOV-N6-DELIVERY. N6 B轨三通道与唯一发布主线
 

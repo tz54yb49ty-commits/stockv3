@@ -21,6 +21,13 @@ N6_GAP_RECOVERY_PHASE_HASH = "e7dc55d1eabe8396a7e74ea7a3fa22352179eca68f6130a561
 N6_GAP_RECOVERY_CLOSEOUT_HASH = (
     "2a42a154a57fce62a6d44c5183a33655308a8278be182b9b9e0d7d275a1e05df"
 )
+N6_GAP_RECOVERY_BROWSER_SUPPLEMENT = (
+    ROOT
+    / "docs/N5_N6_TRIGGER_STATUS_20260824_881002_AUTHENTICATED_BROWSER_ACCEPTANCE_SUPPLEMENT.json"
+)
+N6_GAP_RECOVERY_BROWSER_SUPPLEMENT_HASH = (
+    "f32cc010d4f7bcf7a70d01bb49771eb7ace29980c2ff23668c3517dcbdadd51f"
+)
 PHASE_HASHES = {
     N5_PHASE: "8acdfe1a7dea74cab97224fab0dc1775fafd83e61e9cf1ded280b0b7ef023215",
     N6_PHASE: "083acdcce8df5e9f845785a1136e758fbc0ae1f00f3fc0e35021acce6d709e81",
@@ -244,6 +251,57 @@ class TriggerStatusSchedulerGovernanceTest(unittest.TestCase):
         self.assertEqual(closeout["untouched_boundaries"]["web_service_operations"], 0)
         self.assertEqual(len(closeout["evidence_gaps"]), 2)
 
+    def test_n6_gap_recovery_authenticated_browser_supplement_is_append_only(self) -> None:
+        raw = N6_GAP_RECOVERY_BROWSER_SUPPLEMENT.read_bytes()
+        self.assertEqual(
+            sha256(raw).hexdigest(), N6_GAP_RECOVERY_BROWSER_SUPPLEMENT_HASH
+        )
+        supplement = json.loads(raw)
+        self.assertEqual(supplement["policy_id"], N6_GAP_RECOVERY_POLICY_ID)
+        self.assertEqual(
+            supplement["result"], "AUTHENTICATED_BROWSER_ACCEPTANCE_PASS"
+        )
+        self.assertEqual(supplement["recovery_status"], "CLOSED")
+        self.assertFalse(supplement["rerun_required"])
+        self.assertEqual(
+            supplement["supplements"]["runtime_closeout_artifact_sha256"],
+            N6_GAP_RECOVERY_CLOSEOUT_HASH,
+        )
+        self.assertTrue(
+            supplement["supplements"][
+                "historical_browser_not_run_statement_preserved"
+            ]
+        )
+        self.assertEqual(
+            supplement["authenticated_page"]["current_trigger_row_count"], 189
+        )
+        self.assertEqual(len(supplement["authenticated_page"]["columns"]), 8)
+        self.assertFalse(
+            supplement["authenticated_page"]["trigger_pct_column_present"]
+        )
+        self.assertEqual(supplement["exact_881002_dom_row"]["asset"], "881002")
+        self.assertEqual(
+            supplement["exact_881002_dom_row"]["name"], "煤炭开采"
+        )
+        self.assertEqual(supplement["exact_881002_dom_row"]["result"], "PASS")
+        budget = supplement["browser_operation_budget"]
+        self.assertEqual(budget["reload_count"], 1)
+        self.assertEqual(budget["business_button_click_count"], 0)
+        self.assertEqual(budget["post_request_count"], 0)
+        self.assertEqual(budget["dom_mutation_count"], 0)
+        boundary = supplement["untouched_boundaries"]
+        self.assertEqual(boundary["database_connections"], 0)
+        self.assertEqual(boundary["service_operations"], 0)
+        self.assertEqual(boundary["n1_n6_business_changes"], 0)
+        self.assertTrue(
+            supplement["registration_boundary"]["append_only_supplement"]
+        )
+        self.assertFalse(
+            supplement["registration_boundary"][
+                "rewrites_runtime_closeout_artifact"
+            ]
+        )
+
     def test_policy_is_synchronized_across_control_documents(self) -> None:
         paths = (
             ROOT / "AGENTS.md",
@@ -275,6 +333,10 @@ class TriggerStatusSchedulerGovernanceTest(unittest.TestCase):
         )
         self.assertIn(
             N6_GAP_RECOVERY_POLICY_ID, closeout.read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            N6_GAP_RECOVERY_POLICY_ID,
+            N6_GAP_RECOVERY_BROWSER_SUPPLEMENT.read_text(encoding="utf-8"),
         )
 
 
