@@ -40,6 +40,7 @@ def load_vendor_module(module_name: str) -> Any:
 
 
 class TQClient(Protocol):
+    def get_stock_list(self, market: str) -> Any: ...
     def get_stock_list_in_sector(self, market: str) -> Any: ...
     def get_daily_bars(
         self, symbol: str, *, start_date: str, end_date: str,
@@ -74,6 +75,9 @@ class TQHttpClient:
     def get_stock_list_in_sector(self, market: str) -> Any:
         return self.call("get_stock_list_in_sector", {"block_code": market})
 
+    def get_stock_list(self, market: str) -> Any:
+        return self.call("get_stock_list", {"market": market, "list_type": 1})
+
     def get_daily_bars(
         self, symbol: str, *, start_date: str, end_date: str,
         adjust: str | None, fill_data: bool,
@@ -106,9 +110,12 @@ class TQWindowsSource:
     def fetch_market_members(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for market in TQ_MARKETS:
-            for row in _records(self.client.get_stock_list_in_sector(market)):
+            for row in _records(self.client.get_stock_list(market)):
                 rows.append({**row, "market": market})
         return rows
+
+    def fetch_sector_members(self, block_code: str) -> list[dict[str, Any]]:
+        return _records(self.client.get_stock_list_in_sector(block_code))
 
     def fetch_daily(
         self,
@@ -132,22 +139,21 @@ class TQWindowsSource:
         )
 
 
-class EltdxClient(Protocol):
-    def finance_batch(self, codes: Sequence[str]) -> Any: ...
-    def finance_report(self, code: str, report: str) -> Any: ...
-
-
 @dataclass(frozen=True)
 class EltdxWindowsSource:
-    client: EltdxClient
+    client: Any
 
     def fetch_finance_batch(self, codes: Sequence[str]) -> list[dict[str, Any]]:
-        return _records(self.client.finance_batch(tuple(codes)))
+        return _records(self.client.corporate.finance_batch(tuple(codes)))
 
     def fetch_three_reports(self, code: str) -> dict[str, list[dict[str, Any]]]:
         return {
-            report: _records(self.client.finance_report(code, report))
-            for report in ("balance", "income", "cashflow")
+            name: _records(self.client.f10.finance_report(code, report_type=report_type))
+            for name, report_type in (
+                ("balance", "zcfzb"),
+                ("income", "lrb"),
+                ("cashflow", "xjllb"),
+            )
         }
 
 

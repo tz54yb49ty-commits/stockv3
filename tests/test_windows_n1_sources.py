@@ -19,19 +19,24 @@ class FakeTQ:
     def __init__(self): self.calls = []
     def get_stock_list_in_sector(self, market):
         self.calls.append(("sector", market)); return [{"code": market + "00001"}]
+    def get_stock_list(self, market):
+        self.calls.append(("market", market)); return [{"code": market + "00001"}]
     def get_daily_bars(self, symbol, **kwargs):
         self.calls.append(("daily", symbol, kwargs)); return [{"trade_date": "20260102", "open": 1, "high": 2, "low": 1, "close": 2}]
 
 
 class FakeEltdx:
+    def __init__(self): self.corporate = self; self.f10 = self; self.reports = []
     def finance_batch(self, codes): return [{"code": code} for code in codes]
-    def finance_report(self, code, report): return [{"code": code, "report": report}]
+    def finance_report(self, code, report_type):
+        self.reports.append(report_type); return [{"code": code, "report": report_type}]
 
 
 class WindowsN1SourcesTest(unittest.TestCase):
     def test_tq_uses_exact_markets_and_adjustment_authority(self):
         client = FakeTQ(); source = TQWindowsSource(client)
         self.assertEqual([row["market"] for row in source.fetch_market_members()], list(TQ_MARKETS))
+        self.assertEqual([call for call in client.calls if call[0] == "market"], [("market", m) for m in TQ_MARKETS])
         source.fetch_daily("600000.SH", asset_kind="stock", start_date="20230101", end_date="20260102")
         source.fetch_daily("000001.SH", asset_kind="index", start_date="20230101", end_date="20260102")
         self.assertEqual(client.calls[-2][2], {"start_date": "20230101", "end_date": "20260102", "adjust": "qfq", "fill_data": False})
@@ -48,6 +53,8 @@ class WindowsN1SourcesTest(unittest.TestCase):
         self.assertEqual(rows, [{"Time": "20260102", "Close": 10}])
         client.get_stock_list_in_sector("5")
         self.assertEqual(calls[-1], ("get_stock_list_in_sector", {"block_code": "5"}))
+        client.get_stock_list("5")
+        self.assertEqual(calls[-1], ("get_stock_list", {"market": "5", "list_type": 1}))
 
     def test_no_forbidden_source_fallback(self):
         with self.assertRaisesRegex(RuntimeError, "forbidden"):
@@ -56,8 +63,9 @@ class WindowsN1SourcesTest(unittest.TestCase):
             load_vendor_module("mootdx.client")
 
     def test_eltdx_requires_exact_three_reports(self):
-        result = EltdxWindowsSource(FakeEltdx()).fetch_three_reports("600000")
+        client = FakeEltdx(); result = EltdxWindowsSource(client).fetch_three_reports("600000")
         self.assertEqual(tuple(result), ("balance", "income", "cashflow"))
+        self.assertEqual(client.reports, ["zcfzb", "lrb", "xjllb"])
 
     def test_three_year_start_market_values_and_invalid_ohlc(self):
         self.assertEqual(three_year_start(date(2026, 8, 26)), "20230101")
