@@ -3,14 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import inspect
 import unittest
 
 from ashare_v3.ingestion.windows_n1_db_setup import (
     ELEVATED_RUNTIME_PGPASS, OPERATOR_DIRECT, OPERATOR_ELEVATED,
-    WindowsIdentityEvidence, assert_fresh_authority, merge_pgpass,
-    pgpass_path_for_mode, validate_operator_identity, verify_pgpass_acl,
-    write_user_pgpass,
+    RecoveryAuthorityEvidence, WindowsIdentityEvidence, assert_fresh_authority, merge_pgpass,
+    grant_minimum_n1_privileges, pgpass_path_for_mode, validate_operator_identity, verify_pgpass_acl,
+    validate_recovery_authority, write_user_pgpass,
 )
+from ashare_v3.ingestion.windows_n1_postgres import FORBIDDEN_WRITE_TABLES, N1_WRITABLE_TABLES
 
 
 class FakeCursor:
@@ -63,9 +65,10 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             self.assertEqual(path, Path(directory) / "postgresql" / "pgpass.conf")
             self.assertIn("not-printed-secret", path.read_text(encoding="utf-8"))
             self.assertNotIn("not-printed-secret", repr(calls))
-            self.assertFalse(path.with_name("pgpass.conf.windows_n1_tmp").exists())
+            self.assertEqual(list(path.parent.glob("pgpass.conf.windows_n1_*.tmp")), [])
             self.assertIn("/inheritance:r", calls[0][0])
-            self.assertIn(r"TDX-STOCK\ashare-ops:(R,W)", calls[0][0])
+            self.assertIn(f"*{self.runtime_sid}:(R,W)", calls[1][0])
+            self.assertEqual(calls[2][0][-1], f"*{self.runtime_sid}")
 
     def test_operator_modes_require_exact_windows_identity_and_sids(self):
         validate_operator_identity(OPERATOR_DIRECT, self.direct_identity)
@@ -117,6 +120,57 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             Path("pgpass.conf"), runtime_sid=self.runtime_sid,
             run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
         )
+
+    def recovery_evidence(self, **overrides):
+        tables = tuple(sorted(N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES))
+        values = {
+            "database_exists": True, "database_owner": "postgres",
+            "database_size": 9116695, "role_exists": True, "role_login": True,
+            "role_superuser": False, "role_createdb": False,
+            "role_createrole": False, "role_replication": False,
+            "public_tables": tables, "table_counts": {table: 0 for table in tables},
+        }
+        values.update(overrides)
+        return RecoveryAuthorityEvidence(**values)
+
+    def test_recovery_requires_exact_existing_empty_authority(self):
+        validate_recovery_authority(self.recovery_evidence())
+        invalid = (
+            {"database_exists": False}, {"database_owner": "ashare_v3_user"},
+            {"role_exists": False}, {"role_login": False},
+            {"role_superuser": True},
+            {"public_tables": tuple(sorted(N1_WRITABLE_TABLES))},
+            {"table_counts": {**self.recovery_evidence().table_counts, "stock_identity": 1}},
+        )
+        for override in invalid:
+            with self.subTest(override=override), self.assertRaises(RuntimeError):
+                validate_recovery_authority(self.recovery_evidence(**override))
+
+    def test_permission_refreeze_revokes_tables_and_sequences_before_grant(self):
+        source = inspect.getsource(grant_minimum_n1_privileges)
+        self.assertLess(source.index("REVOKE ALL ON ALL TABLES"), source.index("GRANT SELECT ON"))
+        self.assertLess(source.index("REVOKE ALL ON ALL SEQUENCES"), source.index("GRANT USAGE,SELECT ON ALL SEQUENCES"))
+
+    def test_acl_failure_cleans_unique_temp_and_preserves_existing_pgpass(self):
+        with TemporaryDirectory() as directory:
+            import ashare_v3.ingestion.windows_n1_db_setup as module
+            original = module.ELEVATED_RUNTIME_PGPASS
+            target = Path(directory) / "runtime" / "pgpass.conf"
+            target.parent.mkdir(parents=True)
+            target.write_text("old-entry\n", encoding="utf-8")
+            module.ELEVATED_RUNTIME_PGPASS = target
+            try:
+                with self.assertRaisesRegex(RuntimeError, "acl failed"):
+                    write_user_pgpass(
+                        password="new-memory-secret", operator_mode=OPERATOR_ELEVATED,
+                        identity=self.elevated_identity, environ={},
+                        run_command=lambda *args, **kwargs: None,
+                        acl_verifier=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("acl failed")),
+                    )
+            finally:
+                module.ELEVATED_RUNTIME_PGPASS = original
+            self.assertEqual(target.read_text(encoding="utf-8"), "old-entry\n")
+            self.assertEqual(list(target.parent.glob("pgpass.conf.windows_n1_*.tmp")), [])
 
 
 if __name__ == "__main__": unittest.main()
