@@ -13,6 +13,7 @@ POLICY_ID = "windows_rebuild_w0_bounded_v1"
 AGENTS_PATH = ROOT / "AGENTS.md"
 COMPILER_PATH = ROOT / "docs" / "EXECUTION_COMPILER.md"
 KERNEL_PATH = ROOT / "docs" / "EXECUTION_KERNEL.md"
+RUNTIME_GATE_PATH = ROOT / "docs" / "EXECUTION_RUNTIME_GATE.md"
 
 
 def load_policy_from(path: Path) -> dict[str, Any]:
@@ -30,8 +31,9 @@ def load_control_contracts(
     agents_path: Path = AGENTS_PATH,
     compiler_path: Path = COMPILER_PATH,
     kernel_path: Path = KERNEL_PATH,
-) -> tuple[dict[str, Any], str]:
-    for path in (agents_path, compiler_path, kernel_path):
+    runtime_gate_path: Path = RUNTIME_GATE_PATH,
+) -> tuple[dict[str, Any], str, str]:
+    for path in (agents_path, compiler_path, kernel_path, runtime_gate_path):
         if not path.is_file():
             raise FileNotFoundError(path)
     agents_policy = load_policy_from(agents_path)
@@ -41,7 +43,10 @@ def load_control_contracts(
     compiler = compiler_path.read_text(encoding="utf-8")
     if POLICY_ID not in compiler:
         raise AssertionError("Compiler must recognize the W0 policy")
-    return agents_policy, compiler
+    runtime_gate = runtime_gate_path.read_text(encoding="utf-8")
+    if POLICY_ID not in runtime_gate:
+        raise AssertionError("Runtime Gate must recognize the W0 policy")
+    return agents_policy, compiler, runtime_gate
 
 
 def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
@@ -87,7 +92,7 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.policy, cls.compiler = load_control_contracts()
+        cls.policy, cls.compiler, cls.runtime_gate = load_control_contracts()
         cls.request = canonical_request(cls.policy)
 
     def decision(self, **overrides: Any) -> str:
@@ -185,10 +190,32 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
 
     def test_missing_any_mandatory_control_document_fails(self) -> None:
         missing = ROOT / "docs" / "__missing_w0_control_document__.md"
-        for field in ("agents_path", "compiler_path", "kernel_path"):
+        for field in (
+            "agents_path",
+            "compiler_path",
+            "kernel_path",
+            "runtime_gate_path",
+        ):
             kwargs = {field: missing}
             with self.subTest(field=field), self.assertRaises(FileNotFoundError):
                 load_control_contracts(**kwargs)
+
+    def test_runtime_gate_matches_policy_and_general_runtime_rejects(self) -> None:
+        gate = self.runtime_gate
+        self.assertIn("general Windows setup request to `REJECT`", gate)
+        self.assertIn("named_policy_evaluated=true", gate)
+        self.assertIn("named_policy_passed=true", gate)
+        self.assertIn("semantically equal", gate)
+        self.assertIn("w0_prepare_and_mutate", gate)
+        self.assertIn("wsl_shutdown_native_control", gate)
+        self.assertIn("RESTART_REQUIRED", gate)
+        for value in (
+            self.policy["exact_allowlist"]["legacy_service_name"],
+            *self.policy["exact_allowlist"]["software_package_ids"],
+            *self.policy["n1_handoff"]["forbidden_sources"][:2],
+        ):
+            self.assertIn(value, gate)
+        self.assertTrue(self.policy["governance_session_cannot_execute"])
 
     def test_control_plan_references_policy_and_new_empty_cluster(self) -> None:
         plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
