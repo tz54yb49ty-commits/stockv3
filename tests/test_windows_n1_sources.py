@@ -4,6 +4,7 @@ from datetime import date
 import unittest
 
 from ashare_v3.ingestion.windows_n1_sources import (
+    ELTDX_FINANCE_BATCH_SIZE,
     EltdxWindowsSource,
     TQ_MARKETS,
     TQHttpClient,
@@ -27,8 +28,10 @@ class FakeTQ:
 
 
 class FakeEltdx:
-    def __init__(self): self.corporate = self; self.f10 = self; self.reports = []
-    def finance_batch(self, codes): return [{"code": code} for code in codes]
+    def __init__(self):
+        self.corporate = self; self.f10 = self; self.reports = []; self.finance_requests = []
+    def finance_batch(self, codes):
+        self.finance_requests.append(tuple(codes)); return [{"code": code} for code in codes]
     def finance_report(self, code, report_type):
         self.reports.append(report_type); return [{"code": code, "report": report_type}]
 
@@ -68,6 +71,13 @@ class WindowsN1SourcesTest(unittest.TestCase):
         client = FakeEltdx(); result = EltdxWindowsSource(client).fetch_three_reports("600000")
         self.assertEqual(tuple(result), ("balance", "income", "cashflow"))
         self.assertEqual(client.reports, ["zcfzb", "lrb", "xjllb"])
+
+    def test_eltdx_finance_batch_is_chunked_at_server_limit(self):
+        client = FakeEltdx(); codes = [f"code-{index}" for index in range(205)]
+        result = EltdxWindowsSource(client).fetch_finance_batch(codes)
+        self.assertEqual([len(batch) for batch in client.finance_requests], [100, 100, 5])
+        self.assertEqual([row["code"] for row in result], codes)
+        self.assertEqual(ELTDX_FINANCE_BATCH_SIZE, 100)
 
     def test_three_year_start_market_values_and_invalid_ohlc(self):
         self.assertEqual(three_year_start(date(2026, 8, 26)), "20230101")

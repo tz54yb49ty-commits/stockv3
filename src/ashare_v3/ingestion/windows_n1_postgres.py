@@ -56,9 +56,10 @@ class WindowsN1PostgresRepository:
     connection: Any
 
     def verify_authority(self) -> None:
-        with self.connection.cursor() as cur:
-            cur.execute("SELECT current_database(), current_user")
-            database, _user = cur.fetchone()
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute("SELECT current_database(), current_user")
+                database, _user = cur.fetchone()
         if database != "ashare_v3":
             raise RuntimeError(f"database authority mismatch: {database}")
 
@@ -86,27 +87,29 @@ class WindowsN1PostgresRepository:
 
     def business_row_counts(self) -> dict[str, int]:
         counts = {}
-        with self.connection.cursor() as cur:
-            for table in sorted(N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES):
-                cur.execute("SELECT to_regclass(%s)", (table,))
-                if cur.fetchone()[0] is None:
-                    counts[table] = 0
-                    continue
-                cur.execute(f'SELECT count(*) FROM "{table}"')
-                counts[table] = int(cur.fetchone()[0])
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                for table in sorted(N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES):
+                    cur.execute("SELECT to_regclass(%s)", (table,))
+                    if cur.fetchone()[0] is None:
+                        counts[table] = 0
+                        continue
+                    cur.execute(f'SELECT count(*) FROM "{table}"')
+                    counts[table] = int(cur.fetchone()[0])
         return counts
 
     def downstream_row_counts(self) -> dict[str, int]:
         counts = {}
-        with self.connection.cursor() as cur:
-            cur.execute(
-                "SELECT schemaname,tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')"
-            )
-            for schema, table in cur.fetchall():
-                if schema == "public" and table in N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES:
-                    continue
-                cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
-                counts[f"{schema}.{table}"] = int(cur.fetchone()[0])
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    "SELECT schemaname,tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')"
+                )
+                for schema, table in cur.fetchall():
+                    if schema == "public" and table in N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES:
+                        continue
+                    cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
+                    counts[f"{schema}.{table}"] = int(cur.fetchone()[0])
         return counts
 
     def persist_batch(
@@ -181,19 +184,20 @@ class WindowsN1PostgresRepository:
 
     def assert_n1_data_ready(self, scope_key: str) -> dict[str, int]:
         counts: dict[str, int] = {}
-        with self.connection.cursor() as cur:
-            cur.execute("SELECT data_type FROM common_active_source_version WHERE scope_key=%s", (scope_key,))
-            active = {row[0] for row in cur.fetchall()}
-            missing = REQUIRED_READY_DATA_TYPES - active
-            if missing:
-                raise RuntimeError(f"missing active N1 sources: {sorted(missing)}")
-            for table in sorted(REQUIRED_READY_DATA_TYPES):
-                validate_write_target(table)
-                cur.execute(f'SELECT count(*) FROM "{table}"')
-                counts[table] = int(cur.fetchone()[0])
-                if counts[table] == 0:
-                    raise RuntimeError(f"empty N1 fact: {table}")
-            cur.execute("SELECT count(*) FROM common_trade_calendar")
-            if int(cur.fetchone()[0]) != 0:
-                raise RuntimeError("common_trade_calendar must remain empty in Windows N1")
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute("SELECT data_type FROM common_active_source_version WHERE scope_key=%s", (scope_key,))
+                active = {row[0] for row in cur.fetchall()}
+                missing = REQUIRED_READY_DATA_TYPES - active
+                if missing:
+                    raise RuntimeError(f"missing active N1 sources: {sorted(missing)}")
+                for table in sorted(REQUIRED_READY_DATA_TYPES):
+                    validate_write_target(table)
+                    cur.execute(f'SELECT count(*) FROM "{table}"')
+                    counts[table] = int(cur.fetchone()[0])
+                    if counts[table] == 0:
+                        raise RuntimeError(f"empty N1 fact: {table}")
+                cur.execute("SELECT count(*) FROM common_trade_calendar")
+                if int(cur.fetchone()[0]) != 0:
+                    raise RuntimeError("common_trade_calendar must remain empty in Windows N1")
         return counts

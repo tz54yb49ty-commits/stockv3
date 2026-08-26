@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 TQ_MARKETS = ("5", "9", "11", "12", "14")
 FORBIDDEN_SOURCE_MODULES = ("tushare", "mootdx")
+ELTDX_FINANCE_BATCH_SIZE = 100
 
 
 def three_year_start(today: date) -> str:
@@ -166,7 +167,11 @@ class EltdxWindowsSource:
     client: Any
 
     def fetch_finance_batch(self, codes: Sequence[str]) -> list[dict[str, Any]]:
-        return _records(self.client.corporate.finance_batch(tuple(codes)))
+        rows: list[dict[str, Any]] = []
+        for offset in range(0, len(codes), ELTDX_FINANCE_BATCH_SIZE):
+            batch = tuple(codes[offset : offset + ELTDX_FINANCE_BATCH_SIZE])
+            rows.extend(_records(self.client.corporate.finance_batch(batch)))
+        return rows
 
     def fetch_three_reports(self, code: str) -> dict[str, list[dict[str, Any]]]:
         return {
