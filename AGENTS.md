@@ -461,7 +461,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 3,
+  "policy_version": 4,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -527,12 +527,20 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     ],
     "installer_version_hash_signature_must_be_frozen_before_install": true,
     "postgresql_minimum_version": "16.14",
+    "postgresql_installer_package_id": "PostgreSQL.PostgreSQL.16",
+    "postgresql_installer_version": "16.15-1",
+    "postgresql_installer_filename": "postgresql-16.15-1-windows-x64-download-v1.exe",
+    "postgresql_installer_path": "C:\\AshareV3\\staging\\installers\\postgresql-16.15-1-windows-x64-download-v1.exe",
+    "postgresql_installer_url": "https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe",
+    "postgresql_installer_sha256": "DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2",
+    "postgresql_installer_authenticode_status": "Valid",
+    "postgresql_installer_signer": "EnterpriseDB Corporation",
     "postgresql_install_root": "D:\\PostgreSQL\\16",
     "postgresql_data_directory": "D:\\PostgreSQL\\16\\data",
     "postgresql_backup_staging": "D:\\PostgreSQL\\backup-staging",
     "postgresql_listen_addresses": "127.0.0.1",
-    "postgresql_service_name": "AshareV3-PostgreSQL-16",
-    "postgresql_service_identity": "NT SERVICE\\AshareV3-PostgreSQL-16",
+    "postgresql_service_name": "postgresql-x64-16",
+    "postgresql_service_account": "TDX-STOCK\\postgres",
     "c_directories": [
       "C:\\AshareV3\\app",
       "C:\\AshareV3\\config",
@@ -580,6 +588,43 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "business_venv_create_attempts": 0,
     "project_package_install_attempts": 0
   },
+  "postgresql16_installer_contract": {
+    "publisher_supported_defaults_required": true,
+    "installation_mode": "interactive_gui_from_exact_staged_installer",
+    "winget_unattended_execution_forbidden": true,
+    "service_name": "postgresql-x64-16",
+    "service_account": "TDX-STOCK\\postgres",
+    "networkservice_final_identity_forbidden": true,
+    "service_account_preflight_states": [
+      "missing_local_postgres_account",
+      "existing_exact_local_postgres_account"
+    ],
+    "installer_may_create_account_only_when_missing": true,
+    "account_create_attempts_when_missing": 1,
+    "account_create_attempts_when_existing": 0,
+    "existing_account_password_reset_forbidden": true,
+    "service_logon_only": true,
+    "interactive_local_rdp_network_batch_logon_forbidden": true,
+    "account_group_membership_change_forbidden": true,
+    "gui_secret_entry_required": true,
+    "unattended_install_with_secret_forbidden": true,
+    "password_shared_by_database_superuser_and_windows_service_account": true,
+    "secret_forbidden_locations": [
+      "command_line",
+      "process_argv",
+      "environment",
+      "response_file",
+      "shell_history",
+      "transcript",
+      "log",
+      "evidence",
+      "screenshot"
+    ],
+    "secret_value_or_hash_recording_forbidden": true,
+    "evidence_records_only_redacted_gui_entry_and_redaction_audit": true,
+    "automatic_retry_attempts": 0,
+    "failed_install_preserved_as_evidence": true
+  },
   "empty_cluster_contract": {
     "initdb_new_empty_cluster_only": true,
     "mac_dump_import_attempts": 0,
@@ -614,20 +659,20 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
         "disable_dynamically_frozen_scheduler_inventory",
         "stop_and_disable_postgresql_x64_18",
         "create_exact_d_postgresql_directories",
-        "apply_exact_c_and_d_acl",
-        "create_or_configure_exact_postgresql_16_service",
-        "stage_exact_wsl_configuration"
+      "apply_exact_c_and_d_acl",
+      "create_or_configure_exact_postgresql_16_service",
+      "restrict_exact_postgres_service_account_logon",
+      "stage_exact_wsl_configuration"
       ]
     },
     "routine_and_elevated_identities_must_be_distinct": true,
     "elevated_operator_is_not_routine_codex_or_application": true,
     "operator_d_access_must_not_be_used_as_routine_acl_failure": true,
     "unknown_sid_rejected": true,
-    "account_create_password_group_or_privilege_change_forbidden": true,
+    "account_create_password_group_or_privilege_change_forbidden_except_exact_edb_postgres_creation": true,
     "postgresql_identity_non_interactive": true,
     "postgresql_identity_access_scope": [
       "D:\\PostgreSQL\\16",
-      "D:\\PostgreSQL\\16\\data",
       "D:\\PostgreSQL\\backup-staging"
     ],
     "application_identity_must_be_non_admin": true,
@@ -673,6 +718,9 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "installed_git_python_postgresql_versions_and_paths",
     "native_python311_registry_launcher_alias_executable_pe_version_pip_venv_state",
     "installer_package_ids_versions_sha256_and_signatures",
+    "postgresql_16_15_1_exact_hash_authenticode_signer_and_official_authority",
+    "local_postgres_account_presence_sid_groups_and_logon_rights",
+    "postgresql_gui_secret_redaction_plan",
     "TdxW_process_and_127_0_0_1_17709_owner",
     "wsl_mounts_and_wsl_conf",
     "process_and_service_inventory",
@@ -686,6 +734,9 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "native_python311_executable_pe_x64_version_3_11_x_pip_and_venv",
     "postgresql_16_version_at_least_16_14",
     "postgresql_16_install_and_data_paths_on_d",
+    "postgresql_x64_16_service_runs_as_exact_local_postgres_account",
+    "postgres_service_account_service_logon_only_and_exact_d_acl",
+    "postgres_secret_absent_from_command_line_environment_logs_evidence_and_screenshots",
     "new_cluster_identity_and_zero_business_objects",
     "listen_addresses_exactly_127_0_0_1",
     "c_and_d_owner_acl_sddl_and_effective_access",
@@ -724,8 +775,15 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "python311_third_party_distribution_attempts",
     "business_venv_create_attempts",
     "project_package_install_attempts",
-    "identity_account_create_attempts",
-    "identity_password_change_attempts",
+    "non_postgresql_identity_account_create_attempts",
+    "postgres_account_create_attempts_without_missing_preflight",
+    "postgres_account_second_create_attempts",
+    "postgres_existing_account_password_reset_attempts",
+    "postgres_secret_command_line_or_process_argv_attempts",
+    "postgres_secret_environment_or_response_file_attempts",
+    "postgres_secret_log_history_transcript_evidence_or_screenshot_attempts",
+    "postgres_interactive_logon_enable_attempts",
+    "identity_password_change_attempts_outside_single_edb_gui_creation",
     "identity_group_membership_change_attempts",
     "identity_privilege_change_attempts",
     "elevated_operator_outside_prepare_attempts",
@@ -745,7 +803,11 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "Python 3.12 or 3.14 substitution",
     "Python source build or third-party distribution",
     "W0 business venv or project package install",
-    "new Windows account or password/group/privilege mutation",
+    "new Windows account except one installer-created TDX-STOCK\\postgres when preflight proves it missing",
+    "password reset or password/group/privilege mutation outside the exact EDB GUI creation contract",
+    "PostgreSQL secret in command line, argv, environment, response file, history, transcript, log, evidence or screenshot",
+    "interactive logon for TDX-STOCK\\postgres",
+    "NT AUTHORITY\\NetworkService as final PostgreSQL 16 identity",
     "unknown or swapped routine/elevated SID",
     "routine identity in Administrators",
     "WSL interop enabled or appendWindowsPath true after restart",
@@ -817,9 +879,24 @@ W0 双身份固定为 routine `TDX-STOCK\ashare-ops`（SID
 和 elevated operator `TDX-STOCK\47894`（SID
 `S-1-5-21-2072264739-3883739137-88032818-1002`，Administrators）。只有后者可在
 独立 `w0_prepare_and_mutate` 任务中执行 policy 列出的管理员动作；它不是 routine
-Codex/application，也不能用它的 D 访问能力判定 routine ACL 失败。不得创建账号、
-改密码、改组或改变既有用户权限。routine 验收必须经 `ashare-ops` SSH，证明 Medium、
+Codex/application，也不能用它的 D 访问能力判定 routine ACL 失败。除 EDB 16.15-1
+安装器在只读 preflight 证明本地 `TDX-STOCK\postgres` 缺失时创建该唯一服务账号外，
+不得创建账号、改密码、改组或改变既有用户权限。routine 验收必须经 `ashare-ops` SSH，证明 Medium、
 非管理员及对 `D:\PostgreSQL\16` 的全部拒绝；正常访问仅为 loopback DB 与 C 盘。
+
+PostgreSQL 16 必须使用 EDB 官方 x64 16.15-1 安装器，服务名
+`postgresql-x64-16`，服务账号 `TDX-STOCK\postgres`。安装器 SHA-256 必须为
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`，
+Authenticode 必须为 `Valid` 且 signer 为 `EnterpriseDB Corporation`。该账号只允许
+service logon，并且只能访问 `D:\PostgreSQL\16` 与
+`D:\PostgreSQL\backup-staging`；local/RDP/network/batch 交互登录全部禁止。
+旧 PG18 的 `NT AUTHORITY\NetworkService` 仅为只读历史质量证据，明确禁止作为
+PG16 最终身份。
+EDB GUI 的同一密码同时用于数据库 superuser 与 Windows service account，必须只由
+独立 elevated operator 在 GUI 密码控件中输入；不得进入命令行、process argv、环境、
+response file、history、transcript、日志、evidence 或截图，且不得记录明文或 hash。
+preflight 若发现账号已存在，只能使用其现有密码并验证 exact 身份/权限；未知密码、
+身份冲突或权限不符必须 fail-closed，禁止 reset、重试或卸载清理。
 
 restart 后 WSL 必须仅显式挂载 C，`/mnt/d` 不存在，并在 `/etc/wsl.conf` 设置
 `[interop] enabled=false`、`appendWindowsPath=false`。Linux `ashare-codex` 仍须能访问

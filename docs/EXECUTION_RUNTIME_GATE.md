@@ -655,13 +655,16 @@ identities must differ. Only the elevated SID, only in an independent
 `w0_prepare_and_mutate`, may perform the exact installer/Scheduler-disable/
 PG18-disable/D-directory/ACL/service/WSL-config admin allowlist. Its D access
 must not be evaluated as routine ACL failure. Unknown/swapped/equal SID,
-routine admin/non-Medium/SSH failure, identity mutation, or elevated use from
+routine admin/non-Medium/SSH failure, identity mutation outside the exact EDB
+postgres-account exception, or elevated use from
 current WSL interop returns `REJECT`.
 
 For `w0_prepare_and_mutate`, Runtime Gate rechecks the dynamically frozen
 current exact Scheduler inventory, `postgresql-x64-18`, `Git.Git`,
-`PostgreSQL.PostgreSQL.16`, conditional `Python.Python.3.11`, C/D path, service
-identity, empty-cluster, loopback-listener, ACL, CPython/TdxW/17709 and evidence
+exact EDB `PostgreSQL.PostgreSQL.16` 16.15-1, conditional
+`Python.Python.3.11`, C/D path, service `postgresql-x64-16`, local account
+`TDX-STOCK\postgres`, empty-cluster, loopback-listener, ACL,
+CPython/TdxW/17709 and evidence
 contracts in the Kernel policy. It requires Mac import, Tushare/Mootdx,
 N1-N6/NAS/business write, Scheduler creation/enable/delete, legacy uninstall/
 delete, recursive delete, overwrite, reset/clean, automatic cleanup/rollback/
@@ -683,6 +686,29 @@ Wrong package/path/version, second attempt, Microsoft Store alias, 3.12/3.14,
 source/third-party distribution, business venv/project package mutation,
 unknown-Python uninstall, retry or cleanup returns `REJECT` with evidence
 preserved.
+
+PostgreSQL acceptance freezes URL, 16.15-1 x64 version, SHA-256
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid` and signer `EnterpriseDB Corporation`. Read-only account
+preflight also freezes exact staged path
+`C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe`;
+PostgreSQL execution is interactive GUI only, never winget/unattended.
+Read-only account
+preflight must resolve either missing local `TDX-STOCK\postgres` or the exact
+existing account. Only the missing state permits one installer account-create
+attempt. Existing-account password reset, another account, second attempt,
+group change or retry returns `REJECT`. Postflight requires service-logon only,
+local/RDP/network/batch interactive logon denied, and access limited to the
+exact PostgreSQL D roots while routine ashare-ops remains fully denied D.
+Historical PG18 `NT AUTHORITY\NetworkService` is quality evidence only and is
+not an allowed final PG16 identity.
+
+Because EDB uses one password for the database superuser and Windows service
+account, Gate permits secret entry only in the elevated installer GUI. Any
+unattended secret, command-line/argv/environment/response-file/history/
+transcript/log/evidence/screenshot disclosure, or recorded secret value/hash
+returns `REJECT`. Evidence may contain only a redacted GUI-entry completion
+flag and redaction-audit result.
 
 For `wsl_shutdown_native_control`, Runtime Gate additionally requires the
 prior sealed `RESTART_REQUIRED` result and complete pre-shutdown evidence. It

@@ -133,6 +133,32 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "python311_machine_wide_x64": True,
         "python311_install_or_repair_attempts": 1,
         "python311_post_verify_complete": True,
+        "postgresql_package_id": policy["exact_allowlist"][
+            "postgresql_installer_package_id"
+        ],
+        "postgresql_installer_version": policy["exact_allowlist"][
+            "postgresql_installer_version"
+        ],
+        "postgresql_installer_sha256": policy["exact_allowlist"][
+            "postgresql_installer_sha256"
+        ],
+        "postgresql_installer_path": policy["exact_allowlist"][
+            "postgresql_installer_path"
+        ],
+        "postgresql_installation_mode": "interactive_gui_from_exact_staged_installer",
+        "postgresql_winget_unattended_execution": False,
+        "postgresql_authenticode_status": "Valid",
+        "postgresql_installer_signer": "EnterpriseDB Corporation",
+        "postgresql_service_name": "postgresql-x64-16",
+        "postgresql_service_account": r"TDX-STOCK\postgres",
+        "postgresql_service_account_preflight_state": "missing_local_postgres_account",
+        "postgresql_service_account_create_attempts": 1,
+        "postgresql_service_logon_only": True,
+        "postgresql_interactive_logons_denied": True,
+        "postgresql_networkservice_final_identity": False,
+        "postgresql_secret_entered_only_in_elevated_gui": True,
+        "postgresql_secret_redaction_audit_passed": True,
+        "postgresql_secret_value_or_hash_recorded": False,
         **{name: 0 for name in policy["required_zero_attempts"]},
     }
 
@@ -250,6 +276,48 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
         ):
             if request.get(field) is not True:
                 return reject
+    pg = policy["postgresql16_installer_contract"]
+    allowlist = policy["exact_allowlist"]
+    exact_pg_values = {
+        "postgresql_package_id": allowlist["postgresql_installer_package_id"],
+        "postgresql_installer_version": allowlist["postgresql_installer_version"],
+        "postgresql_installer_sha256": allowlist["postgresql_installer_sha256"],
+        "postgresql_installer_path": allowlist["postgresql_installer_path"],
+        "postgresql_installation_mode": pg["installation_mode"],
+        "postgresql_authenticode_status": allowlist[
+            "postgresql_installer_authenticode_status"
+        ],
+        "postgresql_installer_signer": allowlist["postgresql_installer_signer"],
+        "postgresql_service_name": pg["service_name"],
+        "postgresql_service_account": pg["service_account"],
+    }
+    if any(request.get(key) != value for key, value in exact_pg_values.items()):
+        return reject
+    pg_state = request.get("postgresql_service_account_preflight_state")
+    pg_create_attempts = request.get("postgresql_service_account_create_attempts")
+    if pg_state == "missing_local_postgres_account":
+        if pg_create_attempts != pg["account_create_attempts_when_missing"]:
+            return reject
+    elif pg_state == "existing_exact_local_postgres_account":
+        if pg_create_attempts != pg["account_create_attempts_when_existing"]:
+            return reject
+    else:
+        return reject
+    for field in (
+        "postgresql_service_logon_only",
+        "postgresql_interactive_logons_denied",
+        "postgresql_secret_entered_only_in_elevated_gui",
+        "postgresql_secret_redaction_audit_passed",
+    ):
+        if request.get(field) is not True:
+            return reject
+    for field in (
+        "postgresql_networkservice_final_identity",
+        "postgresql_secret_value_or_hash_recorded",
+        "postgresql_winget_unattended_execution",
+    ):
+        if request.get(field) is not False:
+            return reject
     if any(request.get(name) != 0 for name in policy["required_zero_attempts"]):
         return reject
     return policy["accept_decision"]
@@ -388,6 +456,63 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             self.policy["required_zero_attempts"],
         )
 
+    def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
+        allowlist = self.policy["exact_allowlist"]
+        pg = self.policy["postgresql16_installer_contract"]
+        self.assertEqual(self.policy["policy_version"], 4)
+        self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
+        self.assertEqual(
+            allowlist["postgresql_installer_sha256"],
+            "DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2",
+        )
+        self.assertEqual(allowlist["postgresql_installer_signer"], "EnterpriseDB Corporation")
+        self.assertEqual(
+            allowlist["postgresql_installer_path"],
+            r"C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe",
+        )
+        self.assertEqual(pg["service_name"], "postgresql-x64-16")
+        self.assertEqual(pg["service_account"], r"TDX-STOCK\postgres")
+        self.assertTrue(pg["networkservice_final_identity_forbidden"])
+        self.assertTrue(pg["password_shared_by_database_superuser_and_windows_service_account"])
+        self.assertEqual(self.decision(), "ACCEPT")
+        self.assertEqual(
+            self.decision(
+                postgresql_service_account_preflight_state="existing_exact_local_postgres_account",
+                postgresql_service_account_create_attempts=0,
+            ),
+            "ACCEPT",
+        )
+
+    def test_postgresql_wrong_identity_attempt_or_secret_boundary_rejects(self) -> None:
+        for overrides in (
+            {"postgresql_package_id": "PostgreSQL.PostgreSQL.15"},
+            {"postgresql_installer_version": "16.14-1"},
+            {"postgresql_installer_sha256": "0" * 64},
+            {"postgresql_installer_path": r"C:\Temp\postgresql.exe"},
+            {"postgresql_installation_mode": "unattended"},
+            {"postgresql_winget_unattended_execution": True},
+            {"postgresql_authenticode_status": "UnknownError"},
+            {"postgresql_installer_signer": "Unknown"},
+            {"postgresql_service_name": "AshareV3-PostgreSQL-16"},
+            {"postgresql_service_account": r"NT AUTHORITY\NetworkService"},
+            {"postgresql_networkservice_final_identity": True},
+            {"postgresql_service_account_preflight_state": "unknown"},
+            {"postgresql_service_account_create_attempts": 2},
+            {
+                "postgresql_service_account_preflight_state": "existing_exact_local_postgres_account",
+                "postgresql_service_account_create_attempts": 1,
+            },
+            {"postgresql_service_logon_only": False},
+            {"postgresql_interactive_logons_denied": False},
+            {"postgresql_secret_entered_only_in_elevated_gui": False},
+            {"postgresql_secret_redaction_audit_passed": False},
+            {"postgresql_secret_value_or_hash_recorded": True},
+            {"postgres_existing_account_password_reset_attempts": 1},
+            {"postgres_secret_command_line_or_process_argv_attempts": 1},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.decision(**overrides), "REJECT")
+
     def test_python311_missing_or_damaged_allows_one_exact_repair(self) -> None:
         contract = self.policy["python311_contract"]
         self.assertEqual(contract["package_id"], "Python.Python.3.11")
@@ -451,7 +576,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             *allowlist["software_package_ids"],
             allowlist["postgresql_install_root"],
             allowlist["postgresql_backup_staging"],
-            allowlist["postgresql_service_identity"],
+            allowlist["postgresql_service_account"],
             self.policy["python311_contract"]["install_root"],
         ):
             self.assertIn(value, compiler)
@@ -572,6 +697,35 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             self.assertIn(phase, suite)
         self.assertTrue(self.policy["governance_session_cannot_execute"])
 
+    def test_postgresql_v4_semantics_are_present_across_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        documents = {
+            "Compiler": self.compiler,
+            "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox,
+            "Trace": self.trace,
+            "TestSuite": self.test_suite,
+            "W0Plan": plan,
+        }
+        for name, document in documents.items():
+            with self.subTest(document=name):
+                for value in (
+                    "16.15-1",
+                    "postgresql-x64-16",
+                    r"TDX-STOCK\postgres",
+                    "DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2",
+                    "EnterpriseDB Corporation",
+                    "Valid",
+                    r"NT AUTHORITY\NetworkService",
+                    r"C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe",
+                ):
+                    self.assertIn(value, document)
+                self.assertRegex(document, r"(?i)GUI")
+                self.assertRegex(document, r"(?i)secret|password")
+                self.assertRegex(document, r"(?i)log|evidence")
+
     def test_sandbox_matches_policy_and_simulation_never_executes(self) -> None:
         sandbox = self.sandbox
         self.assertIn("Sandbox Simulation", sandbox)
@@ -594,7 +748,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             allowlist["postgresql_data_directory"],
             allowlist["postgresql_backup_staging"],
             allowlist["postgresql_service_name"],
-            allowlist["postgresql_service_identity"],
+            allowlist["postgresql_service_account"],
             allowlist["postgresql_listen_addresses"],
             self.policy["python311_contract"]["install_root"],
         ):

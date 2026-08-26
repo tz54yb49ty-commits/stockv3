@@ -962,7 +962,13 @@ PLAN exact phase, identities, versions, paths, resources and attempt budget
   -> MODIFY only through the independent elevated 47894 prepare channel:
             export and disable every exact AshareV3 task without deletion;
             stop/disable exact postgresql-x64-18 without uninstall/delete;
-            install Git.Git and PostgreSQL.PostgreSQL.16 only; only when
+            install Git.Git and exact EDB PostgreSQL.PostgreSQL.16 16.15-1
+            x64 only; preflight exact local TDX-STOCK\postgres and permit the
+            GUI installer to create it once only when missing; freeze service
+            postgresql-x64-16 and enter its shared DB/service password only in
+            elevated GUI password controls with zero secret logging; run only
+            C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe
+            interactively, never winget/unattended for PostgreSQL; only when
             preflight proves native 3.11 missing/damaged, install/repair
             Python.Python.3.11 once machine-wide x64 at
             C:\Program Files\Python311; create the exact
@@ -972,7 +978,9 @@ PLAN exact phase, identities, versions, paths, resources and attempt budget
             appendWindowsPath=false configuration without shutdown
   -> VERIFY every required post-evidence item, zero Mac imports, zero business
             objects/data, zero forbidden attempts, exact versions/paths/ACLs,
-            all dynamically frozen AshareV3 tasks disabled, Python311
+            all dynamically frozen AshareV3 tasks disabled, exact PostgreSQL
+            installer hash/signer/service/account/service-logon-only rights,
+            secret redaction audit and exact D ACL, Python311
             python.exe PE x64/version 3.11.x/pip/venv verified without venv or
             package creation, routine ashare-ops Medium/non-admin SSH and exact
             D denial, operator access excluded from routine ACL verdict,
@@ -999,7 +1007,10 @@ Scheduler definitions, service `postgresql-x64-18`, packages `Git.Git` and
 `PostgreSQL.PostgreSQL.16`, conditional package `Python.Python.3.11`, exact
 `C:\Program Files\Python311`, `D:\PostgreSQL\16`,
 `D:\PostgreSQL\backup-staging`, the exact `C:\AshareV3` directory allowlist,
-service identity `NT SERVICE\AshareV3-PostgreSQL-16`, `/etc/wsl.conf`, the WSL
+service `postgresql-x64-16`, local service account `TDX-STOCK\postgres`, exact
+EDB 16.15-1 SHA-256
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid`, signer `EnterpriseDB Corporation`, `/etc/wsl.conf`, the WSL
 instance in the separate shutdown phase, exact routine SID
 `S-1-5-21-2072264739-3883739137-88032818-1006`, exact elevated SID
 `S-1-5-21-2072264739-3883739137-88032818-1002`, and CPython/TdxW/17709 capability
@@ -1019,8 +1030,13 @@ Python install/repair without missing/damaged proof, a second attempt, a path
 other than `C:\Program Files\Python311`, a non-3.11.x version, Microsoft Store
 alias, 3.12/3.14 substitution, source build, third-party distribution, unknown
 Python uninstall, failed-directory cleanup, business venv creation or project
-package installation also compile to `FINALIZE(REJECT)`. Account creation,
-password/group/privilege change, unknown/swapped/equal SIDs, routine
+package installation also compile to `FINALIZE(REJECT)`. Account creation
+except the one exact installer-created `TDX-STOCK\postgres` when missing,
+existing-account password reset, group/privilege change, unattended secret
+arguments or any PostgreSQL password in command line/argv/environment/
+response-file/history/transcript/log/evidence/screenshot, interactive postgres
+logon, `NT AUTHORITY\NetworkService` as final PG16 identity,
+unknown/swapped/equal SIDs, routine
 Administrators membership, non-Medium/unavailable routine SSH, elevated
 operation outside the independent prepare phase, operator D access as a
 routine ACL failure, current-WSL native interop, or a restart configuration

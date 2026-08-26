@@ -482,7 +482,11 @@ count was execution authority, every frozen definition was exported and every
 frozen task ended Disabled. It also records
 legacy `postgresql-x64-18` service configuration/state/path fingerprints,
 package identity/version/hash/signature, every exact C/D path and ACL/effective
-access result, the dedicated PostgreSQL service identity, empty-cluster proof,
+access result, exact EDB 16.15-1 URL/version/SHA-256
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid`,
+signer `EnterpriseDB Corporation`,
+service `postgresql-x64-16`, local account `TDX-STOCK\postgres`, empty-cluster proof,
 loopback-only configuration, CPython 3.11 x64, TdxW, `127.0.0.1:17709`, and
 the proposed WSL configuration. It records per-resource attempted/succeeded/
 failed mutation counts and proves every forbidden count is zero, including
@@ -491,6 +495,10 @@ overwrite, Mac import, Tushare/Mootdx, N1-N6, NAS, business write and
 prepare-phase `wsl --shutdown`. A WSL configuration change ends only with
 sealed pre-shutdown evidence and `RESTART_REQUIRED`; it never implies that the
 shutdown phase ran.
+The PostgreSQL installer trace also binds exact staged path
+`C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe`
+and records interactive GUI mode, with zero winget/unattended PostgreSQL
+execution attempts.
 
 Python trace fields record registry/launcher/Store-alias and executable
 preflight facts and exactly one state: valid, missing or damaged native 3.11
@@ -501,6 +509,19 @@ signer and SHA-256, attempt/result, and postflight python.exe existence, PE x64,
 3.11.x, pip and venv-module results. It records zero second/retry, alias,
 3.12/3.14, source/third-party, unknown uninstall, cleanup, business-venv and
 project-package attempts. Failure is append-only blocked evidence.
+
+PostgreSQL trace fields record the local postgres-account preflight state,
+account SID/groups/logon rights before and after, create-attempt count (one
+only when missing; otherwise zero), service image/data path and exact D ACL.
+They record that the EDB GUI password is shared by database superuser and
+Windows service account, but never record its value or hash. The trace stores
+only redacted GUI-entry completion and redaction-audit PASS, plus zero counters
+for secret appearance in command line, argv, environment, response file,
+history, transcript, log, evidence or screenshot. Existing-account reset,
+interactive logon enablement, second create/install attempt, leakage or
+incomplete redaction evidence is fail-closed and append-only.
+The trace may record historical PG18 `NT AUTHORITY\NetworkService` only as
+non-authoritative quality evidence and must prove it was not selected for PG16.
 
 The shutdown trace requires and hash-binds that exact `RESTART_REQUIRED`
 prepare entry. It records frozen evidence before connection loss, one native

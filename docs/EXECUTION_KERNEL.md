@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 3,
+  "policy_version": 4,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5443,12 +5443,20 @@ phase combination, retry or excess attempt returns `REJECT`.
     ],
     "installer_version_hash_signature_must_be_frozen_before_install": true,
     "postgresql_minimum_version": "16.14",
+    "postgresql_installer_package_id": "PostgreSQL.PostgreSQL.16",
+    "postgresql_installer_version": "16.15-1",
+    "postgresql_installer_filename": "postgresql-16.15-1-windows-x64-download-v1.exe",
+    "postgresql_installer_path": "C:\\AshareV3\\staging\\installers\\postgresql-16.15-1-windows-x64-download-v1.exe",
+    "postgresql_installer_url": "https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe",
+    "postgresql_installer_sha256": "DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2",
+    "postgresql_installer_authenticode_status": "Valid",
+    "postgresql_installer_signer": "EnterpriseDB Corporation",
     "postgresql_install_root": "D:\\PostgreSQL\\16",
     "postgresql_data_directory": "D:\\PostgreSQL\\16\\data",
     "postgresql_backup_staging": "D:\\PostgreSQL\\backup-staging",
     "postgresql_listen_addresses": "127.0.0.1",
-    "postgresql_service_name": "AshareV3-PostgreSQL-16",
-    "postgresql_service_identity": "NT SERVICE\\AshareV3-PostgreSQL-16",
+    "postgresql_service_name": "postgresql-x64-16",
+    "postgresql_service_account": "TDX-STOCK\\postgres",
     "c_directories": [
       "C:\\AshareV3\\app",
       "C:\\AshareV3\\config",
@@ -5496,6 +5504,43 @@ phase combination, retry or excess attempt returns `REJECT`.
     "business_venv_create_attempts": 0,
     "project_package_install_attempts": 0
   },
+  "postgresql16_installer_contract": {
+    "publisher_supported_defaults_required": true,
+    "installation_mode": "interactive_gui_from_exact_staged_installer",
+    "winget_unattended_execution_forbidden": true,
+    "service_name": "postgresql-x64-16",
+    "service_account": "TDX-STOCK\\postgres",
+    "networkservice_final_identity_forbidden": true,
+    "service_account_preflight_states": [
+      "missing_local_postgres_account",
+      "existing_exact_local_postgres_account"
+    ],
+    "installer_may_create_account_only_when_missing": true,
+    "account_create_attempts_when_missing": 1,
+    "account_create_attempts_when_existing": 0,
+    "existing_account_password_reset_forbidden": true,
+    "service_logon_only": true,
+    "interactive_local_rdp_network_batch_logon_forbidden": true,
+    "account_group_membership_change_forbidden": true,
+    "gui_secret_entry_required": true,
+    "unattended_install_with_secret_forbidden": true,
+    "password_shared_by_database_superuser_and_windows_service_account": true,
+    "secret_forbidden_locations": [
+      "command_line",
+      "process_argv",
+      "environment",
+      "response_file",
+      "shell_history",
+      "transcript",
+      "log",
+      "evidence",
+      "screenshot"
+    ],
+    "secret_value_or_hash_recording_forbidden": true,
+    "evidence_records_only_redacted_gui_entry_and_redaction_audit": true,
+    "automatic_retry_attempts": 0,
+    "failed_install_preserved_as_evidence": true
+  },
   "empty_cluster_contract": {
     "initdb_new_empty_cluster_only": true,
     "mac_dump_import_attempts": 0,
@@ -5530,20 +5575,20 @@ phase combination, retry or excess attempt returns `REJECT`.
         "disable_dynamically_frozen_scheduler_inventory",
         "stop_and_disable_postgresql_x64_18",
         "create_exact_d_postgresql_directories",
-        "apply_exact_c_and_d_acl",
-        "create_or_configure_exact_postgresql_16_service",
-        "stage_exact_wsl_configuration"
+      "apply_exact_c_and_d_acl",
+      "create_or_configure_exact_postgresql_16_service",
+      "restrict_exact_postgres_service_account_logon",
+      "stage_exact_wsl_configuration"
       ]
     },
     "routine_and_elevated_identities_must_be_distinct": true,
     "elevated_operator_is_not_routine_codex_or_application": true,
     "operator_d_access_must_not_be_used_as_routine_acl_failure": true,
     "unknown_sid_rejected": true,
-    "account_create_password_group_or_privilege_change_forbidden": true,
+    "account_create_password_group_or_privilege_change_forbidden_except_exact_edb_postgres_creation": true,
     "postgresql_identity_non_interactive": true,
     "postgresql_identity_access_scope": [
       "D:\\PostgreSQL\\16",
-      "D:\\PostgreSQL\\16\\data",
       "D:\\PostgreSQL\\backup-staging"
     ],
     "application_identity_must_be_non_admin": true,
@@ -5589,6 +5634,9 @@ phase combination, retry or excess attempt returns `REJECT`.
     "installed_git_python_postgresql_versions_and_paths",
     "native_python311_registry_launcher_alias_executable_pe_version_pip_venv_state",
     "installer_package_ids_versions_sha256_and_signatures",
+    "postgresql_16_15_1_exact_hash_authenticode_signer_and_official_authority",
+    "local_postgres_account_presence_sid_groups_and_logon_rights",
+    "postgresql_gui_secret_redaction_plan",
     "TdxW_process_and_127_0_0_1_17709_owner",
     "wsl_mounts_and_wsl_conf",
     "process_and_service_inventory",
@@ -5602,6 +5650,9 @@ phase combination, retry or excess attempt returns `REJECT`.
     "native_python311_executable_pe_x64_version_3_11_x_pip_and_venv",
     "postgresql_16_version_at_least_16_14",
     "postgresql_16_install_and_data_paths_on_d",
+    "postgresql_x64_16_service_runs_as_exact_local_postgres_account",
+    "postgres_service_account_service_logon_only_and_exact_d_acl",
+    "postgres_secret_absent_from_command_line_environment_logs_evidence_and_screenshots",
     "new_cluster_identity_and_zero_business_objects",
     "listen_addresses_exactly_127_0_0_1",
     "c_and_d_owner_acl_sddl_and_effective_access",
@@ -5640,8 +5691,15 @@ phase combination, retry or excess attempt returns `REJECT`.
     "python311_third_party_distribution_attempts",
     "business_venv_create_attempts",
     "project_package_install_attempts",
-    "identity_account_create_attempts",
-    "identity_password_change_attempts",
+    "non_postgresql_identity_account_create_attempts",
+    "postgres_account_create_attempts_without_missing_preflight",
+    "postgres_account_second_create_attempts",
+    "postgres_existing_account_password_reset_attempts",
+    "postgres_secret_command_line_or_process_argv_attempts",
+    "postgres_secret_environment_or_response_file_attempts",
+    "postgres_secret_log_history_transcript_evidence_or_screenshot_attempts",
+    "postgres_interactive_logon_enable_attempts",
+    "identity_password_change_attempts_outside_single_edb_gui_creation",
     "identity_group_membership_change_attempts",
     "identity_privilege_change_attempts",
     "elevated_operator_outside_prepare_attempts",
@@ -5661,7 +5719,11 @@ phase combination, retry or excess attempt returns `REJECT`.
     "Python 3.12 or 3.14 substitution",
     "Python source build or third-party distribution",
     "W0 business venv or project package install",
-    "new Windows account or password/group/privilege mutation",
+    "new Windows account except one installer-created TDX-STOCK\\postgres when preflight proves it missing",
+    "password reset or password/group/privilege mutation outside the exact EDB GUI creation contract",
+    "PostgreSQL secret in command line, argv, environment, response file, history, transcript, log, evidence or screenshot",
+    "interactive logon for TDX-STOCK\\postgres",
+    "NT AUTHORITY\\NetworkService as final PostgreSQL 16 identity",
     "unknown or swapped routine/elevated SID",
     "routine identity in Administrators",
     "WSL interop enabled or appendWindowsPath true after restart",
@@ -5713,3 +5775,26 @@ must stop with sealed evidence and `RESTART_REQUIRED`; it may not invoke
 `wsl_shutdown_native_control` phase may invoke shutdown once and then prove
 that WSL explicitly sees C and cannot see D. W0 PASS is required before a
 separate `N1_ingestion` task may build Windows N1 from zero.
+
+PostgreSQL installation is frozen to official EDB 16.15-1 x64: package
+`PostgreSQL.PostgreSQL.16`, URL
+`https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe`,
+SHA-256 `DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid`, signer `EnterpriseDB Corporation`, service
+`postgresql-x64-16`, and local service account `TDX-STOCK\postgres`. Only when
+read-only preflight proves that exact local account missing may the installer
+create it once. Existing-account password reset, any other account creation,
+group change or automatic retry is forbidden. The account is service-logon
+only, with local/RDP/network/batch interactive logon forbidden and access
+limited to `D:\PostgreSQL\16` and `D:\PostgreSQL\backup-staging`.
+The historical PG18 `NT AUTHORITY\NetworkService` configuration is read-only
+quality evidence only and is explicitly rejected as the final PG16 identity.
+
+The EDB GUI password is a shared database-superuser/Windows-service-account
+secret. It must be entered only by the independent elevated operator in GUI
+password controls. It may never appear in command lines, process argv,
+environment variables, response files, shell history, transcripts, logs,
+evidence or screenshots; neither its value nor a hash may be retained.
+Evidence records only redacted GUI-entry completion and a redaction audit.
+Missing, leaked, reset, unattended or unverifiable secret handling returns
+`REJECT/BLOCKED_EVIDENCE_PRESERVED` without retry, uninstall or cleanup.

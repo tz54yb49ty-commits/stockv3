@@ -1555,6 +1555,26 @@ distribution, second attempt/retry, unknown-Python uninstall, cleanup, business
 venv or project package install. Postflight must require python.exe, PE x64,
 3.11.x, pip and venv module.
 
+PostgreSQL fixtures must freeze official EDB 16.15-1 x64, package
+`PostgreSQL.PostgreSQL.16`, service `postgresql-x64-16`, local account
+`TDX-STOCK\postgres`, SHA-256
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid` and signer `EnterpriseDB Corporation`. Missing-account
+fixtures must use only interactive GUI mode from exact staged path
+`C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe`;
+winget/unattended PostgreSQL execution must reject. Missing-account
+preflight accepts exactly one installer-created account; exact-existing accepts
+zero create attempts. Wrong service/account/version/hash/signer, create when
+existing, second attempt, existing-password reset, group change, interactive
+local/RDP/network/batch logon, `NT AUTHORITY\NetworkService` as final PG16
+identity or excess D access must reject.
+
+Secret fixtures must recognize the EDB shared database-superuser/service-account
+password and accept only redacted elevated-GUI entry. Unattended secret input,
+command-line/argv/environment/response-file/history/transcript/log/evidence/
+screenshot disclosure, retaining either value or hash, missing redaction audit,
+retry or cleanup must reject.
+
 Scheduler fixtures must accept any nonnegative current inventory count only
 when every current TaskName or TaskPath belonging to AshareV3 is dynamically
 frozen, exported and Disabled. Prior count and a 10-to-9 or any other drift are
@@ -1569,7 +1589,8 @@ admin actions are accepted only in the independent prepare phase and only for
 the exact installer/Scheduler-disable/PG18-disable/D-directory/ACL/service/WSL
 configuration allowlist. Tests must keep operator D access separate from
 routine D-denial acceptance and reject swapped/equal/unknown SID, routine
-admin/non-Medium/login failure, account/password/group/privilege mutation,
+admin/non-Medium/login failure, account/password/group/privilege mutation
+outside the one exact EDB postgres-account creation contract,
 elevated use outside prepare or current-WSL interop.
 
 Restart fixtures require C-only explicit mount, missing `/mnt/d`, `[interop]

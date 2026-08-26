@@ -569,15 +569,22 @@ enable), stop plus disable of `postgresql-x64-18` (never uninstall or touch
 its program/data), packages `Git.Git` and `PostgreSQL.PostgreSQL.16` with
 PostgreSQL >=16.14, and these exact database resources:
 `D:\PostgreSQL\16`, `D:\PostgreSQL\16\data`,
-`D:\PostgreSQL\backup-staging`, service `AshareV3-PostgreSQL-16`, identity
-`NT SERVICE\AshareV3-PostgreSQL-16`, and `listen_addresses=127.0.0.1`.
+`D:\PostgreSQL\backup-staging`, service `postgresql-x64-16`, local account
+`TDX-STOCK\postgres`, and `listen_addresses=127.0.0.1`. The installer is exact
+EDB 16.15-1 x64 with SHA-256
+`DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
+Authenticode `Valid`, signer `EnterpriseDB Corporation`.
+Only interactive GUI execution of
+`C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe`
+is modeled; winget/unattended PostgreSQL execution predicts `REJECT`.
 The new cluster must be empty: Mac dump/record/source_version/evidence imports,
 business database/schema work and N1-N6 writes all remain zero.
 
 The same model permits only `C:\AshareV3\app`, `config`, `runtime`, `logs`,
 `seed-inbox`, `evidence` and `staging` below `C:\AshareV3`; it proves the
-dedicated non-interactive PostgreSQL identity is limited to the three exact D
-resources and that the non-admin application/Codex identities are denied D
+dedicated non-interactive PostgreSQL identity is limited to the two exact D
+roots (`D:\PostgreSQL\16`, including its data child, and backup-staging) and
+that the non-admin application/Codex identities are denied D
 read, list, write, create, delete, permission-change and take-ownership
 rights. It also proves native CPython 3.11 x64, TdxW and
 `127.0.0.1:17709`, and models WSL configuration with only C visible and D
@@ -610,9 +617,21 @@ and elevated `TDX-STOCK\47894` SID
 `S-1-5-21-2072264739-3883739137-88032818-1002` as the distinct Administrators
 operator. It predicts elevated admin mutation only for the exact prepare-phase
 allowlist and evaluates D-denial acceptance only as routine ashare-ops. Equal,
-swapped or unknown SID, identity/group/password mutation, routine admin/SSH or
+swapped or unknown SID, identity/group/password mutation outside the one exact
+EDB postgres-account creation contract, routine admin/SSH or
 integrity failure, elevated use outside prepare, or current-WSL interop predicts
 `REJECT`.
+
+Account simulation first resolves missing versus exact-existing
+`TDX-STOCK\postgres`. Missing permits the EDB installer to create that account
+once; existing permits zero create/reset attempts. It requires service-logon
+only, denies local/RDP/network/batch interactive logon and rejects any other
+account/group/privilege mutation. The shared database-superuser/service-account
+password is modeled only as redacted elevated-GUI entry. Any secret in command
+line, argv, environment, response file, history, transcript, log, evidence or
+screenshot, including a retained secret hash, predicts fail-closed `REJECT`.
+The old PG18 `NT AUTHORITY\NetworkService` fact is modeled only as read-only
+quality evidence; using it as final PG16 identity predicts `REJECT`.
 
 Restart simulation requires explicit C only, absent `/mnt/d`, `[interop]
 enabled=false`, `appendWindowsPath=false`, and Linux `ashare-codex` access to
