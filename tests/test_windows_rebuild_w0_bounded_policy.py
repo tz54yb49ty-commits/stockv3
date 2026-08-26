@@ -352,6 +352,33 @@ def evaluate_1639_recovery(policy: dict[str, Any], request: dict[str, Any]) -> s
     return policy["accept_decision"] if request == expected else "REJECT"
 
 
+def evaluate_22_recovery(policy: dict[str, Any], request: dict[str, Any]) -> str:
+    contract = policy["postgresql_virtual_identity_22_recovery"]
+    expected = {
+        "policy_id": "w0_postgresql_virtual_identity_22_recovery_v1",
+        "prior_policy_commit": contract["prior_policy_commit"],
+        "prior_policy_tree": contract["prior_policy_tree"],
+        "prior_return_value": 22,
+        "prior_service_start_attempts": 0,
+        "prior_identity_change_proven": False,
+        "phase_mode": contract["phase_mode"],
+        "attempts": 1,
+        "required_fresh_read_only_pre_state": contract["required_fresh_read_only_pre_state"],
+        "only_mutation_program": "sc.exe",
+        "exact_argument_vector": ["config", "postgresql-x64-16", "obj=", r"NT SERVICE\postgresql-x64-16"],
+        "password_argument": "OMITTED",
+        "changeserviceconfig_lpPassword": "NULL",
+        "required_exit_code": 0,
+        "service_start_attempts_after_verified_change": 1,
+        "configuration_acl_install_or_logon_right_mutation_attempts": 0,
+        "v6_rerun_attempts": 0,
+        "automatic_retry_attempts": 0,
+        "networkservice_restore_attempts": 0,
+        "n1_handoff_allowed": False,
+    }
+    return policy["accept_decision"] if request == expected else "REJECT"
+
+
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -416,7 +443,11 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         self.assertTrue(elevated["administrators_member"])
         self.assertEqual(
             elevated["allowed_phase_modes"],
-            ["w0_prepare_and_mutate", "w0_postgresql_virtual_identity_1639_recovery"],
+            [
+                "w0_prepare_and_mutate",
+                "w0_postgresql_virtual_identity_1639_recovery",
+                "w0_postgresql_virtual_identity_22_recovery",
+            ],
         )
         self.assertEqual(acl["routine_d_denial_scope"], r"D:\PostgreSQL\16")
         wsl = self.policy["wsl_isolation_contract"]
@@ -491,7 +522,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 6)
+        self.assertEqual(self.policy["policy_version"], 7)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -589,6 +620,60 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                 bad["required_pre_state"][field] = not value if isinstance(value, bool) else "wrong"
                 self.assertEqual(evaluate_1639_recovery(self.policy, bad), "REJECT")
 
+    def test_postgresql_22_recovery_exact_null_password_contract(self) -> None:
+        recovery = self.policy["postgresql_virtual_identity_22_recovery"]
+        request = {
+            "policy_id": "w0_postgresql_virtual_identity_22_recovery_v1",
+            "prior_policy_commit": recovery["prior_policy_commit"],
+            "prior_policy_tree": recovery["prior_policy_tree"],
+            "prior_return_value": 22,
+            "prior_service_start_attempts": 0,
+            "prior_identity_change_proven": False,
+            "phase_mode": recovery["phase_mode"],
+            "attempts": 1,
+            "required_fresh_read_only_pre_state": recovery["required_fresh_read_only_pre_state"],
+            "only_mutation_program": "sc.exe",
+            "exact_argument_vector": ["config", "postgresql-x64-16", "obj=", r"NT SERVICE\postgresql-x64-16"],
+            "password_argument": "OMITTED",
+            "changeserviceconfig_lpPassword": "NULL",
+            "required_exit_code": 0,
+            "service_start_attempts_after_verified_change": 1,
+            "configuration_acl_install_or_logon_right_mutation_attempts": 0,
+            "v6_rerun_attempts": 0,
+            "automatic_retry_attempts": 0,
+            "networkservice_restore_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(evaluate_22_recovery(self.policy, request), "ACCEPT")
+        negatives = {
+            "prior_policy_commit": "0" * 40,
+            "prior_policy_tree": "0" * 40,
+            "prior_return_value": 0,
+            "prior_service_start_attempts": 1,
+            "prior_identity_change_proven": True,
+            "attempts": 2,
+            "only_mutation_program": "Invoke-CimMethod",
+            "exact_argument_vector": ["config", "postgresql-x64-16", "password=", ""],
+            "password_argument": "empty_string",
+            "changeserviceconfig_lpPassword": "empty_string",
+            "required_exit_code": 22,
+            "service_start_attempts_after_verified_change": 2,
+            "configuration_acl_install_or_logon_right_mutation_attempts": 1,
+            "v6_rerun_attempts": 1,
+            "automatic_retry_attempts": 1,
+            "networkservice_restore_attempts": 1,
+            "n1_handoff_allowed": True,
+        }
+        for field, value in negatives.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request)
+                bad[field] = value
+                self.assertEqual(evaluate_22_recovery(self.policy, bad), "REJECT")
+        for field, value in recovery["required_fresh_read_only_pre_state"].items():
+            with self.subTest(pre_state=field):
+                bad = copy.deepcopy(request)
+                bad["required_fresh_read_only_pre_state"][field] = not value if isinstance(value, bool) else "wrong"
+                self.assertEqual(evaluate_22_recovery(self.policy, bad), "REJECT")
     def test_python311_missing_or_damaged_allows_one_exact_repair(self) -> None:
         contract = self.policy["python311_contract"]
         self.assertEqual(contract["package_id"], "Python.Python.3.11")
@@ -821,6 +906,24 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                 ):
                     self.assertIn(value, document)
                 self.assertRegex(document, r"(?i)stopped")
+
+    def test_postgresql_v7_recovery_semantics_are_present_across_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(encoding="utf-8")
+        for name, document in {
+            "Compiler": self.compiler, "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox, "Trace": self.trace,
+            "TestSuite": self.test_suite, "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_postgresql_virtual_identity_22_recovery",
+                    "0a64eb665433483a69e9134c222a1dabc03c1da2",
+                    "0f97f27c5a43d976e73f025e20d6b355f6ece494",
+                    "ReturnValue 22", "sc.exe", "obj=",
+                    r"NT SERVICE\postgresql-x64-16", "NULL", "password",
+                    "NetworkService", "UNRESTRICTED", "N1",
+                ):
+                    self.assertIn(value, document)
 
     def test_sandbox_matches_policy_and_simulation_never_executes(self) -> None:
         sandbox = self.sandbox

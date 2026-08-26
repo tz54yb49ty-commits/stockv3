@@ -461,7 +461,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 6,
+  "policy_version": 7,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -479,6 +479,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "allowed_phase_modes": [
       "w0_prepare_and_mutate",
       "w0_postgresql_virtual_identity_1639_recovery",
+      "w0_postgresql_virtual_identity_22_recovery",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -487,6 +488,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "phase_order": [
       "w0_prepare_and_mutate",
       "w0_postgresql_virtual_identity_1639_recovery",
+      "w0_postgresql_virtual_identity_22_recovery",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -669,6 +671,52 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "networkservice_restore_attempts": 0,
     "n1_handoff_allowed": false
   },
+  "postgresql_virtual_identity_22_recovery": {
+    "policy_id": "w0_postgresql_virtual_identity_22_recovery_v1",
+    "prior_policy_commit": "0a64eb665433483a69e9134c222a1dabc03c1da2",
+    "prior_policy_tree": "0f97f27c5a43d976e73f025e20d6b355f6ece494",
+    "prior_phase": "w0_postgresql_virtual_identity_1639_recovery",
+    "prior_mutation_method": "Invoke-CimMethod Win32_Service.Change",
+    "prior_change_start_name": "NT SERVICE\\postgresql-x64-16",
+    "prior_change_start_password": "empty_string",
+    "prior_return_value": 22,
+    "prior_service_start_attempts": 0,
+    "prior_identity_change_proven": false,
+    "phase_mode": "w0_postgresql_virtual_identity_22_recovery",
+    "attempts": 1,
+    "required_fresh_read_only_pre_state": {
+      "service_state": "Stopped",
+      "start_name": "NT AUTHORITY\\NetworkService",
+      "service_sid_type": "UNRESTRICTED",
+      "listener_5432_present": false
+    },
+    "only_mutation_program": "sc.exe",
+    "exact_argument_vector": [
+      "config",
+      "postgresql-x64-16",
+      "obj=",
+      "NT SERVICE\\postgresql-x64-16"
+    ],
+    "password_argument": "OMITTED",
+    "changeserviceconfig_lpPassword": "NULL",
+    "required_exit_code": 0,
+    "read_only_startname_check_before_start": true,
+    "service_start_attempts_after_verified_change": 1,
+    "required_post_state": {
+      "service_state": "Running",
+      "start_name": "NT SERVICE\\postgresql-x64-16",
+      "service_sid_type": "UNRESTRICTED",
+      "listen_endpoint": "127.0.0.1:5432",
+      "pg_isready": "accepting",
+      "networkservice_acl_count_full_tree": 0
+    },
+    "configuration_acl_install_or_logon_right_mutation_attempts": 0,
+    "v6_rerun_attempts": 0,
+    "automatic_retry_attempts": 0,
+    "networkservice_restore_attempts": 0,
+    "failure_service_state": "Stopped",
+    "n1_handoff_allowed": false
+  },
   "empty_cluster_contract": {
     "initdb_new_empty_cluster_only": true,
     "mac_dump_import_attempts": 0,
@@ -697,7 +745,8 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "administrators_member": true,
       "allowed_phase_modes": [
         "w0_prepare_and_mutate",
-        "w0_postgresql_virtual_identity_1639_recovery"
+        "w0_postgresql_virtual_identity_1639_recovery",
+        "w0_postgresql_virtual_identity_22_recovery"
       ],
       "allowed_admin_operations": [
         "exact_frozen_installer_once",
@@ -708,7 +757,8 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "create_or_configure_exact_postgresql_16_service",
       "restrict_exact_postgres_service_account_logon",
       "stage_exact_wsl_configuration",
-      "invoke_exact_postgresql_1639_cim_change_and_verified_start"
+      "invoke_exact_postgresql_1639_cim_change_and_verified_start",
+      "invoke_exact_postgresql_22_sc_config_null_password_and_verified_start"
       ]
     },
     "routine_and_elevated_identities_must_be_distinct": true,
@@ -838,7 +888,13 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "postgresql_1639_recovery_second_attempts",
     "postgresql_1639_recovery_sc_exe_attempts",
     "postgresql_1639_recovery_acl_or_config_attempts",
-    "postgresql_1639_recovery_networkservice_restore_attempts"
+    "postgresql_1639_recovery_networkservice_restore_attempts",
+    "postgresql_22_recovery_second_attempts",
+    "postgresql_22_recovery_v6_rerun_attempts",
+    "postgresql_22_recovery_cim_attempts",
+    "postgresql_22_recovery_password_argument_attempts",
+    "postgresql_22_recovery_acl_config_install_or_logon_right_attempts",
+    "postgresql_22_recovery_networkservice_restore_attempts"
   ],
   "forbidden": [
     "Tushare",

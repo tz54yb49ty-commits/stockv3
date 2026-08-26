@@ -646,3 +646,14 @@ Win32_Service.Change`, empty/null password, ReturnValue 0, read-only StartName
 verification, then one start and final checks. `sc.exe`, config/ACL/install
 mutation, retry, early start or NetworkService restoration predicts fail-closed
 Stopped and no N1. A simulation PASS is not execution.
+
+Sandbox Simulation for `w0_postgresql_virtual_identity_22_recovery` binds v6
+commit `0a64eb665433483a69e9134c222a1dabc03c1da2`, tree
+`0f97f27c5a43d976e73f025e20d6b355f6ece494`, ReturnValue 22, no start and no
+identity change. It predicts one exact `sc.exe config` argument vector containing
+`obj=` and `NT SERVICE\postgresql-x64-16` only after fresh
+Stopped/NetworkService/UNRESTRICTED/no-listener proof. Omitting the
+password argument must yield NULL lpPassword; empty/nonempty password, CIM/V6
+rerun, extra options, ACL/config/install/logon-right mutation, early start,
+retry or fallback predicts fail-closed Stopped and no N1. Simulation PASS is
+not execution.

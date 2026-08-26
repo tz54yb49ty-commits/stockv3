@@ -180,3 +180,17 @@ Verify StartName before one start; then require Running, UNRESTRICTED, only
 `127.0.0.1:5432`, pg_isready and ACL count zero. Never modify config/ACL,
 reinstall, use `sc.exe` for mutation, retry or restore NetworkService. Failure
 leaves the service Stopped with evidence preserved and N1 blocked.
+
+## W0 PostgreSQL ReturnValue 22 recovery
+
+Only `w0_postgresql_virtual_identity_22_recovery` may follow v6 commit
+`0a64eb665433483a69e9134c222a1dabc03c1da2`, tree
+`0f97f27c5a43d976e73f025e20d6b355f6ece494`, CIM ReturnValue 22, zero starts
+and no identity change. Recheck Stopped, NetworkService StartName, SID
+UNRESTRICTED and no 5432 listener. Permit one exact `sc.exe` process argument
+vector: `config`, `postgresql-x64-16`, `obj=`,
+`NT SERVICE\postgresql-x64-16`. Omit `password=` entirely so the native
+ChangeServiceConfig lpPassword is NULL. Require exit zero and read-only
+StartName verification before one start, then the existing final checks. Never
+rerun v6/CIM, add a password or extra option, change ACL/config/install/logon
+rights, retry or restore NetworkService. Failure remains Stopped and blocks N1.

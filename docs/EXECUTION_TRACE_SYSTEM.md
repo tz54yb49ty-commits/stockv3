@@ -558,3 +558,14 @@ arguments without a secret, ReturnValue, StartName check, one start and final
 state. Config/ACL/install, grant/remove/deny, `sc.exe` mutation, retry,
 NetworkService restoration and N1 counts stay zero. Failure ends Stopped,
 `BLOCKED_EVIDENCE_PRESERVED`, with N1 forbidden.
+
+The append-only `w0_postgresql_virtual_identity_22_recovery` trace binds v6
+commit `0a64eb665433483a69e9134c222a1dabc03c1da2`, tree
+`0f97f27c5a43d976e73f025e20d6b355f6ece494`, ReturnValue 22, zero starts and
+unchanged identity. It records fresh precheck hashes, one exact `sc.exe`
+argument vector containing `obj=` and `NT SERVICE\postgresql-x64-16`, explicit
+absence of `password=`, NULL lpPassword authority,
+exit code, read-only StartName check, at most one start and final evidence.
+V6/CIM rerun, password/extra argument, ACL/config/install/logon-right mutation,
+retry, restoration and N1 counts remain zero. Failure is Stopped and
+`BLOCKED_EVIDENCE_PRESERVED`.

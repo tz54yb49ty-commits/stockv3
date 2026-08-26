@@ -1607,3 +1607,14 @@ ReturnValue 0, verified StartName, one start and final state. Negative fixtures
 reject wrong authority/failure/pre-state, `sc.exe`, config/ACL/install mutation,
 nonzero return, early/repeated start, retry, NetworkService restoration,
 incomplete evidence and N1 handoff.
+
+V7 full-chain fixtures register `w0_postgresql_virtual_identity_22_recovery`
+across all nine governance files. Positive coverage binds v6 commit
+`0a64eb665433483a69e9134c222a1dabc03c1da2`, tree
+`0f97f27c5a43d976e73f025e20d6b355f6ece494`, ReturnValue 22, zero starts,
+unchanged identity, fresh exact pre-state, one exact `sc.exe config` argument
+vector containing `obj=` and `NT SERVICE\postgresql-x64-16`, omitted
+password/NULL lpPassword, zero exit, StartName verification,
+one start and final checks. Negative tests reject wrong authority/state,
+V6/CIM rerun, empty/nonempty password argument, extra sc option, second attempt,
+ACL/config/install/logon-right mutation, early/repeated start, fallback and N1.

@@ -730,3 +730,15 @@ Final acceptance requires Running, virtual StartName, SID UNRESTRICTED, only
 `127.0.0.1:5432`, pg_isready accepting and ACL count zero. No configuration,
 ACL, install, retry or NetworkService restoration is allowed. Failure leaves
 the service Stopped, preserves evidence and rejects N1.
+
+The independent `w0_postgresql_virtual_identity_22_recovery` gate binds exact
+v6 commit `0a64eb665433483a69e9134c222a1dabc03c1da2`, tree
+`0f97f27c5a43d976e73f025e20d6b355f6ece494`, ReturnValue 22, zero starts and
+no identity change. Fresh read-only evidence must still prove Stopped,
+NetworkService StartName, SID UNRESTRICTED and no 5432 listener. The only
+mutation is one exact `sc.exe` argument vector `config`, service, `obj=`,
+`NT SERVICE\postgresql-x64-16`; `password=` is absent, mapping to required NULL
+lpPassword. Exit must be zero, StartName must be read back before one start,
+and existing Running/virtual/SID/loopback/pg_isready/ACL-zero postchecks apply.
+V6 or CIM retry, password argument, extra option, ACL/config/install/logon-right
+mutation, retry or NetworkService restoration rejects and leaves Stopped.
