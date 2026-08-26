@@ -14,6 +14,7 @@ AGENTS_PATH = ROOT / "AGENTS.md"
 COMPILER_PATH = ROOT / "docs" / "EXECUTION_COMPILER.md"
 KERNEL_PATH = ROOT / "docs" / "EXECUTION_KERNEL.md"
 RUNTIME_GATE_PATH = ROOT / "docs" / "EXECUTION_RUNTIME_GATE.md"
+SANDBOX_PATH = ROOT / "docs" / "EXECUTION_SANDBOX.md"
 
 
 def load_policy_from(path: Path) -> dict[str, Any]:
@@ -32,8 +33,15 @@ def load_control_contracts(
     compiler_path: Path = COMPILER_PATH,
     kernel_path: Path = KERNEL_PATH,
     runtime_gate_path: Path = RUNTIME_GATE_PATH,
-) -> tuple[dict[str, Any], str, str]:
-    for path in (agents_path, compiler_path, kernel_path, runtime_gate_path):
+    sandbox_path: Path = SANDBOX_PATH,
+) -> tuple[dict[str, Any], str, str, str]:
+    for path in (
+        agents_path,
+        compiler_path,
+        kernel_path,
+        runtime_gate_path,
+        sandbox_path,
+    ):
         if not path.is_file():
             raise FileNotFoundError(path)
     agents_policy = load_policy_from(agents_path)
@@ -46,7 +54,10 @@ def load_control_contracts(
     runtime_gate = runtime_gate_path.read_text(encoding="utf-8")
     if POLICY_ID not in runtime_gate:
         raise AssertionError("Runtime Gate must recognize the W0 policy")
-    return agents_policy, compiler, runtime_gate
+    sandbox = sandbox_path.read_text(encoding="utf-8")
+    if POLICY_ID not in sandbox:
+        raise AssertionError("Sandbox must recognize the W0 policy")
+    return agents_policy, compiler, runtime_gate, sandbox
 
 
 def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
@@ -92,7 +103,9 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.policy, cls.compiler, cls.runtime_gate = load_control_contracts()
+        cls.policy, cls.compiler, cls.runtime_gate, cls.sandbox = (
+            load_control_contracts()
+        )
         cls.request = canonical_request(cls.policy)
 
     def decision(self, **overrides: Any) -> str:
@@ -195,6 +208,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             "compiler_path",
             "kernel_path",
             "runtime_gate_path",
+            "sandbox_path",
         ):
             kwargs = {field: missing}
             with self.subTest(field=field), self.assertRaises(FileNotFoundError):
@@ -215,6 +229,38 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             *self.policy["n1_handoff"]["forbidden_sources"][:2],
         ):
             self.assertIn(value, gate)
+        self.assertTrue(self.policy["governance_session_cannot_execute"])
+
+    def test_sandbox_matches_policy_and_simulation_never_executes(self) -> None:
+        sandbox = self.sandbox
+        self.assertIn("Sandbox Simulation", sandbox)
+        self.assertIn("mutation count zero before simulation", sandbox)
+        self.assertIn("a simulation `PASS` is not execution", sandbox)
+        self.assertIn("policy-definition governance", sandbox)
+        self.assertIn("session always predicts `REJECT`", sandbox)
+        self.assertIn("fail-closed `REJECT`", sandbox)
+        self.assertIn("RESTART_REQUIRED", sandbox)
+        self.assertIn(
+            "current WSL/SSH session attempting to disconnect itself", sandbox
+        )
+        for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
+            self.assertIn(phase, sandbox)
+        allowlist = self.policy["exact_allowlist"]
+        for value in (
+            allowlist["legacy_service_name"],
+            *allowlist["software_package_ids"],
+            allowlist["postgresql_install_root"],
+            allowlist["postgresql_data_directory"],
+            allowlist["postgresql_backup_staging"],
+            allowlist["postgresql_service_name"],
+            allowlist["postgresql_service_identity"],
+            allowlist["postgresql_listen_addresses"],
+        ):
+            self.assertIn(value, sandbox)
+        for path in allowlist["c_directories"]:
+            self.assertIn(path.rsplit("\\", 1)[-1], sandbox)
+        for value in self.policy["n1_handoff"]["forbidden_sources"][:2]:
+            self.assertIn(value, sandbox)
         self.assertTrue(self.policy["governance_session_cannot_execute"])
 
     def test_control_plan_references_policy_and_new_empty_cluster(self) -> None:
