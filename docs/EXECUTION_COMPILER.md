@@ -1253,3 +1253,33 @@ The mutation allowlist is empty; layout, direct MSI, uninstall, machine install,
 PATH/registry/cache edit and every W0/N1-N6 mutation compile to REJECT. A future
 revision needs new PSF authority and independent authorization; v8 is not
 retryable. Compiler recognition is not execution.
+
+### Windows W0 isolated uv-managed CPython 3.11 compilation (v10)
+
+`w0_python311_isolated_uv_managed_install_v1` compiles only as the independent
+one-attempt `w0_python311_isolated_uv_managed_install` phase bound to parent
+`95af7b50c7032a74c5a196b1acaa935e89b29f60`, tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f`. The v9 internal-MSI recovery
+remains REJECT and all v8 repair/uninstall attempts remain consumed.
+
+The one-way DAG is: fresh read-only Windows 10 Pro 25H2 build 26200.9168 x64,
+routine ashare-ops SID/non-admin/Git 2.55.0.windows.5, exact five-path absence,
+legacy-state hashes and zero-process validation -> create only exact C tools,
+uv and cache directories -> download the immutable uv 0.12.1 x64 ZIP once,
+verify SHA-256, expand without force, verify `uv 0.12.1`, PE x64 and hash -> set
+only the six frozen process environment variables -> invoke the exact
+`UV_PYTHON_INSTALL_BIN=0` and `UV_PYTHON_NO_REGISTRY=1` are mandatory ->
+`uv.exe --no-progress python install --managed-python --install-dir
+C:\AshareV3\tools\python cpython@3.11` vector once -> discover only through
+`uv python find --managed-python 3.11`, freeze one stable >=3.11.9 x64 CPython
+and standard-library proof -> invoke that exact python once with `-m venv
+C:\AshareV3\.venv` -> verify venv/base-prefix/pip and immutable post-state ->
+append trace. Only uv built-in python-build-standalone metadata/checksum is the
+managed artifact authority.
+
+Existing target/ZIP, drift, admin/UAC, pipe-to-iex, overwrite, self-update,
+`--default`/`--force`/`--reinstall`/upgrade, 3.12/system/Store/registry/PATH,
+old MSI/bundle/cache/target mutation, retry/cleanup, project dependencies or
+D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation compiles to REJECT. Failure
+preserves partial evidence; success is `ISOLATED_NATIVE_CPYTHON311_READY` but
+does not hand off N1. Compilation is not execution.

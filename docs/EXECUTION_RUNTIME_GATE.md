@@ -773,3 +773,25 @@ not define direct internal-MSI recovery. Policy state is
 evidence match can produce ACCEPT; layout, MSI, uninstall, machine install,
 retry, cleanup, PATH edit and N1 all fail closed.
 The terminal gate result is `BLOCKED_EVIDENCE_PRESERVED`.
+
+### Isolated uv-managed CPython 3.11 v10 gate
+
+The Gate may ACCEPT `w0_python311_isolated_uv_managed_install_v1` only in a
+later independent request with phase
+`w0_python311_isolated_uv_managed_install`, parent
+`95af7b50c7032a74c5a196b1acaa935e89b29f60`/tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f`, attempt one and retry zero. It
+requires exact non-admin ashare-ops identity, frozen OS/Git/ACL/five-absence/
+process evidence, unchanged legacy Python evidence, immutable uv 0.12.1 ZIP
+URL/SHA, exact C-only directories, six process-only environment values, exact
+install/find/venv vectors, one stable >=3.11.9 x64 managed interpreter and all
+`cpython@3.11` is the only install request;
+postchecks. PATH and registry must remain byte/inventory unchanged;
+`UV_PYTHON_INSTALL_BIN=0` and `UV_PYTHON_NO_REGISTRY=1` are mandatory.
+
+The v9 internal-MSI policy stays REJECT. Any old MSI/bundle operation, existing
+target, alternate URL/hash/version/path/identity, extra flag, second attempt,
+admin/UAC, pipe-to-iex, overwrite, self-update, system/Store/3.12, registry/
+PATH/cleanup/dependency or D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation
+returns REJECT. Success is `ISOLATED_NATIVE_CPYTHON311_READY`; failure is
+`BLOCKED_EVIDENCE_PRESERVED`; both keep `n1_handoff_allowed=false`.

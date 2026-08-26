@@ -1644,3 +1644,23 @@ evidence and drift, and for layout, `msiexec`, repair, `/uninstall /quiet`,
 machine install, retry, PATH/registry/cache edits, cleanup, 3.12 substitution
 and every PG/D/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation. The only result is
 `BLOCKED_EVIDENCE_PRESERVED`; no ACCEPT fixture exists.
+
+Isolated uv-managed Python v10 fixtures register
+`w0_python311_isolated_uv_managed_install_v1` and
+`w0_python311_isolated_uv_managed_install` across all nine governance files.
+The positive fixture binds parent
+`95af7b50c7032a74c5a196b1acaa935e89b29f60`/tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f`, routine ashare-ops, Windows
+26200.9168 x64, Git 2.55.0.windows.5, five absent targets, exact uv 0.12.1
+URL/SHA/x64, three C directories, six environment values, exact managed
+`UV_PYTHON_INSTALL_BIN=0`, `UV_PYTHON_NO_REGISTRY=1`,
+`cpython@3.11` install/find, >=3.11.9 stable x64/module verification, one empty
+venv and unchanged legacy/PATH/registry state. It accepts only one independent
+attempt and success `ISOLATED_NATIVE_CPYTHON311_READY` with N1 false.
+
+Negative fixtures reject v9/v8 rerun; wrong SID/admin/UAC; any pre-state drift;
+existing target/ZIP; URL/hash/version/architecture/path/flag drift; pipe-to-iex;
+overwrite/self-update; missing isolation env; system/Store/3.12/registry/PATH;
+multiple roots, prerelease or <3.11.9; missing stdlib/pip/base-prefix proof;
+extra venv packages; retry/cleanup; old MSI/bundle/cache/target change; and every
+D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac or business-dependency mutation.

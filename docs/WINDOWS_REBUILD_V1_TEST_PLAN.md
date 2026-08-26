@@ -234,3 +234,30 @@ internal-MSI recovery. Layout/direct MSI/bundle uninstall/machine install,
 retry, manual PATH/registry/cache edit, cleanup, PG/D/WSL/Scheduler/Git/N1-N6/
 NAS/Mac mutation and N1 handoff remain zero. Expected terminal state:
 `BLOCKED_EVIDENCE_PRESERVED`.
+
+### V10 isolated uv-managed native CPython 3.11 gate
+
+Test `w0_python311_isolated_uv_managed_install_v1` only as a later independent
+routine ashare-ops phase bound to parent
+`95af7b50c7032a74c5a196b1acaa935e89b29f60`, tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f`. Preserve the v9 REJECT and every
+old Python bundle/MSI/PATH/cache/target/log byte. Preflight Windows 10 Pro 25H2
+build 26200.9168 x64, SID/non-admin, Git 2.55.0.windows.5, ACL, exact five path
+absences and process zero.
+
+Verify one download of uv 0.12.1 x64 from the exact Astral release URL with
+SHA-256 `8fcb0cb46e1229065e344758980924e569bef5882ef45f46fada8fb24e06b74a`,
+hash-before-expand, no overwrite, `uv 0.12.1`, PE x64 and uv.exe hash. Verify
+only process-local `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_INSTALL_BIN=0`,
+`UV_PYTHON_NO_REGISTRY=1`, `UV_CACHE_DIR`, `UV_NO_PROGRESS=1` and
+`UV_MANAGED_PYTHON=1`; then one exact managed `cpython@3.11` install and
+managed-only find. Require exactly one stable >=3.11.9 x64 root, frozen
+executable/base-prefix/implementation/hash, ssl/sqlite3/ctypes/venv/ensurepip,
+then one exact empty `C:\AshareV3\.venv` with matching base-prefix and pip.
+
+Positive terminal state is `ISOLATED_NATIVE_CPYTHON311_READY`, N1 false.
+Negative tests cover every identity/evidence/path/hash/argument/env/version/
+module/package/attempt drift, partial failure, admin/UAC, old MSI operations,
+pipe-to-iex, overwrite/self-update, PATH/registry, cleanup, project dependency,
+and D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation. Failure preserves partial
+evidence as `BLOCKED_EVIDENCE_PRESERVED` without retry.

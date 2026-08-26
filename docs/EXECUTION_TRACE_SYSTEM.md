@@ -596,3 +596,20 @@ authority, `runtime_execution_allowed=false`, and zero layout/direct-MSI/
 uninstall/machine-install/PATH/registry/cache/cleanup/business/W0/N1-N6
 mutation counters. The only terminal trace is `BLOCKED_EVIDENCE_PRESERVED`;
 there is no attempt, retry, cleanup, N1 handoff or executable command.
+
+The append-only `w0_python311_isolated_uv_managed_install_v1` trace binds
+parent `95af7b50c7032a74c5a196b1acaa935e89b29f60`/tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f`; Windows 10 Pro 25H2
+26200.9168 x64; ashare-ops SID/non-admin; Git; exact five absent targets;
+process zero; and byte/hash snapshots of PATH, registry and legacy Python state.
+It records exact directory/download/expand/install/find/venv attempts, uv ZIP
+and uv.exe SHA, uv 0.12.1 PE x64, six process environment values, the uv
+install request `cpython@3.11`, including `UV_PYTHON_INSTALL_BIN=0` and
+`UV_PYTHON_NO_REGISTRY=1`,
+built-in python-build-standalone artifact decision/checksum, managed patch/root/
+python SHA/sys fields/module checks, and venv version/architecture/base-prefix/
+pip/default-ensurepip inventory. Success records
+`ISOLATED_NATIVE_CPYTHON311_READY`; failure records
+`BLOCKED_EVIDENCE_PRESERVED` and preserves partial paths. Retry, cleanup,
+admin/UAC, old MSI/bundle, PATH/registry, D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac,
+business dependency and N1-handoff counters remain zero. V9 stays REJECT.

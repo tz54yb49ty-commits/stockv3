@@ -685,3 +685,21 @@ coherence or safe AppSearch behavior. Simulation has no MODIFY node and ends
 `BLOCKED_EVIDENCE_PRESERVED`; simulated success cannot authorize layout,
 direct MSI, `/uninstall /quiet`, machine install, retry, cleanup, D/PG/WSL/
 Scheduler/Git/N1-N6/NAS/Mac mutation or N1.
+
+### Isolated uv-managed CPython 3.11 v10 simulation
+
+Sandbox Simulation models the complete
+`w0_python311_isolated_uv_managed_install_v1` one-way DAG at parent
+`95af7b50c7032a74c5a196b1acaa935e89b29f60`/tree
+`337c92c3db7d1cf591b7d1143a2385d27eb1be5f` without performing it. It proves
+routine non-admin identity, exact absent C targets, legacy Python immutability,
+uv ZIP URL/SHA/version/x64, non-overwriting expansion, process-only isolation,
+exact uv `0.12.1`, `UV_PYTHON_INSTALL_BIN=0`,
+`UV_PYTHON_NO_REGISTRY=1`,
+one managed `cpython@3.11` install, managed-only find, one >=3.11.9 stable x64
+root, ssl/sqlite3/ctypes/venv/ensurepip, and one empty venv with only ensurepip
+bootstrap. It predicts fail-closed for partial download/install/venv, drift,
+extra interpreter/root/package, registry/PATH delta or any forbidden counter.
+Simulation PASS is not execution, never cleans partial state, never enables N1,
+and cannot override the v9 internal-MSI REJECT.
+The only simulated success is `ISOLATED_NATIVE_CPYTHON311_READY`.

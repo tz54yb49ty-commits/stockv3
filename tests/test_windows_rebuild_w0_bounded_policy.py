@@ -419,6 +419,39 @@ def evaluate_python_appsearch_cycle_recovery(
     return "REJECT"
 
 
+def evaluate_python_isolated_uv_install(
+    policy: dict[str, Any], request: dict[str, Any]
+) -> str:
+    contract = policy["python311_isolated_uv_managed_install"]
+    expected = {
+        "policy_id": contract["policy_id"],
+        "phase_mode": contract["phase_mode"],
+        "parent_policy_commit": contract["parent_policy_commit"],
+        "parent_policy_tree": contract["parent_policy_tree"],
+        "attempts": 1,
+        "automatic_retry_attempts": 0,
+        "independent_execution_session": True,
+        "operator": contract["operator"],
+        "required_fresh_read_only_pre_state": contract[
+            "required_fresh_read_only_pre_state"
+        ],
+        "legacy_python_immutable_contract": contract[
+            "legacy_python_immutable_contract"
+        ],
+        "uv_distribution": contract["uv_distribution"],
+        "exact_directories_created": contract["exact_directories_created"],
+        "process_environment": contract["process_environment"],
+        "managed_python_install": contract["managed_python_install"],
+        "managed_python_discovery": contract["managed_python_discovery"],
+        "empty_venv": contract["empty_venv"],
+        "required_post_state": contract["required_post_state"],
+        "required_zero_mutations": contract["required_zero_mutations"],
+        "cleanup_attempts": 0,
+        "n1_handoff_allowed": False,
+    }
+    return policy["accept_decision"] if request == expected else "REJECT"
+
+
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -563,7 +596,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 9)
+        self.assertEqual(self.policy["policy_version"], 10)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -911,6 +944,122 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertEqual(recovery[field], 0)
         self.assertFalse(recovery["n1_handoff_allowed"])
+
+    def test_python311_isolated_uv_managed_install_exact_contract(self) -> None:
+        recovery = self.policy["python311_isolated_uv_managed_install"]
+        request = {
+            "policy_id": recovery["policy_id"],
+            "phase_mode": recovery["phase_mode"],
+            "parent_policy_commit": recovery["parent_policy_commit"],
+            "parent_policy_tree": recovery["parent_policy_tree"],
+            "attempts": 1,
+            "automatic_retry_attempts": 0,
+            "independent_execution_session": True,
+            "operator": recovery["operator"],
+            "required_fresh_read_only_pre_state": recovery[
+                "required_fresh_read_only_pre_state"
+            ],
+            "legacy_python_immutable_contract": recovery[
+                "legacy_python_immutable_contract"
+            ],
+            "uv_distribution": recovery["uv_distribution"],
+            "exact_directories_created": recovery["exact_directories_created"],
+            "process_environment": recovery["process_environment"],
+            "managed_python_install": recovery["managed_python_install"],
+            "managed_python_discovery": recovery["managed_python_discovery"],
+            "empty_venv": recovery["empty_venv"],
+            "required_post_state": recovery["required_post_state"],
+            "required_zero_mutations": recovery["required_zero_mutations"],
+            "cleanup_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(evaluate_python_isolated_uv_install(self.policy, request), "ACCEPT")
+        self.assertEqual(recovery["operator"]["account"], r"TDX-STOCK\ashare-ops")
+        self.assertFalse(recovery["operator"]["administrators_member"])
+        self.assertEqual(recovery["operator"]["admin_or_uac_attempts"], 0)
+        self.assertEqual(recovery["uv_distribution"]["version"], "0.12.1")
+        self.assertEqual(
+            recovery["uv_distribution"]["sha256"],
+            "8fcb0cb46e1229065e344758980924e569bef5882ef45f46fada8fb24e06b74a",
+        )
+        self.assertEqual(
+            recovery["managed_python_install"]["argument_vector"],
+            [
+                "--no-progress", "python", "install", "--managed-python",
+                "--install-dir", r"C:\AshareV3\tools\python", "cpython@3.11",
+            ],
+        )
+        self.assertEqual(recovery["process_environment"]["UV_PYTHON_INSTALL_BIN"], "0")
+        self.assertEqual(recovery["process_environment"]["UV_PYTHON_NO_REGISTRY"], "1")
+        self.assertEqual(
+            recovery["required_post_state"]["success_state"],
+            "ISOLATED_NATIVE_CPYTHON311_READY",
+        )
+        self.assertFalse(recovery["n1_handoff_allowed"])
+
+        for field, value in {
+            "parent_policy_commit": "0" * 40,
+            "parent_policy_tree": "0" * 40,
+            "attempts": 2,
+            "automatic_retry_attempts": 1,
+            "independent_execution_session": False,
+            "operator": {"account": r"TDX-STOCK\47894"},
+            "required_fresh_read_only_pre_state": {"drift": True},
+            "legacy_python_immutable_contract": {"v9_runtime_decision": "ACCEPT"},
+            "uv_distribution": {"version": "latest"},
+            "exact_directories_created": [r"D:\Python"],
+            "process_environment": {"UV_PYTHON_NO_REGISTRY": "0"},
+            "managed_python_install": {"argument_vector": ["--force"]},
+            "managed_python_discovery": {"version": "3.12"},
+            "empty_venv": {"project_dependencies": 1},
+            "required_post_state": {"registry_delta": 1},
+            "required_zero_mutations": {"d_drive": 1},
+            "cleanup_attempts": 1,
+            "n1_handoff_allowed": True,
+        }.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request)
+                bad[field] = value
+                self.assertEqual(
+                    evaluate_python_isolated_uv_install(self.policy, bad), "REJECT"
+                )
+
+        v9 = self.policy["python311_orphaned_dependency_appsearch_cycle_recovery"]
+        self.assertEqual(
+            evaluate_python_appsearch_cycle_recovery(
+                self.policy,
+                {"policy_id": v9["policy_id"], "phase_mode": v9["phase_mode"]},
+            ),
+            "REJECT",
+        )
+
+    def test_python311_isolated_uv_managed_install_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        for name, document in {
+            "Compiler": self.compiler,
+            "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox,
+            "Trace": self.trace,
+            "TestSuite": self.test_suite,
+            "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_python311_isolated_uv_managed_install_v1",
+                    "w0_python311_isolated_uv_managed_install",
+                    "95af7b50c7032a74c5a196b1acaa935e89b29f60",
+                    "337c92c3db7d1cf591b7d1143a2385d27eb1be5f",
+                    "0.12.1",
+                    "cpython@3.11",
+                    "UV_PYTHON_INSTALL_BIN=0",
+                    "UV_PYTHON_NO_REGISTRY=1",
+                    "ISOLATED_NATIVE_CPYTHON311_READY",
+                    "BLOCKED_EVIDENCE_PRESERVED",
+                    "N1",
+                ):
+                    self.assertIn(value, document)
 
     def test_scheduler_inventory_is_dynamic_and_all_frozen_tasks_disable(self) -> None:
         inventory = self.policy["exact_allowlist"]["scheduler_inventory_contract"]

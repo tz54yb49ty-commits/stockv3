@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 9,
+  "policy_version": 10,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5397,6 +5397,7 @@ phase combination, retry or excess attempt returns `REJECT`.
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
+      "w0_python311_isolated_uv_managed_install",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -5407,6 +5408,7 @@ phase combination, retry or excess attempt returns `REJECT`.
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
+      "w0_python311_isolated_uv_managed_install",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -5661,6 +5663,175 @@ phase combination, retry or excess attempt returns `REJECT`.
     "business_venv_or_dependency_attempts": 0,
     "postgresql_d_wsl_scheduler_git_n1_n6_nas_mac_mutations": 0,
     "only_terminal_state": "BLOCKED_EVIDENCE_PRESERVED",
+    "n1_handoff_allowed": false
+  },
+  "python311_isolated_uv_managed_install": {
+    "policy_id": "w0_python311_isolated_uv_managed_install_v1",
+    "phase_mode": "w0_python311_isolated_uv_managed_install",
+    "parent_policy_commit": "95af7b50c7032a74c5a196b1acaa935e89b29f60",
+    "parent_policy_tree": "337c92c3db7d1cf591b7d1143a2385d27eb1be5f",
+    "attempts": 1,
+    "automatic_retry_attempts": 0,
+    "governance_session_cannot_execute": true,
+    "execution_session_must_be_independent": true,
+    "operator": {
+      "account": "TDX-STOCK\\ashare-ops",
+      "sid": "S-1-5-21-2072264739-3883739137-88032818-1006",
+      "administrators_member": false,
+      "integrity": "Medium",
+      "admin_or_uac_attempts": 0
+    },
+    "required_fresh_read_only_pre_state": {
+      "os_product_name": "Windows 10 Pro",
+      "os_display_version": "25H2",
+      "os_build": 26200,
+      "os_ubr": 9168,
+      "os_architecture": "x64",
+      "git_for_windows_version": "2.55.0.windows.5",
+      "asharev3_acl_authenticated_users_create_write_children": true,
+      "where_uv_found": false,
+      "py_launcher_result": "No installed Pythons found",
+      "program_files_python311_exists": false,
+      "installer_or_msiexec_process_count": 0,
+      "exact_absent_targets": [
+        "C:\\AshareV3\\tools",
+        "C:\\AshareV3\\tools\\uv-0.12.1",
+        "C:\\AshareV3\\tools\\python",
+        "C:\\AshareV3\\.venv",
+        "C:\\AshareV3\\staging\\installers\\uv-x86_64-pc-windows-msvc-0.12.1.zip"
+      ]
+    },
+    "legacy_python_immutable_contract": {
+      "v9_policy_id": "w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1",
+      "v9_runtime_decision": "REJECT",
+      "old_hkcu_bundle_and_eight_msi_registrations_unchanged": true,
+      "old_user_path_bytes_unchanged": true,
+      "windows_installer_cache_path": "C:\\WINDOWS\\Installer\\15c7d68.msi",
+      "windows_installer_cache_unchanged": true,
+      "old_logs_unchanged": true,
+      "old_package_cache_and_target_unchanged": true,
+      "bundle_or_msi_repair_uninstall_attempts": 0
+    },
+    "uv_distribution": {
+      "version": "0.12.1",
+      "release_commit": "329541a",
+      "url": "https://releases.astral.sh/github/uv/releases/download/0.12.1/uv-x86_64-pc-windows-msvc.zip",
+      "zip_path": "C:\\AshareV3\\staging\\installers\\uv-x86_64-pc-windows-msvc-0.12.1.zip",
+      "sha256": "8fcb0cb46e1229065e344758980924e569bef5882ef45f46fada8fb24e06b74a",
+      "download_attempts": 1,
+      "download_method": "Invoke-WebRequest -Uri exact_url -OutFile exact_zip_path",
+      "pipe_to_iex_forbidden": true,
+      "expand_method": "Expand-Archive -LiteralPath exact_zip_path -DestinationPath exact_uv_dir",
+      "expand_overwrite_or_force": false,
+      "install_dir": "C:\\AshareV3\\tools\\uv-0.12.1",
+      "executable": "C:\\AshareV3\\tools\\uv-0.12.1\\uv.exe",
+      "required_version_output": "uv 0.12.1",
+      "required_pe_architecture": "x64",
+      "uv_executable_sha256_frozen_after_expand": true,
+      "self_update_attempts": 0
+    },
+    "exact_directories_created": [
+      "C:\\AshareV3\\tools",
+      "C:\\AshareV3\\tools\\uv-0.12.1",
+      "C:\\AshareV3\\runtime\\uv-cache"
+    ],
+    "process_environment": {
+      "UV_PYTHON_INSTALL_DIR": "C:\\AshareV3\\tools\\python",
+      "UV_PYTHON_INSTALL_BIN": "0",
+      "UV_PYTHON_NO_REGISTRY": "1",
+      "UV_CACHE_DIR": "C:\\AshareV3\\runtime\\uv-cache",
+      "UV_NO_PROGRESS": "1",
+      "UV_MANAGED_PYTHON": "1"
+    },
+    "managed_python_install": {
+      "program": "C:\\AshareV3\\tools\\uv-0.12.1\\uv.exe",
+      "argument_vector": [
+        "--no-progress",
+        "python",
+        "install",
+        "--managed-python",
+        "--install-dir",
+        "C:\\AshareV3\\tools\\python",
+        "cpython@3.11"
+      ],
+      "attempts": 1,
+      "artifact_authority": "uv-0.12.1-built-in-python-download-metadata-and-checksum",
+      "distribution_family": "python-build-standalone",
+      "platform": "x86_64-pc-windows-msvc",
+      "default_force_reinstall_upgrade_system_store_registry_forbidden": true,
+      "python_3_12_substitution_forbidden": true,
+      "failure_preserves_partial_and_stops": true
+    },
+    "managed_python_discovery": {
+      "program": "C:\\AshareV3\\tools\\uv-0.12.1\\uv.exe",
+      "argument_vector": [
+        "python",
+        "find",
+        "--managed-python",
+        "3.11"
+      ],
+      "result_must_be_under": "C:\\AshareV3\\tools\\python",
+      "exactly_one_stable_cpython311_x64_root": true,
+      "minimum_version": "3.11.9",
+      "prerelease_forbidden": true,
+      "freeze_fields": [
+        "patch_version",
+        "sys.executable",
+        "sys.base_prefix",
+        "struct_pointer_bits_64",
+        "sys.implementation",
+        "python_executable_sha256"
+      ],
+      "required_stdlib_modules": [
+        "ssl",
+        "sqlite3",
+        "ctypes",
+        "venv",
+        "ensurepip"
+      ]
+    },
+    "empty_venv": {
+      "target": "C:\\AshareV3\\.venv",
+      "command": "exact_managed_python.exe -m venv C:\\AshareV3\\.venv",
+      "attempts": 1,
+      "required_python": "C:\\AshareV3\\.venv\\Scripts\\python.exe",
+      "required_version_family": "3.11",
+      "required_architecture": "x64",
+      "base_prefix_must_equal_managed_root": true,
+      "pip_required": true,
+      "allowed_packages": "ensurepip_default_bootstrap_only",
+      "project_dependency_install_attempts": 0
+    },
+    "required_post_state": {
+      "success_state": "ISOLATED_NATIVE_CPYTHON311_READY",
+      "user_and_machine_path_bytes_unchanged": true,
+      "python_registry_inventory_additions": 0,
+      "legacy_python_state_unchanged": true,
+      "program_files_python311_exists": false,
+      "git_for_windows_version": "2.55.0.windows.5",
+      "installer_or_msiexec_process_count": 0,
+      "exact_paths_versions_and_hashes_recorded": true,
+      "n1_handoff_allowed": false
+    },
+    "required_zero_mutations": {
+      "admin_or_uac": 0,
+      "d_drive": 0,
+      "postgresql": 0,
+      "wsl": 0,
+      "scheduler": 0,
+      "git": 0,
+      "n1_n6": 0,
+      "nas": 0,
+      "mac": 0,
+      "winget": 0,
+      "psf_installer_rerun": 0,
+      "registry_or_path": 0,
+      "old_msi_bundle_cache_or_target": 0,
+      "uv_self_update": 0,
+      "business_dependencies": 0
+    },
+    "failure_state": "BLOCKED_EVIDENCE_PRESERVED",
+    "cleanup_attempts": 0,
     "n1_handoff_allowed": false
   },
   "postgresql16_installer_contract": {
