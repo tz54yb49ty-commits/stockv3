@@ -42,8 +42,13 @@ BLOCKED_N3_C1_SCOPED_CONTEXT_INSUFFICIENT = "BLOCKED_N3_C1_SCOPED_CONTEXT_INSUFF
 BLOCKED_PREVIOUS_DAY_RAW_C1_CONTEXT_INSUFFICIENT = "BLOCKED_PREVIOUS_DAY_RAW_C1_CONTEXT_INSUFFICIENT"
 BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH = "BLOCKED_C1_SOURCE_ROWS_CONTRACT_MISMATCH"
 BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE = "BLOCKED_SOURCE_CLOSE_LABEL_NOT_MAPPABLE"
+BLOCKED_N3T_FIXED_PERIOD_WINDOW_UNAVAILABLE = "BLOCKED_N3T_FIXED_PERIOD_WINDOW_UNAVAILABLE"
+BLOCKED_N3T_CURRENT_5M_SAME_WINDOW_SOURCE_MISSING = (
+    "BLOCKED_N3T_CURRENT_5M_SAME_WINDOW_SOURCE_MISSING"
+)
+BLOCKED_N3T_METRIC_CONTEXT_FIELDS_MISSING = "BLOCKED_N3T_METRIC_CONTEXT_FIELDS_MISSING"
 
-SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_morning_close_boundary_v3"
+SOURCE_CLOSE_LABEL_POLICY = "source_label_to_physical_with_close_boundaries_v4"
 SOURCE_LABEL_SEMANTICS = "source_label"
 PHYSICAL_LABEL_SEMANTICS = "start_label"
 FORBIDDEN_SOURCE_CLOSE_LABELS = {"11:30"}
@@ -55,6 +60,26 @@ BOUNDARY_POLICY_VERSION = "n3.action_confirmation_boundary.v1"
 SAME_TRADE_DATE_PREVIOUS_PERIOD = "same_trade_date_previous_period"
 PREVIOUS_TRADE_DATE_LAST_PERIOD = "previous_trade_date_last_period"
 NOT_AVAILABLE_PERIOD_SOURCE = "not_available"
+BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE = "BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE"
+VALID_PREVIOUS_PERIOD_SOURCES = frozenset(
+    {SAME_TRADE_DATE_PREVIOUS_PERIOD, PREVIOUS_TRADE_DATE_LAST_PERIOD}
+)
+PREVIOUS_PERIOD_SOURCE_FIELDS = tuple(
+    f"previous_{period}_period_source" for period in ("1m", "5m", "30m", "120m")
+)
+FIXED_PERIOD_LAYOUT_INTRADAY = "intraday"
+FIXED_PERIOD_LAYOUT_POST_CLOSE = "post_close"
+FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL = "preload_close_label"
+FIXED_PERIOD_MINUTE_AXIS_VERSION = "n3.fixed_period_minute_axis.v1"
+FIXED_PERIOD_CALCULATION_LABELS = tuple(
+    label
+    for label in canonical_ashare_1m_labels("20000103")
+    if label not in {"09:30", "11:30"}
+)
+FIXED_PERIOD_CALCULATION_ORDINALS = {
+    label: index
+    for index, label in enumerate(FIXED_PERIOD_CALCULATION_LABELS, start=1)
+}
 
 ASSET_KINDS = ("stock", "index", "board")
 REQUIRED_SCOPE_GRAIN = (
@@ -109,6 +134,49 @@ REQUIRED_METRIC_CONTEXT_FIELDS = (
     "previous_120m_period_source",
     "boundary_policy_version",
 )
+
+
+def previous_period_sources_are_valid(metric_values: Mapping[str, Any]) -> bool:
+    return all(
+        str(metric_values.get(field) or "") in VALID_PREVIOUS_PERIOD_SOURCES
+        for field in PREVIOUS_PERIOD_SOURCE_FIELDS
+    )
+
+
+def required_previous_day_metric_context_labels(
+    *,
+    labels: Sequence[str],
+    current_labels: set[str],
+) -> set[str]:
+    """Return previous-day physical labels required by the shared fixed-period axis."""
+
+    canonical_labels = tuple(str(label or "") for label in labels)
+    calculation_labels = tuple(
+        label for label in canonical_labels if label in FIXED_PERIOD_CALCULATION_ORDINALS
+    )
+    if calculation_labels != FIXED_PERIOD_CALCULATION_LABELS:
+        return set()
+    observed_labels = {
+        str(label or "")
+        for label in current_labels
+        if str(label or "") in FIXED_PERIOD_CALCULATION_ORDINALS
+    }
+    if not observed_labels:
+        return set()
+
+    latest_label = max(
+        observed_labels,
+        key=lambda label: FIXED_PERIOD_CALCULATION_ORDINALS[label],
+    )
+    position = FIXED_PERIOD_CALCULATION_ORDINALS[latest_label]
+    required: set[str] = set()
+    for size in (1, 5, 30, 120):
+        current_start = ((position - 1) // size) * size
+        if current_start == 0:
+            required.update(canonical_labels[-size:])
+    for size in (5, 30):
+        required.update(_fixed_period_same_window_labels(position=position, size=size))
+    return required
 
 
 def build_n3_c1_scoped_current_day_pull_plan(
@@ -387,12 +455,16 @@ def apply_source_close_label_policy_to_row(row: Mapping[str, Any], *, for_trade_
 def _source_close_label_for_physical_label(physical_label: str) -> str:
     if not validate_ashare_c1_minute_label(physical_label):
         return ""
+    if physical_label == "14:59":
+        return "15:00"
     return physical_label
 
 
 def _physical_label_for_source_close_label(raw_label: str) -> str:
     if raw_label == "11:30":
         return "13:00"
+    if raw_label == "15:00":
+        return "14:59"
     if not re.fullmatch(r"\d{2}:\d{2}", raw_label or ""):
         return ""
     try:
@@ -677,6 +749,24 @@ def build_n3_c1_n3t_metric_context_source_artifact(
         if not previous_rows:
             return _blocked_metric_context_source_artifact(base, BLOCKED_PREVIOUS_DAY_RAW_C1_CONTEXT_INSUFFICIENT)
         metric_values = _derive_metric_values(current_rows=current_rows, previous_rows=previous_rows)
+        missing_metric_fields = [
+            field
+            for field in REQUIRED_METRIC_CONTEXT_FIELDS
+            if metric_values.get(field) is None
+        ]
+        if missing_metric_fields:
+            reason = _missing_metric_context_block_reason(
+                metric_values=metric_values,
+                missing_fields=missing_metric_fields,
+            )
+            blocked = _blocked_metric_context_source_artifact(base, reason)
+            blocked.update(
+                {
+                    "blocked_stage": _metric_context_blocked_stage(reason),
+                    "missing_metric_fields": missing_metric_fields,
+                }
+            )
+            return blocked
         for scope_row in refs_by_object.get(object_key, []):
             metric_context_rows.append(
                 {
@@ -999,6 +1089,29 @@ def _blocked_metric_context_source_artifact(base: Mapping[str, Any], reason: str
         }
     )
     return artifact
+
+
+def _missing_metric_context_block_reason(
+    *,
+    metric_values: Mapping[str, Any],
+    missing_fields: Sequence[str],
+) -> str:
+    if not metric_values:
+        return BLOCKED_N3T_FIXED_PERIOD_WINDOW_UNAVAILABLE
+    if (
+        "current_5m_amount" in missing_fields
+        and previous_period_sources_are_valid(metric_values)
+    ):
+        return BLOCKED_N3T_CURRENT_5M_SAME_WINDOW_SOURCE_MISSING
+    return BLOCKED_N3T_METRIC_CONTEXT_FIELDS_MISSING
+
+
+def _metric_context_blocked_stage(reason: str) -> str:
+    if reason == BLOCKED_N3T_CURRENT_5M_SAME_WINDOW_SOURCE_MISSING:
+        return "current_5m_same_window_source_missing"
+    if reason == BLOCKED_N3T_FIXED_PERIOD_WINDOW_UNAVAILABLE:
+        return "fixed_period_window_unavailable"
+    return "metric_context_fields_missing"
 
 
 def _blocked_current_day_staging_artifact(base: Mapping[str, Any], reason: str) -> dict[str, Any]:
@@ -1574,50 +1687,102 @@ def _current_rows_through_target(
     return output if latest_label == target_label else []
 
 
+def resolve_fixed_period_windows(
+    *,
+    current_rows: Sequence[Mapping[str, Any]],
+    previous_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Resolve canonical fixed-period windows for N3 metric consumers."""
+
+    unavailable = {
+        "status": NOT_AVAILABLE_PERIOD_SOURCE,
+        "position": 0,
+        "latest_current_row": None,
+        "previous_period_rows": {size: [] for size in (1, 5, 30, 120)},
+        "previous_period_sources": {size: NOT_AVAILABLE_PERIOD_SOURCE for size in (1, 5, 30, 120)},
+        "current_period_rows": {size: [] for size in (1, 5, 30, 120)},
+        "previous_day_same_period_rows": {size: [] for size in (1, 5, 30, 120)},
+        "boundary_policy_version": BOUNDARY_POLICY_VERSION,
+    }
+    try:
+        current_index = fixed_period_calculation_row_index(current_rows)
+        previous_index = _fixed_period_row_index(previous_rows)
+        if not current_index:
+            return unavailable
+        current_ordinals = sorted(current_index)
+        if current_ordinals != list(range(1, current_ordinals[-1] + 1)):
+            return unavailable
+
+        current = [current_index[ordinal] for ordinal in current_ordinals]
+        previous = [previous_index[ordinal] for ordinal in sorted(previous_index)]
+        latest_current = current[-1]
+        position = current_ordinals[-1]
+        previous_period_rows: dict[int, list[Mapping[str, Any]]] = {}
+        previous_period_sources: dict[int, str] = {}
+        current_period_rows: dict[int, list[Mapping[str, Any]]] = {}
+        previous_day_same_period_rows: dict[int, list[Mapping[str, Any]]] = {}
+        for size in (1, 5, 30, 120):
+            period_rows, period_source = _resolve_previous_period_rows(
+                current_rows=current,
+                previous_rows=previous,
+                labels=FIXED_PERIOD_CALCULATION_LABELS,
+                position=position,
+                size=size,
+            )
+            previous_period_rows[size] = period_rows
+            previous_period_sources[size] = period_source
+            current_period_rows[size] = _resolve_current_period_rows(
+                current,
+                labels=FIXED_PERIOD_CALCULATION_LABELS,
+                position=position,
+                size=size,
+            )
+            previous_day_same_period_rows[size] = _resolve_previous_day_same_period_rows(
+                previous_rows,
+                labels=FIXED_PERIOD_CALCULATION_LABELS,
+                position=position,
+                size=size,
+            )
+    except ValueError:
+        return unavailable
+    return {
+        "status": "ready",
+        "position": position,
+        "latest_current_row": latest_current,
+        "previous_period_rows": previous_period_rows,
+        "previous_period_sources": previous_period_sources,
+        "current_period_rows": current_period_rows,
+        "previous_day_same_period_rows": previous_day_same_period_rows,
+        "boundary_policy_version": BOUNDARY_POLICY_VERSION,
+        "minute_axis_version": FIXED_PERIOD_MINUTE_AXIS_VERSION,
+    }
+
+
 def _derive_metric_values(
     *,
     current_rows: Sequence[Mapping[str, Any]],
     previous_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    current = list(current_rows)
-    previous = list(previous_rows)
-    latest_current = current[-1]
-    for_trade_date = str(latest_current.get("for_trade_date") or "")
-    latest_label = _hhmm_label(latest_current.get("physical_c1_label") or latest_current.get("minute_label") or "")
-    labels = canonical_ashare_1m_labels(for_trade_date) if _valid_trade_date(for_trade_date) else []
-    position = labels.index(latest_label) + 1 if latest_label in labels else 0
-    previous_1m_rows, previous_1m_source = _resolve_previous_period_rows(
-        current_rows=current,
-        previous_rows=previous,
-        labels=labels,
-        position=position,
-        size=1,
-    )
-    previous_5m_rows, previous_5m_source = _resolve_previous_period_rows(
-        current_rows=current,
-        previous_rows=previous,
-        labels=labels,
-        position=position,
-        size=5,
-    )
-    previous_30m_rows, previous_30m_source = _resolve_previous_period_rows(
-        current_rows=current,
-        previous_rows=previous,
-        labels=labels,
-        position=position,
-        size=30,
-    )
-    previous_120m_rows, previous_120m_source = _resolve_previous_period_rows(
-        current_rows=current,
-        previous_rows=previous,
-        labels=labels,
-        position=position,
-        size=120,
-    )
-    current_5m_rows = _resolve_current_period_rows(current, labels=labels, position=position, size=5)
-    current_30m_rows = _resolve_current_period_rows(current, labels=labels, position=position, size=30)
-    previous_day_same_5m_rows = _resolve_previous_day_same_period_rows(previous, labels=labels, position=position, size=5)
-    previous_day_same_30m_rows = _resolve_previous_day_same_period_rows(previous, labels=labels, position=position, size=30)
+    windows = resolve_fixed_period_windows(current_rows=current_rows, previous_rows=previous_rows)
+    if windows["status"] != "ready":
+        return {}
+    latest_current = windows["latest_current_row"]
+    previous_period_rows = windows["previous_period_rows"]
+    previous_period_sources = windows["previous_period_sources"]
+    current_period_rows = windows["current_period_rows"]
+    previous_day_same_period_rows = windows["previous_day_same_period_rows"]
+    previous_1m_rows = previous_period_rows[1]
+    previous_5m_rows = previous_period_rows[5]
+    previous_30m_rows = previous_period_rows[30]
+    previous_120m_rows = previous_period_rows[120]
+    previous_1m_source = previous_period_sources[1]
+    previous_5m_source = previous_period_sources[5]
+    previous_30m_source = previous_period_sources[30]
+    previous_120m_source = previous_period_sources[120]
+    current_5m_rows = current_period_rows[5]
+    current_30m_rows = current_period_rows[30]
+    previous_day_same_5m_rows = previous_day_same_period_rows[5]
+    previous_day_same_30m_rows = previous_day_same_period_rows[30]
     is_first_1m = previous_1m_source == PREVIOUS_TRADE_DATE_LAST_PERIOD
     is_first_5m = previous_5m_source == PREVIOUS_TRADE_DATE_LAST_PERIOD
     is_first_30m = previous_30m_source == PREVIOUS_TRADE_DATE_LAST_PERIOD
@@ -1675,30 +1840,27 @@ def _resolve_previous_period_rows(
     position: int,
     size: int,
 ) -> tuple[list[Mapping[str, Any]], str]:
-    if not labels or position <= 0:
+    if position <= 0:
         return [], NOT_AVAILABLE_PERIOD_SOURCE
-    previous_end = position - 1
-    previous_start = previous_end - size
-    if previous_start < 0:
-        rows = _rows_for_labels(previous_rows, labels[-size:])
-        return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
-    expected_labels = list(labels[previous_start:previous_end])
-    if expected_labels == ["09:30"] and _has_open_boundary_source_gap(current_rows):
-        rows = _rows_for_labels(previous_rows, labels[-size:])
-        return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD if len(rows) == size else NOT_AVAILABLE_PERIOD_SOURCE
-    rows = _rows_for_labels(current_rows, expected_labels)
+    current_start = ((position - 1) // size) * size
+    if current_start == 0:
+        previous_index = _fixed_period_row_index(previous_rows)
+        if not previous_index:
+            return [], NOT_AVAILABLE_PERIOD_SOURCE
+        previous_end = max(previous_index) // size * size
+        if previous_end < size:
+            return [], NOT_AVAILABLE_PERIOD_SOURCE
+        expected_ordinals = list(range(previous_end - size + 1, previous_end + 1))
+        rows = [previous_index[ordinal] for ordinal in expected_ordinals if ordinal in previous_index]
+        if len(rows) == size:
+            return rows, PREVIOUS_TRADE_DATE_LAST_PERIOD
+        return [], NOT_AVAILABLE_PERIOD_SOURCE
+    expected_ordinals = list(range(current_start - size + 1, current_start + 1))
+    current_index = fixed_period_calculation_row_index(current_rows)
+    rows = [current_index[ordinal] for ordinal in expected_ordinals if ordinal in current_index]
     if len(rows) == size:
         return rows, SAME_TRADE_DATE_PREVIOUS_PERIOD
-    if (
-        expected_labels[:1] == ["09:30"]
-        and "09:31" in expected_labels
-        and _has_open_boundary_source_gap(current_rows)
-    ):
-        open_gap_adjusted_labels = [label for label in expected_labels if label != "09:30"]
-        rows = _rows_for_labels(current_rows, open_gap_adjusted_labels)
-        if len(rows) == len(open_gap_adjusted_labels):
-            return rows, SAME_TRADE_DATE_PREVIOUS_PERIOD
-    return rows, NOT_AVAILABLE_PERIOD_SOURCE
+    return [], NOT_AVAILABLE_PERIOD_SOURCE
 
 
 def _resolve_current_period_rows(
@@ -1708,20 +1870,13 @@ def _resolve_current_period_rows(
     position: int,
     size: int,
 ) -> list[Mapping[str, Any]]:
-    if not labels or position <= 0:
+    if position <= 0:
         return []
-    current_start = max(0, position - size)
-    expected_labels = labels[current_start:position]
-    output = _rows_for_labels(rows, expected_labels)
-    if (
-        expected_labels[:1] == ["09:30"]
-        and "09:31" in expected_labels
-        and _has_open_boundary_source_gap(rows)
-    ):
-        open_gap_adjusted_labels = [label for label in expected_labels if label != "09:30"]
-        output = _rows_for_labels(rows, open_gap_adjusted_labels)
-        return output if len(output) == len(open_gap_adjusted_labels) else []
-    return output if len(output) == len(expected_labels) else []
+    current_start = ((position - 1) // size) * size
+    expected_ordinals = list(range(current_start + 1, position + 1))
+    row_index = fixed_period_calculation_row_index(rows)
+    output = [row_index[ordinal] for ordinal in expected_ordinals if ordinal in row_index]
+    return output if len(output) == len(expected_ordinals) else []
 
 
 def _resolve_previous_day_same_period_rows(
@@ -1731,27 +1886,233 @@ def _resolve_previous_day_same_period_rows(
     position: int,
     size: int,
 ) -> list[Mapping[str, Any]]:
-    if not labels or position <= 0:
+    if position <= 0:
         return []
-    current_start = max(0, position - size)
-    expected_labels = list(labels[current_start:position])
-    if (
-        expected_labels[:1] == ["09:30"]
-        and "09:31" in expected_labels
-        and _has_open_boundary_source_gap(rows)
-    ):
-        expected_labels = [label for label in expected_labels if label != "09:30"]
-    output = _rows_for_labels(rows, expected_labels)
-    return output if len(output) == len(expected_labels) else []
+    expected_labels = _fixed_period_same_window_labels(
+        position=position,
+        size=size,
+        labels=labels,
+    )
+    return _rows_for_labels(rows, expected_labels)
+
+
+def _fixed_period_same_window_labels(
+    *,
+    position: int,
+    size: int,
+    labels: Sequence[str] = FIXED_PERIOD_CALCULATION_LABELS,
+) -> list[str]:
+    if position <= 0 or size <= 0:
+        return []
+    current_start = ((position - 1) // size) * size
+    return list(labels[current_start : min(current_start + size, len(labels))])
+
+
+def _fixed_period_row_index(rows: Sequence[Mapping[str, Any]]) -> dict[int, Mapping[str, Any]]:
+    afternoon_layout = _fixed_period_afternoon_layout(rows)
+    indexed: dict[int, Mapping[str, Any]] = {}
+    for row in sorted(rows, key=_metric_period_sort_key):
+        ordinal = _metric_period_ordinal(row, afternoon_layout)
+        if ordinal <= 0:
+            continue
+        existing = indexed.get(ordinal)
+        if existing is not None:
+            if _is_contract_equivalent_close_boundary_duplicate(existing, row):
+                indexed[ordinal] = _preferred_close_boundary_row(existing, row)
+                continue
+            existing_ref = str(existing.get("source_row_ref") or "")
+            duplicate_ref = str(row.get("source_row_ref") or "")
+            raise ValueError(
+                "duplicate normalized fixed-period ordinal "
+                f"{ordinal}: existing={existing_ref!r}, duplicate={duplicate_ref!r}"
+            )
+        indexed[ordinal] = row
+    return indexed
+
+
+def fixed_period_calculation_row_index(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[int, Mapping[str, Any]]:
+    """Index current-day rows on the unique physical fixed-period axis."""
+
+    _fixed_period_afternoon_layout(rows)
+    rows_by_label = _rows_by_unique_physical_label(rows)
+    indexed: dict[int, Mapping[str, Any]] = {}
+    for label, row in rows_by_label.items():
+        ordinal = FIXED_PERIOD_CALCULATION_ORDINALS.get(label, 0)
+        if ordinal > 0:
+            indexed[ordinal] = row
+    return indexed
+
+
+def _metric_period_ordinal(row: Mapping[str, Any], afternoon_layout: str) -> int:
+    raw_label = _hhmm_label(row.get("raw_source_label") or "")
+    physical_label = _hhmm_label(
+        row.get("physical_c1_label") or row.get("minute_label") or row.get("bar_time") or ""
+    )
+    label = physical_label or raw_label
+    if not label or physical_label == "09:30":
+        return 0
+    if afternoon_layout == FIXED_PERIOD_LAYOUT_POST_CLOSE and raw_label == "11:30":
+        return 120
+    ordinal = FIXED_PERIOD_CALCULATION_ORDINALS.get(physical_label or raw_label, 0)
+    if ordinal >= 120:
+        if afternoon_layout in {
+            FIXED_PERIOD_LAYOUT_POST_CLOSE,
+            FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL,
+        }:
+            ordinal += 1
+        return ordinal
+    return ordinal
+
+
+def _fixed_period_afternoon_layout(rows: Sequence[Mapping[str, Any]]) -> str:
+    has_raw_1130 = _has_post_close_raw_1130(rows)
+    observed_styles: set[str] = set()
+    for row in rows:
+        raw_label = _hhmm_label(row.get("raw_source_label") or "")
+        physical_label = _hhmm_label(
+            row.get("physical_c1_label") or row.get("minute_label") or row.get("bar_time") or ""
+        )
+        physical_minutes = _hhmm_minutes(physical_label)
+        if not (13 * 60 <= physical_minutes <= 14 * 60 + 59):
+            continue
+        if physical_label == "13:00" and raw_label == "11:30":
+            continue
+        if physical_label == "14:59" and raw_label == "15:00":
+            continue
+        if not raw_label:
+            observed_styles.add(FIXED_PERIOD_LAYOUT_INTRADAY)
+            continue
+        if raw_label == physical_label:
+            observed_styles.add(FIXED_PERIOD_LAYOUT_INTRADAY)
+            continue
+        if raw_label == _next_hhmm_label(physical_label):
+            observed_styles.add(FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL)
+            continue
+        raise ValueError(
+            "ambiguous fixed-period afternoon label layout: "
+            f"physical={physical_label!r}, raw={raw_label!r}"
+        )
+
+    if has_raw_1130:
+        if FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL in observed_styles:
+            raise ValueError("ambiguous fixed-period post-close and preload label layout")
+        return FIXED_PERIOD_LAYOUT_POST_CLOSE
+    if observed_styles == {FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL}:
+        return FIXED_PERIOD_LAYOUT_PRELOAD_CLOSE_LABEL
+    if observed_styles in (set(), {FIXED_PERIOD_LAYOUT_INTRADAY}):
+        return FIXED_PERIOD_LAYOUT_INTRADAY
+    raise ValueError("ambiguous fixed-period intraday and preload label layout")
+
+
+def _next_hhmm_label(label: str) -> str:
+    minutes = _hhmm_minutes(label)
+    if minutes < 0 or minutes >= 24 * 60 - 1:
+        return ""
+    minutes += 1
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _metric_period_sort_key(row: Mapping[str, Any]) -> tuple[int, str, str]:
+    raw_label = _hhmm_label(row.get("raw_source_label") or "")
+    physical_label = _hhmm_label(
+        row.get("physical_c1_label") or row.get("minute_label") or row.get("bar_time") or ""
+    )
+    return (_hhmm_minutes(physical_label or raw_label), raw_label, str(row.get("source_row_ref") or ""))
+
+
+def _is_contract_equivalent_close_boundary_duplicate(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    physical_labels = {
+        _hhmm_label(row.get("physical_c1_label") or row.get("minute_label") or "")
+        for row in (first, second)
+    }
+    raw_labels = {
+        _hhmm_label(row.get("raw_source_label") or "")
+        for row in (first, second)
+    }
+    if physical_labels != {"14:59"} or raw_labels != {"14:59", "15:00"}:
+        return False
+    for field in ("asset_kind", "identity_key"):
+        values = {str(row.get(field) or "") for row in (first, second)}
+        if len(values - {""}) > 1:
+            return False
+    return True
+
+
+def _preferred_close_boundary_row(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    return second if _hhmm_label(second.get("raw_source_label") or "") == "15:00" else first
+
+
+def _has_post_close_raw_1130(rows: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        _hhmm_label(
+            row.get("physical_c1_label")
+            or row.get("minute_label")
+            or row.get("bar_time")
+            or ""
+        )
+        == "13:00"
+        and _hhmm_label(row.get("raw_source_label") or "") == "11:30"
+        for row in rows
+    )
+
+
+def _hhmm_minutes(label: str) -> int:
+    if not re.fullmatch(r"\d{2}:\d{2}", label or ""):
+        return -1
+    hour, minute = (int(part) for part in label.split(":", 1))
+    return hour * 60 + minute
 
 
 def _rows_for_labels(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> list[Mapping[str, Any]]:
+    by_label = _rows_by_unique_physical_label(rows, accepted_labels=set(labels))
+    output = [by_label[label] for label in labels if label in by_label]
+    return output if len(output) == len(labels) else []
+
+
+def _rows_by_unique_physical_label(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    accepted_labels: set[str] | None = None,
+) -> dict[str, Mapping[str, Any]]:
     by_label: dict[str, Mapping[str, Any]] = {}
     for row in rows:
-        label = _hhmm_label(row.get("physical_c1_label") or row.get("minute_label") or row.get("raw_source_label") or "")
-        if label:
-            by_label.setdefault(label, row)
-    return [by_label[label] for label in labels if label in by_label]
+        label = _hhmm_label(
+            row.get("physical_c1_label")
+            or row.get("minute_label")
+            or row.get("bar_time")
+            or row.get("raw_source_label")
+            or ""
+        )
+        if not label or (accepted_labels is not None and label not in accepted_labels):
+            continue
+        existing = by_label.get(label)
+        if existing is None:
+            by_label[label] = row
+            continue
+        raw_labels = {
+            _hhmm_label(candidate.get("raw_source_label") or "")
+            for candidate in (existing, row)
+        }
+        if label == "13:00" and raw_labels == {"11:30", "13:00"}:
+            by_label[label] = (
+                row
+                if _hhmm_label(row.get("raw_source_label") or "") == "13:00"
+                else existing
+            )
+            continue
+        if _is_contract_equivalent_close_boundary_duplicate(existing, row):
+            by_label[label] = _preferred_close_boundary_row(existing, row)
+            continue
+        raise ValueError(f"duplicate fixed-period physical label: {label}")
+    return by_label
 
 
 def _has_open_boundary_source_gap(rows: Sequence[Mapping[str, Any]]) -> bool:
@@ -1849,15 +2210,23 @@ def _amount_sum(rows: Sequence[Mapping[str, Any]]) -> float:
 
 
 def _body_high(rows: Sequence[Mapping[str, Any]]) -> float | None:
-    values = [_body_high_for_row(row) for row in rows]
-    values = [value for value in values if value is not None]
-    return max(values) if values else None
+    if not rows:
+        return None
+    open_value = _optional_numeric(rows[0].get("open"))
+    close_value = _optional_numeric(rows[-1].get("close"))
+    if open_value is None or close_value is None:
+        return None
+    return max(open_value, close_value)
 
 
 def _body_low(rows: Sequence[Mapping[str, Any]]) -> float | None:
-    values = [_body_low_for_row(row) for row in rows]
-    values = [value for value in values if value is not None]
-    return min(values) if values else None
+    if not rows:
+        return None
+    open_value = _optional_numeric(rows[0].get("open"))
+    close_value = _optional_numeric(rows[-1].get("close"))
+    if open_value is None or close_value is None:
+        return None
+    return min(open_value, close_value)
 
 
 def _body_high_for_row(row: Mapping[str, Any]) -> float | None:

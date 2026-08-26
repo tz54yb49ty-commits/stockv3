@@ -7,7 +7,10 @@ from io import StringIO
 from pathlib import Path
 
 from ashare_v3.market import v3_realtime_virtual_metric_writer as writer
-from ashare_v3.market.realtime_virtual_metric import build_previous_day_cumulative_summary_rows
+from ashare_v3.market.realtime_virtual_metric import (
+    _build_formal_amount_chain_fields,
+    build_previous_day_cumulative_summary_rows,
+)
 
 SOURCE_SNAPSHOT_RUN_ID = (
     "realtime_daily_snapshot_20260612_standard_outbox_until_1500__"
@@ -2049,6 +2052,245 @@ class V3RealtimeVirtualMetricWriterRunnerTest(unittest.TestCase):
             stock_row["raw_json"]["higher_period_context_source"]["period_trigger_baseline_source"],
             "n4_context_snapshot",
         )
+
+    def test_index_000688_new_week_uses_today_and_just_finished_week_average(self) -> None:
+        today_amount = 127_195_597_248
+        last_week_average = "113345131315.2"
+        row = {
+            "source_trade_date": "20260814",
+            "for_trade_date": "20260817",
+            "period_trigger_baseline_json": {
+                "periods": {
+                    "W": {
+                        "period_key_current": "2026W33",
+                        "baseline_source_trade_date": "20260814",
+                        "current_amount_seed": last_week_average,
+                        "current_amount_total_seed": "566725656576",
+                        "current_trade_days_seed": 5,
+                        "trigger_previous_amount_baseline": last_week_average,
+                        "previous_avg_amount": "133071565619.2",
+                    }
+                }
+            },
+        }
+
+        context, trace = writer.higher_period_context_from_period_baseline_row(
+            row,
+            source_kind="n4_context_snapshot",
+        )
+        metrics, proof = _build_formal_amount_chain_fields(
+            today_virt_amount=today_amount,
+            higher_period_context=context,
+            asset_kind="index",
+        )
+        contracted = writer.apply_formal_amount_chain_contract(
+            metric={
+                "metric_ready": True,
+                "quality_status": "passed",
+                "blocked_reasons": [],
+                **metrics,
+                "trace_json": {"formal_period_amount_proof": proof},
+                "raw_json": {},
+            },
+            candidate={"signal_type": "B_BUY", "condition_key": "BUY:D", "original_condition_key": "BUY:D"},
+            higher_period_context_source=trace,
+        )
+
+        self.assertEqual(context["W"]["current_amount_total_seed"], 0)
+        self.assertEqual(context["W"]["current_trade_days_seed"], 0)
+        self.assertEqual(context["W"]["previous_avg_amount"], last_week_average)
+        self.assertEqual(metrics["weekly_avg_with_today"], today_amount)
+        self.assertEqual(metrics["prev_weekly_avg"], float(last_week_average))
+        self.assertTrue(contracted["trace_json"]["trigger_amount_chain_pass"]["D"])
+        self.assertEqual(
+            trace["period_seed_guards"]["W"]["previous_avg_rollover_source"],
+            "trigger_previous_amount_baseline",
+        )
+
+    def test_higher_period_rollover_is_symmetric_and_unit_safe(self) -> None:
+        cases = [
+            ("stock", "113345131.3152", "566725656.576", 127_195_597_248, 113_345_131_315.2),
+            ("index", "113345131315.2", "566725656576", 127_195_597_248, 113_345_131_315.2),
+            ("board", "113345131315.2", "566725656576", 127_195_597_248, 113_345_131_315.2),
+        ]
+        for asset_kind, seed, total, today_amount, expected_previous in cases:
+            with self.subTest(asset_kind=asset_kind):
+                row = {
+                    "source_trade_date": "20260814",
+                    "for_trade_date": "20260817",
+                    "period_trigger_baseline_json": {
+                        "periods": {
+                            "W": {
+                                "period_key_current": "2026W33",
+                                "current_amount_seed": seed,
+                                "current_amount_total_seed": total,
+                                "current_trade_days_seed": 5,
+                                "previous_avg_amount": "1",
+                            }
+                        }
+                    },
+                }
+                context, _ = writer.higher_period_context_from_period_baseline_row(
+                    row,
+                    source_kind="n4_context_snapshot",
+                )
+                metrics, proof = _build_formal_amount_chain_fields(
+                    today_virt_amount=today_amount,
+                    higher_period_context=context,
+                    asset_kind=asset_kind,
+                )
+                self.assertEqual(metrics["weekly_avg_with_today"], today_amount)
+                self.assertEqual(metrics["prev_weekly_avg"], expected_previous)
+
+                for signal_type, condition_key, today, expected in (
+                    ("B_BUY", "BUY:D", today_amount, True),
+                    ("S_SELL", "SELL:D", 100_000_000_000, True),
+                ):
+                    direction_metrics, direction_proof = _build_formal_amount_chain_fields(
+                        today_virt_amount=today,
+                        higher_period_context=context,
+                        asset_kind=asset_kind,
+                    )
+                    contracted = writer.apply_formal_amount_chain_contract(
+                        metric={
+                            "metric_ready": True,
+                            "quality_status": "passed",
+                            "blocked_reasons": [],
+                            **direction_metrics,
+                            "trace_json": {"formal_period_amount_proof": direction_proof},
+                            "raw_json": {},
+                        },
+                        candidate={
+                            "signal_type": signal_type,
+                            "condition_key": condition_key,
+                            "original_condition_key": condition_key,
+                        },
+                        higher_period_context_source={},
+                    )
+                    self.assertIs(contracted["trace_json"]["trigger_amount_chain_pass"]["D"], expected)
+                self.assertEqual(proof["periods"]["W"]["current_trade_days_seed"], 0.0)
+
+    def test_w_m_q_y_rollover_and_same_period_context_are_guarded(self) -> None:
+        cases = [
+            ("W", "20260814", "20260817", "2026W33", "2026W34"),
+            ("M", "20260831", "20260901", "202608", "202609"),
+            ("Q", "20260930", "20261001", "2026Q3", "2026Q4"),
+            ("Y", "20261231", "20270104", "2026", "2027"),
+        ]
+        for period, source_date, for_date, source_key, for_key in cases:
+            with self.subTest(period=period):
+                row = {
+                    "source_trade_date": source_date,
+                    "for_trade_date": for_date,
+                    "period_trigger_baseline_json": {
+                        "periods": {
+                            period: {
+                                "period_key_current": source_key,
+                                "current_amount_seed": "100",
+                                "current_amount_total_seed": "500",
+                                "current_trade_days_seed": 5,
+                                "trigger_previous_amount_baseline": "100",
+                                "previous_avg_amount": "50",
+                            }
+                        }
+                    },
+                }
+                context, trace = writer.higher_period_context_from_period_baseline_row(
+                    row,
+                    source_kind="n4_context_snapshot",
+                )
+                self.assertEqual(context[period]["source_period_key"], source_key)
+                self.assertEqual(context[period]["for_period_key"], for_key)
+                self.assertFalse(context[period]["period_seed_applied"])
+                self.assertEqual(context[period]["previous_avg_amount"], "100")
+                self.assertEqual(context[period]["current_trade_days_seed"], 0)
+                self.assertTrue(trace["period_seed_guards"][period]["period_key_guard_pass"])
+
+        same_period = {
+            "source_trade_date": "20260813",
+            "for_trade_date": "20260814",
+            "period_trigger_baseline_json": {
+                "periods": {
+                    "W": {
+                        "period_key_current": "2026W33",
+                        "current_amount_seed": "100",
+                        "current_amount_total_seed": "400",
+                        "current_trade_days_seed": 4,
+                        "previous_avg_amount": "50",
+                    }
+                }
+            },
+        }
+        context, _ = writer.higher_period_context_from_period_baseline_row(
+            same_period,
+            source_kind="n4_context_snapshot",
+        )
+        self.assertTrue(context["W"]["period_seed_applied"])
+        self.assertEqual(context["W"]["current_amount_total_seed"], "400")
+        self.assertEqual(context["W"]["previous_avg_amount"], "50")
+
+        combined_item = {
+            "current_amount_seed": "100",
+            "current_amount_total_seed": "500",
+            "current_trade_days_seed": 5,
+            "trigger_previous_amount_baseline": "100",
+            "previous_avg_amount": "50",
+        }
+        combined, _ = writer.higher_period_context_from_period_baseline_row(
+            {
+                "source_trade_date": "20261231",
+                "for_trade_date": "20270104",
+                "period_trigger_baseline_json": {
+                    "periods": {
+                        period: {**combined_item, "period_key_current": writer._period_key_for_trade_date("20261231", period)}
+                        for period in ("W", "M", "Q", "Y")
+                    }
+                },
+            },
+            source_kind="n4_context_snapshot",
+        )
+        self.assertEqual(
+            {period: (combined[period]["current_trade_days_seed"], combined[period]["previous_avg_amount"]) for period in combined},
+            {period: (0, "100") for period in ("W", "M", "Q", "Y")},
+        )
+
+    def test_higher_period_rollover_tampering_fails_closed(self) -> None:
+        baseline_item = {
+            "period_key_current": "2026W33",
+            "current_amount_seed": "100",
+            "current_amount_total_seed": "500",
+            "current_trade_days_seed": 5,
+            "trigger_previous_amount_baseline": "100",
+        }
+        for field, value, reason in (
+            ("current_amount_total_seed", "499", "seed_proof_mismatch"),
+            ("trigger_previous_amount_baseline", "99", "trigger_baseline_mismatch"),
+            ("period_key_current", "2026W32", "baseline_period_key_mismatch"),
+        ):
+            with self.subTest(field=field):
+                item = dict(baseline_item)
+                item[field] = value
+                with self.assertRaisesRegex(writer.VirtualMetricWriterBlocked, f"higher_period_rollover_{reason}:W"):
+                    writer.higher_period_context_from_period_baseline_row(
+                        {
+                            "source_trade_date": "20260814",
+                            "for_trade_date": "20260817",
+                            "period_trigger_baseline_json": {"periods": {"W": item}},
+                        },
+                        source_kind="n4_context_snapshot",
+                    )
+
+        with self.assertRaisesRegex(
+            writer.VirtualMetricWriterBlocked,
+            "higher_period_rollover_period_key_unavailable:W",
+        ):
+            writer.higher_period_context_from_period_baseline_row(
+                {
+                    "source_trade_date": "20260814",
+                    "period_trigger_baseline_json": {"periods": {"W": baseline_item}},
+                },
+                source_kind="n4_context_snapshot",
+            )
 
     def test_amount_chain_trace_uses_n4_current_period_avg_transition_input(self) -> None:
         metric = {

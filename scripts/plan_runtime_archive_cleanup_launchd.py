@@ -12,7 +12,6 @@ from typing import Any
 
 from ashare_v3.ingestion.runtime_archive import DEFAULT_RUNTIME_ARCHIVE_ROOT
 from ashare_v3.ingestion.runtime_archive_execute import DEFAULT_DSN
-from ashare_v3.ingestion.runtime_hot_cleanup import DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN
 
 
 CLEANUP_LABEL = "com.ashare-v3.runtime-hot-cleanup-keep5-daily"
@@ -25,9 +24,14 @@ def build_runtime_archive_cleanup_launchd_plan(
     python_executable: str = sys.executable,
     dsn: str = DEFAULT_DSN,
     archive_root: str = DEFAULT_RUNTIME_ARCHIVE_ROOT,
+    local_archive_current_pointer_path: str | None = None,
+    local_archive_root: str = "/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts",
 ) -> dict[str, Any]:
     root = Path(project_root)
     logs = root / "logs/runtime_archive_cleanup"
+    pointer_path = _require_absolute_evidence_path(
+        "local_archive_current_pointer_path", local_archive_current_pointer_path
+    )
     cleanup_plist = _build_plist(
         label=CLEANUP_LABEL,
         project_root=root,
@@ -39,10 +43,11 @@ def build_runtime_archive_cleanup_launchd_plan(
             "--archive-root",
             archive_root,
             "--execute",
-            "--direct-delete-no-archive",
-            "--skip-row-count-plan",
-            "--confirm-token",
-            DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
+            "--local-archive-current-pointer-path",
+            pointer_path,
+            "--local-archive-root",
+            local_archive_root,
+            "--local-only",
         ],
         hour=1,
         minute=0,
@@ -50,7 +55,9 @@ def build_runtime_archive_cleanup_launchd_plan(
         stderr=logs / "cleanup_stderr.log",
     )
     return {
-        "stage": "V3_RUNTIME_HOT_KEEP5_DIRECT_CLEANUP_DAILY_LAUNCHD_PLAN",
+        "schema": "RuntimeHotCleanupPlan.v2",
+        "stage": "V3_RUNTIME_HOT_KEEP5_ARCHIVE_GATED_DAILY_LAUNCHD_PLAN",
+        "local_cleanup_policy": "verified-archive-required",
         "launchd_plist_keys": ["cleanup"],
         "cleanup": {"label": CLEANUP_LABEL, "plist": cleanup_plist},
         "side_effects": {
@@ -61,6 +68,15 @@ def build_runtime_archive_cleanup_launchd_plan(
             "cleanup_executed": False,
         },
     }
+
+
+def _require_absolute_evidence_path(name: str, value: str | None) -> str:
+    if not value:
+        raise ValueError(f"{name} is required for verified-archive-required cleanup")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{name} must be an absolute normalized path")
+    return str(path)
 
 
 def _build_plist(
@@ -98,12 +114,16 @@ def materialize_plists(
     python_executable: str = sys.executable,
     dsn: str = DEFAULT_DSN,
     archive_root: str = DEFAULT_RUNTIME_ARCHIVE_ROOT,
+    local_archive_current_pointer_path: str | None = None,
+    local_archive_root: str = "/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts",
 ) -> dict[str, Any]:
     report = build_runtime_archive_cleanup_launchd_plan(
         project_root=project_root,
         python_executable=python_executable,
         dsn=dsn,
         archive_root=archive_root,
+        local_archive_current_pointer_path=local_archive_current_pointer_path,
+        local_archive_root=local_archive_root,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     for key in report["launchd_plist_keys"]:
@@ -121,6 +141,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--dsn", default=DEFAULT_DSN)
     parser.add_argument("--archive-root", default=DEFAULT_RUNTIME_ARCHIVE_ROOT)
+    parser.add_argument("--local-archive-current-pointer-path", required=True)
+    parser.add_argument(
+        "--local-archive-root",
+        default="/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -133,6 +158,8 @@ def main() -> int:
         python_executable=args.python_executable,
         dsn=args.dsn,
         archive_root=args.archive_root,
+        local_archive_current_pointer_path=args.local_archive_current_pointer_path,
+        local_archive_root=args.local_archive_root,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) if args.json else "\n".join(report[key]["plist_path"] for key in report["launchd_plist_keys"]))
     return 0

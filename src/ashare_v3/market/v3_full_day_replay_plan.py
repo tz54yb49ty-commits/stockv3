@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -307,6 +308,7 @@ def build_full_day_backfill_records_for_context(
     for_trade_date: str,
     minute_trade_date: str | None = None,
     is_previous_day_preload: bool = False,
+    transport_provenance: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Build scoped full-day 1m records without touching the database.
 
@@ -316,6 +318,7 @@ def build_full_day_backfill_records_for_context(
     """
 
     minute_trade_date = minute_trade_date or for_trade_date
+    transport_provenance = dict(transport_provenance or {})
     records_by_asset: dict[str, list[dict[str, Any]]] = {asset: [] for asset in ASSET_CONFIG}
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -361,6 +364,7 @@ def build_full_day_backfill_records_for_context(
                     **extra,
                     "source_bar_id": row.get("source_bar_id"),
                     "source_run_id": row.get("source_run_id"),
+                    **(transport_provenance if source_policy == "mootdx_full_day_backfill" else {}),
                 },
             )
             for row in source_rows
@@ -375,6 +379,9 @@ def build_full_day_backfill_records_for_context(
                 "adapter_row_count": len(adapter_rows),
                 "minute_rows_written": len(built_rows),
                 "status": "passed" if len(built_rows) >= FULL_DAY_EXPECTED_1M_BAR_COUNT else "missing",
+                "transport_provenance": (
+                    transport_provenance if source_policy == "mootdx_full_day_backfill" else {}
+                ),
             }
         )
     return records_by_asset, results
@@ -653,8 +660,10 @@ def write_full_day_backfill_to_db(
     prev_trade_date: str,
     records_by_asset: Mapping[str, Sequence[Mapping[str, Any]]],
     object_results: Sequence[Mapping[str, Any]],
+    transport_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     minute_trade_date = minute_trade_date or for_trade_date
+    transport_provenance = dict(transport_provenance or {})
     pre_counts = capture_full_day_backfill_counts(
         dsn=dsn,
         backfill_run_id=backfill_run_id,
@@ -710,6 +719,7 @@ def write_full_day_backfill_to_db(
                                 "records_planned": total_rows,
                                 "writes_outbox": False,
                                 "old_system_read": False,
+                                "transport_provenance": transport_provenance,
                             }
                         ),
                     ),
@@ -746,7 +756,8 @@ def write_full_day_backfill_to_db(
                                     "source_policy_counts": dict(
                                         Counter(str(row.get("source_policy")) for row in object_results)
                                     ),
-                                }
+                                },
+                                "transport_provenance": transport_provenance,
                             }
                         ),
                         backfill_run_id,
@@ -837,13 +848,11 @@ def period_seed_guard(
     source_period_key = period_key_for_trade_date(source_trade_date, period)
     for_period_key = period_key_for_trade_date(for_trade_date, period)
     baseline_period_key_current = item.get("period_key_current")
-    reset_reason = None
     if not source_period_key or not for_period_key:
-        reset_reason = "period_key_unavailable"
-    elif source_period_key != for_period_key:
-        reset_reason = "source_period_key_mismatch_for_trade_date"
-    elif baseline_period_key_current and str(baseline_period_key_current) != for_period_key:
-        reset_reason = "baseline_period_key_mismatch_for_trade_date"
+        raise FullDayMetricBlocked(f"higher_period_rollover_period_key_unavailable:{period}")
+    if baseline_period_key_current and str(baseline_period_key_current) != source_period_key:
+        raise FullDayMetricBlocked(f"higher_period_rollover_baseline_period_key_mismatch:{period}")
+    reset_reason = "source_period_key_mismatch_for_trade_date" if source_period_key != for_period_key else None
     return {
         "period_key_source": "source_trade_date_for_trade_date_guard",
         "source_period_key": source_period_key,
@@ -851,8 +860,35 @@ def period_seed_guard(
         "baseline_period_key_current": baseline_period_key_current,
         "period_seed_applied": reset_reason is None,
         "period_seed_reset_reason": reset_reason,
-        "period_key_guard_pass": reset_reason is None,
+        "period_key_guard_pass": True,
     }
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _rollover_previous_avg_amount(item: Mapping[str, Any], *, period: str) -> tuple[Any, str]:
+    current_avg = _decimal_or_none(item.get("current_amount_seed"))
+    current_total = _decimal_or_none(item.get("current_amount_total_seed"))
+    current_trade_days = _decimal_or_none(item.get("current_trade_days_seed"))
+    if current_avg is None or current_total is None or current_trade_days is None or current_trade_days <= 0:
+        raise FullDayMetricBlocked(f"higher_period_rollover_seed_proof_invalid:{period}")
+    if abs(current_avg - (current_total / current_trade_days)) > Decimal("0.01"):
+        raise FullDayMetricBlocked(f"higher_period_rollover_seed_proof_mismatch:{period}")
+
+    trigger_baseline_value = item.get("trigger_previous_amount_baseline")
+    if trigger_baseline_value not in (None, ""):
+        trigger_baseline = _decimal_or_none(trigger_baseline_value)
+        if trigger_baseline is None or abs(trigger_baseline - current_avg) > Decimal("0.01"):
+            raise FullDayMetricBlocked(f"higher_period_rollover_trigger_baseline_mismatch:{period}")
+        return trigger_baseline_value, "trigger_previous_amount_baseline"
+    return item.get("current_amount_seed"), "current_amount_seed"
 
 
 def higher_period_context_from_trigger_context(row: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -893,7 +929,13 @@ def higher_period_context_from_trigger_context(row: Mapping[str, Any]) -> dict[s
         current_amount_seed = item.get("current_amount_seed") or 0
         current_amount_total_seed = item.get("current_amount_total_seed")
         current_trade_days_seed = item.get("current_trade_days_seed") or elapsed_units or 0
+        previous_avg_rollover_source = None
         if period != "D" and not seed_applied:
+            previous_avg_amount, previous_avg_rollover_source = _rollover_previous_avg_amount(
+                item,
+                period=period,
+            )
+            previous_amount = previous_avg_amount
             current_amount_seed = 0
             current_amount_total_seed = 0
             current_trade_days_seed = 0
@@ -919,6 +961,7 @@ def higher_period_context_from_trigger_context(row: Mapping[str, Any]) -> dict[s
             "current_trade_days_seed": current_trade_days_seed,
             "elapsed_units": elapsed_units or 0,
             "total_units": total_units,
+            "previous_avg_rollover_source": previous_avg_rollover_source,
             **guard,
         }
     return output
@@ -1421,6 +1464,7 @@ def build_full_day_metric_rows_for_identity(
                     "period_seed_applied": period_context.get("period_seed_applied"),
                     "period_seed_reset_reason": period_context.get("period_seed_reset_reason"),
                     "period_key_guard_pass": period_context.get("period_key_guard_pass"),
+                    "previous_avg_rollover_source": period_context.get("previous_avg_rollover_source"),
                 }
             )
         current_5m_rows = current_segment_rows(current_dt, 5)

@@ -12,13 +12,20 @@ from typing import Any
 
 import pandas as pd
 import psycopg
-from mootdx.quotes import Quotes
 
+from ashare_v3.market.realtime_snapshot_execute import build_default_mootdx_endpoint_probe
 from ashare_v3.market.query_audit_phase3 import audited_n3_market_readonly_plan_connect
-from check_condition_source_ready import DEFAULT_DSN
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
+from ashare_v3.quote_transport import create_quote_transport, resolve_quote_transport_name
+
+try:
+    from check_condition_source_ready import DEFAULT_DSN
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.check_condition_source_ready import DEFAULT_DSN
 
 
 DEFAULT_RUN_ID = "market_data_subscription_20260525_condition_layer_20260522_to_20260525_20260525102249_execute"
+DIAGNOSTIC_ONLY = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=5)
     parser.add_argument("--include-ext", action="store_true", help="Also probe ext quote paths for the first code.")
+    parser.add_argument("--diagnostic-only-confirmed", action="store_true")
     return parser.parse_args()
 
 
@@ -91,8 +99,13 @@ def run_call(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
     }
 
 
-def probe_std_paths(samples: list[dict[str, Any]], timeout: int) -> list[dict[str, Any]]:
-    client = Quotes.factory(market="std", timeout=timeout)
+def probe_std_paths(
+    samples: list[dict[str, Any]],
+    selection: EndpointSelection,
+    client_factory: Callable[[EndpointSelection, str], Any] | None = None,
+) -> list[dict[str, Any]]:
+    client_factory = client_factory or _selection_transport_factory
+    client = client_factory(selection, "std")
     try:
         results: list[dict[str, Any]] = []
         for sample in samples:
@@ -119,8 +132,23 @@ def probe_std_paths(samples: list[dict[str, Any]], timeout: int) -> list[dict[st
         client.close()
 
 
-def probe_ext_paths(first_code: str, timeout: int) -> list[dict[str, Any]]:
-    client = Quotes.factory(market="ext", timeout=timeout)
+def probe_ext_paths(
+    first_code: str,
+    selection: EndpointSelection,
+    client_factory: Callable[[EndpointSelection, str], Any] | None = None,
+) -> list[dict[str, Any]]:
+    client_factory = client_factory or _selection_transport_factory
+    if str(getattr(selection, "transport", "") or "") == "tdxpy":
+        return [
+            {
+                "path": "ext.transport_profile",
+                "ok": False,
+                "transport": "tdxpy",
+                "capability_reason": "transport_profile_unsupported",
+                "error": "tdxpy transport supports only the std quote profile",
+            }
+        ]
+    client = client_factory(selection, "ext")
     try:
         results = [run_call("ext.markets", lambda: client.markets())]
         for market in (31, 47, 48, 27, 1):
@@ -130,8 +158,22 @@ def probe_ext_paths(first_code: str, timeout: int) -> list[dict[str, Any]]:
         client.close()
 
 
+def recommended_board_probe_path(selection: EndpointSelection) -> str:
+    return (
+        "diagnostic-only manager-selected pinned "
+        f"{selection.transport} transport index frequency=9"
+    )
+
+
 def main() -> int:
     args = parse_args()
+    if not args.diagnostic_only_confirmed:
+        print(json.dumps({
+            "status": "PROBE_BLOCKED",
+            "diagnostic_only": DIAGNOSTIC_ONLY,
+            "blocked_reason": "requires --diagnostic-only-confirmed",
+        }, ensure_ascii=False, indent=2))
+        return 2
     samples = fetch_board_samples(args.dsn, args.run_id, args.limit)
     result: dict[str, Any] = {
         "stage": "N3-B1 BoardMarketDataAdapter probe",
@@ -152,9 +194,39 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 2
 
-    result["std_probe_results"] = probe_std_paths(samples, args.timeout)
+    manager = MootdxEndpointManager.from_toml()
+    resolved_transport = resolve_quote_transport_name()
+
+    def transport_factory(selection: EndpointSelection, profile: str) -> Any:
+        return create_quote_transport(
+            selection,
+            profile,
+            transport=resolved_transport,
+        )
+
+    selection = manager.select_for_batch(
+        batch_id=f"diagnostic_board_probe:{args.run_id}",
+        probe=build_default_mootdx_endpoint_probe(
+            [{**sample, "asset_kind": "board"} for sample in samples]
+        ),
+        transport=resolved_transport,
+        client_factory=transport_factory,
+    )
+    if not selection.selectable:
+        result["status"] = "PROBE_BLOCKED"
+        result["blocked_reason"] = "endpoint manager selection failed closed"
+        result["endpoint_selection"] = selection.to_provenance()
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 2
+    result["endpoint_selection"] = selection.to_provenance()
+    result["actual_transport"] = selection.transport
+    result["std_probe_results"] = probe_std_paths(samples, selection, transport_factory)
     if args.include_ext:
-        result["ext_probe_results"] = probe_ext_paths(str(samples[0]["code"]), args.timeout)
+        result["ext_probe_results"] = probe_ext_paths(
+            str(samples[0]["code"]),
+            selection,
+            transport_factory,
+        )
 
     std_index_ok = [
         row
@@ -164,8 +236,24 @@ def main() -> int:
         and int(row.get("rows") or 0) > 0
         and row.get("snapshot_mappable")
     ]
-    result["status"] = "PROBE_PASS" if len(std_index_ok) == len(samples) else "PROBE_BLOCKED"
-    result["recommended_path"] = "mootdx Quotes.factory(market='std').index(symbol=code, frequency=9, start=0, offset=5)"
+    ext_failures = [
+        row
+        for row in result["ext_probe_results"]
+        if not row.get("ok")
+    ]
+    result["capability_reasons"] = sorted(
+        {
+            str(row.get("capability_reason"))
+            for row in ext_failures
+            if row.get("capability_reason")
+        }
+    )
+    result["status"] = (
+        "PROBE_PASS"
+        if len(std_index_ok) == len(samples) and not ext_failures
+        else "PROBE_BLOCKED"
+    )
+    result["recommended_path"] = recommended_board_probe_path(selection)
     result["field_mapping"] = {
         "open": "open",
         "high": "high",
@@ -183,3 +271,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _selection_transport_factory(selection: EndpointSelection, profile: str) -> Any:
+    return create_quote_transport(
+        selection,
+        profile,
+        transport=selection.transport,
+    )

@@ -26,6 +26,19 @@ SOURCE_TIME_TRACE_FIELDS = (
     "source_time_label_normalized",
     "snapshot_time_policy",
 )
+BATCH_ATTEMPT_TRACE_FIELDS = (
+    "attempt_id",
+    "endpoint_pool_version",
+    "endpoint_id",
+    "endpoint_host",
+    "endpoint_port",
+    "transport",
+    "failover_mode",
+    "failover_from",
+    "failover_reason",
+    "failover_performed",
+    "mootdx_batch_attempt",
+)
 
 
 def write_market_snapshot_with_event(conn: Any, snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -140,7 +153,7 @@ def build_trace_payload(
     if quality_item_id is not None:
         payload["quality_item_id"] = quality_item_id
     source_trace = unwrap_jsonb_mapping(record.get("raw_json"))
-    for field in SOURCE_TIME_TRACE_FIELDS:
+    for field in (*SOURCE_TIME_TRACE_FIELDS, *BATCH_ATTEMPT_TRACE_FIELDS):
         value = record.get(field)
         if value is None:
             value = source_trace.get(field)

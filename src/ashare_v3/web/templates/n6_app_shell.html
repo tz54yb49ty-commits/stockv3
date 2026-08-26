@@ -55,7 +55,6 @@
       gap: 8px;
       flex-wrap: wrap;
     }
-    nav:focus-within { outline: none; }
     a, button {
       min-height: 34px;
       border: 1px solid var(--line);
@@ -76,15 +75,6 @@
       border-color: var(--accent);
       color: var(--accent);
       background: var(--accent-soft);
-    }
-    a:focus-visible,
-    button:focus-visible,
-    input:focus-visible,
-    select:focus-visible,
-    textarea:focus-visible,
-    summary:focus-visible {
-      outline: 3px solid rgba(15, 118, 110, .32);
-      outline-offset: 2px;
     }
     main { padding: 18px 0 34px; display: grid; gap: 16px; }
     .banner, .surface {
@@ -140,17 +130,6 @@
       margin-bottom: 6px;
     }
     .metric strong { font-size: 18px; overflow-wrap: anywhere; }
-    .message-summary-grid {
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
-      padding: 10px 12px;
-    }
-    .message-summary-grid .metric {
-      padding: 9px 10px;
-    }
-    .message-summary-grid .metric strong {
-      font-size: 16px;
-    }
     .split {
       display: grid;
       grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
@@ -168,25 +147,9 @@
     }
     .guide-hero h3 { color: var(--ink); font-size: 18px; }
     .guide-quick-links {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .guide-link-group {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: rgba(255, 255, 255, .78);
-      padding: 10px;
-      display: grid;
-      align-content: start;
+      display: flex;
+      flex-wrap: wrap;
       gap: 8px;
-    }
-    .guide-link-group strong {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .guide-link-group a {
-      justify-content: flex-start;
     }
     .guide-step-grid {
       display: grid;
@@ -294,124 +257,6 @@
       border-top: 1px solid var(--line);
       padding-top: 10px;
     }
-    .n6-skeleton {
-      display: grid;
-      gap: 8px;
-      margin-top: 10px;
-    }
-    .n6-skeleton[hidden] { display: none; }
-    .n6-skeleton span {
-      display: block;
-      height: 12px;
-      border-radius: 999px;
-      background: linear-gradient(90deg, #eef2f7 25%, #f8fafc 50%, #eef2f7 75%);
-      background-size: 200% 100%;
-      animation: n6-skeleton-pulse 1.2s linear infinite;
-    }
-    .n6-skeleton span:nth-child(2) { width: 82%; }
-    .n6-skeleton span:nth-child(3) { width: 64%; }
-    @keyframes n6-skeleton-pulse {
-      from { background-position: 200% 0; }
-      to { background-position: -200% 0; }
-    }
-    .strategy-package-grid {
-      padding: 14px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 12px;
-    }
-    .strategy-package-card {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--soft);
-      padding: 14px;
-      display: grid;
-      gap: 8px;
-    }
-    .strategy-package-card label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-weight: 760;
-    }
-    .strategy-package-card input { width: 18px; height: 18px; }
-    .strategy-toolbar {
-      padding: 0 14px 14px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .strategy-result-grid { padding: 14px; display: grid; gap: 12px; }
-    .strategy-surface {
-      margin: 0 14px 14px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--soft);
-      overflow: hidden;
-    }
-    .strategy-surface-head {
-      padding: 12px 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-    }
-    .strategy-surface-head h2 { margin: 0; font-size: 16px; }
-    .strategy-observation-card { border-style: dashed; }
-    .strategy-confluence-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-      gap: 8px;
-    }
-    .strategy-confluence-grid > div {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--soft);
-      padding: 8px 10px;
-      display: grid;
-      gap: 3px;
-    }
-    .strategy-confluence-grid span { color: var(--muted); font-size: 11px; }
-    .strategy-confluence-grid strong { font-size: 13px; }
-    .strategy-evidence-list { display: grid; gap: 6px; }
-    .strategy-evidence-row {
-      border-left: 3px solid var(--line);
-      padding: 4px 8px;
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
-    .strategy-result-card {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--panel);
-      padding: 14px;
-      display: grid;
-      gap: 10px;
-    }
-    .strategy-result-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .strategy-evidence { display: grid; gap: 6px; }
-    .strategy-signal-fields {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 6px 12px;
-      margin: 0;
-    }
-    .strategy-signal-fields div {
-      border-top: 1px solid var(--line);
-      padding-top: 6px;
-      min-width: 0;
-    }
-    .strategy-signal-fields dt { color: var(--muted); font-size: 11px; }
-    .strategy-signal-fields dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 12px; }
     .grade-filter-panel {
       margin: 0 14px 16px;
       border: 1px solid var(--line);
@@ -601,16 +446,6 @@
       min-height: 28px;
       font-size: 12px;
     }
-    .proposal-inline-status {
-      display: block;
-      margin-top: 6px;
-      max-width: 220px;
-      color: var(--warn);
-      font-size: 12px;
-      font-weight: 650;
-      line-height: 1.35;
-      white-space: normal;
-    }
     .row-action-line {
       display: flex;
       align-items: center;
@@ -653,75 +488,6 @@
       font-size: 12px;
       font-weight: 720;
       white-space: nowrap;
-    }
-    .table-wrap table th:first-child,
-    .table-wrap table td:first-child {
-      position: sticky;
-      left: 0;
-      z-index: 2;
-      background: var(--panel);
-      box-shadow: 1px 0 0 var(--line);
-    }
-    .table-wrap table th:first-child {
-      z-index: 3;
-      background: var(--soft);
-    }
-    .table-wrap .sticky-action {
-      position: sticky;
-      right: 0;
-      z-index: 2;
-      background: var(--panel);
-      box-shadow: -1px 0 0 var(--line);
-    }
-    .table-wrap th.sticky-action {
-      z-index: 3;
-      background: var(--soft);
-    }
-    .filter-action-cell {
-      position: sticky;
-      left: 0;
-      z-index: 2;
-      background: var(--panel);
-      box-shadow: 1px 0 0 var(--line);
-    }
-    .technical-details {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-    .technical-details > summary {
-      min-height: 48px;
-      padding: 12px 14px;
-      cursor: pointer;
-      color: var(--ink);
-      font-size: 14px;
-      font-weight: 720;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-    .technical-details[open] > summary {
-      border-bottom: 1px solid var(--line);
-    }
-    .task-empty {
-      padding: 28px 20px;
-      display: grid;
-      gap: 10px;
-      justify-items: start;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .task-empty strong {
-      color: var(--ink);
-      font-size: 16px;
-    }
-    .task-empty p { margin: 0; }
-    .task-empty-links {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
     }
     th a {
       min-height: 0;
@@ -861,39 +627,17 @@
     .empty { padding: 24px; color: var(--muted); font-size: 14px; }
     @media (max-width: 980px) {
       .topbar { align-items: flex-start; flex-direction: column; padding: 14px 0; }
-      nav {
-        width: 100%;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        overscroll-behavior-inline: contain;
-        padding: 2px 2px 8px;
-      }
-      nav a, nav button { flex: 0 0 auto; }
-      .metric-grid:not(.message-summary-grid), .split, .field-grid, .guide-flow-grid, .guide-quick-links { grid-template-columns: 1fr; }
+      .metric-grid, .split, .field-grid, .guide-flow-grid { grid-template-columns: 1fr; }
       .guide-flow-node::after { display: none; }
-    }
-    @media (max-width: 800px) {
-      .wrap { width: min(100% - 20px, 1440px); }
-      main { padding-top: 12px; gap: 12px; }
-      .banner { line-height: 1.5; }
-      .task-empty { padding: 22px 14px; }
-      .table-wrap { max-width: 100%; }
     }
   </style>
 </head>
-<body
-  data-n6-csrf-token="{{ page.csrf_token|default('') }}"
-  data-n6-scope-write-enabled="{{ 'true' if page.scope_write_enabled else 'false' }}"
-  data-n6-scope-bulk-write-enabled="{{ 'true' if page.scope_bulk_write_enabled else 'false' }}"
-  data-n6-scope-write-mode="{{ 'bulk-and-single' if page.scope_bulk_write_enabled else 'single-item' if page.scope_write_enabled else 'disabled' }}"
-  data-n6-proposal-write-enabled="{{ 'true' if page.proposal_write_enabled else 'false' }}"
-  data-n6-strategy-center-write-enabled="{{ 'true' if page.strategy_center_write_enabled else 'false' }}"
->
+<body>
   <header>
     <div class="wrap topbar{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
       <div>
         <h1>{{ page.app_title }}</h1>
-        <div class="subtle">{{ user.login_name }} · {{ "管理员" if page.principal.principal_type == "admin" else "用户" }}</div>
+        <div class="subtle">{{ user.login_name }} · {{ page.principal.principal_type }} · {{ page.principal.app_scope }}</div>
       </div>
       <nav aria-label="B轨导航">
         {% for item in page.nav.links %}
@@ -905,13 +649,17 @@
   </header>
   <main class="wrap{% if page.page_key == 'filter-center' %} n6-data-workspace{% endif %}">
     <section class="banner" aria-label="安全提示">
-      <span>{{ page.ux_safety_status|default("投影只读模式；本人监控范围管理未启用；交易申请未启用；不连接真实券商；不执行真实下单") }}</span>
+      {% for item in page.safety %}
+      <span class="chip">{{ item }}</span>
+      {% endfor %}
+      <span class="chip">展示GET · 监控偏好写入限定</span>
+      <span class="chip">按账号范围展示</span>
     </section>
-    <p class="subtle" data-n6-proposal-status role="status" aria-live="polite" hidden></p>
 
     <section class="surface">
       <div class="surface-head">
         <h2>{{ page.page_title }}</h2>
+        <span class="subtle">principal_id={{ page.principal.principal_id }}</span>
       </div>
       {% if page.page_key in ["home", "dashboard"] %}
       {% set user_guide = page.data.user_operation_guide|default({}) %}
@@ -920,24 +668,10 @@
           <h3>{{ user_guide.title|default("B轨新用户操作说明书") }}</h3>
           <p class="subtle">{{ user_guide.subtitle|default("B轨用于多用户筛选、保存个人监控范围、查看与自己范围匹配的实时/历史消息。") }}</p>
         </div>
-        {% set quick_links = user_guide.quick_links|default([]) %}
-        <div class="guide-quick-links" aria-label="B轨任务入口">
-          <div class="guide-link-group">
-            <strong>筛选</strong>
-            {% for link in quick_links[0:1] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>范围</strong>
-            {% for link in quick_links[1:3] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>消息</strong>
-            {% for link in quick_links[3:5] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
-          <div class="guide-link-group">
-            <strong>账户 / 日志</strong>
-            {% for link in quick_links[5:8] %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
-          </div>
+        <div class="guide-quick-links" aria-label="B轨快捷入口">
+          {% for link in user_guide.quick_links|default([]) %}
+          <a href="{{ link.href }}">{{ link.label }}</a>
+          {% endfor %}
         </div>
         <div class="guide-step-grid">
           {% for step in user_guide.steps|default([]) %}
@@ -967,33 +701,15 @@
         </div>
       </div>
       {% elif page.page_key == "account" %}
-      <div class="text-block">
-        <h3>虚拟账户</h3>
-        <span class="chip">T+1</span>
-        <span class="chip">{{ "交易申请已启用" if page.proposal_write_enabled else "交易申请未启用" }}</span>
-        {% if page.data.virtual_account %}
-        <p>{{ page.data.virtual_account.account_name }} · {{ page.data.virtual_account.account_status }} · {{ page.data.virtual_account.currency }}</p>
-        {% if page.data.cash_summary %}
-        <div class="metric-grid">
-          <div class="metric"><span>可用资金（人民币）</span><strong>{{ page.data.cash_summary.available_cash_display }}</strong></div>
-          <div class="metric"><span>冻结资金（人民币）</span><strong>{{ page.data.cash_summary.frozen_cash_display }}</strong></div>
-          <div class="metric"><span>总现金（人民币）</span><strong>{{ page.data.cash_summary.total_cash_display }}</strong></div>
-          <div class="metric"><span>资金快照时间</span><strong>{{ page.data.cash_summary.snapshot_time or "—" }}</strong></div>
-        </div>
-        {% endif %}
-        <div class="task-empty">
-          <strong>账户已就绪</strong>
-          <p>持仓、N6 分钟行情与止损状态在“持仓与实时估值”中查看。当前没有持仓时，行情与止损状态保持未就绪，不会回查上游或使用旧价格补算。</p>
-          <p>虚拟成交不连接真实券商，也不会执行真实下单。</p>
-          <div class="task-empty-links"><a href="/n6/app/portfolio">查看持仓与实时估值</a></div>
-        </div>
-        {% else %}
-        <div class="task-empty" data-n6-empty-state="account">
-          <strong>账户尚未初始化，请联系管理员</strong>
-          <p>账户准备完成后，默认初始资金为 1 亿元；单次买入预算 30 万元，按 100 股整数倍计算，并遵守 T+1。</p>
-          <p>账户建立并产生持仓后才会显示 N6 行情与止损状态。{% if page.proposal_write_enabled %}交易申请由受限 Web 创建，成交由独立 N6 executor 处理；本页不表示 executor 或 scheduler 正在运行。{% else %}交易申请未启用。{% endif %}</p>
-        </div>
-        {% endif %}
+      <div class="metric-grid">
+        <div class="metric"><span>账户名称</span><strong>{{ page.data.virtual_account.account_name }}</strong></div>
+        <div class="metric"><span>币种</span><strong>{{ page.data.virtual_account.base_currency }}</strong></div>
+        <div class="metric"><span>初始展示资金</span><strong>{{ page.data.virtual_account.initial_cash }}</strong></div>
+        <div class="metric"><span>可展示现金</span><strong>{{ page.data.virtual_account.available_cash }}</strong></div>
+        <div class="metric"><span>冻结展示现金</span><strong>{{ page.data.virtual_account.frozen_cash }}</strong></div>
+        <div class="metric"><span>展示现金合计</span><strong>{{ page.data.virtual_account.total_cash }}</strong></div>
+        <div class="metric"><span>账户状态</span><strong>{{ page.data.virtual_account.status }}</strong></div>
+        <div class="metric"><span>质量状态</span><strong>{{ page.data.virtual_account.quality_status }}</strong></div>
       </div>
       {% elif page.page_key == "watchlist" %}
       <div class="text-block">
@@ -1051,6 +767,7 @@
         <h3>{{ page.data.component_label }}</h3>
         <span class="chip">消息</span>
         <span class="chip">消息详情</span>
+        <span class="chip">route: /n6/app/signals</span>
         {% if page.data.date_policy_message %}
         <div class="monitor-message">{{ page.data.date_policy_message }}</div>
         {% endif %}
@@ -1073,19 +790,16 @@
           class="monitor-message"
           data-n6-auto-refresh="signals"
           data-refresh-enabled="{% if signals_auto_refresh_enabled %}true{% else %}false{% endif %}"
+          data-refresh-interval-ms="5000"
+          data-refresh-backoff-ms="15000"
+          data-refresh-max-backoff-ms="60000"
           data-refresh-url="{{ page.data.api_refresh_href }}"
-          data-sse-url="{{ page.data.api_stream_href }}"
-          data-page-limit="{{ page.data.pagination.limit }}"
-          data-next-cursor="{{ page.data.pagination.next_cursor }}"
-          data-watermark="{{ page.data.pagination.watermark }}"
         >
-          <span data-n6-refresh-status>{% if signals_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
+          <span data-n6-refresh-status>{% if signals_auto_refresh_enabled %}自动刷新中，每 5 秒{% else %}历史快照，自动刷新关闭{% endif %}</span>
           <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
-          <button type="button" class="row-action" data-n6-load-more{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
-          <div class="n6-skeleton" data-n6-skeleton hidden aria-label="消息加载中"><span></span><span></span><span></span></div>
         </div>
       </div>
-      <div class="table-wrap" data-n6-signals-table{% if not page.data['items'] %} hidden{% endif %}>
+      <div class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -1107,17 +821,14 @@
               <th>条件 trace</th>
               <th>触发周期</th>
               <th>主触发周期</th>
-              <th>价格</th>
-              <th>收益率 / projection</th>
               <th>动作状态</th>
               <th>action_mark</th>
               <th>未确认原因</th>
-              {% if selected_signal_asset_kind == "stock" %}<th>数量</th><th class="sticky-action">操作</th>{% endif %}
             </tr>
           </thead>
           <tbody data-n6-signals-body data-asset-kind="{{ selected_signal_asset_kind }}">
             {% for item in page.data['items'] %}
-            <tr data-n6-projection-id="{{ item.user_signal_projection_id }}">
+            <tr>
               <td>{{ item.trade_date }}</td>
               <td>{{ item.event_time }}</td>
               <td>{{ item.asset_kind_label }}</td>
@@ -1131,41 +842,27 @@
               <td>{{ item.display_name }}</td>
               {% endif %}
               <td>{{ item.direction_label }}</td>
-              <td>{{ item.condition_key }}<br><span class="subtle">{{ item.condition_rendering_policy }}</span></td>
+              <td>{{ item.condition_trace.condition_key }}<br><span class="subtle">{{ item.condition_trace.rendering_policy }}</span></td>
               <td>{{ item.triggered_periods }}</td>
               <td>{{ item.primary_trigger_period }}</td>
-              <td>buy_target={{ item.buy_target or "—" }}<br>trigger={{ item.trigger_price or "—" }} · action={{ item.action_price or "—" }}<br>up_ref={{ item.up_ref or "—" }} · down_ref={{ item.down_ref or "—" }}</td>
-              <td>buy={{ item.buy_return if item.buy_return is not none else "—" }}% · secondary={{ item.secondary_return if item.secondary_return is not none else "—" }}%<br>sell={{ item.sell_return if item.sell_return is not none else "—" }}% · trigger={{ item.trigger_pct or "—" }}%<br>{% if item.asset_kind == "stock" %}score={{ item.score or "—" }} · pe_core={{ item.pe_core or "—" }} · {% endif %}{{ item.projection_message_status or "not_ready" }}</td>
               <td>{{ item.action_state_label }}</td>
               <td>{{ item.action_mark }}</td>
               <td>{{ item.blocked_reason_label }}</td>
-              {% if selected_signal_asset_kind == "stock" %}
-              <td>{{ "30万预算，确认时按行情取整" if item.direction == "buy" else "全部 T+1 可卖数量" }}</td>
-              <td class="sticky-action">
-                {% if page.proposal_write_enabled and item.action_state in ["eligible", "executed"] %}
-                <button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="{{ item.user_signal_projection_id }}">
-                  {{ "买入" if item.direction == "buy" else "卖出" }}{{ "确认" if item.action_state == "executed" else "准备" }}
-                </button>
-                {% else %}<span class="subtle">{{ "未启用" if not page.proposal_write_enabled else "—" }}</span>{% endif %}
-              </td>
-              {% endif %}
             </tr>
             {% endfor %}
           </tbody>
         </table>
-      </div>
-      <div class="task-empty" data-n6-empty-state="signals"{% if page.data['items'] %} hidden{% endif %}>
-        <strong data-n6-empty-title>{% if page.data.effective_monitor_count <= 0 %}尚无匹配当前范围的消息{% else %}当前类型暂无消息{% endif %}</strong>
-        <p>可先从筛选中心选择对象，或检查本人监控对象是否在当前生效日期内。</p>
-        <div class="task-empty-links">
-          <a href="/n6/app/filter-center">前往筛选中心</a>
-          <a href="/n6/app/my-monitor">查看监控对象</a>
-        </div>
+        {% if not page.data['items'] %}
+        <div class="empty">{% if page.data.effective_monitor_count <= 0 %}暂无该类型监控对象匹配的消息{% else %}暂无该类型消息{% endif %}</div>
+        {% endif %}
       </div>
       {% elif page.page_key == "messages" %}
       {% set messages_auto_refresh_enabled = page.data.selected_trade_date == page.data.current_filter_batch.for_trade_date %}
       <div class="text-block">
         <h3>{{ page.data.component_label }}</h3>
+        {% for item in page.data.safety_banner %}
+        <span class="chip">{{ item }}</span>
+        {% endfor %}
         {% if page.data.date_policy_message %}
         <div class="monitor-message">{{ page.data.date_policy_message }}</div>
         {% endif %}
@@ -1173,11 +870,6 @@
           {% for tab in page.data.asset_kind_tabs %}
           <a class="{% if tab.active %}active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
           {% endfor %}
-        </div>
-        <div class="monitor-actions" aria-label="卡片语音播报">
-          <button type="button" class="row-action" data-n6-voice-toggle>开启语音</button>
-          <button type="button" class="row-action" data-n6-voice-test>测试语音</button>
-          <span class="chip" data-n6-voice-status aria-live="polite">语音默认关闭，仅播报新 SSE 消息</span>
         </div>
         <form method="get" action="/n6/app/messages" class="monitor-actions">
           <label for="messages-trade-date">交易日</label>
@@ -1193,19 +885,16 @@
           class="monitor-message"
           data-n6-auto-refresh="messages"
           data-refresh-enabled="{% if messages_auto_refresh_enabled %}true{% else %}false{% endif %}"
+          data-refresh-interval-ms="5000"
+          data-refresh-backoff-ms="15000"
+          data-refresh-max-backoff-ms="60000"
           data-refresh-url="{{ page.data.api_refresh_href }}"
-          data-sse-url="{{ page.data.api_stream_href }}"
-          data-page-limit="{{ page.data.pagination.limit }}"
-          data-next-cursor="{{ page.data.pagination.next_cursor }}"
-          data-watermark="{{ page.data.pagination.watermark }}"
         >
-          <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}实时增量连接中{% else %}历史快照，自动刷新关闭{% endif %}</span>
+          <span data-n6-refresh-status>{% if messages_auto_refresh_enabled %}自动刷新中，每 5 秒{% else %}历史快照，自动刷新关闭{% endif %}</span>
           <button type="button" class="row-action" data-n6-refresh-now>立即刷新</button>
-          <button type="button" class="row-action" data-n6-load-more{% if not page.data.pagination.has_more %} hidden{% endif %}>加载更多</button>
-          <div class="n6-skeleton" data-n6-skeleton hidden aria-label="卡片加载中"><span></span><span></span><span></span></div>
         </div>
       </div>
-      <div class="metric-grid message-summary-grid">
+      <div class="metric-grid">
         <div class="metric"><span>当前有效监控交易日</span><strong>{{ page.data.current_filter_batch.for_trade_date }}</strong></div>
         <div class="metric"><span>条件来源日</span><strong>{{ page.data.current_filter_batch.source_trade_date }}</strong></div>
         <div class="metric"><span>有效监控对象数量</span><strong data-summary-key="effective_monitor_count">{{ page.data.summary.effective_monitor_count }}</strong></div>
@@ -1244,7 +933,7 @@
       </div>
       <div class="message-card-grid" data-n6-message-cards>
         {% for item in page.data.card_items %}
-        <article class="message-card" data-n6-projection-id="{{ item.user_signal_projection_id }}">
+        <article class="message-card">
           <div class="message-card-head">
             <div>
               <div class="message-card-title">{{ item.title }}</div>
@@ -1260,16 +949,6 @@
             <span class="chip">触发周期 {{ item.triggered_periods }}</span>
             <span class="chip">主周期 {{ item.primary_trigger_period }}</span>
             <span class="chip">action_mark {{ item.action_mark }}</span>
-            <span class="chip">buy_target {{ item.buy_target or item.target_price or "—" }}</span>
-            <span class="chip">buy_return {{ item.buy_return if item.buy_return is not none else "—" }}%</span>
-            <span class="chip">secondary_return {{ item.secondary_return if item.secondary_return is not none else "—" }}%</span>
-            <span class="chip">sell_return {{ item.sell_return if item.sell_return is not none else "—" }}%</span>
-            <span class="chip">up_ref {{ item.up_ref or "—" }}</span>
-            <span class="chip">down_ref {{ item.down_ref or "—" }}</span>
-            {% if item.asset_kind == "stock" %}<span class="chip">score {{ item.score or "—" }} / pe_core {{ item.pe_core or "—" }}</span>{% endif %}
-            <span class="chip">trigger {{ item.trigger_price or "—" }} ({{ item.trigger_pct or "—" }}%)</span>
-            <span class="chip">action {{ item.action_price or "—" }} ({{ item.action_pct or "—" }}%)</span>
-            <span class="chip">projection {{ item.projection_message_status or "not_ready" }}</span>
           </div>
           <p class="subtle">condition={{ item.condition_key }} · blocked_reason={{ item.blocked_reason_label }}</p>
           <p class="subtle">trade_date={{ item.trade_date }} · identity_key={{ item.identity_key }}</p>
@@ -1289,6 +968,9 @@
       {% elif page.page_key == "buy-messages" %}
       <div class="text-block">
         <h3>{{ page.data.component_label }}</h3>
+        {% for item in page.data.safety_banner %}
+        <span class="chip">{{ item }}</span>
+        {% endfor %}
       </div>
       <div class="metric-grid">
         <div class="metric"><span>指数买入信号</span><strong>{{ page.data.summary.index_count }}</strong></div>
@@ -1323,6 +1005,43 @@
         {% endfor %}
       </div>
       {% endfor %}
+      {% elif page.page_key == "realtime-scope" %}
+      <div class="text-block">
+        <h3>{{ page.data.component_label }}</h3>
+        <span class="chip">对象数: {{ page.data.summary.count }}</span>
+        <span class="chip">默认指数: {{ page.data.summary.default_seed_count }}</span>
+        <span class="chip">{{ page.data.controls.scope_notice }}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>identity_key</th>
+              <th>display_name</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in page.data["items"] %}
+            <tr>
+              <td>{{ item.identity_key }}</td>
+              <td>{{ item.display_name }}</td>
+              <td>
+                <button
+                  class="row-action"
+                  type="button"
+                  data-realtime-scope-delete
+                  data-realtime-scope-id="{{ item.realtime_scope_id }}"
+                  {% if not item.controls.delete_enabled %}disabled{% endif %}
+                >删除</button>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" class="empty">暂无实时监控范围。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
       {% elif page.page_key == "filter-center" %}
       <div class="text-block">
         <h3>筛选中心</h3>
@@ -1458,23 +1177,37 @@
         <span class="chip">成分表: {{ section.membership_read_source_table }}</span>
         {% endif %}
         <span class="chip">默认方向: {{ section.default_monitor_direction_label }}</span>
-        <div class="monitor-actions"><span class="chip">筛选结果只读；可按授权保存到本人范围</span></div>
-        {% if section.controls.bulk_add_enabled and section.filtered_count %}
-        <div
-          class="monitor-actions"
-          data-n6-bulk-scope
-          data-n6-asset-kind="{{ section.asset_kind }}"
-          data-n6-filtered-count="{{ section.filtered_count }}"
-        >
-          <button type="button" class="row-action" data-n6-bulk-monitor>
-            将筛选结果全部加入监控对象（{{ section.filtered_count }}）
-          </button>
-          <button type="button" class="row-action" data-n6-bulk-realtime>
-            将筛选结果全部加入实时监控范围（{{ section.filtered_count }}）
-          </button>
-          <span class="chip" data-n6-bulk-status role="status" aria-live="polite" hidden></span>
+        <div class="monitor-actions">
+          <button
+            type="button"
+            data-monitor-selected-add
+            data-monitor-asset-kind="{{ section.asset_kind }}"
+            data-monitor-direction="{{ section.default_monitor_direction }}"
+            data-monitor-for-trade-date="{{ section.selected_for_trade_date }}"
+          >{{ section.controls.add_selected_label }}</button>
+          <button
+            type="button"
+            data-monitor-bulk-add
+            data-monitor-asset-kind="{{ section.asset_kind }}"
+            data-monitor-direction="{{ section.default_monitor_direction }}"
+            data-monitor-for-trade-date="{{ section.selected_for_trade_date }}"
+            data-monitor-filters="{{ section.filters_json }}"
+          >{{ section.controls.bulk_add_label }}</button>
+          <button
+            type="button"
+            data-realtime-scope-selected-add
+            data-realtime-scope-asset-kind="{{ section.asset_kind }}"
+            data-realtime-scope-for-trade-date="{{ section.selected_for_trade_date }}"
+          >{{ section.controls.add_realtime_selected_label }}</button>
+          <button
+            type="button"
+            data-realtime-scope-bulk-add
+            data-realtime-scope-asset-kind="{{ section.asset_kind }}"
+            data-realtime-scope-for-trade-date="{{ section.selected_for_trade_date }}"
+            data-realtime-scope-filters="{{ section.filters_json }}"
+          >{{ section.controls.bulk_realtime_scope_label }}</button>
+          <span class="chip">{{ section.controls.write_scope_notice }}</span>
         </div>
-        {% endif %}
         {% if section.linked_stock_filter %}
         <div class="monitor-actions" data-linked-stock-filter>
           <a href="{{ section.linked_stock_filter.href }}">{{ section.linked_stock_filter.label }}</a>
@@ -1516,12 +1249,7 @@
         <p>{{ section.empty_state }}</p>
         {% endif %}
       </div>
-      <div
-        class="table-wrap"
-        role="region"
-        aria-label="筛选结果表格，可横向滚动，操作列固定在左侧"
-        tabindex="0"
-      >
+      <div class="table-wrap">
         <table
           class="filter-table"
           data-filter-table
@@ -1533,7 +1261,7 @@
         >
           <thead>
             <tr>
-              <th scope="col" class="filter-action-cell" data-column-fixed="true">对象 / 操作</th>
+              <th scope="col" data-column-fixed="true">操作</th>
               {% for column in section.columns %}
               <th
                 scope="col"
@@ -1557,18 +1285,43 @@
           </thead>
           <tbody>
             {% for item in section.grid_rows %}
-            <tr data-cell-count="{{ item.cells|length }}" data-n6-identity-key="{{ item.identity_key }}" data-n6-asset-kind="{{ section.asset_kind }}" data-n6-for-trade-date="{{ item.for_trade_date }}" data-n6-direction-policy="{{ item.monitor_direction_policy }}">
+            <tr data-cell-count="{{ item.cells|length }}">
               <td class="filter-action-cell">
                 <div class="row-action-line">
+                  <input
+                    class="row-check"
+                    type="checkbox"
+                    data-monitor-checkbox
+                    data-monitor-asset-kind="{{ item.asset_kind }}"
+                    data-monitor-identity-key="{{ item.identity_key }}"
+                    data-monitor-direction="{{ section.default_monitor_direction }}"
+                    data-monitor-for-trade-date="{{ item.for_trade_date }}"
+                    aria-label="选择{{ item.display_name }}"
+                  >
                   <span>{{ item.asset_kind_label }}</span>
                   <span class="subtle">{{ item.display_code }}</span>
+                  <button
+                    class="row-action"
+                    type="button"
+                    data-monitor-add
+                    data-monitor-asset-kind="{{ item.asset_kind }}"
+                    data-monitor-identity-key="{{ item.identity_key }}"
+                    data-monitor-direction="{{ section.default_monitor_direction }}"
+                    data-monitor-for-trade-date="{{ item.for_trade_date }}"
+                    title="{{ item.add_monitor_label }}"
+                    aria-label="{{ item.add_monitor_label }}"
+                  >{{ item.add_monitor_short_label|default(item.add_monitor_label) }}</button>
+                  <button
+                    class="row-action"
+                    type="button"
+                    data-realtime-scope-add
+                    data-realtime-scope-asset-kind="{{ item.asset_kind }}"
+                    data-realtime-scope-identity-key="{{ item.identity_key }}"
+                    data-realtime-scope-for-trade-date="{{ item.for_trade_date }}"
+                    title="{{ item.add_realtime_scope_label }}"
+                    aria-label="{{ item.add_realtime_scope_label }}"
+                  >{{ item.add_realtime_scope_short_label|default(item.add_realtime_scope_label) }}</button>
                 </div>
-                {% if section.controls.add_monitor_enabled %}
-                <div class="row-action-line">
-                  <button type="button" class="row-action" data-n6-add-monitor>加入监控对象</button>
-                  <button type="button" class="row-action" data-n6-add-realtime>加入实时监控范围</button>
-                </div>
-                {% endif %}
               </td>
               {% for cell in item.cells %}
               <td
@@ -1614,11 +1367,11 @@
 	          <button type="submit">切换日期</button>
 	        </form>
 	      </div>
-      <div class="metric-grid">
+	      <div class="metric-grid">
 	        <div class="metric"><span>我的个股监控</span><strong>{{ page.data.sections.stocks.count }}</strong></div>
 	        <div class="metric"><span>我的板块监控</span><strong>{{ page.data.sections.boards.count }}</strong></div>
         <div class="metric"><span>我的指数监控</span><strong>{{ page.data.sections.indexes.count }}</strong></div>
-        <div class="metric"><span>范围管理</span><strong>{{ "已启用" if page.data.controls.write_route_enabled else "未启用" }}</strong></div>
+        <div class="metric"><span>写入接口</span><strong>{{ page.data.controls.write_route_registered }}</strong></div>
       </div>
       {% set selected_section = page.data.sections[page.data.selected_section_key] %}
 	      <div class="text-block">
@@ -1626,169 +1379,43 @@
 	        <span class="chip">状态: {{ selected_section.status_label }}</span>
 	        <span class="chip">数量: {{ selected_section.count }}</span>
 	        <span class="chip">有效: {{ selected_section.status_counts.active }}</span>
-	        {% if page.data.monitor_status_filter != "active" %}<span class="chip">已失效: {{ selected_section.status_counts.expired }}</span>{% endif %}
+	        <span class="chip">已失效: {{ selected_section.status_counts.expired }}</span>
 	        {% for item in page.data.status_filter_links %}
 	        <a class="chip{% if item.active %} active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
 	        {% endfor %}
 	      </div>
-      {% if selected_section['items'] %}
 	      <div class="table-wrap">
 	        <table>
 	          <thead>
 	            <tr>
+	              <th>操作</th>
 	              {% for column in selected_section.columns %}
 	              <th class="{{ column.align }}">{{ column.label }}</th>
 	              {% endfor %}
-                {% if page.data.controls.remove_monitor_enabled %}<th class="sticky-action">操作</th>{% endif %}
             </tr>
           </thead>
           <tbody>
             {% for item in selected_section['items'] %}
             <tr>
+	              <td>
+	                <button
+	                  class="monitor-delete-button"
+	                  type="button"
+	                  data-monitor-delete
+	                  data-monitor-id="{{ item.monitor_id }}"
+	                >{{ page.data.controls.remove_monitor_label }}</button>
+	              </td>
 	              {% for cell in item.cells %}
 	              <td class="{{ cell.align }}">{{ cell.value }}</td>
 	              {% endfor %}
-                  {% if page.data.controls.remove_monitor_enabled %}
-                <td class="sticky-action">
-                  {% if item.monitor_id %}
-                  <button type="button" class="row-action" data-n6-remove-monitor data-monitor-id="{{ item.monitor_id }}">移除</button>
-                  {% else %}
-                  <span class="subtle">—</span>
-                  {% endif %}
-                </td>
-                  {% endif %}
             </tr>
 	            {% endfor %}
           </tbody>
         </table>
+        {% if not selected_section['items'] %}
+        <div class="empty">{{ selected_section.empty_state }}</div>
+        {% endif %}
       </div>
-      {% else %}
-      <div class="task-empty" data-n6-empty-state="monitor">
-        <strong>当前条件下暂无监控对象</strong>
-        <p>可前往筛选中心选择对象；这里只展示本人范围，不会自动添加或写入。</p>
-        <div class="task-empty-links">
-          <a href="/n6/app/filter-center">前往筛选中心</a>
-          <a href="/n6/app/realtime-scope">查看实时监控范围</a>
-        </div>
-      </div>
-      {% endif %}
-      {% elif page.page_key == "realtime-scope" %}
-      <div class="text-block">
-        <h3>实时监控范围</h3>
-        <span class="chip">本人长期白名单</span>
-        <span class="chip">个股仅买入方向</span>
-        <span class="chip">指数/板块双向</span>
-        <p>{{ page.data.controls.scope_notice }}</p>
-      </div>
-      <div class="metric-grid">
-        <div class="metric"><span>当前范围</span><strong>{{ page.data.summary.count }}</strong></div>
-        <div class="metric"><span>系统默认对象</span><strong>{{ page.data.summary.default_seed_count }}</strong></div>
-        <div class="metric"><span>范围管理</span><strong>{{ "已启用" if page.data.controls.write_route_enabled else "未启用" }}</strong></div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>类型</th><th>对象</th><th>名称</th><th>来源</th><th>状态</th><th class="sticky-action">操作</th></tr></thead>
-          <tbody>
-            {% for item in page.data['items'] %}
-            <tr>
-              <td>{{ item.asset_kind_label }}</td>
-              <td>{{ item.identity_key }}</td>
-              <td>{{ item.display_name }}</td>
-              <td>{{ "系统默认" if item.is_default_seed or item.source_type == "default_seed" else "用户添加" }}</td>
-              <td>{{ item.status_label }}</td>
-              <td class="sticky-action">
-                {% if page.data.controls.delete_enabled and item.controls.delete_enabled %}
-                <button type="button" class="row-action" data-n6-remove-realtime data-scope-id="{{ item.realtime_scope_id }}">移除</button>
-                {% else %}<span class="subtle">—</span>{% endif %}
-              </td>
-            </tr>
-            {% else %}
-            <tr><td colspan="6"><div class="empty">暂无实时监控范围</div></td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% elif page.page_key == "strategy-center" %}
-      <div data-n6-strategy-center>
-        <div class="metric-grid" data-n6-strategy-metrics>
-          <div class="metric"><span>交易日</span><strong data-strategy-trade-date>加载中</strong></div>
-          <div class="metric"><span>适用个股并集</span><strong data-strategy-scope-count>—</strong></div>
-          <div class="metric"><span>当前 revision</span><strong data-strategy-revision>—</strong></div>
-          <div class="metric"><span>合格候选</span><strong data-strategy-match-count>—</strong></div>
-          <div class="metric"><span>观察项</span><strong data-strategy-observation-count>—</strong></div>
-        </div>
-        <div class="banner" data-strategy-migration-required hidden>
-          <span>当前 active revision 仍使用 V1 策略包。V1 历史结果已 fail-closed 隔离，不会进入合格候选或观察区；请先完成该用户的 V2 补偿 revision。</span>
-        </div>
-        <div class="strategy-package-grid" data-strategy-packages aria-label="策略包选择"></div>
-        <div class="strategy-toolbar">
-          <button type="button" data-strategy-save>保存策略选择</button>
-          <button type="button" data-strategy-refresh>立即刷新</button>
-          <span class="subtle" data-strategy-status role="status" aria-live="polite">正在加载当前用户策略…</span>
-        </div>
-        <div class="banner">
-          <span>纯展示：指数、板块、个股必须同向并按交易分钟校验新鲜度；action_price 仅展示，不会创建 proposal、启动 executor 或买入。</span>
-        </div>
-        <section class="strategy-surface" aria-labelledby="strategy-qualified-title">
-          <div class="strategy-surface-head">
-            <h2 id="strategy-qualified-title">合格候选</h2>
-            <span class="chip">STRONG / MEDIUM · fresh</span>
-          </div>
-          <div class="strategy-result-grid" data-strategy-qualified-results></div>
-          <div class="task-empty" data-strategy-qualified-empty hidden>
-            <strong>当前交易日暂无合格候选</strong>
-            <p>只有同向且时间跨度不超过30个交易分钟的 fresh 证据进入本区。</p>
-          </div>
-        </section>
-        <section class="strategy-surface" aria-labelledby="strategy-observation-title">
-          <div class="strategy-surface-head">
-            <h2 id="strategy-observation-title">观察区</h2>
-            <span class="chip">WEAK / stale · 不合格</span>
-          </div>
-          <div class="strategy-result-grid" data-strategy-observation-results></div>
-          <div class="task-empty" data-strategy-observation-empty hidden>
-            <strong>当前交易日暂无观察项</strong>
-            <p>31–60个交易分钟的 WEAK 组合或确认后已 stale 的候选显示在这里。</p>
-          </div>
-        </section>
-      </div>
-      {% elif page.page_key == "trade-log" %}
-      <div class="text-block">
-        <h3>买卖日志</h3>
-        <span class="chip">本人虚拟成交记录</span>
-        <p>仅用于虚拟账户审计，不连接券商；{% if page.proposal_write_enabled %}交易申请由受限 Web 创建，成交由独立 N6 executor 处理，本页不证明 executor 或 scheduler 正在运行。{% else %}交易申请未启用。{% endif %}</p>
-      </div>
-      {% if page.data['items'] %}
-      <div class="table-wrap"><table>
-        <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>数量</th><th>成交价</th><th>参考价</th><th>金额</th><th>状态</th></tr></thead>
-        <tbody>
-          {% for item in page.data['items'] %}
-          <tr>
-            <td>{{ item.trade_time }}</td>
-            <td>{{ item.identity_key }}</td>
-            <td>{{ item.trade_side }}</td>
-            <td>{{ item.filled_quantity }}</td>
-            <td>
-              {{ item.filled_price }}<br>
-              <span class="subtle">{% if item.fill_quote_snapshot_id %}行情成交价{% elif item.signal_reference_kind == "trigger_price" %}触发价虚拟成交{% elif item.signal_reference_kind == "action_price" %}动作价虚拟成交{% else %}成交价来源未就绪{% endif %}</span>
-            </td>
-            <td>{{ item.signal_reference_kind }} {{ item.signal_reference_price or "—" }}</td>
-            <td>{{ item.net_amount }}</td>
-            <td>{{ item.trade_status }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table></div>
-      {% else %}
-      <div class="task-empty" data-n6-empty-state="trade-log">
-        <strong>尚无虚拟买卖记录</strong>
-        <p>虚拟账户和交易功能准备完成后，成交记录会显示在这里。</p>
-        <div class="task-empty-links">
-          <a href="/n6/app/account">查看虚拟账户状态</a>
-          <a href="/n6/app/my-monitor">查看监控对象</a>
-        </div>
-      </div>
-      {% endif %}
       {% elif page.page_key == "status-monitor" %}
       <div class="metric-grid">
         <div class="metric"><span>有效</span><strong>{{ page.data.status_summary.active }}</strong></div>
@@ -1842,220 +1469,6 @@
         <div class="empty">暂无状态记录。</div>
         {% endif %}
       </div>
-      {% elif page.page_key == "portfolio" %}
-      <div class="text-block">
-        <h3>虚拟持仓组合</h3>
-        <span class="chip">只读展示</span>
-        <span class="chip">报价状态: fresh / stale / not_ready / market_closed</span>
-        <span class="chip">止损状态: not_ready / provisional_first_day / frozen / disabled</span>
-        <p>缺失或过期报价不会回查其他行情源，也不会使用昨收价补算估值。</p>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>股票</th>
-              <th>持仓</th>
-              <th>可卖 / T+1 锁定</th>
-              <th>平均成本</th>
-              <th>当前价</th>
-              <th>报价状态</th>
-              <th>市值</th>
-              <th>浮动盈亏</th>
-              <th>收益率</th>
-              <th>目标价</th>
-              <th>止损</th>
-              <th>Episode</th>
-              <th class="sticky-action">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for item in page.data['items'] %}
-            <tr>
-              <td>{{ item.stock_code }}<br><span class="subtle">{{ item.identity_key }}</span></td>
-              <td>{{ item.quantity }}</td>
-              <td>{{ item.sellable_quantity or "0" }} / {{ item.t1_locked_quantity or "0" }}<br><span class="subtle">批次合计 {{ item.lot_quantity_total or "—" }}</span></td>
-              <td>{{ item.average_cost if item.average_cost is not none else "—" }}</td>
-              <td>{{ item.current_price if item.current_price is not none else "—" }}</td>
-              <td>{{ item.quote_status }}<br><span class="subtle">{{ item.quote_minute or "—" }}</span></td>
-              <td>{{ item.market_value if item.market_value is not none else "—" }}</td>
-              <td>{{ item.unrealized_pnl if item.unrealized_pnl is not none else "—" }}</td>
-              <td>{{ item.unrealized_return_pct if item.unrealized_return_pct is not none else "—" }}</td>
-              <td>{{ item.target_price or "—" }}<br><span class="subtle">{{ "已冻结" if item.target_price_status == "frozen" else "未就绪" }}</span></td>
-              <td>
-                {{ item.stop_loss_price or "—" }}<br>
-                <span class="subtle">
-                  {% if item.stop_loss_status == "provisional_first_day" %}首日临时止损，待下一交易日生效
-                  {% elif item.stop_loss_status == "frozen" %}已冻结生效
-                  {% elif item.stop_loss_status == "disabled" %}已禁用
-                  {% else %}止损未就绪{% endif %}
-                </span><br>
-                <span class="subtle">生效日 {{ item.stop_loss_effective_trade_date or "—" }} · 冻结 {{ item.stop_loss_frozen_at or "—" }}</span>
-              </td>
-              <td>#{{ item.holding_episode_no or "—" }}<br><span class="subtle">首次开仓 {{ item.first_open_trade_date or "—" }}</span></td>
-              <td class="sticky-action">
-                {% if page.proposal_write_enabled and item.manual_sell_available %}
-                <button type="button" class="row-action" data-n6-create-proposal data-source-type="manual_position" data-source-id="{{ item.virtual_position_id }}">手动卖出</button>
-                {% else %}<button type="button" class="row-action" disabled aria-disabled="true" aria-label="{{ item.manual_sell_disabled_reason }}" title="{{ item.manual_sell_disabled_reason }}">{{ item.manual_sell_disabled_reason }}</button>{% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% if not page.data['items'] %}
-        <div class="task-empty" data-n6-empty-state="portfolio">
-          <strong>暂无虚拟持仓</strong>
-          <p>当前没有可展示持仓。请先确认虚拟账户已建立；若已有持仓，请检查当前交易日与持仓批次数量是否就绪。</p>
-          <p>没有有效持仓时不会拉取持仓行情，行情与止损状态保持未就绪，也不会触发自动卖出。</p>
-          <div class="task-empty-links"><a href="/n6/app/account">返回虚拟账户</a><a href="/n6/app/signals">查看消息列表</a></div>
-        </div>
-        {% endif %}
-      </div>
-      {% elif page.page_key == "ai-agent" %}
-      {% set ai_status = page.data.profile.status %}
-      {% set ai_mode = page.data.profile.mode %}
-      {% set ai_pause_reason = page.data.profile.pause_reason %}
-      <div class="text-block" data-n6-ai-agent-page>
-        <h3>AI模拟投资员</h3>
-        <span class="chip">AI身份:
-          {% if ai_status == "sandbox_only" %}沙盒观察
-          {% elif ai_status == "active" %}已激活
-          {% elif ai_status == "disabled" %}已停用
-          {% elif ai_status == "not_registered" %}未注册
-          {% else %}{{ ai_status }}{% endif %}
-        </span>
-        <span class="chip">运行模式:
-          {% if ai_mode == "shadow" %}Shadow
-          {% elif ai_mode == "autonomous" %}自治模拟
-          {% elif ai_mode == "disabled" %}未启用
-          {% else %}{{ ai_mode }}{% endif %}
-        </span>
-        {% if ai_status == "sandbox_only" %}
-        <span class="chip">自治交易: 未启用，需独立授权</span>
-        {% elif ai_status == "disabled" %}
-        <span class="chip">自治交易: 未启用</span>
-        {% else %}
-        <span class="chip">自治交易: 以独立授权为准</span>
-        {% endif %}
-        <span class="chip">策略: {{ page.data.profile.strategy_version or "—" }}</span>
-        <span class="chip">模型: {{ page.data.profile.model_label or "—" }} {{ page.data.profile.model_version or "" }}</span>
-        <p>所有B轨登录用户看到同一个AI独立模拟账户。本页仅展示模拟账户、结构化决策理由与审计结果，不提供申请、确认、暂停、改策略或交易操作。</p>
-        <p><strong>模拟实验 · 不连接真实券商 · 非投资建议 · 不代表未来结果</strong></p>
-      </div>
-      {% if page.data.empty_state %}
-      <div class="task-empty" data-n6-empty-state="ai-agent">
-        <strong>AI模拟投资员尚未就绪</strong>
-        <p>{{ page.data.empty_state }}</p>
-        <p>身份、独立模拟账户或公开快照就绪后，账户和决策记录会自动显示在这里。</p>
-      </div>
-      {% else %}
-      <div class="metric-grid">
-        <div class="metric"><span>账户总权益</span><strong>{{ page.data.account.total_equity if page.data.account.total_equity is not none else "—" }}</strong></div>
-        <div class="metric"><span>现金余额</span><strong>{{ page.data.account.cash_balance if page.data.account.cash_balance is not none else "—" }}</strong></div>
-        <div class="metric"><span>持仓市值</span><strong>{{ page.data.account.market_value if page.data.account.market_value is not none else "—" }}</strong></div>
-        <div class="metric"><span>累计收益率</span><strong>{{ page.data.account.total_return_pct if page.data.account.total_return_pct is not none else "—" }}{% if page.data.account.total_return_pct is not none %}%{% endif %}</strong></div>
-        <div class="metric"><span>最大回撤</span><strong>{{ page.data.account.max_drawdown_pct if page.data.account.max_drawdown_pct is not none else "—" }}{% if page.data.account.max_drawdown_pct is not none %}%{% endif %}</strong></div>
-        <div class="metric"><span>风险调整评分</span><strong>{{ page.data.performance.risk_adjusted_score if page.data.performance.risk_adjusted_score is not none else "—" }}</strong></div>
-        <div class="metric"><span>估值状态</span><strong>{{ page.data.account.valuation_status or "not_ready" }}{% if page.data.account.not_ready_position_count %}（{{ page.data.account.not_ready_position_count }}项未就绪）{% endif %}</strong></div>
-        <div class="metric"><span>最近成功决策</span><strong>{{ page.data.profile.last_success_at or "—" }}</strong></div>
-        <div class="metric"><span>运行说明</span><strong>
-          {% if ai_status == "sandbox_only" and ai_pause_reason in ("", "—") %}
-            {% if page.data.profile.last_success_at and page.data.profile.last_success_at != "—" %}Shadow观察中，最近有效决策已记录
-            {% else %}沙盒观察中，尚无已记录的有效决策（非暂停）{% endif %}
-          {% elif ai_pause_reason == "agent_run_in_progress" %}决策运行中
-          {% elif ai_pause_reason == "agent_run_rejected" %}最近一次决策被规则拒绝
-          {% elif ai_pause_reason == "agent_run_failed" %}最近一次决策运行失败
-          {% elif ai_pause_reason == "agent_run_unavailable" %}最近一次决策状态不可用
-          {% elif ai_pause_reason == "not_open_trade_date" %}非交易日，等待下一个开市日
-          {% elif ai_pause_reason == "position_quote_not_ready" %}持仓报价未就绪，等待有效行情
-          {% elif ai_pause_reason == "signal_universe_too_large" %}信号范围超限，已阻断本次决策
-          {% elif ai_pause_reason == "max_drawdown_pause" %}最大回撤达到阈值，已暂停
-          {% elif ai_pause_reason == "ai_user_disabled" %}AI身份已停用
-          {% elif ai_pause_reason == "ai_user_inactive" %}AI身份未激活
-          {% elif ai_pause_reason == "not_started" %}尚无已记录的有效决策
-          {% elif ai_pause_reason in ("", "—") %}当前无已记录暂停原因
-          {% else %}{{ ai_pause_reason }}{% endif %}
-        </strong></div>
-      </div>
-
-      <div class="text-block"><h3>当前模拟持仓</h3><p>报价异常或过期时只展示质量状态，不使用替代价格补算。</p></div>
-      {% if page.data.positions %}
-      <div class="table-wrap"><table>
-        <thead><tr><th>股票</th><th>数量</th><th>可卖 / T+1锁定</th><th>成本 / 当前价</th><th>市值</th><th>浮盈</th><th>收益率</th><th>报价</th><th>目标 / 止损</th></tr></thead>
-        <tbody>
-          {% for item in page.data.positions %}
-          <tr>
-            <td>{{ item.display_name or "—" }}<br><span class="subtle">{{ item.identity_key }}</span></td>
-            <td>{{ item.quantity if item.quantity is not none else "—" }}</td>
-            <td>{{ item.sellable_quantity if item.sellable_quantity is not none else "—" }} / {{ item.t1_locked_quantity if item.t1_locked_quantity is not none else "—" }}</td>
-            <td>{{ item.average_cost if item.average_cost is not none else "—" }} / {{ item.current_price if item.current_price is not none else "—" }}</td>
-            <td>{{ item.market_value if item.market_value is not none else "—" }}</td>
-            <td>{{ item.unrealized_pnl if item.unrealized_pnl is not none else "—" }}</td>
-            <td>{{ item.unrealized_return_pct if item.unrealized_return_pct is not none else "—" }}</td>
-            <td>{{ item.quote_status or "—" }}<br><span class="subtle">{{ item.updated_at or "—" }}</span></td>
-            <td>{{ item.target_price if item.target_price is not none else "—" }} / {{ item.stop_loss_price if item.stop_loss_price is not none else "—" }}<br><span class="subtle">{{ item.stop_loss_status or "—" }}</span></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table></div>
-      {% else %}
-      <div class="task-empty"><strong>当前没有模拟持仓</strong><p>无持仓时不会展示虚构的市值或收益。</p></div>
-      {% endif %}
-
-      <div class="text-block"><h3>AI结构化决策理由</h3><p>这里只显示简短理由、公开证据、反方证据和风险结论；不保存或展示隐藏推理与原始prompt。</p></div>
-      {% if page.data.decisions %}
-      <div class="message-card-grid">
-        {% for item in page.data.decisions %}
-        <article class="message-card">
-          <div class="message-card-head">
-            <strong>{{ item.display_name or item.identity_key or "组合决策" }}</strong>
-            <span class="chip">{{ item.decision_type }}</span>
-          </div>
-          <p>{{ item.reason_summary or "未提供公开理由" }}</p>
-          <p class="subtle">{{ item.trade_date }} {{ item.event_time }} · 置信度 {{ item.confidence if item.confidence is not none else "—" }} · 风险 {{ item.risk_status or "—" }}（{{ item.risk_reason or "—" }}）</p>
-          <p><strong>支持证据</strong> {{ item.evidence|tojson }}</p>
-          <p><strong>反方证据</strong> {{ item.counter_evidence|tojson }}</p>
-          <p><strong>风险评估</strong> {{ item.risk_assessment|tojson }}</p>
-          <p class="subtle">申请 {{ item.proposal_status or "—" }} · 执行 {{ item.execution_status or "—" }} · 策略 {{ item.strategy_version or "—" }}</p>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <div class="task-empty"><strong>尚无AI决策记录</strong><p>尚无有效决策时不会生成模拟交易申请；Shadow观察不等于自治交易已启用。</p></div>
-      {% endif %}
-
-      <div class="text-block"><h3>模拟成交</h3></div>
-      {% if page.data.trades %}
-      <div class="table-wrap"><table>
-        <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>数量</th><th>成交价</th><th>净额</th><th>状态</th><th>关联理由</th></tr></thead>
-        <tbody>
-          {% for item in page.data.trades %}
-          <tr><td>{{ item.trade_time }}</td><td>{{ item.display_name or "—" }}<br><span class="subtle">{{ item.identity_key }}</span></td><td>{{ item.trade_side }}</td><td>{{ item.filled_quantity }}</td><td>{{ item.filled_price }}</td><td>{{ item.net_amount }}</td><td>{{ item.trade_status }}</td><td>{{ item.reason_summary or "查看关联AI决策" }}</td></tr>
-          {% endfor %}
-        </tbody>
-      </table></div>
-      {% else %}
-      <div class="task-empty"><strong>尚无模拟成交</strong><p>决策记录不等于成交；只有独立N6执行器成功处理后才会出现成交。</p></div>
-      {% endif %}
-
-      <div class="text-block"><h3>每日总结</h3></div>
-      {% if page.data.daily_summaries %}
-      <div class="message-card-grid">
-        {% for item in page.data.daily_summaries %}
-        <article class="message-card">
-          <div class="message-card-head"><strong>{{ item.trade_date }}</strong><span class="chip">{{ item.strategy_version or "—" }}</span></div>
-          <p>{{ item.summary_text or "当日无可公开总结" }}</p>
-          <p class="subtle">决策 {{ item.decision_count }} · 成交 {{ item.trade_count }} · 当日盈亏 {{ item.daily_net_pnl if item.daily_net_pnl is not none else "—" }} · 累计收益 {{ item.net_return_pct if item.net_return_pct is not none else "—" }}% · 最大回撤 {{ item.max_drawdown_pct if item.max_drawdown_pct is not none else "—" }}%</p>
-          <p><strong>做得好的地方</strong> {{ item.success_reasons|tojson }}</p>
-          <p><strong>失败与改进</strong> {{ item.lessons|tojson }}</p>
-          <p><strong>次日关注</strong> {{ item.next_day_watch_plan|tojson }}</p>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <div class="task-empty"><strong>尚无每日总结</strong><p>仅在已登记的交易日总结运行完成后展示。</p></div>
-      {% endif %}
-      {% endif %}
       {% elif page.page_key == "ai-users" %}
       <div class="text-block">
         <h3>AI助手</h3>
@@ -2123,8 +1536,11 @@
     </section>
 
     {% if page.page_key not in ["home", "dashboard"] %}
-    <details class="technical-details">
-      <summary>技术说明与数据边界 <span class="subtle">默认折叠</span></summary>
+    <section class="surface">
+      <div class="surface-head">
+        <h2>数据边界</h2>
+        <span class="subtle">allowlist adapter</span>
+      </div>
       <div class="split">
         <div class="text-block">
           <h3>允许来源</h3>
@@ -2139,27 +1555,7 @@
           {% endfor %}
         </div>
       </div>
-      <div class="text-block">
-        <h3>当前页面技术状态</h3>
-        <p>
-          principal_id={{ page.principal.principal_id }} ·
-          principal_type={{ page.principal.principal_type }} ·
-          app_scope={{ page.principal.app_scope }} ·
-          scope_write_enabled={{ page.scope_write_enabled }} ·
-          proposal_write_enabled={{ page.proposal_write_enabled }}
-        </p>
-        {% for item in page.safety %}
-        <span class="chip">{{ item }}</span>
-        {% endfor %}
-        {% if page.page_key == "realtime-scope" %}
-        <p>source values:
-          {% for item in page.data['items'] %}
-          <code>{{ item.identity_key }}={{ item.source_type }}</code>{% if not loop.last %} · {% endif %}
-          {% endfor %}
-        </p>
-        {% endif %}
-      </div>
-    </details>
+    </section>
     {% endif %}
   </main>
   <script>
@@ -2169,6 +1565,34 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
+
+    const monitorMessage = (assetKind, text) => {
+      const target = document.querySelector(`[data-monitor-result="${assetKind}"]`);
+      if (target) target.textContent = text;
+    };
+
+    const postMonitorJson = async (url, payload) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (_error) {
+        data = {
+          ok: false,
+          status: response.ok ? "invalid_json" : "http_error",
+          error: text ? text.slice(0, 120) : "empty_response",
+        };
+      }
+      if (!response.ok && !data.error) {
+        data.error = `http_${response.status}`;
+      }
+      return data;
+    };
 
     const linkedMessage = (panel, text) => {
       const target = panel.querySelector("[data-linked-status]");
@@ -2235,6 +1659,150 @@
       });
     });
 
+    document.querySelectorAll("[data-monitor-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        monitorMessage(assetKind, "正在加入监控");
+        const payload = await postMonitorJson("/api/n6/app/v2/monitor/items", {
+          asset_kind: assetKind,
+          identity_key: button.dataset.monitorIdentityKey,
+          direction: button.dataset.monitorDirection || "buy",
+          for_trade_date: button.dataset.monitorForTradeDate || "",
+        });
+        monitorMessage(assetKind, payload.status === "added" ? "已加入监控" : `结果: ${payload.status || payload.error}`);
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-selected-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        const direction = button.dataset.monitorDirection || "buy";
+        const selected = Array.from(document.querySelectorAll(
+          `[data-monitor-checkbox][data-monitor-asset-kind="${assetKind}"]:checked`
+        ));
+        if (!selected.length) {
+          monitorMessage(assetKind, "请先选择要加入监控的对象");
+          return;
+        }
+        const identityKeys = selected.map((item) => item.dataset.monitorIdentityKey).filter(Boolean);
+        const forTradeDate = button.dataset.monitorForTradeDate
+          || selected.map((item) => item.dataset.monitorForTradeDate).find(Boolean)
+          || "";
+        monitorMessage(assetKind, `正在加入已选对象：${identityKeys.length} 个`);
+        try {
+          const payload = await postMonitorJson("/api/n6/app/v2/monitor/selected-add", {
+            asset_kind: assetKind,
+            identity_keys: identityKeys,
+            direction,
+            for_trade_date: forTradeDate,
+          });
+          if (!payload.ok) {
+            monitorMessage(assetKind, `已选对象处理失败：${payload.error || payload.status || "unknown_error"}`);
+            return;
+          }
+          monitorMessage(
+            assetKind,
+            `已选对象处理完成：选中 ${payload.requested_count || identityKeys.length}，新增 ${payload.added_count || 0}，跳过 ${payload.skipped_count || 0}，失败 ${payload.failed_count || 0}`
+          );
+        } catch (_error) {
+          monitorMessage(assetKind, "已选对象处理失败，请稍后重试");
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-bulk-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.monitorAssetKind;
+        monitorMessage(assetKind, "正在将当前筛选结果加入监控");
+        let filters = {};
+        try {
+          filters = JSON.parse(button.dataset.monitorFilters || "{}");
+        } catch (_error) {
+          filters = {};
+        }
+        const payload = await postMonitorJson("/api/n6/app/v2/monitor/bulk-add", {
+          asset_kind: assetKind,
+          direction: button.dataset.monitorDirection || "buy",
+          for_trade_date: button.dataset.monitorForTradeDate || "",
+          filters,
+        });
+        if (!payload.ok) {
+          monitorMessage(assetKind, `筛选结果处理失败：${payload.error || payload.status || "unknown_error"}`);
+          return;
+        }
+        monitorMessage(
+          assetKind,
+          `筛选结果处理完成：命中 ${payload.filtered_count || 0}，新增 ${payload.added_count || 0}，跳过 ${payload.skipped_count || 0}`
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        monitorMessage(assetKind, "正在加入实时监控范围");
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/items", {
+          asset_kind: assetKind,
+          identity_key: button.dataset.realtimeScopeIdentityKey,
+          for_trade_date: button.dataset.realtimeScopeForTradeDate || "",
+        });
+        monitorMessage(assetKind, payload.ok ? "已加入实时监控范围" : `结果: ${payload.status || payload.error}`);
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-selected-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        const selected = Array.from(document.querySelectorAll(
+          `[data-monitor-checkbox][data-monitor-asset-kind="${assetKind}"]:checked`
+        ));
+        if (!selected.length) {
+          monitorMessage(assetKind, "请先选择要加入实时监控范围的对象");
+          return;
+        }
+        const identityKeys = selected.map((item) => item.dataset.monitorIdentityKey).filter(Boolean);
+        const forTradeDate = button.dataset.realtimeScopeForTradeDate
+          || selected.map((item) => item.dataset.monitorForTradeDate).find(Boolean)
+          || "";
+        monitorMessage(assetKind, `正在加入实时监控范围：${identityKeys.length} 个`);
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/selected-add", {
+          asset_kind: assetKind,
+          identity_keys: identityKeys,
+          for_trade_date: forTradeDate,
+        });
+        monitorMessage(
+          assetKind,
+          payload.ok
+            ? `实时监控范围处理完成：新增 ${payload.added_count || 0}，失败 ${payload.failed_count || 0}`
+            : `实时监控范围处理失败：${payload.error || payload.status || "unknown_error"}`
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-bulk-add]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const assetKind = button.dataset.realtimeScopeAssetKind;
+        let filters = {};
+        try {
+          filters = JSON.parse(button.dataset.realtimeScopeFilters || "{}");
+        } catch (_error) {
+          filters = {};
+        }
+        monitorMessage(assetKind, "正在将当前筛选结果加入实时监控范围");
+        const payload = await postMonitorJson("/api/n6/app/v2/realtime-scope/bulk-add", {
+          asset_kind: assetKind,
+          for_trade_date: button.dataset.realtimeScopeForTradeDate || "",
+          filters,
+        });
+        monitorMessage(
+          assetKind,
+          payload.ok
+            ? `实时监控范围处理完成：命中 ${payload.filtered_count || 0}，新增 ${payload.added_count || 0}`
+            : `实时监控范围处理失败：${payload.error || payload.status || "unknown_error"}`
+        );
+      });
+    });
+
     document.querySelectorAll("[data-expected-return-filter]").forEach((form) => {
       const range = form.querySelector("[data-expected-return-range]");
       const hidden = form.querySelector("[data-expected-return-hidden]");
@@ -2243,6 +1811,33 @@
       range.addEventListener("input", () => {
         hidden.value = range.value;
         output.textContent = `${range.value}%`;
+      });
+    });
+
+    document.querySelectorAll("[data-monitor-delete]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const monitorId = button.dataset.monitorId;
+        const response = await fetch(`/api/n6/app/v2/monitor/items/${monitorId}`, { method: "DELETE" });
+        const payload = await response.json();
+        if (payload.status === "removed") {
+          window.location.reload();
+          return;
+        }
+        button.textContent = "删除失败";
+      });
+    });
+
+    document.querySelectorAll("[data-realtime-scope-delete]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const scopeId = button.dataset.realtimeScopeId;
+        if (!scopeId) return;
+        const response = await fetch(`/api/n6/app/v2/realtime-scope/items/${scopeId}`, { method: "DELETE" });
+        const payload = await response.json();
+        if (payload.status === "deleted") {
+          window.location.reload();
+          return;
+        }
+        button.textContent = "删除失败";
       });
     });
 
@@ -2379,79 +1974,10 @@
       return { init };
     })();
 
-    const n6Voice = (() => {
-      const storageKey = "n6.btrack.voice.enabled";
-      const supported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
-      let enabled = supported && window.localStorage.getItem(storageKey) === "1";
-      const status = (text) => document.querySelectorAll("[data-n6-voice-status]").forEach((node) => { node.textContent = text; });
-      const update = () => {
-        document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => { button.textContent = enabled ? "关闭语音" : "开启语音"; });
-        status(supported ? (enabled ? "语音已开启，仅播报新 SSE 消息" : "语音已关闭") : "当前浏览器不支持语音");
-      };
-      const speakText = (text) => {
-        if (!supported) return;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = "zh-CN";
-        window.speechSynthesis.speak(utterance);
-      };
-      const speak = (signal) => {
-        if (!enabled) return;
-        const returnValue = signal.direction === "sell" ? signal.sell_return : signal.buy_return;
-        speakText(`${signal.event_time || ""}，${signal.display_name || signal.identity_key || ""}，${signal.direction_label || signal.direction || ""}，收益率${returnValue ?? "未就绪"}`);
-      };
-      const init = () => {
-        document.querySelectorAll("[data-n6-voice-toggle]").forEach((button) => button.addEventListener("click", () => {
-          if (!supported) return update();
-          enabled = !enabled;
-          window.localStorage.setItem(storageKey, enabled ? "1" : "0");
-          update();
-        }));
-        document.querySelectorAll("[data-n6-voice-test]").forEach((button) => button.addEventListener("click", () => speakText("N6 卡片消息语音测试")));
-        update();
-      };
-      return { init, speak };
-    })();
-
     const n6AutoRefresh = (() => {
-      const sharedStore = window.__n6ProjectionStore || {
-        scopes: new Map(),
-        inFlight: new Map(),
-      };
-      window.__n6ProjectionStore = sharedStore;
-
-      const scopeKey = (root) => {
-        const url = new URL(root.dataset.refreshUrl || window.location.href, window.location.origin);
-        return [
-          url.searchParams.get("trade_date") || "",
-          url.searchParams.get("asset_kind") || "stock",
-        ].join("|");
-      };
-
-      const scopeState = (root) => {
-        const key = scopeKey(root);
-        if (!sharedStore.scopes.has(key)) {
-          sharedStore.scopes.set(key, {
-            signals: new Map(),
-            cards: new Map(),
-            etagByUrl: new Map(),
-            watermark: root.dataset.watermark || "0",
-            nextCursor: root.dataset.nextCursor || "",
-            controllers: new Map(),
-          });
-        }
-        return sharedStore.scopes.get(key);
-      };
-
       const statusText = (root, text) => {
         const target = root.querySelector("[data-n6-refresh-status]");
         if (target) target.textContent = text;
-      };
-
-      const setLoading = (root, loading) => {
-        const skeleton = root.querySelector("[data-n6-skeleton]");
-        if (skeleton) skeleton.hidden = !loading;
-        root.setAttribute("aria-busy", loading ? "true" : "false");
       };
 
       const formatList = (value) => {
@@ -2459,435 +1985,161 @@
         return value || "—";
       };
 
-      const postgresBigintMaxText = "9223372036854775807";
-      const canonicalProjectionId = (value) => {
-        if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) return "";
-        try {
-          const parsed = BigInt(value);
-          if (parsed < 0n || parsed > BigInt(postgresBigintMaxText)) return "";
-        } catch (_error) {
+      const renderSignals = (payload) => {
+        const target = document.querySelector("[data-n6-signals-body]");
+        if (!target) return 0;
+        const assetKind = target.dataset.assetKind || payload.selected_asset_kind || "stock";
+        const columnCount = assetKind === "stock" ? 15 : 13;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        if (!items.length) {
+          const message = payload.empty_state?.message || "暂无已审核消息。";
+          target.innerHTML = `<tr><td colspan="${columnCount}"><div class="empty">${escapeHtml(message)}</div></td></tr>`;
+          return 0;
+        }
+        const renderAssetNameCells = (item) => {
+          if (assetKind === "stock") {
+            return `
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.display_name) : "—"}</td>
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_code || "—") : "—"}</td>
+              <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_name || "—") : "—"}</td>
+            `;
+          }
+          if (assetKind === "board" || assetKind === "index") {
+            return `<td>${escapeHtml(item.display_name || "—")}</td>`;
+          }
           return "";
-        }
-        return value;
-      };
-      const compareProjectionIds = (left, right) => {
-        const leftId = BigInt(left);
-        const rightId = BigInt(right);
-        if (leftId < rightId) return -1;
-        if (leftId > rightId) return 1;
-        return 0;
-      };
-      const descendingProjectionItems = (items) => items
-        .map((item) => ({ item, projectionId: canonicalProjectionId(item.user_signal_projection_id) }))
-        .filter((entry) => entry.projectionId)
-        .sort((left, right) => compareProjectionIds(right.projectionId, left.projectionId))
-        .slice(0, 100);
-
-      const renderAssetNameCells = (item, assetKind) => {
-        if (assetKind === "stock") {
-          return `
-            <td>${item.asset_kind === "stock" ? escapeHtml(item.display_name) : "—"}</td>
-            <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_code || "—") : "—"}</td>
-            <td>${item.asset_kind === "stock" ? escapeHtml(item.industry_name || "—") : "—"}</td>
-          `;
-        }
-        if (assetKind === "board" || assetKind === "index") {
-          return `<td>${escapeHtml(item.display_name || "—")}</td>`;
-        }
-        return "";
-      };
-
-      const signalProposalCells = (item, assetKind) => {
-        if (assetKind !== "stock") return "";
-        const quantity = item.direction === "buy" ? "30万预算，确认时按行情取整" : "全部 T+1 可卖数量";
-        const actionable = ["eligible", "executed"].includes(item.action_state);
-        const enabled = document.body.dataset.n6ProposalWriteEnabled === "true";
-        if (!actionable || !enabled) {
-          return `<td>${escapeHtml(quantity)}</td><td><span class="subtle">${enabled ? "—" : "未启用"}</span></td>`;
-        }
-        const side = item.direction === "buy" ? "买入" : "卖出";
-        const stage = item.action_state === "executed" ? "确认" : "准备";
-        return `<td>${escapeHtml(quantity)}</td><td><button type="button" class="row-action" data-n6-create-proposal data-source-type="signal" data-source-id="${escapeHtml(item.user_signal_projection_id)}">${side}${stage}</button></td>`;
-      };
-
-      const signalRowMarkup = (item, assetKind) => {
-        const projectionId = canonicalProjectionId(item.user_signal_projection_id);
-        if (!projectionId) return "";
-        const conditionKey = item.condition_trace?.condition_key ?? item.condition_key;
-        const renderingPolicy = item.condition_trace?.rendering_policy ?? item.condition_rendering_policy;
-        return `
-          <tr data-n6-projection-id="${projectionId}">
+        };
+        target.innerHTML = items.map((item) => `
+          <tr>
             <td>${escapeHtml(item.trade_date)}</td>
             <td>${escapeHtml(item.event_time)}</td>
             <td>${escapeHtml(item.asset_kind_label)}</td>
             <td>${escapeHtml(item.display_name)}<br><span class="subtle">${escapeHtml(item.display_code)}</span></td>
             <td>${escapeHtml(item.identity_key)}</td>
-            ${renderAssetNameCells(item, assetKind)}
+            ${renderAssetNameCells(item)}
             <td>${escapeHtml(item.direction_label)}</td>
-            <td>${escapeHtml(conditionKey)}<br><span class="subtle">${escapeHtml(renderingPolicy)}</span></td>
+            <td>${escapeHtml(item.condition_trace?.condition_key)}<br><span class="subtle">${escapeHtml(item.condition_trace?.rendering_policy)}</span></td>
             <td>${escapeHtml(formatList(item.triggered_periods))}</td>
             <td>${escapeHtml(item.primary_trigger_period || "—")}</td>
-            <td>buy_target=${escapeHtml(item.buy_target ?? item.target_price ?? "—")}<br>trigger=${escapeHtml(item.trigger_price ?? "—")} · action=${escapeHtml(item.action_price ?? "—")}<br>up_ref=${escapeHtml(item.up_ref ?? "—")} · down_ref=${escapeHtml(item.down_ref ?? "—")}</td>
-            <td>buy=${escapeHtml(item.buy_return ?? "—")}% · secondary=${escapeHtml(item.secondary_return ?? "—")}%<br>sell=${escapeHtml(item.sell_return ?? "—")}% · trigger=${escapeHtml(item.trigger_pct ?? "—")}%<br>${item.asset_kind === "stock" ? "score=" + escapeHtml(item.score ?? "—") + " · pe_core=" + escapeHtml(item.pe_core ?? "—") + " · " : ""}${escapeHtml(item.projection_message_status || "not_ready")}</td>
             <td>${escapeHtml(item.action_state_label)}</td>
             <td>${escapeHtml(item.action_mark || "—")}</td>
             <td>${escapeHtml(item.blocked_reason_label || "—")}</td>
-            ${signalProposalCells(item, assetKind)}
           </tr>
-        `;
+        `).join("");
+        return items.length;
       };
 
-      const renderSignals = (root, payload, { append = false } = {}) => {
-        const target = document.querySelector("[data-n6-signals-body]");
-        if (!target) return 0;
-        const state = scopeState(root);
-        const assetKind = target.dataset.assetKind || payload.selected_asset_kind || "stock";
-        const items = Array.isArray(payload.items) ? payload.items : [];
-        if (!items.length && !append) {
-          const message = payload.empty_state?.message || "暂无已审核消息。";
-          target.replaceChildren();
-          state.signals.clear();
-          setSignalsViewState(false, message);
-          return 0;
-        }
-        const seen = new Set();
-        const entries = descendingProjectionItems(items);
-        if (!append) entries.reverse();
-        entries.forEach(({ item, projectionId }) => {
-          seen.add(projectionId);
-          state.signals.set(projectionId, item);
-          upsertMarkup(
-            target,
-            projectionId,
-            signalRowMarkup(item, assetKind),
-            "tr[data-n6-projection-id]",
-            append ? "append" : "prepend",
-          );
-        });
-        if (!append) {
-          target.querySelectorAll("tr[data-n6-projection-id]").forEach((node) => {
-            const projectionId = canonicalProjectionId(node.dataset.n6ProjectionId || "");
-            if (projectionId && !seen.has(projectionId)) {
-              node.remove();
-              state.signals.delete(projectionId);
-            }
-          });
-        }
-        setSignalsViewState(Boolean(target.querySelector("tr[data-n6-projection-id]")));
-        return seen.size;
-      };
-
-      const messageCardMarkup = (item) => {
-        const projectionId = canonicalProjectionId(item.user_signal_projection_id);
-        if (!projectionId) return "";
-        return `
-        <article class="message-card" data-n6-projection-id="${projectionId}">
-          <div class="message-card-head">
-            <div>
-              <div class="message-card-title">${escapeHtml(item.title)}</div>
-              <div class="subtle">${escapeHtml(item.event_label)} · ${escapeHtml(item.event_time)}</div>
-            </div>
-            <span class="chip">${escapeHtml(item.action_state_label)}</span>
-          </div>
-          <div class="message-card-summary">${escapeHtml(item.summary)}</div>
-          <div class="message-card-meta">
-            <span class="chip">${escapeHtml(item.asset_kind_label)}</span>
-            <span class="chip">${escapeHtml(item.display_name)} ${escapeHtml(item.display_code)}</span>
-            <span class="chip">${escapeHtml(item.direction_label)}</span>
-            <span class="chip">触发周期 ${escapeHtml(formatList(item.triggered_periods))}</span>
-            <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period || "—")}</span>
-            <span class="chip">action_mark ${escapeHtml(item.action_mark || "—")}</span>
-            <span class="chip">buy_target ${escapeHtml(item.buy_target ?? item.target_price ?? "—")}</span>
-            <span class="chip">buy_return ${escapeHtml(item.buy_return ?? "—")}%</span>
-            <span class="chip">secondary_return ${escapeHtml(item.secondary_return ?? "—")}%</span>
-            <span class="chip">sell_return ${escapeHtml(item.sell_return ?? "—")}%</span>
-            <span class="chip">trigger_pct ${escapeHtml(item.trigger_pct ?? "—")}%</span>
-            <span class="chip">up_ref ${escapeHtml(item.up_ref ?? "—")}</span>
-            <span class="chip">down_ref ${escapeHtml(item.down_ref ?? "—")}</span>
-            ${item.asset_kind === "stock" ? `<span class="chip">score ${escapeHtml(item.score ?? "—")} / pe_core ${escapeHtml(item.pe_core ?? "—")}</span>` : ""}
-            <span class="chip">projection ${escapeHtml(item.projection_message_status || "not_ready")}</span>
-          </div>
-          <p class="subtle">condition=${escapeHtml(item.condition_key)} · blocked_reason=${escapeHtml(item.blocked_reason_label)}</p>
-          <p class="subtle">trade_date=${escapeHtml(item.trade_date)} · identity_key=${escapeHtml(item.identity_key)}</p>
-          <div class="message-card-foot">
-            <span class="subtle">user_signal_card_id=${escapeHtml(item.user_signal_card_id)} · authority=${escapeHtml(item.authority_source)}</span>
-            ${item.detail_href ? `<a href="${escapeHtml(item.detail_href)}">查看详情</a>` : ""}
-          </div>
-        </article>
-      `;
-      };
-
-      const renderMessageCards = (root, payload, { append = false } = {}) => {
+      const renderMessageCards = (payload) => {
         const cardsTarget = document.querySelector("[data-n6-message-cards]");
         if (!cardsTarget) return 0;
-        const state = scopeState(root);
         const summary = payload.summary || {};
         document.querySelectorAll("[data-summary-key]").forEach((target) => {
           const value = summary[target.dataset.summaryKey];
           if (value !== undefined) target.textContent = value;
         });
         const items = Array.isArray(payload.card_items) ? payload.card_items : [];
-        if (!items.length && !append) {
+        if (!items.length) {
           const message = payload.empty_state?.message || "当前有效监控对象暂无 N6 用户消息";
-          const empty = document.createElement("div");
-          empty.className = "empty";
-          empty.textContent = message;
-          cardsTarget.replaceChildren(empty);
-          state.cards.clear();
+          cardsTarget.innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
           return 0;
         }
-        const seen = new Set();
-        const entries = descendingProjectionItems(items);
-        if (!append) entries.reverse();
-        entries.forEach(({ item, projectionId }) => {
-          seen.add(projectionId);
-          state.cards.set(projectionId, item);
-          upsertMarkup(
-            cardsTarget,
-            projectionId,
-            messageCardMarkup(item),
-            "article[data-n6-projection-id]",
-            append ? "append" : "prepend",
-          );
-        });
-        if (!append) {
-          cardsTarget.querySelectorAll("article[data-n6-projection-id]").forEach((node) => {
-            const projectionId = canonicalProjectionId(node.dataset.n6ProjectionId || "");
-            if (projectionId && !seen.has(projectionId)) {
-              node.remove();
-              state.cards.delete(projectionId);
-            }
-          });
-        }
-        return seen.size;
+        cardsTarget.innerHTML = items.map((item) => `
+          <article class="message-card">
+            <div class="message-card-head">
+              <div>
+                <div class="message-card-title">${escapeHtml(item.title)}</div>
+                <div class="subtle">${escapeHtml(item.event_label)} · ${escapeHtml(item.event_time)}</div>
+              </div>
+              <span class="chip">${escapeHtml(item.action_state_label)}</span>
+            </div>
+            <div class="message-card-summary">${escapeHtml(item.summary)}</div>
+            <div class="message-card-meta">
+              <span class="chip">${escapeHtml(item.asset_kind_label)}</span>
+              <span class="chip">${escapeHtml(item.display_name)} ${escapeHtml(item.display_code)}</span>
+              <span class="chip">${escapeHtml(item.direction_label)}</span>
+              <span class="chip">触发周期 ${escapeHtml(formatList(item.triggered_periods))}</span>
+              <span class="chip">主周期 ${escapeHtml(item.primary_trigger_period || "—")}</span>
+              <span class="chip">action_mark ${escapeHtml(item.action_mark || "—")}</span>
+            </div>
+            <p class="subtle">condition=${escapeHtml(item.condition_key)} · blocked_reason=${escapeHtml(item.blocked_reason_label)}</p>
+            <p class="subtle">trade_date=${escapeHtml(item.trade_date)} · identity_key=${escapeHtml(item.identity_key)}</p>
+            <div class="message-card-foot">
+              <span class="subtle">user_signal_card_id=${escapeHtml(item.user_signal_card_id)} · authority=${escapeHtml(item.authority_source)}</span>
+              ${item.detail_href ? `<a href="${escapeHtml(item.detail_href)}">查看详情</a>` : ""}
+            </div>
+          </article>
+        `).join("");
+        return items.length;
       };
 
-      const projectionContainer = (kind) => kind === "signals"
-        ? document.querySelector("[data-n6-signals-body]")
-        : document.querySelector("[data-n6-message-cards]");
-
-      const setSignalsViewState = (hasItems, emptyMessage = "") => {
-        const table = document.querySelector("[data-n6-signals-table]");
-        const empty = document.querySelector('[data-n6-empty-state="signals"]');
-        if (table) table.hidden = !hasItems;
-        if (empty) {
-          empty.hidden = hasItems;
-          const title = empty.querySelector("[data-n6-empty-title]");
-          if (!hasItems && emptyMessage && title) title.textContent = emptyMessage;
-        }
+      const backoffRemainingSeconds = (root) => {
+        const backoffUntil = Number(root.dataset.refreshBackoffUntil || 0);
+        return Math.max(0, Math.ceil((backoffUntil - Date.now()) / 1000));
       };
 
-      const currentAfterId = (kind) => {
-        const root = document.querySelector(`[data-n6-auto-refresh="${kind}"]`);
-        const storedWatermark = root ? canonicalProjectionId(scopeState(root).watermark || "") : "";
-        if (storedWatermark) return storedWatermark;
-        const target = projectionContainer(kind);
-        if (!target) return "0";
-        return Array.from(target.querySelectorAll("[data-n6-projection-id]"))
-          .map((node) => canonicalProjectionId(node.dataset.n6ProjectionId || ""))
-          .filter((value) => value)
-          .reduce(
-            (maximum, value) => compareProjectionIds(value, maximum) > 0 ? value : maximum,
-            "0",
-          );
-      };
-
-      const upsertMarkup = (target, projectionId, markup, selector, placement = "prepend") => {
-        const canonicalId = canonicalProjectionId(projectionId);
-        if (!target || !canonicalId) return false;
-        const existing = target.querySelector(`[data-n6-projection-id="${canonicalId}"]`);
-        const template = document.createElement("template");
-        template.innerHTML = markup.trim();
-        const node = template.content.firstElementChild;
-        if (!node) return false;
-        if (existing) {
-          existing.replaceWith(node);
-        } else {
-          target.querySelectorAll(".empty").forEach((empty) => empty.remove());
-          if (placement === "append") target.append(node);
-          else target.prepend(node);
-        }
-        const nodes = target.querySelectorAll(selector);
-        Array.from(nodes).slice(100).forEach((extra) => extra.remove());
-        return !existing;
-      };
-
-      const incrementMessageSummary = (signal) => {
-        const increment = (key) => {
-          const target = document.querySelector(`[data-summary-key="${key}"]`);
-          if (target) target.textContent = String(Number(target.textContent || 0) + 1);
-        };
-        increment("today_message_count");
-        const keyByState = {
-          executed: "action_executed_count",
-          blocked: "action_blocked_count",
-          eligible: "action_eligible_count",
-          skipped: "action_skipped_count",
-        };
-        if (keyByState[signal.action_state]) increment(keyByState[signal.action_state]);
-      };
-
-      const applySignalEvent = (root, payload, lastEventId) => {
-        if (payload?.contract_version !== "n6-b-track-signal-sse-v1") return 0;
-        const projectionId = canonicalProjectionId(lastEventId);
-        const payloadProjectionId = canonicalProjectionId(payload.signal?.user_signal_projection_id);
-        if (!projectionId || payloadProjectionId !== projectionId) return 0;
-        const signal = { ...payload.signal, user_signal_projection_id: projectionId };
-        const state = scopeState(root);
-        state.signals.set(projectionId, signal);
-        state.watermark = compareProjectionIds(projectionId, state.watermark || "0") > 0
-          ? projectionId
-          : state.watermark;
-        root.dataset.watermark = state.watermark;
-        const kind = root.dataset.n6AutoRefresh;
-        if (kind === "signals") {
-          const target = projectionContainer(kind);
-          const assetKind = target?.dataset.assetKind || signal.asset_kind || "stock";
-          const inserted = upsertMarkup(
-            target,
-            projectionId,
-            signalRowMarkup(signal, assetKind),
-            "tr[data-n6-projection-id]",
-          );
-          setSignalsViewState(Boolean(target?.querySelector("tr[data-n6-projection-id]")));
-          return inserted ? 1 : 0;
-        }
-        if (!payload.card) return 0;
-        const cardItem = { ...signal, ...payload.card };
-        state.cards.set(projectionId, cardItem);
-        const inserted = upsertMarkup(
-          projectionContainer(kind),
-          projectionId,
-          messageCardMarkup(cardItem),
-          "article[data-n6-projection-id]",
-        );
-        if (inserted) {
-          incrementMessageSummary(signal);
-          n6Voice.speak(signal);
-        }
-        return inserted ? 1 : 0;
-      };
-
-      const refreshOnce = async (root, { append = false } = {}) => {
-        const rawUrl = root.dataset.refreshUrl;
-        if (!rawUrl) return;
-        const state = scopeState(root);
-        const kind = root.dataset.n6AutoRefresh;
-        const url = new URL(rawUrl, window.location.origin);
-        url.searchParams.set("limit", root.dataset.pageLimit || "50");
-        if (append) {
-          if (!state.nextCursor) return;
-          url.searchParams.set("cursor", state.nextCursor);
-        } else {
-          url.searchParams.delete("cursor");
-        }
-        const requestKey = url.toString();
-        if (sharedStore.inFlight.has(requestKey)) {
-          await sharedStore.inFlight.get(requestKey);
+      const refreshOnce = async (root, options = {}) => {
+        const url = root.dataset.refreshUrl;
+        if (!url) return;
+        if (root.dataset.refreshInFlight === "true") {
+          statusText(root, "刷新中，跳过重叠请求");
           return;
         }
+        if (!options.force) {
+          const remaining = backoffRemainingSeconds(root);
+          if (remaining > 0) {
+            statusText(root, `刷新失败退避中，${remaining}s 后重试`);
+            return;
+          }
+        }
         const button = root.querySelector("[data-n6-refresh-now]");
-        const loadMoreButton = root.querySelector("[data-n6-load-more]");
         const startedAt = performance.now();
         root.dataset.refreshInFlight = "true";
         if (button) button.disabled = true;
-        if (loadMoreButton) loadMoreButton.disabled = true;
-        setLoading(root, !projectionContainer(kind)?.querySelector("[data-n6-projection-id]"));
-        const previousController = state.controllers.get(kind);
-        if (previousController) previousController.abort();
-        const controller = new AbortController();
-        state.controllers.set(kind, controller);
-        const requestPromise = (async () => {
-          const headers = { "Accept": "application/json" };
-          const knownEtag = state.etagByUrl.get(requestKey);
-          if (knownEtag) headers["If-None-Match"] = knownEtag;
-          const response = await fetch(url, {
-            method: "GET",
-            headers,
-            signal: controller.signal,
-          });
-          if (response.status === 304) {
-            statusText(root, `数据未变化 · watermark ${state.watermark || "0"}`);
-            return;
-          }
+        try {
+          const response = await fetch(url, { method: "GET", headers: { "Accept": "application/json" } });
           const payload = await response.json();
           if (!response.ok || payload.ok === false) {
-            statusText(root, `按需校正失败：${payload.error || response.status} · SSE 自动重连中`);
+            const errorCount = Number(root.dataset.refreshErrorCount || 0) + 1;
+            root.dataset.refreshErrorCount = String(errorCount);
+            const baseBackoffMs = Number(root.dataset.refreshBackoffMs || 15000);
+            const maxBackoffMs = Number(root.dataset.refreshMaxBackoffMs || 60000);
+            const backoffMs = Math.min(maxBackoffMs, baseBackoffMs * errorCount);
+            root.dataset.refreshBackoffUntil = String(Date.now() + backoffMs);
+            statusText(root, `刷新失败：${payload.error || response.status} · 退避 ${Math.ceil(backoffMs / 1000)}s`);
             return;
           }
-          const etag = response.headers.get("ETag");
-          if (etag) state.etagByUrl.set(requestKey, etag);
-          const pagination = payload.pagination || {};
-          state.nextCursor = pagination.next_cursor || "";
-          state.watermark = response.headers.get("X-N6-Watermark")
-            || pagination.watermark
-            || state.watermark;
-          root.dataset.nextCursor = state.nextCursor;
-          root.dataset.watermark = state.watermark;
-          if (loadMoreButton) loadMoreButton.hidden = !pagination.has_more;
-          const count = kind === "signals"
-            ? renderSignals(root, payload, { append })
-            : renderMessageCards(root, payload, { append });
+          const kind = root.dataset.n6AutoRefresh;
+          const count = kind === "signals" ? renderSignals(payload) : renderMessageCards(payload);
           const durationMs = Math.round(performance.now() - startedAt);
-          statusText(root, `按需校正 ${new Date().toLocaleTimeString()} · ${count} 条 · ${durationMs}ms`);
-        })();
-        sharedStore.inFlight.set(requestKey, requestPromise);
-        try {
-          await requestPromise;
-        } catch (error) {
-          if (error?.name !== "AbortError") {
-            statusText(root, "按需校正失败 · SSE 自动重连中");
-          }
+          root.dataset.refreshErrorCount = "0";
+          root.dataset.refreshBackoffUntil = "0";
+          statusText(root, `已刷新 ${new Date().toLocaleTimeString()} · ${count} 条 · 上次耗时 ${durationMs}ms`);
+        } catch (_error) {
+          const errorCount = Number(root.dataset.refreshErrorCount || 0) + 1;
+          root.dataset.refreshErrorCount = String(errorCount);
+          const baseBackoffMs = Number(root.dataset.refreshBackoffMs || 15000);
+          const maxBackoffMs = Number(root.dataset.refreshMaxBackoffMs || 60000);
+          const backoffMs = Math.min(maxBackoffMs, baseBackoffMs * errorCount);
+          root.dataset.refreshBackoffUntil = String(Date.now() + backoffMs);
+          statusText(root, `刷新失败：网络或服务暂不可用 · 退避 ${Math.ceil(backoffMs / 1000)}s`);
         } finally {
-          if (sharedStore.inFlight.get(requestKey) === requestPromise) {
-            sharedStore.inFlight.delete(requestKey);
-          }
           root.dataset.refreshInFlight = "false";
-          setLoading(root, false);
           if (button) button.disabled = false;
-          if (loadMoreButton) loadMoreButton.disabled = false;
         }
       };
 
       const init = () => {
-        const eventSources = [];
         document.querySelectorAll("[data-n6-auto-refresh]").forEach((root) => {
           const button = root.querySelector("[data-n6-refresh-now]");
-          const loadMoreButton = root.querySelector("[data-n6-load-more]");
           root.dataset.refreshInFlight = "false";
-          scopeState(root);
-          if (button) button.addEventListener("click", () => refreshOnce(root, { append: false }));
-          if (loadMoreButton) {
-            loadMoreButton.addEventListener("click", () => refreshOnce(root, { append: true }));
-          }
+          root.dataset.refreshErrorCount = "0";
+          root.dataset.refreshBackoffUntil = "0";
+          if (button) button.addEventListener("click", () => refreshOnce(root, { force: true }));
           if (root.dataset.refreshEnabled !== "true") return;
-          const kind = root.dataset.n6AutoRefresh;
-          const streamUrl = new URL(root.dataset.sseUrl, window.location.origin);
-          streamUrl.searchParams.set("after_id", currentAfterId(kind));
-          const eventSource = new EventSource(streamUrl.toString());
-          eventSources.push(eventSource);
-          eventSource.addEventListener("signal", (event) => {
-            try {
-              const count = applySignalEvent(root, JSON.parse(event.data), event.lastEventId);
-              statusText(root, `实时增量已连接 · ${count ? "收到新消息" : "已幂等校正"}`);
-            } catch (_error) {
-              statusText(root, "实时消息格式无效 · 等待完整同步校正");
-            }
-          });
-          eventSource.onopen = () => statusText(root, "实时增量已连接");
-          eventSource.onerror = () => statusText(root, "实时连接暂不可用 · 自动重连；可手动按需校正");
-        });
-        document.addEventListener("visibilitychange", () => {
-          if (!document.hidden) {
-            document.querySelectorAll("[data-n6-auto-refresh][data-refresh-enabled='true']")
-              .forEach((root) => refreshOnce(root, { append: false }));
-          }
-        });
-        window.addEventListener("beforeunload", () => {
-          eventSources.forEach((source) => source.close());
-          sharedStore.scopes.forEach((state) => {
-            state.controllers.forEach((controller) => controller.abort());
-          });
+          const intervalMs = Number(root.dataset.refreshIntervalMs || 5000);
+          window.setInterval(() => {
+            if (!document.hidden) refreshOnce(root);
+          }, intervalMs);
         });
       };
 
@@ -2895,564 +2147,7 @@
     })();
 
     n6FilterColumnOrder.init();
-    n6Voice.init();
     n6AutoRefresh.init();
-
-    const n6ScopeWrite = (() => {
-      const csrfToken = document.body.dataset.n6CsrfToken || "";
-      const scopeWriteEnabled = document.body.dataset.n6ScopeWriteEnabled === "true";
-      const scopeBulkWriteEnabled = document.body.dataset.n6ScopeBulkWriteEnabled === "true";
-      const proposalWriteEnabled = document.body.dataset.n6ProposalWriteEnabled === "true";
-      const proposalStatus = document.querySelector("[data-n6-proposal-status]");
-      const proposalBySource = new Map();
-      const request = async (url, method, body, extraHeaders = {}) => {
-        if (!csrfToken) throw new Error("scope_write_disabled");
-        const response = await fetch(url, {
-          method,
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken,
-            ...extraHeaders,
-          },
-          body: body === undefined ? undefined : JSON.stringify(body),
-        });
-        const proposalRequest = url.includes("/api/n6/app/v3/virtual-account/proposals");
-        const fallbackError = proposalRequest ? "proposal_service_unavailable" : "service_unavailable";
-        let payload;
-        try {
-          payload = await response.json();
-        } catch (_error) {
-          throw new Error(fallbackError);
-        }
-        if (!response.ok || payload.ok === false) {
-          throw new Error(payload.error || fallbackError);
-        }
-        return payload;
-      };
-      const proposalSourceKey = (sourceType, sourceId) => `${sourceType || "signal"}:${sourceId || ""}`;
-      const proposalMessage = (message, button = null) => {
-        if (proposalStatus) {
-          proposalStatus.hidden = false;
-          proposalStatus.textContent = message;
-        }
-        if (!button) return;
-        const container = button.closest(".sticky-action") || button.parentElement;
-        if (!container) return;
-        let inlineStatus = container.querySelector("[data-n6-proposal-inline-status]");
-        if (!inlineStatus) {
-          inlineStatus = document.createElement("span");
-          inlineStatus.className = "proposal-inline-status";
-          inlineStatus.dataset.n6ProposalInlineStatus = "";
-          inlineStatus.setAttribute("role", "status");
-          inlineStatus.setAttribute("aria-live", "polite");
-          button.insertAdjacentElement("afterend", inlineStatus);
-        }
-        inlineStatus.textContent = message;
-      };
-      const proposalErrorLabel = (error) => ({
-        outside_trading_session: "当前不在交易时段",
-        current_open_trade_date_required: "当前不是开市日，不能创建交易申请",
-        proposal_trade_date_not_current: "该申请不是当前交易日，不能继续",
-        signal_reference_price_invalid: "该消息缺少有效触发价或动作价，不能买入",
-        proposal_retry_scope_mismatch: "原申请与当前账户或消息不一致，请刷新后重试",
-        proposal_generation_mismatch: "申请已更新，正在恢复最新状态",
-        proposal_expired: "申请已过期，请重新准备",
-        proposal_not_pending: "申请状态已变化，请刷新后重试",
-        proposal_already_exists: "已有未完成申请，请刷新后继续",
-        signal_not_in_effective_scope: "该共享消息已失效，或不在本人当前监控范围，请刷新后重试",
-        exactly_one_active_virtual_account_required: "当前账号没有唯一可用的虚拟账户，请联系管理员",
-        sellable_position_not_found: "当前没有可卖持仓，或 T+1 数量尚未可卖",
-        pending_proposal_required: "服务未返回待确认申请，请刷新后重试",
-        proposal_service_unavailable: "交易申请服务暂不可用，请稍后重试",
-      }[error] || "交易申请暂未完成，请稍后重试");
-      const bulkErrorLabel = (error) => ({
-        bulk_scope_too_large: "筛选结果超过10000项，请先缩小筛选范围",
-        current_for_trade_date_required: "批量加入仅支持当前生效交易日",
-        filter_snapshot_stale: "筛选结果或来源批次已变化，请重新预览",
-        selection_token_invalid: "批量预览凭证无效，请重新预览",
-        selection_token_expired: "批量预览已超过5分钟，请重新预览",
-        scope_bulk_write_disabled: "批量加入功能未启用",
-      }[error] || "批量加入暂未完成，请稍后重试");
-      const applyProposalState = (button, proposal) => {
-        const status = String(proposal?.proposal_status || "");
-        button.dataset.proposalId = proposal?.proposal_id || "";
-        button.dataset.proposalStatus = status;
-        button.dataset.confirmationGenerationToken =
-          proposal?.confirmation_generation_token || "";
-        if (status === "pending") {
-          button.textContent = "准备完成，请再次确认";
-          button.disabled = false;
-        } else if (status === "confirmed") {
-          button.textContent = "已确认，等待虚拟执行器";
-          button.disabled = true;
-        } else if (status === "processing") {
-          button.textContent = "执行处理中";
-          button.disabled = true;
-        } else if (status === "executed") {
-          button.textContent = "虚拟成交已完成";
-          button.disabled = true;
-        } else if (status === "expired") {
-          button.textContent = "申请已过期，请重新准备";
-          button.dataset.proposalId = "";
-          button.dataset.confirmationGenerationToken = "";
-          button.disabled = false;
-        } else if (status === "failed") {
-          button.textContent = "执行失败，请重新准备";
-          button.dataset.proposalId = "";
-          button.dataset.confirmationGenerationToken = "";
-          button.disabled = false;
-        } else if (status === "rejected") {
-          button.textContent = "申请被拒绝，请重新准备";
-          button.dataset.proposalId = "";
-          button.dataset.confirmationGenerationToken = "";
-          button.disabled = false;
-        } else {
-          button.textContent = "申请状态未知，请刷新";
-          button.disabled = true;
-        }
-        proposalMessage(button.textContent);
-      };
-      const restoreProposalButtons = async () => {
-        const payload = await request("/api/n6/app/v3/virtual-account/proposals", "GET");
-        const latestBySource = new Map();
-        for (const proposal of payload.items || []) {
-          const key = proposalSourceKey(proposal.source_type, proposal.source_id);
-          if (!latestBySource.has(key)) latestBySource.set(key, proposal);
-        }
-        for (const [key, proposal] of latestBySource) {
-          proposalBySource.set(key, proposal);
-        }
-        document.querySelectorAll("[data-n6-create-proposal]").forEach((button) => {
-          const proposal = proposalBySource.get(
-            proposalSourceKey(button.dataset.sourceType, button.dataset.sourceId),
-          );
-          if (proposal) applyProposalState(button, proposal);
-        });
-      };
-      const init = () => {
-        if (proposalWriteEnabled) document.querySelectorAll("[data-n6-create-proposal]").forEach((button) => {
-          button.dataset.proposalActionLabel = button.textContent.trim();
-        });
-        if (scopeWriteEnabled) document.querySelectorAll("[data-n6-add-monitor], [data-n6-add-realtime]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            const row = button.closest("[data-n6-identity-key]");
-            if (!row) return;
-            button.disabled = true;
-            try {
-              const realtime = button.hasAttribute("data-n6-add-realtime");
-              const body = { asset_kind: row.dataset.n6AssetKind, identity_key: row.dataset.n6IdentityKey };
-              if (!realtime) body.for_trade_date = row.dataset.n6ForTradeDate;
-              await request(
-                realtime ? "/api/n6/app/v3/realtime-scope-items" : "/api/n6/app/v3/monitor-items",
-                "POST",
-                body,
-              );
-              button.textContent = "已加入";
-            } catch (error) {
-              button.textContent = `失败: ${error.message}`;
-              button.disabled = false;
-            }
-          });
-        });
-        if (scopeBulkWriteEnabled) document.querySelectorAll("[data-n6-bulk-scope]").forEach((container) => {
-          const status = container.querySelector("[data-n6-bulk-status]");
-          const buttons = Array.from(
-            container.querySelectorAll("[data-n6-bulk-monitor], [data-n6-bulk-realtime]"),
-          );
-          const showStatus = (message, href = "", linkLabel = "") => {
-            if (!status) return;
-            status.hidden = false;
-            status.textContent = message;
-            if (href && linkLabel) {
-              status.append(" ");
-              const link = document.createElement("a");
-              link.href = href;
-              link.textContent = linkLabel;
-              status.append(link);
-            }
-          };
-          buttons.forEach((button) => {
-            button.addEventListener("click", async () => {
-              const target = button.hasAttribute("data-n6-bulk-monitor") ? "monitor" : "realtime";
-              const targetLabel = target === "monitor" ? "监控对象" : "实时监控范围";
-              buttons.forEach((item) => { item.disabled = true; });
-              showStatus("正在计算完整筛选结果影响…");
-              try {
-                const previewUrl = new URL(
-                  "/api/n6/app/v3/filter-scope-bulk-preview",
-                  window.location.origin,
-                );
-                const pageParams = new URLSearchParams(window.location.search);
-                pageParams.delete("show_all");
-                pageParams.delete("sort");
-                pageParams.delete("sort_dir");
-                pageParams.forEach((value, key) => previewUrl.searchParams.append(key, value));
-                previewUrl.searchParams.set("target", target);
-                previewUrl.searchParams.set("asset_kind", container.dataset.n6AssetKind || "");
-                const preview = await request(previewUrl.toString(), "GET");
-                const confirmed = window.confirm(
-                  `将完整筛选结果加入${targetLabel}？\n`
-                  + `命中对象：${preview.matched_count}\n`
-                  + `预计新增：${preview.will_add_count}\n`
-                  + `已存在：${preview.already_active_count}\n`
-                  + `重新启用：${preview.reactivated_count}\n`
-                  + `实际方向行数：${preview.direction_row_count}\n\n`
-                  + "确认后将以一次原子命令提交。",
-                );
-                if (!confirmed) {
-                  showStatus("已取消，未写入任何监控范围");
-                  return;
-                }
-                const endpoint = target === "monitor"
-                  ? "/api/n6/app/v3/monitor-items/bulk"
-                  : "/api/n6/app/v3/realtime-scope-items/bulk";
-                const result = await request(
-                  endpoint,
-                  "POST",
-                  { selection_token: preview.selection_token },
-                );
-                showStatus(
-                  `批量加入完成：新增${result.added_count || 0}，`
-                  + `已存在${result.already_active_count || 0}，`
-                  + `重新启用${result.reactivated_count || 0}。`,
-                  target === "monitor" ? "/n6/app/my-monitor" : "/n6/app/realtime-scope",
-                  `前往${targetLabel}查看`,
-                );
-              } catch (error) {
-                showStatus(bulkErrorLabel(error.message));
-              } finally {
-                buttons.forEach((item) => { item.disabled = false; });
-              }
-            });
-          });
-        });
-        if (scopeWriteEnabled) document.querySelectorAll("[data-n6-remove-monitor]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            if (!window.confirm("确认移除此监控对象？")) return;
-            await request(`/api/n6/app/v3/monitor-items/${button.dataset.monitorId}`, "DELETE");
-            window.location.reload();
-          });
-        });
-        if (scopeWriteEnabled) document.querySelectorAll("[data-n6-remove-realtime]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            if (!window.confirm("确认移除此实时监控范围？")) return;
-            await request(`/api/n6/app/v3/realtime-scope-items/${button.dataset.scopeId}`, "DELETE");
-            window.location.reload();
-          });
-        });
-        if (proposalWriteEnabled) document.addEventListener("click", async (event) => {
-          const button = event.target.closest?.("[data-n6-create-proposal]");
-          if (!button || button.disabled) return;
-          const proposalId = button.dataset.proposalId;
-          const actionLabel = button.dataset.proposalActionLabel || button.textContent.trim();
-          button.dataset.proposalActionLabel = actionLabel;
-          if (!proposalId) {
-            if (!window.confirm(`${actionLabel}：仅创建待确认申请，不会成交；是否继续？`)) return;
-            button.disabled = true;
-            proposalMessage(`${actionLabel}申请处理中…`, button);
-            try {
-              const created = await request(
-                "/api/n6/app/v3/virtual-account/proposals",
-                "POST",
-                { source_type: button.dataset.sourceType || "signal", source_id: button.dataset.sourceId },
-              );
-              const proposal = created.item;
-              if (!proposal?.proposal_id || proposal.proposal_status !== "pending") {
-                throw new Error("pending_proposal_required");
-              }
-              proposalBySource.set(
-                proposalSourceKey(button.dataset.sourceType, button.dataset.sourceId),
-                proposal,
-              );
-              applyProposalState(button, proposal);
-              proposalMessage(button.textContent, button);
-            } catch (error) {
-              button.textContent = actionLabel;
-              proposalMessage(`${actionLabel}未创建：${proposalErrorLabel(error.message)}`, button);
-              button.disabled = false;
-            }
-            return;
-          }
-          if (!window.confirm("再次确认本次虚拟交易申请？仅在交易时段内使用两分钟内有效行情价完成虚拟成交。是否继续？")) return;
-          button.disabled = true;
-          proposalMessage("正在确认虚拟交易申请…", button);
-          try {
-            const generationToken = button.dataset.confirmationGenerationToken || "";
-            if (!generationToken) throw new Error("proposal_generation_mismatch");
-            const confirmationNonce =
-              window.crypto?.randomUUID?.() || `n6-${Date.now()}-${proposalId}`;
-            const idempotencyKey = `n6v3:${generationToken}:${confirmationNonce}`;
-            const confirmed = await request(
-              `/api/n6/app/v3/virtual-account/proposals/${proposalId}/confirm`,
-              "POST",
-              {},
-              { "Idempotency-Key": idempotencyKey },
-            );
-            applyProposalState(button, {
-              proposal_id: proposalId,
-              proposal_status: confirmed.item?.proposal_status || confirmed.status,
-              confirmation_generation_token: generationToken,
-            });
-            proposalMessage(button.textContent, button);
-          } catch (error) {
-            const label = proposalErrorLabel(error.message);
-            proposalMessage(`${actionLabel}未确认：${label}`, button);
-            if (error.message === "proposal_expired") {
-              button.dataset.proposalId = "";
-              button.dataset.proposalStatus = "expired";
-              button.dataset.confirmationGenerationToken = "";
-              button.textContent = actionLabel;
-            } else if (error.message === "proposal_generation_mismatch") {
-              try {
-                await restoreProposalButtons();
-                proposalMessage("申请已更新，请按恢复后的最新状态再次确认", button);
-              } catch (_restoreError) {
-                button.dataset.proposalId = "";
-                button.dataset.proposalStatus = "";
-                button.dataset.confirmationGenerationToken = "";
-                button.textContent = "申请已更新，请刷新页面";
-                button.disabled = false;
-              }
-              return;
-            } else {
-              button.textContent = "准备完成，请再次确认";
-            }
-            button.disabled = false;
-          }
-        });
-        if (proposalWriteEnabled) restoreProposalButtons().catch((error) => {
-          proposalMessage(`申请状态暂不可用：${proposalErrorLabel(error.message)}`);
-        });
-      };
-      return { init };
-    })();
-    n6ScopeWrite.init();
-
-    const n6StrategyCenter = (() => {
-      const root = document.querySelector("[data-n6-strategy-center]");
-      if (!root) return { init: () => {} };
-      const csrfToken = document.body.dataset.n6CsrfToken || "";
-      const writeEnabled = document.body.dataset.n6StrategyCenterWriteEnabled === "true";
-      const packageRoot = root.querySelector("[data-strategy-packages]");
-      const qualifiedRoot = root.querySelector("[data-strategy-qualified-results]");
-      const observationRoot = root.querySelector("[data-strategy-observation-results]");
-      const qualifiedEmpty = root.querySelector("[data-strategy-qualified-empty]");
-      const observationEmpty = root.querySelector("[data-strategy-observation-empty]");
-      const migrationBanner = root.querySelector("[data-strategy-migration-required]");
-      const statusRoot = root.querySelector("[data-strategy-status]");
-      const saveButton = root.querySelector("[data-strategy-save]");
-      const refreshButton = root.querySelector("[data-strategy-refresh]");
-      let state = null;
-      let source = null;
-      let requestCounter = 0;
-      let refreshPromise = null;
-      let refreshAfterFlight = false;
-      let streamRefreshTimer = null;
-      let fullRefreshTimer = null;
-      let disposed = false;
-
-      const status = (message) => { statusRoot.textContent = message; };
-      const packageDescription = (item) => item.package_key === "package_1"
-        ? "个股、所属板块及任一所属风格指数必须同向，时间跨度不超过30个交易分钟。"
-        : "个股与任一所属板块必须同向，时间跨度不超过30个交易分钟。";
-      const displayValue = (value) => {
-        if (value === null || value === undefined || value === "") return "—";
-        if (typeof value === "object") return JSON.stringify(value);
-        return String(value);
-      };
-      const signalFields = (signal) => Object.entries(signal || {})
-        .map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(displayValue(value))}</dd></div>`)
-        .join("");
-      const evidenceChips = (items, kind) => (items || []).map((item) => {
-        const type = kind === "board" ? ` · ${item.board_type || "—"}` : "";
-        const selected = item.selected_for_confluence || (item.selected_event_ids || []).length
-          ? " · 汇合证据"
-          : "";
-        return `<span class="chip">${escapeHtml(item.code || "—")} ${escapeHtml(item.name || "—")}${escapeHtml(type)}${escapeHtml(selected)}</span>`;
-      }).join(" ") || '<span class="subtle">无有效映射证据</span>';
-      const directionLabel = (direction) => direction === "buy" ? "买入方向" : direction === "sell" ? "卖出方向" : "方向未就绪";
-      const heatLabel = (value) => ({
-        MARKET_HEAT_SUPPORTIVE: "市场热度支持",
-        MARKET_HEAT_ADVERSE: "市场热度相反",
-        MARKET_HEAT_MIXED: "市场热度分歧",
-        MARKET_HEAT_NEUTRAL: "市场热度中性",
-      }[value] || value || "市场热度未就绪");
-      const observationLabel = (value) => value === "weak_span" ? "WEAK 时间跨度" : value === "stale_after_confirmation" ? "确认后已 stale" : value || "观察项";
-      const eventEvidence = (item) => {
-        const evidence = item.package_evidence || item.confluence?.package_evidence || [];
-        return evidence.map((entry) => {
-          const packageKey = entry.package_key || entry.package || "—";
-          const packageName = packageKey === "package_1" ? "策略包1" : packageKey === "package_2" ? "策略包2" : packageKey;
-          const stock = `个股 ${entry.stock_event_time || "—"} · ${entry.stock_event_id || "—"}`;
-          const board = `板块 ${entry.board_event_time || "—"} · ${entry.board_identity_key || "—"} · ${entry.board_event_id || "—"}`;
-          const index = packageKey === "package_1"
-            ? `指数 ${entry.index_event_time || "—"} · ${entry.index_identity_key || "—"} · ${entry.index_event_id || "—"}`
-            : "指数 不作为包2资格条件";
-          const span = entry.coherence_span_trading_minutes ?? item.confluence?.coherence_span_trading_minutes ?? "—";
-          return `<div class="strategy-evidence-row"><strong>${escapeHtml(packageName)}</strong> · ${escapeHtml(entry.coherence_level || item.confluence?.coherence_level || "—")} · ${escapeHtml(span)}交易分钟<br><span class="subtle">${escapeHtml(stock)}<br>${escapeHtml(board)}<br>${escapeHtml(index)}</span></div>`;
-        }).join("") || '<span class="subtle">汇合事件证据未就绪</span>';
-      };
-      const marketHeatEvidence = (confluence) => (confluence.market_heat_evidence || []).map((entry) => {
-        const identity = entry.index_identity_key || entry.identity_key || "—";
-        return `<span class="chip">${escapeHtml(identity)} · ${escapeHtml(directionLabel(entry.direction))} · ${escapeHtml(entry.event_time || "—")}</span>`;
-      }).join(" ") || '<span class="subtle">两个市场热度指数均无30交易分钟内的新鲜证据</span>';
-      const resultCard = (item, surfaceKind) => {
-        const signal = item.signal || {};
-        const confluence = item.confluence || {};
-        const title = `${signal.name || signal.display_name || item.stock_identity_key || "—"} ${signal.code || signal.display_code || ""}`.trim();
-        const packages = (item.matched_packages || []).map((key) => key === "package_1" ? "策略包1" : "策略包2").join(" / ");
-        const sources = (item.scope_sources || []).join(" / ") || "—";
-        const timeline = (item.state_timeline || []).map((entry) => `${entry.action_state || "—"}@${entry.event_time || entry.created_at || "—"}`).join(" → ") || "—";
-        const level = confluence.coherence_level || "—";
-        const span = confluence.coherence_span_trading_minutes ?? "—";
-        const freshness = confluence.freshness_status || (surfaceKind === "qualified_match" ? "fresh" : "—");
-        const observation = surfaceKind === "observation" ? `<span class="chip">${escapeHtml(observationLabel(item.observation_reason))}</span>` : "";
-        return `<article class="strategy-result-card ${surfaceKind === "observation" ? "strategy-observation-card" : ""}" data-strategy-surface-kind="${escapeHtml(surfaceKind)}" data-strategy-projection-id="${escapeHtml(item.projection_id)}">
-          <div class="strategy-result-head">
-            <div><h3>${escapeHtml(title)}</h3><p class="subtle">${escapeHtml(item.stock_identity_key)} · action=${escapeHtml(item.action_episode_key)} · coherence=${escapeHtml(item.coherence_episode_key || "—")}</p></div>
-            <div><span class="chip">${escapeHtml(item.action_state)}</span> <span class="chip">${escapeHtml(packages)}</span> ${observation}</div>
-          </div>
-          <div class="strategy-confluence-grid">
-            <div><span>方向</span><strong>${escapeHtml(directionLabel(confluence.direction))}</strong></div>
-            <div><span>汇合等级</span><strong>${escapeHtml(level)}</strong></div>
-            <div><span>交易分钟跨度</span><strong>${escapeHtml(span)}</strong></div>
-            <div><span>新鲜度</span><strong>${escapeHtml(freshness)}</strong></div>
-            <div><span>确认时间</span><strong>${escapeHtml(confluence.confirmation_time || "—")}</strong></div>
-            <div><span>stale 时间</span><strong>${escapeHtml(confluence.stale_at || "—")}</strong></div>
-            <div><span>市场热度</span><strong>${escapeHtml(heatLabel(confluence.market_heat_state))}</strong></div>
-          </div>
-          <div class="strategy-evidence"><strong>适用来源</strong><span class="subtle">${escapeHtml(sources)}</span></div>
-          <div class="strategy-evidence"><strong>所属风格指数（membership as-of）</strong><div>${evidenceChips(item.indices, "index")}</div></div>
-          <div class="strategy-evidence"><strong>命中板块（同向证据）</strong><div>${evidenceChips(item.matched_boards, "board")}</div></div>
-          <div class="strategy-evidence"><strong>各层事件时间与冻结 lineage</strong><div class="strategy-evidence-list">${eventEvidence(item)}</div></div>
-          <div class="strategy-evidence"><strong>市场热度指数证据（000001 / 399001）</strong><div>${marketHeatEvidence(confluence)}</div></div>
-          <details><summary>/signals 完整个股消息字段</summary><dl class="strategy-signal-fields">${signalFields(signal)}</dl></details>
-          <details><summary>状态时间线与质量</summary><p class="subtle">${escapeHtml(timeline)}</p><p class="subtle">mapping_quality=${escapeHtml(item.mapping_quality || "—")}</p></details>
-        </article>`;
-      };
-      const render = (payload) => {
-        state = payload;
-        root.querySelector("[data-strategy-trade-date]").textContent = payload.trade_date || "—";
-        root.querySelector("[data-strategy-scope-count]").textContent = payload.scope?.stock_count ?? 0;
-        const activeSelection = payload.active_selection;
-        const activeVersions = (activeSelection?.selected_packages || [])
-          .map((item) => `${item.package_key}:${item.package_version}`)
-          .join(" / ");
-        root.querySelector("[data-strategy-revision]").textContent = activeSelection
-          ? `${activeSelection.revision_no}${activeVersions ? ` · ${activeVersions}` : ""}`
-          : "—";
-        migrationBanner.hidden = !payload.migration_required;
-        root.querySelector("[data-strategy-match-count]").textContent = payload.counts?.qualified_match ?? payload.match_count ?? 0;
-        root.querySelector("[data-strategy-observation-count]").textContent = payload.counts?.observation ?? payload.observation_count ?? 0;
-        const selected = new Set(
-          (payload.pending_selection || payload.active_selection || {}).selected_package_keys || ["package_1"],
-        );
-        packageRoot.innerHTML = (payload.packages || []).map((item) => `<article class="strategy-package-card">
-          <label><input type="checkbox" value="${escapeHtml(item.package_key)}" ${selected.has(item.package_key) ? "checked" : ""}>${escapeHtml(item.display_name)}</label>
-          <span class="subtle">版本 ${escapeHtml(item.package_version)} · ${escapeHtml(item.rule_kind)}</span>
-          <p>${escapeHtml(packageDescription(item))}</p>
-          <span class="subtle">板块白名单：${escapeHtml((item.allowed_board_types || []).join(" / "))}</span>
-        </article>`).join("");
-        const matches = Array.isArray(payload.matches) ? payload.matches : [];
-        const observations = Array.isArray(payload.observations) ? payload.observations : [];
-        qualifiedRoot.innerHTML = matches.map((item) => resultCard(item, "qualified_match")).join("");
-        observationRoot.innerHTML = observations.map((item) => resultCard(item, "observation")).join("");
-        qualifiedEmpty.hidden = matches.length > 0;
-        observationEmpty.hidden = observations.length > 0;
-        saveButton.disabled = !writeEnabled || Boolean(payload.pending_selection);
-        saveButton.title = writeEnabled ? "" : "策略选择写入尚未启用";
-        status(`已同步 · watermark ${payload.watermark || "0"} · ${payload.quality?.status || "not_ready"}`);
-      };
-      const performRefresh = async () => {
-        refreshButton.disabled = true;
-        try {
-          const response = await fetch("/api/n6/app/v3/strategy-center", { headers: { "Accept": "application/json" } });
-          const payload = await response.json();
-          if (!response.ok || payload.ok === false) throw new Error(payload.error || "strategy_center_service_unavailable");
-          render(payload);
-        } catch (error) {
-          status(`同步失败：${error.message}`);
-        } finally {
-          refreshButton.disabled = false;
-        }
-      };
-      const refresh = () => {
-        if (refreshPromise) {
-          refreshAfterFlight = true;
-          return refreshPromise;
-        }
-        refreshPromise = performRefresh().finally(() => {
-          const runAgain = refreshAfterFlight;
-          refreshAfterFlight = false;
-          refreshPromise = null;
-          if (runAgain && !disposed) void refresh();
-        });
-        return refreshPromise;
-      };
-      const scheduleStreamRefresh = () => {
-        if (streamRefreshTimer !== null || disposed) return;
-        streamRefreshTimer = window.setTimeout(() => {
-          streamRefreshTimer = null;
-          void refresh();
-        }, 250);
-      };
-      const dispose = () => {
-        disposed = true;
-        source?.close();
-        if (streamRefreshTimer !== null) {
-          window.clearTimeout(streamRefreshTimer);
-          streamRefreshTimer = null;
-        }
-        if (fullRefreshTimer !== null) {
-          window.clearInterval(fullRefreshTimer);
-          fullRefreshTimer = null;
-        }
-      };
-      const save = async () => {
-        const selected = Array.from(packageRoot.querySelectorAll('input[type="checkbox"]:checked')).map((item) => item.value);
-        if (!selected.length) { status("至少选择一个策略包"); return; }
-        const revision = state?.pending_selection?.revision_no ?? state?.active_selection?.revision_no ?? 0;
-        requestCounter += 1;
-        saveButton.disabled = true;
-        try {
-          const response = await fetch("/api/n6/app/v3/strategy-center/selection", {
-            method: "PUT",
-            headers: { "Accept": "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-            body: JSON.stringify({
-              selected_package_keys: selected,
-              expected_revision: revision,
-              request_id: `strategy-ui-${Date.now()}-${requestCounter}`,
-            }),
-          });
-          const payload = await response.json();
-          if (!response.ok || payload.ok === false) throw new Error(payload.error || "strategy_center_service_unavailable");
-          status("策略选择已进入当日重算，完成后自动切换");
-          await refresh();
-        } catch (error) {
-          status(`保存失败：${error.message}`);
-          saveButton.disabled = false;
-        }
-      };
-      const openStream = () => {
-        if (source) source.close();
-        const afterId = state?.watermark || "0";
-        source = new EventSource(`/api/n6/app/v3/strategy-center/stream?after_id=${encodeURIComponent(afterId)}`);
-        const streamEventTypes = ["upsert", "remove", "reset"];
-        streamEventTypes.forEach((eventType) => source.addEventListener(eventType, scheduleStreamRefresh));
-        source.onerror = () => status("实时连接暂不可用 · 保留45秒完整校正");
-      };
-      const init = async () => {
-        saveButton.addEventListener("click", save);
-        refreshButton.addEventListener("click", refresh);
-        await refresh();
-        openStream();
-        fullRefreshTimer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 45000);
-        window.addEventListener("beforeunload", dispose);
-      };
-      return { init };
-    })();
-    n6StrategyCenter.init();
 
     document.getElementById("logout-button").addEventListener("click", async () => {
       await fetch("/api/n6/auth/logout", { method: "POST" });

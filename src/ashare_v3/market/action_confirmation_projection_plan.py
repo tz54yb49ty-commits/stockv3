@@ -22,6 +22,11 @@ from psycopg.rows import dict_row
 from ashare_v3.market.query_audit_phase3 import audited_n3_market_readonly_plan_connect
 
 from ashare_v3.condition.basis import count_quality_severities, quality_item
+from ashare_v3.market.c1_scoped_artifact import (
+    BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE,
+    previous_period_sources_are_valid,
+    resolve_fixed_period_windows,
+)
 from ashare_v3.market.projection_enrichment import (
     build_projection_enrichment_v1,
     summarize_projection_enrichment_rows,
@@ -458,7 +463,7 @@ def build_metric_generation_strategy() -> dict[str, Any]:
             "previous_5m": "same-day previous completed 5m body high/low; first period uses previous-day last 5m",
             "previous_30m": "same-day previous completed 30m body high/low; first period uses previous-day last 30m",
             "previous_120m": "same-day previous completed 120m body high/low; first period uses previous-day last 120m",
-            "body_high_low_definition": "max/min of max(open, close) and min(open, close) over the resolved window",
+            "body_high_low_definition": "max/min of the fixed period first open and last close",
         },
         "amount": {
             "current_1m_amount": "latest resolved current 1m amount",
@@ -558,16 +563,24 @@ def build_metric_candidate_row(
     n2_context: Mapping[str, Any] | None = None,
     current_chain_metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    latest = today_rows[-1]
-    position = len(today_rows)
-    previous_1m_rows, previous_1m_source = resolve_previous_window(today_rows, previous_day_rows, position, 1)
-    previous_5m_rows, previous_5m_source = resolve_previous_window(today_rows, previous_day_rows, position, 5)
-    previous_30m_rows, previous_30m_source = resolve_previous_window(today_rows, previous_day_rows, position, 30)
-    previous_120m_rows, previous_120m_source = resolve_previous_window(today_rows, previous_day_rows, position, 120)
-    current_5m_rows = resolve_current_window(today_rows, position, 5)
-    current_30m_rows = resolve_current_window(today_rows, position, 30)
-    reference_5m_rows = resolve_previous_day_same_window(previous_day_rows, position, 5)
-    reference_30m_rows = resolve_previous_day_same_window(previous_day_rows, position, 30)
+    windows = resolve_fixed_period_windows(current_rows=today_rows, previous_rows=previous_day_rows)
+    latest = windows["latest_current_row"] or today_rows[-1]
+    previous_period_rows = windows["previous_period_rows"]
+    previous_period_sources = windows["previous_period_sources"]
+    current_period_rows = windows["current_period_rows"]
+    previous_day_same_period_rows = windows["previous_day_same_period_rows"]
+    previous_1m_rows = previous_period_rows[1]
+    previous_5m_rows = previous_period_rows[5]
+    previous_30m_rows = previous_period_rows[30]
+    previous_120m_rows = previous_period_rows[120]
+    previous_1m_source = previous_period_sources[1]
+    previous_5m_source = previous_period_sources[5]
+    previous_30m_source = previous_period_sources[30]
+    previous_120m_source = previous_period_sources[120]
+    current_5m_rows = current_period_rows[5]
+    current_30m_rows = current_period_rows[30]
+    reference_5m_rows = previous_day_same_period_rows[5]
+    reference_30m_rows = previous_day_same_period_rows[30]
     current_5m_virtual_amount, previous_day_same_5m_full_amount, current_5m_virtual_proof = (
         calibrated_same_window_virtual_amount(
             current_rows=current_5m_rows,
@@ -655,7 +668,7 @@ def build_metric_candidate_row(
         "previous_5m_period_source": previous_5m_source,
         "previous_30m_period_source": previous_30m_source,
         "previous_120m_period_source": previous_120m_source,
-        "boundary_policy_version": "n3.action_confirmation_boundary.v1",
+        "boundary_policy_version": windows["boundary_policy_version"],
         "metric_quality_status": "passed",
         "metric_ready": True,
         "source_fact_ids": {
@@ -690,6 +703,10 @@ def build_metric_candidate_row(
         row["metric_ready"] = False
         row["metric_quality_status"] = "missing"
         row["raw_json"]["db_check_missing_fields"] = db_check["missing_fields"]
+    if not previous_period_sources_are_valid(row):
+        row["metric_ready"] = False
+        row["metric_quality_status"] = "blocked"
+        row["raw_json"]["blocked_reason"] = BLOCKED_N3T_PREVIOUS_PERIOD_SOURCE_UNAVAILABLE
     row["raw_json"]["enrichment_v1"] = build_projection_enrichment_v1(
         metric_row=row,
         n2_context=n2_context,
@@ -700,16 +717,6 @@ def build_metric_candidate_row(
         reference_30m_entity_low=body_low(reference_30m_rows),
     )
     return row
-
-
-def resolve_current_window(rows: list[Mapping[str, Any]], position: int, size: int) -> list[Mapping[str, Any]]:
-    start = ((position - 1) // size) * size
-    return rows[start:position]
-
-
-def resolve_previous_day_same_window(rows: list[Mapping[str, Any]], position: int, size: int) -> list[Mapping[str, Any]]:
-    start = ((position - 1) // size) * size
-    return rows[start : start + size]
 
 
 def calibrated_same_window_virtual_amount(
@@ -757,18 +764,6 @@ def calibrated_same_window_virtual_amount(
     return current_virtual_amount, previous_day_same_full_amount, proof
 
 
-def resolve_previous_window(
-    today_rows: list[Mapping[str, Any]],
-    previous_day_rows: list[Mapping[str, Any]],
-    position: int,
-    size: int,
-) -> tuple[list[Mapping[str, Any]], str]:
-    current_start = ((position - 1) // size) * size
-    if current_start == 0:
-        return previous_day_rows[-size:], "previous_trade_date_last_period"
-    return today_rows[max(0, current_start - size) : current_start], "same_trade_date_previous_period"
-
-
 def add_price_amount_flags(row: dict[str, Any]) -> None:
     current_price = numeric(row.get("current_price"))
     if current_price is None:
@@ -782,10 +777,10 @@ def add_price_amount_flags(row: dict[str, Any]) -> None:
     previous_5m = numeric(row.get("previous_5m_full_amount"))
     current_1m = numeric(row.get("current_1m_amount"))
     previous_1m = numeric(row.get("previous_1m_amount"))
-    row["buy_5m_amount_pass"] = True if row.get("is_first_5m_of_day") else (None if current_5m is None or previous_5m is None else current_5m >= previous_5m)
-    row["sell_5m_amount_pass"] = True if row.get("is_first_5m_of_day") else (None if current_5m is None or previous_5m is None else current_5m <= previous_5m)
-    row["buy_1m_amount_pass"] = True if row.get("is_first_1m_of_day") else (None if current_1m is None or previous_1m is None else current_1m >= previous_1m)
-    row["sell_1m_amount_pass"] = True if row.get("is_first_1m_of_day") else (None if current_1m is None or previous_1m is None else current_1m <= previous_1m)
+    row["buy_5m_amount_pass"] = True if row.get("is_first_5m_of_day") else (None if current_5m is None or previous_5m is None else current_5m > previous_5m)
+    row["sell_5m_amount_pass"] = True if row.get("is_first_5m_of_day") else (None if current_5m is None or previous_5m is None else current_5m < previous_5m)
+    row["buy_1m_amount_pass"] = True if row.get("is_first_1m_of_day") else (None if current_1m is None or previous_1m is None else current_1m > previous_1m)
+    row["sell_1m_amount_pass"] = True if row.get("is_first_1m_of_day") else (None if current_1m is None or previous_1m is None else current_1m < previous_1m)
 
 
 def simulate_metric_ready_db_check(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1240,13 +1235,23 @@ def numeric(value: Any) -> float | None:
 
 
 def body_high(rows: list[Mapping[str, Any]]) -> float | None:
-    values = [max(numeric(row.get("open")) or 0.0, numeric(row.get("close")) or 0.0) for row in rows]
-    return max(values) if values else None
+    if not rows:
+        return None
+    open_value = numeric(rows[0].get("open"))
+    close_value = numeric(rows[-1].get("close"))
+    if open_value is None or close_value is None:
+        return None
+    return max(open_value, close_value)
 
 
 def body_low(rows: list[Mapping[str, Any]]) -> float | None:
-    values = [min(numeric(row.get("open")) or 0.0, numeric(row.get("close")) or 0.0) for row in rows]
-    return min(values) if values else None
+    if not rows:
+        return None
+    open_value = numeric(rows[0].get("open"))
+    close_value = numeric(rows[-1].get("close"))
+    if open_value is None or close_value is None:
+        return None
+    return min(open_value, close_value)
 
 
 def sum_amount(rows: list[Mapping[str, Any]]) -> float | None:

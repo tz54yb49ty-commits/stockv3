@@ -38,6 +38,7 @@ from ashare_v3.ingestion.daily_bars import (
     normalize_board_daily_bar_row,
 )
 from ashare_v3.ingestion.mootdx_daily_source import MootdxDailyBarSource
+from ashare_v3.mootdx_client import MootdxEndpointManager
 from scripts.run_real_initial_ingestion import (
     ADJ_FACTOR_FIELDS,
     BOARD_FILE_TYPES,
@@ -900,6 +901,8 @@ def load_index_daily_day(
     trade_date: str,
     version: str,
     mootdx_offset: int,
+    prefetched_raw_rows: Sequence[Mapping[str, Any]] | None = None,
+    endpoint_provenance: Mapping[str, Any] | None = None,
 ) -> BatchResult:
     source_batch_id = batch_id("index_daily", trade_date, version)
     source_version = source_batch_id
@@ -933,9 +936,20 @@ def load_index_daily_day(
         indexes_by_key.setdefault(str(index["index_identity_key"]), index)
     missing_fixed_identity_keys = sorted(set(FIXED_CORE_INDEX_IDENTITIES) - set(indexes_by_key))
     indexes = sorted(indexes_by_key.values(), key=lambda item: (str(item["code"]), str(item["exchange"])))
-    source = MootdxDailyBarSource(offset=mootdx_offset)
     symbols = [IndexDailySymbol(code=index["code"], exchange=index["exchange"], name=index["name"]) for index in indexes]
-    raw_rows = frame_to_records(source.fetch_index_daily_bars(indexes=symbols, start_date=trade_date, end_date=trade_date))
+    if prefetched_raw_rows is None:
+        source = MootdxDailyBarSource(offset=mootdx_offset)
+        raw_rows, endpoint_provenance = _fetch_and_close_mootdx_phase(
+            source,
+            lambda: source.fetch_index_daily_bars(
+                indexes=symbols,
+                start_date=trade_date,
+                end_date=trade_date,
+            ),
+        )
+    else:
+        raw_rows = [dict(row) for row in prefetched_raw_rows]
+    mootdx_raw_rows = list(raw_rows)
     rows: list[dict[str, Any]] = []
     for item in raw_rows:
         key = f"index:{item.get('exchange')}:{item.get('code')}"
@@ -1009,6 +1023,13 @@ def load_index_daily_day(
         Gate("index_daily_unresolved_source_rows_filtered", True, "indexes without daily rows filtered before activation", str(len(unresolved)), {"missing": unresolved[:50]}, severity="P2"),
         Gate("index_daily_unique_key", len(unique_keys) == len(rows), "0 duplicates", str(len(rows) - len(unique_keys))),
         Gate("index_daily_no_88xxxx", not any(str(row["code"]).startswith("88") for row in rows), "0", str(sum(1 for row in rows if str(row["code"]).startswith("88")))),
+        Gate(
+            "index_daily_mootdx_single_winning_endpoint",
+            _rows_match_endpoint_provenance(mootdx_raw_rows, endpoint_provenance),
+            "one winning endpoint/attempt",
+            str((endpoint_provenance or {}).get("endpoint_id") or ""),
+            dict(endpoint_provenance or {}),
+        ),
     ]
     manifest_path = archive_rows(dataset="index_daily_bar_fact", rows=rows, source_batch_id=source_batch_id, source_version=source_version, data_root=data_root, partition_key="trade_date") if rows else None
 
@@ -1029,7 +1050,7 @@ def load_index_daily_day(
         source="mootdx.index+tushare.index_daily.fallback",
         source_version=source_version,
         source_path=None,
-        source_params={"trade_date": trade_date, "requested_index_count": len(indexes), "mootdx_offset": mootdx_offset, "fixed_core_index_identities": list(FIXED_CORE_INDEX_IDENTITIES)},
+        source_params={"trade_date": trade_date, "requested_index_count": len(indexes), "mootdx_offset": mootdx_offset, "fixed_core_index_identities": list(FIXED_CORE_INDEX_IDENTITIES), "mootdx_endpoint_provenance": dict(endpoint_provenance or {})},
         raw_hash=stable_hash(raw_rows),
         row_count=len(rows),
         gates=gates,
@@ -1046,14 +1067,26 @@ def load_board_daily_day(
     trade_date: str,
     version: str,
     mootdx_offset: int,
+    prefetched_raw_rows: Sequence[Mapping[str, Any]] | None = None,
+    endpoint_provenance: Mapping[str, Any] | None = None,
 ) -> BatchResult:
     source_batch_id = batch_id("board_daily", trade_date, version)
     source_version = source_batch_id
     with conn.cursor() as cur:
         board_rows = get_board_identity_rows(cur)
     boards = [BoardDailySymbol(board_code=row["board_code"], board_name=row["board_name"], board_type=row["board_type"]) for row in board_rows]
-    source = MootdxDailyBarSource(offset=mootdx_offset)
-    raw_rows = frame_to_records(source.fetch_board_daily_bars(boards=boards, start_date=trade_date, end_date=trade_date))
+    if prefetched_raw_rows is None:
+        source = MootdxDailyBarSource(offset=mootdx_offset)
+        raw_rows, endpoint_provenance = _fetch_and_close_mootdx_phase(
+            source,
+            lambda: source.fetch_board_daily_bars(
+                boards=boards,
+                start_date=trade_date,
+                end_date=trade_date,
+            ),
+        )
+    else:
+        raw_rows = [dict(row) for row in prefetched_raw_rows]
     rows = [normalize_board_daily_bar_row(row, source="mootdx.index", source_batch_id=source_batch_id, source_version=source_version) for row in raw_rows]
     requested_keys = {board.board_identity_key for board in boards}
     actual_keys = {str(row["board_identity_key"]) for row in rows}
@@ -1064,6 +1097,13 @@ def load_board_daily_day(
         Gate("board_daily_identity_coverage", not missing, "all requested boards have rows", str(len(missing)), {"missing": missing[:50]}),
         Gate("board_daily_unique_key", len(unique_keys) == len(rows), "0 duplicates", str(len(rows) - len(unique_keys))),
         Gate("board_daily_code_shape", all(str(row["board_code"]).startswith("88") for row in rows), "all board_code starts with 88", str(sum(1 for row in rows if not str(row["board_code"]).startswith("88")))),
+        Gate(
+            "board_daily_mootdx_single_winning_endpoint",
+            _rows_match_endpoint_provenance(raw_rows, endpoint_provenance),
+            "one winning endpoint/attempt",
+            str((endpoint_provenance or {}).get("endpoint_id") or ""),
+            dict(endpoint_provenance or {}),
+        ),
     ]
     manifest_path = archive_rows(dataset="board_daily_bar_fact", rows=rows, source_batch_id=source_batch_id, source_version=source_version, data_root=data_root, partition_key="trade_date") if rows else None
 
@@ -1084,7 +1124,7 @@ def load_board_daily_day(
         source="mootdx.index",
         source_version=source_version,
         source_path=None,
-        source_params={"trade_date": trade_date, "requested_board_count": len(boards), "mootdx_offset": mootdx_offset},
+        source_params={"trade_date": trade_date, "requested_board_count": len(boards), "mootdx_offset": mootdx_offset, "mootdx_endpoint_provenance": dict(endpoint_provenance or {})},
         raw_hash=stable_hash(raw_rows),
         row_count=len(rows),
         gates=gates,
@@ -1092,6 +1132,151 @@ def load_board_daily_day(
         activation_scope_key=trade_date,
         archive_manifest_path=manifest_path,
     )
+
+
+def _fetch_and_close_mootdx_phase(
+    source: Any,
+    fetch: Callable[[], Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    try:
+        rows = frame_to_records(fetch())
+    finally:
+        try:
+            source.close()
+        except Exception as exc:
+            setattr(
+                exc,
+                "mootdx_endpoint_provenance",
+                dict(source.endpoint_provenance or {}),
+            )
+            raise
+    return rows, dict(source.endpoint_provenance or {})
+
+
+def prepare_mootdx_daily_bundle(
+    *,
+    indexes: Sequence[IndexDailySymbol],
+    boards: Sequence[BoardDailySymbol],
+    trade_date: str,
+    mootdx_offset: int,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    source_factory: Callable[..., Any] = MootdxDailyBarSource,
+    attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Prepare only the index+board Mootdx sub-bundle before either fact commit."""
+
+    manager = endpoint_manager or MootdxEndpointManager.from_toml()
+    base_attempt_id = attempt_id or f"n1_real_daily_bundle__{trade_date}"
+    previous_endpoint: str | None = None
+    retry_reason: str | None = None
+    attempts: list[dict[str, Any]] = []
+    for replay_count in range(2):
+        current_attempt_id = (
+            base_attempt_id if replay_count == 0 else f"{base_attempt_id}__retry_1"
+        )
+        source = source_factory(
+            endpoint_manager=manager,
+            attempt_id=current_attempt_id,
+            offset=mootdx_offset,
+            failover_from=previous_endpoint,
+            failover_reason=retry_reason,
+        )
+        try:
+            board_rows = frame_to_records(
+                source.fetch_board_daily_bars(
+                    boards=boards,
+                    start_date=trade_date,
+                    end_date=trade_date,
+                )
+            ) if boards else []
+            index_rows = frame_to_records(
+                source.fetch_index_daily_bars(
+                    indexes=indexes,
+                    start_date=trade_date,
+                    end_date=trade_date,
+                )
+            ) if indexes else []
+        except Exception as exc:
+            provenance = dict(source.endpoint_provenance or {})
+            source.close()
+            attempts.append(
+                {
+                    **provenance,
+                    "status": "failed",
+                    "failure_kind": provenance.get("retry_reason")
+                    or type(exc).__name__,
+                }
+            )
+            if (
+                replay_count == 0
+                and manager.n1_failover_mode == "active"
+                and provenance.get("would_retry") is True
+            ):
+                previous_endpoint = str(provenance.get("endpoint_id") or "") or None
+                retry_reason = str(provenance.get("retry_reason") or "runtime_failure")
+                continue
+            setattr(
+                exc,
+                "mootdx_endpoint_provenance",
+                {
+                    **provenance,
+                    "attempts": [dict(row) for row in attempts],
+                    "winning_attempt_id": None,
+                },
+            )
+            raise
+        provenance = {
+            **dict(source.endpoint_provenance or {}),
+            "replay_count": replay_count,
+        }
+        if not _rows_match_endpoint_provenance(
+            [*board_rows, *index_rows],
+            provenance,
+        ):
+            raise RuntimeError(
+                "Mootdx bundle contains mixed endpoint or attempt provenance"
+            )
+        attempts.append(
+            {
+                **provenance,
+                "status": "winning",
+                "failure_kind": None,
+            }
+        )
+        provenance = {
+            **provenance,
+            "attempts": [dict(row) for row in attempts],
+            "winning_attempt_id": provenance.get("attempt_id"),
+        }
+        source.close()
+        return {
+            "board": board_rows,
+            "index": index_rows,
+            "mootdx_endpoint_provenance": provenance,
+        }
+    raise RuntimeError("Mootdx active bundle replay exhausted")
+
+
+def _rows_match_endpoint_provenance(
+    rows: Sequence[Mapping[str, Any]],
+    provenance: Mapping[str, Any] | None,
+) -> bool:
+    expected_endpoint = str((provenance or {}).get("endpoint_id") or "")
+    expected_attempt = str((provenance or {}).get("attempt_id") or "")
+    expected_transport = str((provenance or {}).get("transport") or "")
+    if not expected_endpoint or not expected_attempt or not expected_transport:
+        return False
+    for row in rows:
+        row_provenance = row.get("mootdx_endpoint_provenance")
+        if not isinstance(row_provenance, Mapping):
+            return False
+        if (
+            str(row_provenance.get("endpoint_id") or "") != expected_endpoint
+            or str(row_provenance.get("attempt_id") or "") != expected_attempt
+            or str(row_provenance.get("transport") or "") != expected_transport
+        ):
+            return False
+    return True
 
 
 def load_financial_day(
@@ -1406,6 +1591,59 @@ def main() -> int:
             for result in load_memberships_day(conn, tdx_root, data_root, trade_date=trade_date, version=args.version):
                 results.append(result)
                 print(json.dumps({"completed": result.__dict__}, ensure_ascii=False), flush=True)
+        prepared_mootdx_sub_bundle: dict[str, Any] | None = None
+        if args.phase == "all":
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ii.code, ii.exchange, ii.name
+                    FROM index_membership_fact im
+                    JOIN index_identity ii ON ii.index_identity_key = im.index_identity_key
+                    WHERE im.trade_date = %s
+                    ORDER BY ii.code
+                    """,
+                    (trade_date,),
+                )
+                bundle_indexes = [
+                    IndexDailySymbol(code=code, exchange=exchange, name=name)
+                    for code, exchange, name in cur.fetchall()
+                ]
+                cur.execute(
+                    """
+                    SELECT code, exchange, name
+                    FROM index_identity
+                    WHERE index_identity_key = ANY(%s)
+                    ORDER BY index_identity_key
+                    """,
+                    (list(FIXED_CORE_INDEX_IDENTITIES),),
+                )
+                bundle_index_by_key = {
+                    (symbol.exchange, symbol.code): symbol
+                    for symbol in bundle_indexes
+                }
+                for code, exchange, name in cur.fetchall():
+                    bundle_index_by_key.setdefault(
+                        (exchange, code),
+                        IndexDailySymbol(code=code, exchange=exchange, name=name),
+                    )
+                bundle_indexes = sorted(
+                    bundle_index_by_key.values(),
+                    key=lambda symbol: (symbol.code, symbol.exchange),
+                )
+                bundle_boards = [
+                    BoardDailySymbol(
+                        board_code=row["board_code"],
+                        board_name=row["board_name"],
+                        board_type=row["board_type"],
+                    )
+                    for row in get_board_identity_rows(cur)
+                ]
+            prepared_mootdx_sub_bundle = prepare_mootdx_daily_bundle(
+                indexes=bundle_indexes,
+                boards=bundle_boards,
+                trade_date=trade_date,
+                mootdx_offset=args.mootdx_offset,
+            )
         if selected(args.phase, {"stock_daily"}):
             result = load_stock_daily_day(conn, pro, data_root, trade_date=trade_date, version=args.version)
             results.append(result)
@@ -1415,11 +1653,11 @@ def main() -> int:
             results.append(result)
             print(json.dumps({"completed": result.__dict__}, ensure_ascii=False), flush=True)
         if selected(args.phase, {"index_daily"}):
-            result = load_index_daily_day(conn, pro, data_root, trade_date=trade_date, version=args.version, mootdx_offset=args.mootdx_offset)
+            result = load_index_daily_day(conn, pro, data_root, trade_date=trade_date, version=args.version, mootdx_offset=args.mootdx_offset, prefetched_raw_rows=(prepared_mootdx_sub_bundle or {}).get("index"), endpoint_provenance=(prepared_mootdx_sub_bundle or {}).get("mootdx_endpoint_provenance"))
             results.append(result)
             print(json.dumps({"completed": result.__dict__}, ensure_ascii=False), flush=True)
         if selected(args.phase, {"board_daily"}):
-            result = load_board_daily_day(conn, data_root, trade_date=trade_date, version=args.version, mootdx_offset=args.mootdx_offset)
+            result = load_board_daily_day(conn, data_root, trade_date=trade_date, version=args.version, mootdx_offset=args.mootdx_offset, prefetched_raw_rows=(prepared_mootdx_sub_bundle or {}).get("board"), endpoint_provenance=(prepared_mootdx_sub_bundle or {}).get("mootdx_endpoint_provenance"))
             results.append(result)
             print(json.dumps({"completed": result.__dict__}, ensure_ascii=False), flush=True)
         if selected(args.phase, {"financial"}):

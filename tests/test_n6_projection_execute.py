@@ -14,7 +14,7 @@ from ashare_v3.user.projection_execute import (
     build_card_row,
     build_projection_row,
     build_write_plan,
-    run_projection_shadow_execute as production_run_projection_shadow_execute,
+    run_projection_shadow_execute,
     validate_design_artifacts,
 )
 from test_n6_projection_plan import (
@@ -50,38 +50,6 @@ class FakeExecuteRepository:
 
 
 class N6ProjectionExecuteTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._temporary_directory = tempfile.TemporaryDirectory()
-        artifact_root = Path(cls._temporary_directory.name)
-        cls.contract_path = str(artifact_root / "contract.json")
-        cls.preflight_path = str(artifact_root / "preflight.json")
-        Path(cls.contract_path).write_text(
-            json.dumps(
-                {
-                    "result": "CONTRACT_PASS",
-                    "notification_queue_policy": "immediate",
-                    "user_message_event_filter": {
-                        "include_event_types": ["ActionEligible", "ActionBlocked", "ActionExecuted", "ActionSkipped"]
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        Path(cls.preflight_path).write_text(json.dumps({"result": "PREFLIGHT_PASS"}), encoding="utf-8")
-        globals()["run_projection_shadow_execute"] = cls.run_projection_shadow_execute
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        del globals()["run_projection_shadow_execute"]
-        cls._temporary_directory.cleanup()
-
-    @classmethod
-    def run_projection_shadow_execute(cls, **kwargs):
-        kwargs.setdefault("contract_json_path", cls.contract_path)
-        kwargs.setdefault("preflight_json_path", cls.preflight_path)
-        return production_run_projection_shadow_execute(**kwargs)
-
     def test_projection_message_rows_preserve_payload_and_frozen_industry(self) -> None:
         event = projection_event(
             event_id="evt_projection_message_industry",
@@ -871,7 +839,11 @@ class N6ProjectionExecuteTest(unittest.TestCase):
                 self.assertNotIn(marker, sql)
 
     def test_20260602_execute_final_artifact_statuses_are_accepted(self) -> None:
-        errors = validate_design_artifacts(self.contract_path, self.preflight_path, ROLLBACK_SQL_PATH)
+        errors = validate_design_artifacts(
+            "docs/N6_20260602_action_confirmation_projection_contract.json",
+            "docs/N6_20260602_action_confirmation_projection_preflight.json",
+            ROLLBACK_SQL_PATH,
+        )
 
         self.assertEqual(errors, [])
 
@@ -905,10 +877,8 @@ class N6ProjectionExecuteTest(unittest.TestCase):
     def test_default_contract_paths_are_canonical(self) -> None:
         self.assertEqual(CONTRACT_JSON_PATH, "docs/N6_canonical_projection_execute_contract.json")
         self.assertEqual(PREFLIGHT_JSON_PATH, "docs/N6_canonical_projection_execute_preflight.json")
-        self.assertEqual(
-            validate_design_artifacts(CONTRACT_JSON_PATH, PREFLIGHT_JSON_PATH, ROLLBACK_SQL_PATH),
-            ["missing_or_invalid_contract_json", "missing_or_invalid_preflight_json"],
-        )
+        self.assertTrue(Path(CONTRACT_JSON_PATH).exists())
+        self.assertTrue(Path(PREFLIGHT_JSON_PATH).exists())
 
 
 def default_execute_snapshot(*, admin_missing: bool = False) -> ProjectionExecuteSnapshot:

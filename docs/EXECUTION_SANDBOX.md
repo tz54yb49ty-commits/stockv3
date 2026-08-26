@@ -50,6 +50,10 @@ sandbox_output:
     risk_level: low | medium | high | critical
     affected_files:
       - string
+    affected_resources:
+      - string
+    policy_id: string | null
+    runtime_execution_requested: boolean
     nodes:
       - id: string
         type: PLAN | VALIDATE | MODIFY | VERIFY | FINALIZE
@@ -67,6 +71,9 @@ sandbox_output:
     layer_role: string
     affected_files:
       - string
+    affected_resources:
+      - string
+    policy_id: string | null
     data_flow: string
     risk_level: low | medium | high | critical
 
@@ -127,13 +134,33 @@ rollback feasibility analysis
 
 The sandbox verifies that a proposed task stays within the declared `layer_role`, `affected_files`, and allowed data-flow direction.
 
-Any cross-layer mutation, runtime execution request, database operation, worker
-startup, or N1-N6 mutation must produce a simulated STOP outcome by default.
-Only a fully matched named Kernel/Runtime-Gate policy may predict `EXECUTE`;
-this includes the historical
-`n6_strategy_center_pre_canary_web_write_quiesce_v1` and the resumable
-`n6_strategy_center_shadow_activation_grant_v1` WEB_TARGET constraints below.
-The sandbox itself never performs an action.
+Any cross-layer mutation, runtime execution request, database operation, worker startup, or N1-N6 mutation must produce a simulated STOP outcome by default. The sandbox may predict `EXECUTE` for `n6_strategy_center_display_only_bounded_run_once_v1`, `n6_strategy_center_display_only_scheduled_evaluator_v1`, `n6_user_web_immutable_release_bounded_rebind_v1`, `n6_strategy_center_schema_migration_maintenance_window_v1`, `n6_strategy_center_post_081_v2_web_bounded_rebind_v1`, `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`, `n6_strategy_center_post_081_v2_catalog_migration_window_v1`, `n6_strategy_center_post_083_single_user_pending_v2_revision_v1`, `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`, `n6_strategy_center_pre_canary_web_write_quiesce_v1`, `n6_immutable_release_install_bounded_v1`, `n6_immutable_release_install_pre_rename_validator_recovery_v1`, `n6_immutable_release_install_preflight_git_violation_recovery_v1`, `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`, `n4_lifecycle_inactive_mark_recovery_v1`, `n6_immutable_release_install_eacces_retry_v1`, `n6_immutable_release_install_host_eacces_remediation_v1`, or `runtime_hot_cleanup_archive_gated_disk_governance_v1` only when its simulated Kernel and Runtime Gate independently pass every machine-readable condition of the selected policy. The sandbox itself still performs no command, database connection, file mutation, service restart, or write.
+
+`n6_immutable_release_privileged_atomic_install_v1` is an additional named
+exception only when its simulated Kernel and Runtime Gate independently pass.
+
+`n6_immutable_release_privileged_materialize_and_install_v1` is an additional
+named exception only when its simulated Kernel and Runtime Gate independently
+pass every fixed-archive, one-staging and one-promotion requirement.
+
+`n6_immutable_release_privileged_materialize_and_install_f67_v1` is a separate
+simulated exception only when its dedicated helper path and every frozen f67
+commit/tree/archive/git-ls-tree/manifest/filesystem/bundle hash, 6240/45
+count, PAX 1/108 count, one-fresh-staging and one-promotion requirement pass.
+The sandbox predicts `REJECT` for d85-helper reuse, old staging reuse, path or
+hash drift, unsafe archive entries, retries, metadata expansion, runtime,
+database, N1-N6 or trading operations. The sandbox performs no real action.
+
+For `runtime_hot_cleanup_archive_gated_disk_governance_v1`, Sandbox predicts
+`EXECUTE` only for one selected phase with every Kernel and Runtime Gate field
+present. Reclaim simulation uses only the SHA-bound exact allowlist, models
+per-entry identity/source/archive hash revalidation, exact unlink plus durable
+journal, fixed family/date order, per-date `df` measurement and the 250 GiB
+stop. Missing archive/restore evidence, retained/active/writer overlap,
+symlink/path drift, directory inference, glob/recursive deletion, cross-layer
+or business-service operation, database/snapshot mixing, retry, or a
+policy-definition execution predicts `STOP/REJECT`. The sandbox itself never
+unlinks a file or changes a service.
 
 ### 5.2 DAG Correctness Validation
 
@@ -240,6 +267,26 @@ service, repeated attempt, N1-N5, queue, business, broker, or trading effect
 predicts `STOP`. Normal virtual-executor StartInterval PID/runs cycling alone
 must not predict drift. The sandbox must not infer or fabricate a passing field.
 
+For `n6_strategy_center_post_083_v2_web_bounded_rebind_v1`, the simulation must
+include current-request authorization; committed 081/082/083/084 and frozen
+schema/catalog evidence; one exact legacy source basename
+`20260724_042200__a1dc7350`; its full-commit/tree/archive/git-ls-tree/manifest/
+filesystem/blob-mode-path/ownership/immutable closure; one-time rollback-only
+use; one formal 40-character target with name/commit binding and complete
+immutable, source-delta, non-regression, V2, and schema evidence; strategy write
+`1` before/target/after/rollback; a passed independent evaluator-quiesce gate
+with job/PID absent and zero evaluator operations; and frozen, write-disjoint
+virtual-executor `StartInterval=5` evidence with zero executor operations.
+
+The simulation may predict one exact-Web bootout/bootstrap, state-driven
+teardown, 60-second readiness, 30-second stability, and one conditional exact
+legacy-source rollback. Missing or drifted evidence, another/reused/mutated
+legacy source, legacy target use, a short target, evaluator or executor
+operation, strategy-write `0`, database/migration, extra service, retry,
+N1-N5, queue, business, broker, or trading effects predicts `STOP`. Normal
+virtual-executor PID/runs cycling alone does not predict drift. The sandbox
+must not infer or fabricate a passing field.
+
 For `n6_strategy_center_post_081_v2_catalog_migration_window_v1`, the simulated
 output must select exactly one phase. The 082 simulation must prove committed
 081, absent 082/083, pending count zero, exact Release/SQL hashes, and an
@@ -293,16 +340,16 @@ transaction, official-function change, non-audit guard change, secret leakage,
 or second mutation attempt also predicts `STOP`. The sandbox must not infer a
 missing field or use the governance session as runtime authority.
 
-For `n6_strategy_center_post_083_remaining_users_pending_v2_revision_v1`, the
-sandbox may predict `EXECUTE` only for one explicitly supplied principal/user
-scope with a current N6 authority date, exact active-V1 predecessor CAS and
-unchanged package keys. It requires strategy write `1`, forbids Web PUT and
-evaluator operation, and requires independent attestation of an immutable
-owner-isolated selection function. Missing attestation predicts
-`scope_expansion_required=owner_selection_function` and `STOP`; the existing
-session-token Web function and hand-written SQL cannot satisfy it. The only
-predicted diff is pending revision/items in the two selection tables, with one
-transaction, one attempt and zero retry.
+For `n6_strategy_center_evaluator_quiesce_for_web_rebind_v1`, the simulation
+must bind post-083 state, strategy write `1`, one exact evaluator label and
+bootout target, frozen plist/path/runner/Release/role/ACL/ownership/before
+state, and state-driven PID/job absence. It predicts `STOP` for evaluator
+execution, bootstrap, kickstart, kill/signal, retry, automatic restore, Web or
+virtual-executor operation, ownership/configuration/hash drift, or any
+database, migration, selection/projection/change, queue, N1-N5, business,
+broker, or trading path. Normal configured virtual-executor PID/runs cycling
+alone does not predict drift. The governance session itself performs no
+bootout.
 
 ### 5.4 Rollback Feasibility Analysis
 
@@ -335,43 +382,165 @@ change runtime state
 
 ## 7. Golden Rule
 
+For `n6_immutable_release_install_bounded_v1`, Sandbox predicts `EXECUTE` only
+for one explicitly authorized, already-attested target Release that does not
+exist before the run. Staging must be unique and under the same Release root;
+all content/hash/metadata checks must pass before one atomic rename. The only
+temporary root metadata transition is one owner-write `0555 -> 0755 -> 0555`
+window with frozen owner/group/ACL/xattr and no group/other write. Failure must
+restore `0555` before returning. The only persistent predicted diff is the newly created target and install artifacts. Existing
+Releases, services, LaunchAgents, databases, evaluators and business data are
+untouchable. Failure cleanup is limited to newly created paths.
+
 Sandbox simulation is not execution.
+
+For `n6_immutable_release_install_pre_rename_validator_recovery_v1`, Sandbox
+predicts `EXECUTE` only for the exact hash-bound aa6d19c BLOCKED pre-rename
+failure, unchanged source and existing-Release fingerprints, absent target,
+restored `0555` root, and the exact preserved staging-v1 identity and
+metadata/xattr fingerprints. The one later recovery simulation must first
+generate exactly one SHA-bound xattr-validator capability attestation and
+sidecar. Capability failure predicts STOP before any root chmod or staging-v2
+creation, but first predicts root confirmation at `0555` plus creation and
+sealing of exact recovery failure artifacts in FINALIZE. Only capability PASS may predict one fresh staging-v2
+materialization, complete blob/path/mode/ACL/xattr-value validation against
+the exact release-content-manifest-derived Kernel path set, record count,
+name, raw-value and canonical fingerprint, one root write window and one
+exclusive same-dirfd renameatx_np promotion with EXCL/NOFOLLOW_ANY/BENEATH.
+The predicted persistent diff contains only the new target and exact new
+capability/recovery evidence and install-attestation paths;
+staging-v1 remains unchanged evidence. Missing capability proof, partial
+validation, old-staging reuse/mutation/deletion/cleanup, another staging,
+fallback, second recovery, Git/test/port/service/LaunchAgent/database/
+evaluator/executor/migration/N1-N6/business/trading activity predicts
+`REJECT`. Unknown request keys, ordinary/overwrite rename, owner/group drift,
+unbound output paths or output overwrite also predict `REJECT`. The governance
+definition gate always simulates `STOP` for recovery
+execution. Any predicted pre-rename failure after staging-v2 creation must
+first seal all created staging-v2 entries to `0444/0555`, freeze
+identity/metadata evidence and restore the Release root; a writable failed
+staging predicts `REJECT`. A post-rename postflight failure preserves the
+immutable target as evidence and predicts no target modification or deletion.
+On the success branch, root restoration immediately follows the sole rename
+attempt and precedes every target postflight or attestation write.
+The simulation must defer creation of every recovery output path until the
+root is restored or confirmed unchanged at `0555` and the selected recovery
+outcome branch, including capability failure, has finished sealing and
+postflight; an output path present during the root
+window, staging work, rename or Release postflight predicts `REJECT`.
+Any failure from output-root creation through final output seal must predict
+exclusive/no-follow partial-file handling, recursive `0444/0555` sealing,
+partial identity/hash evidence and zero writable output residue before STOP.
+
+For `n6_immutable_release_install_preflight_git_violation_recovery_v1`,
+Sandbox predicts `EXECUTE` only for the unique frozen pre-mutation turn
+segment and exact single read-only Git tool-call history. Simulation requires
+zero historical Git/worktree mutation and zero filesystem/runtime mutation,
+then models a later gate with no Git and no tests. Governance authority comes
+only from the frozen current `AGENTS.md` raw-byte hash, policy-block raw-byte
+hash, stable session segment/prefix hashes and direct filesystem evidence.
+Capability failure predicts FINALIZE-A then STOP without root chmod or
+staging-v2. Capability PASS predicts one fresh staging-v2, complete
+blob/path/mode/owner/ACL/xattr-value validation, one root write window and one
+exclusive same-dirfd rename. Staging-v1 mutation, prior-policy reuse, fallback,
+retry, cleanup, service/runtime/database/N1-N6/trading activity, Git or tests
+predict `REJECT`; this governance gate always predicts STOP for execution.
+
+For `n4_lifecycle_deactivation_state_columns_controlled_promotion_v1`,
+Sandbox treats the frozen source endpoint/rollback only as non-executable
+content evidence. It predicts `EXECUTE` only when an independent later gate
+has frozen a policy commit whose parent is `8229124a`, exactly two direct-child
+promotion commits and a direct-child rollback whose tree equals the policy
+commit. Simulation recomputes the fixed eight paths, endpoint blobs,
+combined/rollback patch hashes and two exact label/original-plist bindings.
+
+The safe simulated path is two exact bootouts, state-driven job/PID/child
+absence, one ff-only merge to the final tip, and two original-plist
+bootstraps. Source commits used as execution targets, dirty tracked/index
+state, plist/worker/child drift, another path/blob/patch/plist/label, fixed
+sleep, kickstart, manual execute, retry, non-ff merge, push, checkout/rebase/
+cherry-pick, automatic rollback, DB, message/queue, historical-event,
+N2/N3/N5/N6 or trading work predicts `REJECT`. Failure predicts only rollback
+target reporting, never rollback execution. This definition gate always
+predicts STOP for execution.
+
+For `n4_lifecycle_inactive_mark_recovery_v1`, Sandbox simulates exactly one
+phase per request. It verifies the post-policy direct-parent chain, the stable
+eight-file rollback restore, the corrected `normal` inactive current mark with
+previous evidence retained, and a code rollback that restores the
+rollback-restore N4 tree. The only executable shape is two exact bootouts,
+state-driven absence, one ff-only merge and two original-plist bootstraps.
+Phase combination, automatic continuation/rollback, retry, schema/constraint
+change, manual execute, DB/message/history or cross-layer work predicts
+`REJECT`. The policy-definition gate always predicts STOP.
+
+The current revision also simulates the frozen `.git/ORIG_HEAD.lock`
+permission failure and requires zero ref/tree/index/tracked mutation plus both
+original-plist restorations. It predicts STOP unless a fresh post-revision
+four-commit chain reproduces every frozen patch hash and Git metadata write
+authority is verified before any bootout. Prior-target reuse and an
+unauthorized merge probe predict `REJECT`.
+
+For `n6_immutable_release_install_eacces_retry_v1`, Sandbox predicts `EXECUTE`
+only after a frozen initial `EACCES` failure with unchanged prior staging and
+restored root. It predicts one distinct staging/target pair, one root write
+window, and one staging-root write window surrounding one atomic rename. Any
+prior-staging reuse, non-EACCES cause, target exposure, drift, second retry or
+runtime/database/business action predicts `REJECT`.
+
+For `n6_immutable_release_install_host_eacces_remediation_v1`, Sandbox predicts
+`EXECUTE` only from a hash-bound host trace proving both same-parent and `/tmp`
+`EACCES` failures for a `0555` staging. It predicts one fresh staging/target
+and one staging-root mode window; orphaned staging reuse or modification,
+missing trace, retries and runtime/database/business actions predict `REJECT`.
+
+For `n6_immutable_release_privileged_atomic_install_v1`, Sandbox predicts
+`EXECUTE` only for one attested helper SHA/signature and one fixed-root
+parent-dirfd `renameatx_np` using all exclusive/no-follow/beneath flags. Any
+fallback, arbitrary path, metadata mutation, repeat, service, database or
+business action predicts `REJECT`.
+
+For `n6_immutable_release_privileged_materialize_and_install_v1`, Sandbox
+predicts `EXECUTE` only for the exact hash-bound d85df632 archive/manifest,
+source tree, filesystem validation SHA, 6240-file/45-directory counts, one
+attested V2 helper and one new staging retained on failure. Unsafe archive
+entry, another source/hash/count, path escape, symlink/hardlink, mode/count
+drift, malformed or unknown PAX/type records, retry or any
+runtime/database/business operation predicts `REJECT`. Only strictly framed
+PAX `g`/`x` records with `comment`/`path` keys and the frozen Git archive
+input-to-sealed-output mode matrix predict `EXECUTE`.
 
 No real change is allowed inside the sandbox.
 
-The sandbox recognizes `n6_strategy_center_reviewed_view_date_authority_084_v1`
-only for one reviewed-view consensus 084 forward with frozen source/card
-watermarks, strategy write `0`, evaluator quiescence and no calendar/raw-table,
-selection, projection, change or trading access. It recognizes
-`n6_strategy_center_post_canary_web_write_restore_v1` only for one exact-Web
-`0 -> 1` rebind after canary PASS, 12 stable ticks and pending `0`; all other
-runtime/database/worker operations remain simulated `STOP`.
+For Strategy Center Gate3+,
+`n6_strategy_center_pre_canary_web_write_quiesce_v1` sandbox simulation
+predicts `EXECUTE` only when
+an independently authorized exact-Web pre-canary gate has changed strategy
+write `1 -> 0` on the unchanged d85 Release while evaluator and virtual
+executor operation counts remain zero, and
+the stock/index/board reviewed N6 display-basis latest complete singleton
+batches agree on `for_trade_date`, source/card watermarks and membership as-of
+provenance are frozen, and no calendar or N1-N5 raw-table authority appears.
+It models a dynamic single-scope bounded canary, one-scope-per-tick exact
+five-second evaluator with at least twelve stable ticks, one exact-Web flag
+restore, seven separate remaining-user CAS gates, and a final catalog-only V1
+retirement. Missing natural current-date events, all-users mutation, a second
+attempt, cross-user write, evaluator/executor drift or operation, incomplete V2
+rollout, N1-N5, database expansion, or trading effect predicts `REJECT`.
 
-The sandbox also recognizes
-`n6_strategy_center_post_083_multi_user_pending_v2_revision_v1` only as a
-single-scope selection mutation: it predicts STOP unless strategy-write is
-`0`, the exact evaluator is absent, 081/082/083 and the current N6 authority
-are attested, pending and V2-item counts are zero, the active V1 predecessor
-and CAS are frozen, and the sole permitted owner function is called once.
-It never performs the database call; all projection/change, upstream, account,
-or trading mutations remain STOP.
+For Strategy Center decommission simulation, the retirement lifecycle registry
+is evaluated first. Every retired policy predicts `STOP/REJECT`. The Web
+decommission policy predicts `EXECUTE` only for one exact-Web Release rebind
+with write `0`, evaluator absent and unrestored, bounded readiness/stability,
+conditional frozen-source rollback, optional post-stability read-only artifact
+archive, and zero database/virtual-executor/other-service/heartbeat effects.
+The schema archive policy predicts `EXECUTE` only for a separate single
+transaction over the exact six tables and owned sequences/indexes, new
+owner-only schema, required `USAGE` revocations, exclusive trigger/function
+removal, full evidence, protected-object invariance, and a dedicated 30-day
+rollback. Drop/truncate/row DML, retry, gate combination, automatic deletion,
+or missing evidence predicts `STOP/REJECT`.
 
-For `n6_strategy_center_shadow_activation_grant_v1`, sandbox prediction may be
-`EXECUTE` only for WEB_TARGET after the failed parent checkpoint is resumed
-with frozen failure evidence, the second-level supersession and complete SHA
-chain are verified, `GOVERNANCE` and `EVALUATOR_RESUME_FIX` remain passed,
-WEB_TARGET is planned, EVALUATOR_TARGET is `blocked_pending_canary`, and the
-short WEB_TARGET lease matches the latest checkpoint.
-
-WEB_TARGET simulation contains immutable f464 installation and one exact-Web
-d85-to-f464 rebind with strategy-write fixed at `0`. The Evaluator must remain
-absent and has zero operations. EVALUATOR_TARGET predicts `STOP` until
-WEB_TARGET passed plus a later independent current-date bounded canary PASS;
-only then may it be planned for the same f464. Kickstart, runner, same-session
-canary, extra labels, Virtual Executor, database, N1-N5, broker/trading writes,
-empty restore, or semantic drift always predicts `STOP`.
-
-`n6_strategy_center_pre_canary_web_write_quiesce_v1` remains the Gate3+
-flag-only historical path. It predicts `EXECUTE` only for exact Web `1 -> 0`
-on the unchanged Release with Evaluator already absent and zero Virtual
-Executor/database/canary/N1-N5/trading operations.
+Simulation never performs either decommission policy. Physical deletion after
+30 days and canary-heartbeat pause/removal remain outside both models and
+always predict `STOP` without a new independent policy.

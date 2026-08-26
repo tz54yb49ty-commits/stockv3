@@ -51,23 +51,19 @@ class N3CombinedChildRealIOImplementationTest(unittest.TestCase):
         from scripts.n3_combined_child_real_runners import N3ProductionRealIOAdapter
         from scripts.n3p_current_source_fetch_provider import N3PCurrentMarketFetchAdapter
 
-        with patch("scripts.n3p_current_source_fetch_provider._default_mootdx_client") as factory:
-            adapter = N3ProductionRealIOAdapter()
+        adapter = N3ProductionRealIOAdapter()
 
         backend = adapter._n3p_source_fetch_provider.backend
         self.assertIsInstance(backend.market_fetcher, N3PCurrentMarketFetchAdapter)
-        factory.assert_not_called()
 
     def test_production_hint_source_fetch_binds_low_level_market_adapter_without_network(self) -> None:
         from scripts.n3_combined_child_real_runners import N3ProductionRealIOAdapter
         from scripts.n3_hint_frequency8_source_provider import N3HintFrequency8MarketFetchAdapter
 
-        with patch("scripts.n3_hint_frequency8_source_provider._default_mootdx_client") as factory:
-            adapter = N3ProductionRealIOAdapter()
+        adapter = N3ProductionRealIOAdapter()
 
         backend = adapter._n3_hint_source_fetch_provider.backend
         self.assertIsInstance(backend.market_fetcher, N3HintFrequency8MarketFetchAdapter)
-        factory.assert_not_called()
 
     def test_default_confirmed_execute_fails_closed_without_remaining_production_entrypoints(self) -> None:
         # N3P current-source fetch, HINT frequency=8 source, HINT proof

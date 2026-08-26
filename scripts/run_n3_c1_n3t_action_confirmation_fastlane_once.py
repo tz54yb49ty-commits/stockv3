@@ -46,6 +46,9 @@ from ashare_v3.market.c1_scoped_artifact import (
     build_n3_c1_scoped_current_day_staging_artifact,
     build_n3_c1_scoped_current_day_pull_plan,
     canonical_ashare_1m_labels,
+    fixed_period_calculation_row_index,
+    previous_period_sources_are_valid,
+    required_previous_day_metric_context_labels,
     source_close_label_for_physical_start_label,
     source_close_label_to_physical_start_label,
 )
@@ -59,14 +62,55 @@ from ashare_v3.market.n3t_action_confirmation_metric import (
 INPUT_ARTIFACT_TYPE = "n5_active_scope_snapshot_v1"
 DEFAULT_FASTLANE_MAX_RUNTIME_SECONDS = 30.0
 DEFAULT_POST_CLOSE_FINAL_A_PASS_MAX_CANDIDATES = 12
-DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES = 256
+DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES = 512
 DEFAULT_ACTIVE_A_MINUTE_BATCH_MAX_MINUTES_PER_OBJECT = 10
+DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT = 16
+DEFAULT_OBJECT_CURSOR_BATCH_MAX_PROOF_ROWS = 4096
+DEFAULT_OBJECT_CURSOR_COHORT_MAX_SOURCE_OBJECTS = 512
+DEFAULT_OBJECT_CURSOR_BATCH_BACKLOG_MAX_MINUTES_PER_OBJECT = 64
+DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_MAX_PROOF_ROWS = 4096
+DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_SIZE = 8
+DEFAULT_OBJECT_CURSOR_BATCH_LIVE_SLOTS_PER_CHUNK = 4
+DEFAULT_OBJECT_CURSOR_BATCH_LIVE_WINDOW_MINUTES = 3
+DEFAULT_OBJECT_CURSOR_BATCH_MIN_SECONDS_TO_START_CHUNK = 8.0
+DEFAULT_OBJECT_CURSOR_BATCH_PROBE_CHUNK_COUNT = 4
+DEFAULT_OBJECT_CURSOR_BATCH_MAX_CHUNKS_PER_INVOCATION = 1
+DEFAULT_OBJECT_CURSOR_BATCH_RETRY_SECONDS = 60
+OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED = "balanced_fair"
+OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH = "live_minute_fastpath"
+OBJECT_CURSOR_BATCH_ASSET_KIND_ORDER = ("stock", "index", "board")
+OBJECT_CURSOR_BATCH_QUEUE_POLICY = "live_backlog_50_50_asset_round_robin_v1"
 DEFAULT_EXISTING_SOURCE_STAGING_MAX_CANDIDATES = 16
 DEFAULT_EXISTING_STAGING_METRIC_CONTEXT_MAX_CANDIDATES = 2048
 DEFAULT_SCOPED_PULL_PLAN_MAX_CANDIDATES = 16
 DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY = 8
-MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY = 8
+MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY = 16
+INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE = "n3_c1_n3t_intraday_source_cache_v1"
+INTRADAY_SOURCE_CACHE_TAIL_OFFSET = 32
+INTRADAY_SOURCE_CACHE_MAX_OFFSET = 256
+INTRADAY_SOURCE_CACHE_LOOKAHEAD_ROWS = 16
+POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM = 1501
+POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL = "14:59"
+DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE = 64
+DEFAULT_POST_CLOSE_FINAL_A_PROOF_CHUNK_SIZE = (
+    DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE
+    * DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT
+)
+POST_CLOSE_FINAL_A_C1_PULL_ATTEMPT_ARTIFACT_TYPE = (
+    "n3_c1_n3t_post_close_final_a_c1_pull_attempt_v1"
+)
+POST_CLOSE_FINAL_A_SOURCE_CACHE_ARTIFACT_TYPE = (
+    "n3_c1_n3t_post_close_final_a_source_cache_v1"
+)
+POST_CLOSE_FINAL_A_PROGRESS_ARTIFACT_TYPE = (
+    "n3_c1_n3t_post_close_final_a_progress_v1"
+)
 ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE = "active_a_minute_batch_direct_provider"
+OBJECT_CURSOR_BATCH_MODE = "active_a_object_cursor_in_memory_batch"
+OBJECT_CURSOR_BATCH_ARTIFACT_TYPE = "n3_c1_n3t_object_cursor_batch_v1"
+OBJECT_CURSOR_BATCH_RETRY_STATE_ARTIFACT_TYPE = (
+    "n3_c1_n3t_object_cursor_retry_state_v1"
+)
 OBJECT_SCOPE_REF_FANOUT_PAYLOAD_POLICY = "n3_c1_n3t_compact_ref_v1"
 OBJECT_SCOPE_REF_FANOUT_REF_FIELDS = (
     "for_trade_date",
@@ -174,6 +218,7 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
     metric_context_builder_result: dict[str, Any] | None = None
     metric_context_priority_summary: dict[str, Any] | None = None
     c1_active_a_minute_batch_summary: dict[str, Any] | None = None
+    post_close_final_a_close_grace_pull: dict[str, Any] = {}
     n3t_writer_inputs: list[dict[str, Any]] = []
     n3t_writer_done_markers: list[dict[str, Any]] = []
     lane_results: dict[str, Any] = _initial_independent_lane_results()
@@ -187,8 +232,33 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
         )
         deadline_check("validated")
         raw_active_scope_artifacts = _discover_requested_active_scope_artifacts(args, fanout=False)
-        artifacts = _discover_requested_active_scope_artifacts(args)
         deadline_check("active_scope_discovered")
+        if args.execute and _object_cursor_batch_hot_path_enabled(args):
+            if not raw_active_scope_artifacts:
+                raise FastlaneShellBlocked("active_scope_artifact_missing")
+            if current_day_source_provider_adapter is None:
+                current_day_source_provider_adapter = _configured_current_day_source_provider_adapter(args)
+            if previous_day_context_provider_adapter is None:
+                previous_day_context_provider_adapter = _configured_previous_day_context_provider_adapter(args)
+            if n3t_writer_adapter is None:
+                n3t_writer_adapter = _configured_n3t_writer_adapter(args)
+            object_batch_runner = (
+                _run_post_close_final_a_object_cursor_batch_hot_path
+                if _is_post_close_final_a_pass(args)
+                else _run_object_cursor_batch_hot_path
+            )
+            return object_batch_runner(
+                args=args,
+                invocation_id=invocation_id,
+                active_scope_artifacts=raw_active_scope_artifacts,
+                current_day_source_provider_adapter=current_day_source_provider_adapter,
+                previous_day_context_provider_adapter=previous_day_context_provider_adapter,
+                n3t_writer_adapter=n3t_writer_adapter,
+                deadline_check=deadline_check,
+                started=started,
+                now_monotonic=now_monotonic,
+            )
+        artifacts = _discover_requested_active_scope_artifacts(args)
         if args.execute:
             if not artifacts:
                 raise FastlaneShellBlocked("active_scope_artifact_missing")
@@ -257,7 +327,14 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             scoped_pull_plan_summary: dict[str, Any] = {}
             existing_source_staging_count = 0
             active_a_minute_batch_controls_c1 = False
-            post_close_c1_provider_disabled = _post_close_c1_provider_disabled(args)
+            post_close_final_a_close_grace_pull = _post_close_final_a_c1_pull_gate(
+                args,
+                output_dir=Path(args.output_dir),
+            )
+            args.post_close_final_a_close_grace_pull = post_close_final_a_close_grace_pull
+            post_close_c1_provider_disabled = bool(
+                post_close_final_a_close_grace_pull.get("c1_selection_disabled")
+            )
             if source_dir_text and not post_close_c1_provider_disabled:
                 prioritized_staging_artifacts, c1_active_a_minute_batch_summary = (
                         _select_active_a_minute_batch_direct_provider_artifacts(
@@ -268,6 +345,19 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         max_candidates=_current_day_source_provider_max_candidates(args),
                     )
                 )
+                if _is_post_close_final_a_pass(args):
+                    _apply_post_close_final_a_full_scope_coverage(
+                        close_grace_pull=post_close_final_a_close_grace_pull,
+                        c1_summary=c1_active_a_minute_batch_summary,
+                    )
+                    if not bool(post_close_final_a_close_grace_pull.get("external_pull_allowed")):
+                        c1_active_a_minute_batch_summary["reason"] = (
+                            str(post_close_final_a_close_grace_pull.get("reason") or "")
+                            or "post_close_final_a_scope_exceeds_single_pull_limit"
+                        )
+                    c1_active_a_minute_batch_summary["post_close_final_a_close_grace_pull"] = dict(
+                        post_close_final_a_close_grace_pull
+                    )
                 active_a_minute_batch_controls_c1 = _active_a_minute_batch_controls_c1(
                     active_scope_artifacts=base_active_scope_artifacts,
                     summary=c1_active_a_minute_batch_summary,
@@ -354,6 +444,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             if source_dir_text and post_close_c1_provider_disabled and not metric_context_priority_artifacts:
                 c1_active_a_minute_batch_summary = _post_close_c1_provider_disabled_summary(
                     active_scope_artifacts=base_active_scope_artifacts,
+                    reason=str(
+                        post_close_final_a_close_grace_pull.get("reason")
+                        or "post_close_c1_provider_disabled"
+                    ),
+                    close_grace_pull=post_close_final_a_close_grace_pull,
                 )
                 args.c1_active_a_minute_batch_summary = c1_active_a_minute_batch_summary
                 lane_results["c1_lane"] = _lane_result_from_active_a_minute_batch_summary(
@@ -363,7 +458,7 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 )
                 return {
                     "verdict": "N3_C1_N3T_FASTLANE_READINESS_WAITING",
-                    "reason": "post_close_c1_provider_disabled",
+                    "reason": str(c1_active_a_minute_batch_summary["reason"]),
                     "invocation_id": invocation_id,
                     "fastlane_lane_id": args.fastlane_lane_id,
                     "active_scope_artifact_count": len(base_active_scope_artifacts),
@@ -379,6 +474,9 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                     },
                     "lane_results": dict(lane_results),
                     "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary),
+                    "post_close_final_a_close_grace_pull": dict(
+                        post_close_final_a_close_grace_pull
+                    ),
                     "boundary": _boundary(),
                     "bounded": {
                         "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
@@ -507,7 +605,12 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         deadline_check=deadline_check,
                         require_source_dir_exists=False,
                     )
-                if current_day_source_provider_adapter is None:
+                if (
+                    _is_post_close_final_a_pass(args)
+                    and not bool(post_close_final_a_close_grace_pull.get("external_pull_allowed"))
+                ):
+                    current_day_source_provider_adapter = None
+                elif current_day_source_provider_adapter is None:
                     current_day_source_provider_adapter = _configured_current_day_source_provider_adapter(args)
                 direct_staging_count = 0
                 if existing_source_staging_count > 0:
@@ -533,12 +636,26 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                             )
                             if isinstance(item, Mapping)
                         ]
-                        current_day_source_provider_result = _run_active_a_minute_batch_direct_provider_adapter(
-                            args=args,
-                            active_scope_artifacts=provider_fetch_artifacts or artifacts,
-                            output_dir=Path(args.output_dir),
-                            current_day_source_provider_adapter=current_day_source_provider_adapter,
-                        )
+                        if _is_post_close_final_a_pass(args):
+                            current_day_source_provider_result = (
+                                _run_post_close_final_a_single_close_grace_provider_adapter(
+                                    args=args,
+                                    invocation_id=invocation_id,
+                                    active_scope_artifacts=provider_fetch_artifacts or artifacts,
+                                    output_dir=Path(args.output_dir),
+                                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                                    close_grace_pull=post_close_final_a_close_grace_pull,
+                                )
+                            )
+                        else:
+                            current_day_source_provider_result = (
+                                _run_active_a_minute_batch_direct_provider_adapter(
+                                    args=args,
+                                    active_scope_artifacts=provider_fetch_artifacts or artifacts,
+                                    output_dir=Path(args.output_dir),
+                                    current_day_source_provider_adapter=current_day_source_provider_adapter,
+                                )
+                            )
                         provider_staging_count = _materialize_active_a_minute_batch_direct_staging_artifacts(
                             args=args,
                             active_scope_artifacts=artifacts,
@@ -568,6 +685,10 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                         current_day_source_provider_result=current_day_source_provider_result,
                         staging_artifact_written_count=direct_staging_count,
                     )
+                    if _is_post_close_final_a_pass(args):
+                        c1_active_a_minute_batch_summary["post_close_final_a_close_grace_pull"] = dict(
+                            post_close_final_a_close_grace_pull
+                        )
                     if direct_staging_count > 0:
                         c1_active_a_minute_batch_summary["ready_handoff_artifacts"] = [
                             dict(item) for item in artifacts
@@ -662,6 +783,9 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                             "lane_results": dict(lane_results),
                             "current_day_source_provider_result": current_day_source_provider_result,
                             "c1_active_a_minute_batch": dict(c1_active_a_minute_batch_summary),
+                            "post_close_final_a_close_grace_pull": dict(
+                                post_close_final_a_close_grace_pull
+                            ),
                             "boundary": _boundary(),
                             "bounded": {
                                 "max_runtime_seconds": float(getattr(args, "max_runtime_seconds", 0.0) or 0.0),
@@ -916,6 +1040,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
                 or getattr(args, "c1_active_a_minute_batch_summary", {})
                 or {}
             ),
+            "post_close_final_a_close_grace_pull": dict(
+                post_close_final_a_close_grace_pull
+                or getattr(args, "post_close_final_a_close_grace_pull", {})
+                or {}
+            ),
             "metric_context_builder_result": metric_context_builder_result,
             "scoped_pull_plan_chunk": dict(getattr(args, "scoped_pull_plan_chunk_summary", {}) or {}),
             "bounded": {
@@ -1013,6 +1142,11 @@ def run_n3_c1_n3t_action_confirmation_fastlane_once(
             "c1_active_a_minute_batch": dict(
                 c1_active_a_minute_batch_summary
                 or getattr(args, "c1_active_a_minute_batch_summary", {})
+                or {}
+            ),
+            "post_close_final_a_close_grace_pull": dict(
+                post_close_final_a_close_grace_pull
+                or getattr(args, "post_close_final_a_close_grace_pull", {})
                 or {}
             ),
             "metric_context_builder_result": metric_context_builder_result,
@@ -1748,6 +1882,8 @@ def _select_active_a_minute_batch_direct_provider_artifacts(
             "reason": "active_a_minute_batch_closed_minute_unavailable",
             "selected_candidate_count": 0,
             "selected_object_count": 0,
+            "pending_object_count": 0,
+            "remaining_object_count": 0,
             "selected_ref_count": 0,
             "closed_minute_label": "",
             "source_artifact_written_count": 0,
@@ -1848,6 +1984,10 @@ def _select_active_a_minute_batch_direct_provider_artifacts(
             continue
         pending_records.append(record)
 
+    pending_object_groups = {
+        tuple(item.get("object_group_key") or ())
+        for item in pending_records
+    }
     selected_object_groups: set[tuple[str, str, str, str]] = set()
     for item in pending_records:
         selected_object_groups.add(tuple(item.get("object_group_key") or ()))
@@ -1921,6 +2061,8 @@ def _select_active_a_minute_batch_direct_provider_artifacts(
         ),
         "selected_candidate_count": len(selected_records),
         "selected_object_count": len(selected_object_groups),
+        "pending_object_count": len(pending_object_groups),
+        "remaining_object_count": len(pending_object_groups - selected_object_groups),
         "selected_ref_count": selected_ref_count,
         "closed_minute_label": _hhmm_to_minute_label(selected_hhmm[0]) if len(selected_hhmm) == 1 else "multiple",
         "source_artifact_written_count": 0,
@@ -1964,13 +2106,17 @@ def _active_a_minute_batch_payload_candidates(
     artifact: Mapping[str, Any],
     payload: Mapping[str, Any],
     closed_hhmm: str,
+    selected_object_keys: set[tuple[str, str, str, str]] | None = None,
+    max_minutes_per_object: int | None = None,
+    cursor_floor_by_object: Mapping[tuple[str, str, str, str], str] | None = None,
+    completed_object_keys: set[tuple[str, str, str, str]] | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     if artifact.get("object_scope_ref_fanout") is True or payload.get("object_scope_ref_fanout") is True:
         return [(dict(artifact), dict(payload))]
     closed_value = _hhmm_int(closed_hhmm)
     if closed_value <= 0:
         return []
-    rows = [dict(row) for row in payload.get("scope_rows") or [] if isinstance(row, Mapping)]
+    rows = [row for row in payload.get("scope_rows") or [] if isinstance(row, Mapping)]
     buckets: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for object_row in rows:
         if str(object_row.get("scope_status") or "active") != "active":
@@ -1978,17 +2124,48 @@ def _active_a_minute_batch_payload_candidates(
         for ref_source in object_row.get("active_tracking_refs") or []:
             if not isinstance(ref_source, Mapping):
                 continue
-            ref = dict(ref_source)
-            ref_target = _target_hhmm_from_active_ref(ref)
+            ref_target = _target_hhmm_from_active_ref(ref_source)
             if not ref_target:
                 continue
             ref_for_trade_date = str(
-                ref.get("for_trade_date")
+                ref_source.get("for_trade_date")
                 or object_row.get("for_trade_date")
                 or payload.get("for_trade_date")
                 or artifact.get("for_trade_date")
                 or ""
             )
+            direction = str(
+                ref_source.get("direction")
+                or object_row.get("direction")
+                or ""
+            )
+            object_key = (
+                ref_for_trade_date,
+                str(
+                    ref_source.get("asset_kind")
+                    or object_row.get("asset_kind")
+                    or ""
+                ),
+                str(
+                    ref_source.get("identity_key")
+                    or object_row.get("identity_key")
+                    or ""
+                ),
+                direction,
+            )
+            if not all(object_key):
+                continue
+            if object_key in (completed_object_keys or set()):
+                continue
+            if selected_object_keys is not None and object_key not in selected_object_keys:
+                continue
+            cursor_floor = str((cursor_floor_by_object or {}).get(object_key) or "")
+            if cursor_floor:
+                ref_target = _max_canonical_hhmm(
+                    for_trade_date=ref_for_trade_date,
+                    left=ref_target,
+                    right=cursor_floor,
+                )
             target_hhmms = _active_a_minute_batch_target_hhmms(
                 for_trade_date=ref_for_trade_date,
                 start_hhmm=ref_target,
@@ -1999,21 +2176,31 @@ def _active_a_minute_batch_payload_candidates(
             # One mootdx response already contains the full intraday series.
             # Materialize every closed cursor minute from that single response
             # so N3T can evaluate the backlog without repeating market pulls.
-            direction = str(ref.get("direction") or object_row.get("direction") or "")
-            if not direction:
-                continue
+            ref = dict(ref_source)
             for target_hhmm in target_hhmms:
-                key = (
-                    ref_for_trade_date,
-                    str(ref.get("asset_kind") or object_row.get("asset_kind") or ""),
-                    str(ref.get("identity_key") or object_row.get("identity_key") or ""),
-                    direction,
-                    target_hhmm,
-                )
+                key = (*object_key, target_hhmm)
                 bucket = buckets.setdefault(key, {"object_row": object_row, "refs": [], "target_hhmm": target_hhmm})
                 bucket["refs"].append(ref)
+    bounded_bucket_keys = list(buckets)
+    if max_minutes_per_object is not None:
+        bounded_bucket_keys = []
+        bucket_keys_by_object: dict[
+            tuple[str, str, str, str],
+            list[tuple[str, str, str, str, str]],
+        ] = {}
+        for key in buckets:
+            bucket_keys_by_object.setdefault(key[:4], []).append(key)
+        minute_limit = max(1, int(max_minutes_per_object or 1))
+        for object_key in sorted(bucket_keys_by_object):
+            bounded_bucket_keys.extend(
+                sorted(
+                    bucket_keys_by_object[object_key],
+                    key=lambda item: _hhmm_int(item[4]),
+                )[:minute_limit]
+            )
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for sequence, bucket in enumerate(buckets.values()):
+    for sequence, bucket_key in enumerate(bounded_bucket_keys):
+        bucket = buckets[bucket_key]
         refs = sorted(
             (dict(ref) for ref in bucket["refs"]),
             key=lambda ref: (
@@ -2073,6 +2260,3997 @@ def _active_a_minute_batch_payload_candidates(
         )
         candidates.append((candidate, narrowed_payload))
     return candidates
+
+
+def _object_cursor_batch_lightweight_object_census(
+    *,
+    loaded_artifacts: Sequence[
+        tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
+    ],
+    closed_hhmm: str,
+    max_minutes_per_object: int,
+    cursor_floor_by_object: Mapping[tuple[str, str, str, str], str] | None = None,
+    completed_object_keys: set[tuple[str, str, str, str]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str, str], int]]:
+    earliest_target_by_object: dict[tuple[str, str, str, str], str] = {}
+    candidate_count_by_object: dict[tuple[str, str, str, str], int] = {}
+    cursor_confirmed_proof_object_keys: set[
+        tuple[str, str, str, str]
+    ] = set()
+    minute_limit = max(1, int(max_minutes_per_object or 1))
+    for artifact, _source, payload in loaded_artifacts:
+        for object_row in payload.get("scope_rows") or []:
+            if not isinstance(object_row, Mapping):
+                continue
+            if str(object_row.get("scope_status") or "active") != "active":
+                continue
+            for ref in object_row.get("active_tracking_refs") or []:
+                if not isinstance(ref, Mapping):
+                    continue
+                target_hhmm = _target_hhmm_from_active_ref(ref)
+                if not target_hhmm:
+                    continue
+                for_trade_date = str(
+                    ref.get("for_trade_date")
+                    or object_row.get("for_trade_date")
+                    or payload.get("for_trade_date")
+                    or artifact.get("for_trade_date")
+                    or ""
+                )
+                object_key = (
+                    for_trade_date,
+                    str(
+                        ref.get("asset_kind")
+                        or object_row.get("asset_kind")
+                        or ""
+                    ),
+                    str(
+                        ref.get("identity_key")
+                        or object_row.get("identity_key")
+                        or ""
+                    ),
+                    str(
+                        ref.get("direction")
+                        or object_row.get("direction")
+                        or ""
+                    ),
+                )
+                if not all(object_key):
+                    continue
+                if object_key in (completed_object_keys or set()):
+                    continue
+                if _active_ref_cursor_confirms_existing_proof(ref):
+                    cursor_confirmed_proof_object_keys.add(object_key)
+                cursor_floor = str((cursor_floor_by_object or {}).get(object_key) or "")
+                if cursor_floor:
+                    target_hhmm = _max_canonical_hhmm(
+                        for_trade_date=for_trade_date,
+                        left=target_hhmm,
+                        right=cursor_floor,
+                    )
+                previous_target = earliest_target_by_object.get(object_key)
+                if previous_target is None or _hhmm_int(target_hhmm) < _hhmm_int(
+                    previous_target
+                ):
+                    earliest_target_by_object[object_key] = target_hhmm
+    records: list[dict[str, Any]] = []
+    for object_key, target_hhmm in earliest_target_by_object.items():
+        target_hhmms = _active_a_minute_batch_target_hhmms(
+            for_trade_date=object_key[0],
+            start_hhmm=target_hhmm,
+            closed_hhmm=closed_hhmm,
+        )[:minute_limit]
+        if not target_hhmms:
+            continue
+        candidate_count_by_object[object_key] = len(target_hhmms)
+        records.append(
+            {
+                "object_key": object_key,
+                "target_hhmm": target_hhmms[0],
+                "n3t_metric_run_id": "",
+                "cursor_confirms_existing_proof": (
+                    object_key in cursor_confirmed_proof_object_keys
+                ),
+            }
+        )
+    return records, candidate_count_by_object
+
+
+def _object_cursor_batch_hot_path_enabled(args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, "scheduler_quiet", False)):
+        return False
+    if not bool(getattr(args, "execute", False)):
+        return False
+    session_phase = str(getattr(args, "fastlane_session_phase", "") or "")
+    if session_phase in {"trading", "lunch_break"}:
+        return True
+    return session_phase == "post_close" and _is_post_close_final_a_pass(args)
+
+
+def _object_cursor_batch_candidate_records(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    closed_hhmm: str,
+    max_minutes_per_object: int = DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT,
+    max_objects: int | None = None,
+    priority_object_keys: set[tuple[str, str, str, str]] | None = None,
+    census_summary: dict[str, Any] | None = None,
+    cursor_floor_by_object: Mapping[tuple[str, str, str, str], str] | None = None,
+    completed_object_keys: set[tuple[str, str, str, str]] | None = None,
+    excluded_object_keys: set[tuple[str, str, str, str]] | None = None,
+    queue_mode: str = OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED,
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    loaded_artifacts: list[
+        tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
+    ] = []
+    for artifact in active_scope_artifacts:
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        if not source["exists"]:
+            continue
+        payload = dict(source.get("payload") or {})
+        loaded_artifacts.append((artifact, source, payload))
+
+    selected_object_keys: set[tuple[str, str, str, str]] | None = None
+    lightweight_records: list[dict[str, Any]] = []
+    candidate_count_by_object: dict[tuple[str, str, str, str], int] = {}
+    lightweight_summary: dict[str, Any] = {}
+    if max_objects is not None:
+        lightweight_records, candidate_count_by_object = (
+            _object_cursor_batch_lightweight_object_census(
+                loaded_artifacts=loaded_artifacts,
+                closed_hhmm=closed_hhmm,
+                max_minutes_per_object=max_minutes_per_object,
+                cursor_floor_by_object=cursor_floor_by_object,
+                completed_object_keys=completed_object_keys,
+            )
+        )
+        excluded = set(excluded_object_keys or set())
+        available_lightweight_records = [
+            record
+            for record in lightweight_records
+            if tuple(record.get("object_key") or ()) not in excluded
+        ]
+        selected_objects, lightweight_summary = (
+            _select_pending_object_cursor_batch_records(
+                records=available_lightweight_records,
+                existing_proof_keys=set(),
+                closed_hhmm=closed_hhmm,
+                max_objects=max_objects,
+                max_proof_rows=max_objects,
+                queue_mode=queue_mode,
+            )
+        )
+        selected_object_keys = set()
+        for object_key in sorted(priority_object_keys or set()):
+            if object_key in candidate_count_by_object and object_key not in excluded:
+                selected_object_keys.add(object_key)
+                if len(selected_object_keys) >= max_objects:
+                    break
+        for record in selected_objects:
+            if len(selected_object_keys) >= max_objects:
+                break
+            selected_object_keys.add(tuple(record.get("object_key") or ()))
+        if census_summary is not None:
+            available_candidate_count_by_object = {
+                object_key: count
+                for object_key, count in candidate_count_by_object.items()
+                if object_key not in excluded
+            }
+            pending_candidate_count_by_tier = {"live": 0, "backlog": 0}
+            pending_candidate_count_by_asset: dict[str, int] = {}
+            tier_by_object = {
+                tuple(record.get("object_key") or ()): str(
+                    record.get("queue_tier") or "backlog"
+                )
+                for record in selected_objects
+            }
+            live_hhmms_by_date: dict[str, set[str]] = {}
+            for record in available_lightweight_records:
+                object_key = tuple(record.get("object_key") or ())
+                if len(object_key) != 4:
+                    continue
+                live_hhmms = live_hhmms_by_date.setdefault(
+                    object_key[0],
+                    _object_cursor_batch_live_hhmms(
+                        for_trade_date=object_key[0],
+                        closed_hhmm=closed_hhmm,
+                    ),
+                )
+                tier = (
+                    "live"
+                    if str(record.get("target_hhmm") or "") in live_hhmms
+                    else "backlog"
+                )
+                tier_by_object.setdefault(object_key, tier)
+                count = int(
+                    available_candidate_count_by_object.get(object_key) or 0
+                )
+                pending_candidate_count_by_tier[tier] += count
+                pending_candidate_count_by_asset[object_key[1]] = (
+                    pending_candidate_count_by_asset.get(object_key[1], 0)
+                    + count
+                )
+            census_summary.update(
+                {
+                    "candidate_object_count": len(
+                        available_candidate_count_by_object
+                    ),
+                    "candidate_count": sum(
+                        available_candidate_count_by_object.values()
+                    ),
+                    "pending_object_count_by_tier": dict(
+                        lightweight_summary.get("pending_object_count_by_tier")
+                        or {}
+                    ),
+                    "pending_object_count_by_asset_kind": dict(
+                        lightweight_summary.get(
+                            "pending_object_count_by_asset_kind"
+                        )
+                        or {}
+                    ),
+                    "pending_candidate_count_by_tier": (
+                        pending_candidate_count_by_tier
+                    ),
+                    "pending_candidate_count_by_asset_kind": (
+                        pending_candidate_count_by_asset
+                    ),
+                }
+            )
+
+    for sequence, (artifact, source, payload) in enumerate(loaded_artifacts):
+        for candidate, narrowed_payload in _active_a_minute_batch_payload_candidates(
+            artifact=artifact,
+            payload=payload,
+            closed_hhmm=closed_hhmm,
+            selected_object_keys=selected_object_keys,
+            max_minutes_per_object=max_minutes_per_object,
+            cursor_floor_by_object=cursor_floor_by_object,
+            completed_object_keys=completed_object_keys,
+        ):
+            target_hhmm = str(narrowed_payload.get("target_hhmm") or candidate.get("target_hhmm") or "")
+            object_key = _active_a_minute_batch_object_key(narrowed_payload, target_hhmm=target_hhmm)[:4]
+            if not all(object_key) or not re.fullmatch(r"[0-2][0-9][0-5][0-9]", target_hhmm):
+                continue
+            source_run_hash = _active_a_minute_batch_source_run_hash(
+                narrowed_payload,
+                target_hhmm=target_hhmm,
+            )
+            if not source_run_hash:
+                continue
+            for_trade_date = object_key[0]
+            n3t_metric_run_id = (
+                f"n3t_action_confirmation_metric_{for_trade_date}_until_{target_hhmm}__"
+                f"fastlane_sr_{source_run_hash}_raw_prevday_c1_amount_v1"
+            )
+            groups.setdefault(object_key, []).append(
+                {
+                    "object_key": object_key,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "source_run_namespace": f"{for_trade_date}_{target_hhmm}_{source_run_hash}",
+                    "n3t_metric_run_id": n3t_metric_run_id,
+                    "cursor_confirms_existing_proof": (
+                        _active_scope_payload_cursor_confirms_existing_proof(
+                            narrowed_payload
+                        )
+                    ),
+                    "payload": narrowed_payload,
+                    "source_active_scope_artifact_path": str(source.get("path") or artifact.get("path") or ""),
+                    "source_active_scope_artifact_sha256": str(source.get("sha256") or ""),
+                    "selected_ref_count": _active_a_minute_batch_ref_count(narrowed_payload),
+                    "sort_sequence": sequence,
+                }
+            )
+
+    bounded: list[dict[str, Any]] = []
+    limit = max(
+        1,
+        int(
+            max_minutes_per_object
+            or DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT
+        ),
+    )
+    for object_key in sorted(groups):
+        records_by_target: dict[str, dict[str, Any]] = {}
+        for record in sorted(
+            groups[object_key],
+            key=lambda item: (_hhmm_int(item["target_hhmm"]), int(item.get("sort_sequence") or 0)),
+        ):
+            records_by_target.setdefault(str(record["target_hhmm"]), record)
+        bounded.extend(list(records_by_target.values())[:limit])
+    bounded.sort(key=lambda item: (_hhmm_int(item["target_hhmm"]), tuple(item["object_key"])))
+    return bounded
+
+
+def _object_cursor_batch_proof_key(record: Mapping[str, Any]) -> tuple[str, str, str]:
+    object_key = tuple(record.get("object_key") or ())
+    identity_key = str(object_key[2]) if len(object_key) >= 3 else ""
+    return (
+        str(record.get("n3t_metric_run_id") or ""),
+        identity_key,
+        _hhmm_to_minute_label(record.get("target_hhmm") or ""),
+    )
+
+
+def _object_cursor_batch_live_hhmms(
+    *,
+    for_trade_date: str,
+    closed_hhmm: str,
+    live_window_minutes: int = DEFAULT_OBJECT_CURSOR_BATCH_LIVE_WINDOW_MINUTES,
+) -> set[str]:
+    labels = (
+        _canonical_ashare_1m_labels_cached(for_trade_date)
+        if re.fullmatch(r"\d{8}", str(for_trade_date or ""))
+        else ()
+    )
+    closed_label = _hhmm_to_minute_label(closed_hhmm)
+    if closed_label not in labels:
+        return {str(closed_hhmm or "")} if closed_hhmm else set()
+    closed_index = labels.index(closed_label)
+    start_index = max(0, closed_index - max(1, int(live_window_minutes or 1)) + 1)
+    return {label.replace(":", "") for label in labels[start_index : closed_index + 1]}
+
+
+def _object_cursor_batch_pop_fair_objects(
+    queues_by_asset: Mapping[str, list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]]],
+    *,
+    limit: int,
+) -> list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]]:
+    selected: list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]] = []
+    asset_order = list(OBJECT_CURSOR_BATCH_ASSET_KIND_ORDER)
+    asset_order.extend(sorted(set(queues_by_asset) - set(asset_order)))
+    while len(selected) < max(0, int(limit or 0)):
+        progressed = False
+        for asset_kind in asset_order:
+            queue = queues_by_asset.get(asset_kind) or []
+            if not queue:
+                continue
+            selected.append(queue.pop(0))
+            progressed = True
+            if len(selected) >= limit:
+                break
+        if not progressed:
+            break
+    return selected
+
+
+def _object_cursor_batch_pending_object_queues(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    existing_proof_keys: set[tuple[str, str, str]],
+    existing_proof_object_keys: set[tuple[str, str, str, str]] | None = None,
+    closed_hhmm: str,
+) -> tuple[
+    dict[str, dict[str, list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]]]],
+    list[dict[str, Any]],
+]:
+    pending = [
+        dict(record)
+        for record in records
+        if _object_cursor_batch_proof_key(record) not in existing_proof_keys
+    ]
+    records_by_object: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for record in pending:
+        records_by_object.setdefault(tuple(record.get("object_key") or ()), []).append(record)
+    objects_with_existing_proof = set(existing_proof_object_keys or set())
+    objects_with_existing_proof.update(
+        tuple(record.get("object_key") or ())
+        for record in records
+        if _object_cursor_batch_proof_key(record) in existing_proof_keys
+    )
+    objects_with_existing_proof.update(
+        tuple(record.get("object_key") or ())
+        for record in records
+        if record.get("cursor_confirms_existing_proof") is True
+    )
+
+    queues: dict[
+        str,
+        dict[str, list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]]],
+    ] = {"live": {}, "backlog": {}}
+    for object_key, object_records in records_by_object.items():
+        ordered_records = sorted(
+            object_records,
+            key=lambda item: (_hhmm_int(item.get("target_hhmm")), tuple(item.get("object_key") or ())),
+        )
+        if len(object_key) != 4 or not ordered_records:
+            continue
+        live_hhmms = _object_cursor_batch_live_hhmms(
+            for_trade_date=str(object_key[0]),
+            closed_hhmm=closed_hhmm,
+        )
+        # The first proof is SLA-critical. It remains in the live tier until it
+        # exists, even after its minute falls outside the rolling live window.
+        tier = (
+            "live"
+            if (
+                object_key not in objects_with_existing_proof
+                or str(ordered_records[0].get("target_hhmm") or "") in live_hhmms
+            )
+            else "backlog"
+        )
+        for record in ordered_records:
+            record["first_proof_urgent"] = object_key not in objects_with_existing_proof
+            record["proof_due_hhmm"] = str(record.get("target_hhmm") or "")
+        queues[tier].setdefault(str(object_key[1]), []).append((object_key, ordered_records))
+
+    for tier_queues in queues.values():
+        for asset_kind, queue in tier_queues.items():
+            tier_queues[asset_kind] = sorted(
+                queue,
+                key=lambda item: (
+                    _hhmm_int(item[1][0].get("target_hhmm")),
+                    item[0][2],
+                    item[0][3],
+                ),
+            )
+    return queues, pending
+
+
+def _select_pending_object_cursor_batch_records(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    existing_proof_keys: set[tuple[str, str, str]],
+    existing_proof_object_keys: set[tuple[str, str, str, str]] | None = None,
+    closed_hhmm: str = "",
+    max_objects: int = DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES,
+    max_proof_rows: int = DEFAULT_OBJECT_CURSOR_BATCH_MAX_PROOF_ROWS,
+    queue_mode: str = OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if queue_mode not in {
+        OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED,
+        OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH,
+    }:
+        raise FastlaneShellBlocked("object_cursor_batch_queue_mode_invalid")
+    queues, pending = _object_cursor_batch_pending_object_queues(
+        records=records,
+        existing_proof_keys=existing_proof_keys,
+        existing_proof_object_keys=existing_proof_object_keys,
+        closed_hhmm=closed_hhmm,
+    )
+    pending_objects_by_tier = {
+        tier: sum(len(queue) for queue in queues_by_asset.values())
+        for tier, queues_by_asset in queues.items()
+    }
+    pending_objects_by_asset: dict[str, int] = {}
+    pending_records_by_tier: dict[str, int] = {}
+    pending_records_by_asset: dict[str, int] = {}
+    for tier, queues_by_asset in queues.items():
+        pending_records_by_tier[tier] = 0
+        for asset_kind, queue in queues_by_asset.items():
+            pending_objects_by_asset[asset_kind] = (
+                pending_objects_by_asset.get(asset_kind, 0) + len(queue)
+            )
+            candidate_count = sum(len(object_records) for _, object_records in queue)
+            pending_records_by_tier[tier] += candidate_count
+            pending_records_by_asset[asset_kind] = (
+                pending_records_by_asset.get(asset_kind, 0) + candidate_count
+            )
+    selected: list[dict[str, Any]] = []
+    object_limit = max(1, int(max_objects or DEFAULT_CURRENT_DAY_SOURCE_PROVIDER_MAX_CANDIDATES))
+    proof_limit = max(1, int(max_proof_rows or DEFAULT_OBJECT_CURSOR_BATCH_MAX_PROOF_ROWS))
+    selected_object_count = 0
+    chunk_sequence = 0
+    selected_by_tier = {"live": 0, "backlog": 0}
+    selected_by_asset: dict[str, int] = {}
+    selected_records_by_tier = {"live": 0, "backlog": 0}
+    selected_records_by_asset: dict[str, int] = {}
+    while selected_object_count < object_limit and len(selected) < proof_limit:
+        chunk_capacity = min(
+            DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_SIZE,
+            object_limit - selected_object_count,
+        )
+        live_limit = (
+            chunk_capacity
+            if queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+            else min(DEFAULT_OBJECT_CURSOR_BATCH_LIVE_SLOTS_PER_CHUNK, chunk_capacity)
+        )
+        backlog_limit = chunk_capacity - live_limit
+        live_objects = _object_cursor_batch_pop_fair_objects(
+            queues["live"],
+            limit=live_limit,
+        )
+        backlog_objects = _object_cursor_batch_pop_fair_objects(
+            queues["backlog"],
+            limit=backlog_limit,
+        )
+        shortfall = chunk_capacity - len(live_objects) - len(backlog_objects)
+        if shortfall and queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED:
+            live_objects.extend(
+                _object_cursor_batch_pop_fair_objects(
+                    queues["live"],
+                    limit=shortfall,
+                )
+            )
+        shortfall = chunk_capacity - len(live_objects) - len(backlog_objects)
+        if shortfall and queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED:
+            backlog_objects.extend(
+                _object_cursor_batch_pop_fair_objects(
+                    queues["backlog"],
+                    limit=shortfall,
+                )
+            )
+        chunk_objects = [("live", item) for item in live_objects]
+        chunk_objects.extend(("backlog", item) for item in backlog_objects)
+        if not chunk_objects:
+            break
+        chunk_records: list[dict[str, Any]] = []
+        for tier, (object_key, object_records) in chunk_objects:
+            if len(selected) + len(chunk_records) + len(object_records) > proof_limit:
+                continue
+            object_sequence = selected_object_count + len(
+                {tuple(item.get("object_key") or ()) for item in chunk_records}
+            )
+            for record in object_records:
+                chunk_records.append(
+                    {
+                        **record,
+                        "queue_tier": tier,
+                        "queue_policy": OBJECT_CURSOR_BATCH_QUEUE_POLICY,
+                        "queue_chunk_sequence": chunk_sequence,
+                        "queue_object_sequence": object_sequence,
+                    }
+                )
+            asset_kind = str(object_key[1])
+            selected_by_tier[tier] += 1
+            selected_by_asset[asset_kind] = selected_by_asset.get(asset_kind, 0) + 1
+            selected_records_by_tier[tier] += len(object_records)
+            selected_records_by_asset[asset_kind] = (
+                selected_records_by_asset.get(asset_kind, 0) + len(object_records)
+            )
+        if not chunk_records:
+            break
+        selected.extend(chunk_records)
+        selected_object_count += len({tuple(item.get("object_key") or ()) for item in chunk_records})
+        chunk_sequence += 1
+    return selected, {
+        "candidate_count": len(records),
+        "existing_proof_count": len(records) - len(pending),
+        "pending_candidate_count": len(pending),
+        "queued_object_count": selected_object_count,
+        "queued_candidate_count": len(selected),
+        "selected_object_count": selected_object_count,
+        "selected_candidate_count": len(selected),
+        "remaining_candidate_count": max(0, len(pending) - len(selected)),
+        "selected_object_count_by_tier": selected_by_tier,
+        "selected_object_count_by_asset_kind": selected_by_asset,
+        "selected_candidate_count_by_tier": selected_records_by_tier,
+        "selected_candidate_count_by_asset_kind": selected_records_by_asset,
+        "pending_object_count_by_tier": pending_objects_by_tier,
+        "pending_object_count_by_asset_kind": pending_objects_by_asset,
+        "pending_candidate_count_by_tier": pending_records_by_tier,
+        "pending_candidate_count_by_asset_kind": pending_records_by_asset,
+        "queue_mode": queue_mode,
+    }
+
+
+def _load_existing_n3t_object_minute_proof_keys(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    dsn: str = "",
+    connect_factory: Callable[..., Any] | None = None,
+) -> set[tuple[str, str, str]]:
+    return _load_n3t_object_minute_proof_keys_by_validity(
+        records=records,
+        dsn=dsn,
+        connect_factory=connect_factory,
+        valid=True,
+    )
+
+
+def _load_invalid_n3t_object_minute_proof_keys(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    dsn: str = "",
+    connect_factory: Callable[..., Any] | None = None,
+) -> set[tuple[str, str, str]]:
+    return _load_n3t_object_minute_proof_keys_by_validity(
+        records=records,
+        dsn=dsn,
+        connect_factory=connect_factory,
+        valid=False,
+    )
+
+
+def _load_n3t_object_minute_proof_keys_by_validity(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    dsn: str = "",
+    connect_factory: Callable[..., Any] | None = None,
+    valid: bool,
+) -> set[tuple[str, str, str]]:
+    if not records:
+        return set()
+    effective_dsn = str(dsn or os.environ.get("ASHARE_V3_POSTGRES_DSN") or "").strip()
+    if not effective_dsn:
+        raise FastlaneShellBlocked("object_cursor_batch_n3t_proof_read_dsn_required")
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for record in records:
+        object_key = tuple(record.get("object_key") or ())
+        if len(object_key) != 4:
+            continue
+        grouped.setdefault((str(object_key[0]), str(object_key[1])), []).append(record)
+    if connect_factory is None:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except Exception as exc:  # pragma: no cover - import environment issue
+            raise FastlaneShellBlocked("object_cursor_batch_psycopg_required") from exc
+        connection_manager = psycopg.connect(
+            effective_dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on",
+            connect_timeout=10,
+        )
+    else:
+        connection_manager = connect_factory(effective_dsn)
+    existing: set[tuple[str, str, str]] = set()
+    with connection_manager as connection:
+        with connection.cursor() as cur:
+            for (for_trade_date, asset_kind), group in sorted(grouped.items()):
+                table = N3T_TABLE_BY_ASSET_KIND.get(asset_kind)
+                if not table:
+                    raise FastlaneShellBlocked("object_cursor_batch_asset_kind_mismatch")
+                run_ids = sorted({str(item.get("n3t_metric_run_id") or "") for item in group})
+                if not run_ids:
+                    continue
+                if not valid:
+                    candidate_keys_by_object_minute: dict[
+                        tuple[str, str], set[tuple[str, str, str]]
+                    ] = {}
+                    for item in group:
+                        proof_key = _object_cursor_batch_proof_key(item)
+                        if not all(proof_key):
+                            continue
+                        candidate_keys_by_object_minute.setdefault(
+                            (proof_key[1], proof_key[2]), set()
+                        ).add(proof_key)
+                    object_minutes = sorted(candidate_keys_by_object_minute)
+                    if not object_minutes:
+                        continue
+                    identity_keys = sorted({key[0] for key in object_minutes})
+                    cur.execute(
+                        f"""
+                        SELECT projection_run_id, identity_key, metric_minute_label,
+                               metric_ready, trace_json
+                        FROM {table}
+                        WHERE trade_date = %s
+                          AND identity_key = ANY(%s)
+                          AND source_basis = 'N3T_C1_CLOSED'
+                          AND metric_ready IS TRUE
+                        """,
+                        (for_trade_date, identity_keys),
+                    )
+                    validity_by_object_minute: dict[
+                        tuple[str, str], dict[str, bool]
+                    ] = {}
+                    for row in cur.fetchall():
+                        object_minute = (
+                            str(row["identity_key"]),
+                            str(row["metric_minute_label"]),
+                        )
+                        candidate_keys = candidate_keys_by_object_minute.get(
+                            object_minute
+                        )
+                        if not candidate_keys:
+                            continue
+                        sources = dict(
+                            (row.get("trace_json") or {}).get(
+                                "previous_period_sources"
+                            )
+                            or {}
+                        )
+                        source_valid = previous_period_sources_are_valid(
+                            {
+                                f"previous_{period}_period_source": sources.get(
+                                    period
+                                )
+                                for period in ("1m", "5m", "30m", "120m")
+                            }
+                        )
+                        state = validity_by_object_minute.setdefault(
+                            object_minute, {"valid": False, "invalid": False}
+                        )
+                        state["valid" if source_valid else "invalid"] = True
+                    for object_minute, state in validity_by_object_minute.items():
+                        if state["invalid"] and not state["valid"]:
+                            existing.update(
+                                candidate_keys_by_object_minute[object_minute]
+                            )
+                    continue
+                valid_source_predicate = """
+                      metric_ready IS TRUE
+                      AND trace_json -> 'previous_period_sources' ->> '1m'
+                            IN ('same_trade_date_previous_period', 'previous_trade_date_last_period')
+                      AND trace_json -> 'previous_period_sources' ->> '5m'
+                            IN ('same_trade_date_previous_period', 'previous_trade_date_last_period')
+                      AND trace_json -> 'previous_period_sources' ->> '30m'
+                            IN ('same_trade_date_previous_period', 'previous_trade_date_last_period')
+                      AND trace_json -> 'previous_period_sources' ->> '120m'
+                            IN ('same_trade_date_previous_period', 'previous_trade_date_last_period')
+                """
+                cur.execute(
+                    f"""
+                    SELECT projection_run_id, identity_key, metric_minute_label
+                    FROM {table}
+                    WHERE for_trade_date = %s
+                      AND source_basis = 'N3T_C1_CLOSED'
+                      AND ({valid_source_predicate})
+                      AND projection_run_id = ANY(%s)
+                    """,
+                    (for_trade_date, run_ids),
+                )
+                for row in cur.fetchall():
+                    existing.add(
+                        (
+                            str(row["projection_run_id"]),
+                            str(row["identity_key"]),
+                            str(row["metric_minute_label"]),
+                        )
+                    )
+    return existing
+
+
+def _object_cursor_batch_retry_state_path(
+    *,
+    output_dir: Path,
+    for_trade_date: str,
+) -> Path:
+    return (
+        output_dir
+        / "object_cursor_retry_state"
+        / f"{OBJECT_CURSOR_BATCH_RETRY_STATE_ARTIFACT_TYPE}_{for_trade_date}.json"
+    )
+
+
+def _load_object_cursor_batch_retry_state(
+    *,
+    output_dir: Path,
+    for_trade_date: str,
+) -> tuple[Path, dict[str, Any]]:
+    path = _object_cursor_batch_retry_state_path(
+        output_dir=output_dir,
+        for_trade_date=for_trade_date,
+    )
+    if not path.exists():
+        return path, {
+            "artifact_type": OBJECT_CURSOR_BATCH_RETRY_STATE_ARTIFACT_TYPE,
+            "artifact_schema_version": "v1",
+            "for_trade_date": for_trade_date,
+            "entries": {},
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FastlaneShellBlocked("object_cursor_batch_retry_state_invalid") from exc
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("artifact_type") != OBJECT_CURSOR_BATCH_RETRY_STATE_ARTIFACT_TYPE
+        or str(payload.get("for_trade_date") or "") != for_trade_date
+        or not isinstance(payload.get("entries"), Mapping)
+    ):
+        raise FastlaneShellBlocked("object_cursor_batch_retry_state_contract_mismatch")
+    return path, dict(payload)
+
+
+def _object_cursor_batch_retry_entry_key(
+    object_key: Sequence[str],
+    *,
+    target_hhmm: str,
+) -> str:
+    return "|".join([*(str(value) for value in object_key[:4]), str(target_hhmm or "")])
+
+
+def _object_cursor_batch_retry_deferred_objects(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    retry_state: Mapping[str, Any],
+    observed_at: str,
+) -> tuple[set[tuple[str, str, str, str]], int]:
+    observed = _parse_iso_datetime_or_none(observed_at)
+    if observed is None:
+        raise FastlaneShellBlocked("object_cursor_batch_retry_observed_at_invalid")
+    if observed.tzinfo is None:
+        observed = observed.astimezone()
+    entries = dict(retry_state.get("entries") or {})
+    records_by_object: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+    for record in records:
+        object_key = tuple(str(value) for value in record.get("object_key") or ())
+        if len(object_key) == 4:
+            records_by_object.setdefault(object_key, []).append(record)
+    deferred: set[tuple[str, str, str, str]] = set()
+    deferred_candidate_count = 0
+    for object_key, object_records in records_by_object.items():
+        ordered = sorted(
+            object_records,
+            key=lambda item: _hhmm_int(item.get("target_hhmm")),
+        )
+        first_target = str(ordered[0].get("target_hhmm") or "")
+        entry = entries.get(
+            _object_cursor_batch_retry_entry_key(
+                object_key,
+                target_hhmm=first_target,
+            )
+        )
+        if not isinstance(entry, Mapping):
+            continue
+        next_retry_at = _parse_iso_datetime_or_none(str(entry.get("next_retry_at") or ""))
+        if next_retry_at is None:
+            continue
+        if next_retry_at.tzinfo is None:
+            next_retry_at = next_retry_at.astimezone()
+        if observed < next_retry_at:
+            deferred.add(object_key)
+            deferred_candidate_count += len(ordered)
+    return deferred, deferred_candidate_count
+
+
+def _object_cursor_batch_retryable_failure(reason: str) -> bool:
+    normalized = str(reason or "")
+    return any(
+        marker in normalized
+        for marker in (
+            "BLOCKED_N3_C1_SCOPE_CONTRACT_MISMATCH",
+            "current_day_source_provider_row_conversion_failed",
+            "previous_day_context",
+            "metric_context",
+            "current_day_staging",
+            "object_cursor_batch_staging",
+        )
+    )
+
+
+def _update_object_cursor_batch_retry_state(
+    *,
+    path: Path,
+    retry_state: Mapping[str, Any],
+    observed_at: str,
+    proof_records: Sequence[Mapping[str, Any]],
+    failure_records: Sequence[Mapping[str, Any]],
+    retry_seconds: int = DEFAULT_OBJECT_CURSOR_BATCH_RETRY_SECONDS,
+) -> dict[str, Any]:
+    observed = _parse_iso_datetime_or_none(observed_at)
+    if observed is None:
+        raise FastlaneShellBlocked("object_cursor_batch_retry_observed_at_invalid")
+    if observed.tzinfo is None:
+        observed = observed.astimezone()
+    entries = {
+        str(key): dict(value)
+        for key, value in dict(retry_state.get("entries") or {}).items()
+        if isinstance(value, Mapping)
+    }
+    original_entries = dict(entries)
+    for record in proof_records:
+        object_key = tuple(str(value) for value in record.get("object_key") or ())
+        if len(object_key) != 4:
+            continue
+        entries.pop(
+            _object_cursor_batch_retry_entry_key(
+                object_key,
+                target_hhmm=str(record.get("target_hhmm") or ""),
+            ),
+            None,
+        )
+
+    earliest_failure_by_object: dict[
+        tuple[str, str, str, str], Mapping[str, Any]
+    ] = {}
+    for failure in failure_records:
+        reason = str(failure.get("reason") or "")
+        if not _object_cursor_batch_retryable_failure(reason):
+            continue
+        object_key = (
+            str(failure.get("for_trade_date") or ""),
+            str(failure.get("asset_kind") or ""),
+            str(failure.get("identity_key") or ""),
+            str(failure.get("direction") or ""),
+        )
+        target_hhmm = str(failure.get("target_hhmm") or "")
+        if not all(object_key) or not target_hhmm:
+            continue
+        current = earliest_failure_by_object.get(object_key)
+        if current is None or _hhmm_int(target_hhmm) < _hhmm_int(
+            current.get("target_hhmm")
+        ):
+            earliest_failure_by_object[object_key] = failure
+
+    for object_key, failure in earliest_failure_by_object.items():
+        target_hhmm = str(failure.get("target_hhmm") or "")
+        entry_key = _object_cursor_batch_retry_entry_key(
+            object_key,
+            target_hhmm=target_hhmm,
+        )
+        previous = dict(entries.get(entry_key) or {})
+        entries[entry_key] = {
+            "object_key": list(object_key),
+            "target_hhmm": target_hhmm,
+            "reason": str(failure.get("reason") or ""),
+            "attempt_count": int(previous.get("attempt_count") or 0) + 1,
+            "last_failed_at": observed.isoformat(),
+            "next_retry_at": (
+                observed + timedelta(seconds=max(1, int(retry_seconds or 1)))
+            ).isoformat(),
+        }
+
+    changed = entries != original_entries
+    payload = {
+        "artifact_type": OBJECT_CURSOR_BATCH_RETRY_STATE_ARTIFACT_TYPE,
+        "artifact_schema_version": "v1",
+        "producer_layer": "N3_market_data",
+        "for_trade_date": str(retry_state.get("for_trade_date") or ""),
+        "updated_at": observed.isoformat(),
+        "retry_seconds": max(1, int(retry_seconds or 1)),
+        "entries": entries,
+        "boundary": {
+            "database_written": False,
+            "writes_canonical_minute_bar_1m": False,
+            "writes_n3_outbox": False,
+            "writes_n4_outbox": False,
+            "writes_n5_outbox": False,
+        },
+    }
+    if changed:
+        _write_atomic_compact_json(path, payload)
+    return {
+        "path": str(path),
+        "written": changed,
+        "active_entry_count": len(entries),
+    }
+
+
+def _probe_pending_object_cursor_batch_records(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    closed_hhmm: str,
+    probe_object_limit: int,
+    chunk_size: int,
+    max_minutes_per_object: int,
+    max_proof_rows: int,
+    priority_object_keys: set[tuple[str, str, str, str]],
+    cursor_floor_by_object: Mapping[tuple[str, str, str, str], str],
+    completed_object_keys: set[tuple[str, str, str, str]],
+    excluded_object_keys: set[tuple[str, str, str, str]],
+    retry_state: Mapping[str, Any],
+    observed_at: str,
+    proof_loader: Callable[..., set[tuple[str, str, str]]] | None = None,
+    queue_mode: str = OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED,
+) -> tuple[list[dict[str, Any]], dict[str, Any], set[tuple[str, str, str]]]:
+    effective_proof_loader = (
+        proof_loader or _load_existing_n3t_object_minute_proof_keys
+    )
+    candidate_census: dict[str, Any] = {}
+    initial_excluded = set(excluded_object_keys) | set(completed_object_keys)
+    probed_object_keys: set[tuple[str, str, str, str]] = set()
+    probe_records: list[dict[str, Any]] = []
+    proven_pending_records: list[dict[str, Any]] = []
+    existing_proof_keys: set[tuple[str, str, str]] = set()
+    existing_proof_object_keys: set[tuple[str, str, str, str]] = set()
+    retry_deferred_object_keys: set[tuple[str, str, str, str]] = set()
+    retry_deferred_candidate_count = 0
+    probe_page_count = 0
+    proof_probe_complete = False
+    selected: list[dict[str, Any]] = []
+    selection_summary: dict[str, Any] = {}
+
+    while True:
+        page_candidates = _object_cursor_batch_candidate_records(
+            active_scope_artifacts=active_scope_artifacts,
+            closed_hhmm=closed_hhmm,
+            max_minutes_per_object=max_minutes_per_object,
+            max_objects=probe_object_limit,
+            priority_object_keys=priority_object_keys,
+            census_summary=candidate_census if probe_page_count == 0 else None,
+            cursor_floor_by_object=cursor_floor_by_object,
+            completed_object_keys=completed_object_keys,
+            excluded_object_keys=(
+                initial_excluded | probed_object_keys | retry_deferred_object_keys
+            ),
+            queue_mode=queue_mode,
+        )
+        page_records, _page_summary = _select_pending_object_cursor_batch_records(
+            records=page_candidates,
+            existing_proof_keys=set(),
+            closed_hhmm=closed_hhmm,
+            max_objects=probe_object_limit,
+            max_proof_rows=probe_object_limit * max_minutes_per_object,
+            queue_mode=queue_mode,
+        )
+        page_object_keys = {
+            tuple(record.get("object_key") or ()) for record in page_records
+        }
+        if not page_object_keys:
+            proof_probe_complete = True
+            break
+        probe_page_count += 1
+        page_existing = effective_proof_loader(records=page_records)
+        existing_proof_keys.update(page_existing)
+        existing_proof_object_keys.update(
+            tuple(record.get("object_key") or ())
+            for record in page_records
+            if _object_cursor_batch_proof_key(record) in page_existing
+        )
+        page_pending = [
+            record
+            for record in page_records
+            if _object_cursor_batch_proof_key(record) not in page_existing
+        ]
+        page_deferred, page_deferred_candidate_count = (
+            _object_cursor_batch_retry_deferred_objects(
+                records=page_pending,
+                retry_state=retry_state,
+                observed_at=observed_at,
+            )
+        )
+        retry_deferred_object_keys.update(page_deferred)
+        retry_deferred_candidate_count += page_deferred_candidate_count
+        probe_records.extend(page_records)
+        proven_pending_records.extend(
+            record
+            for record in page_pending
+            if tuple(record.get("object_key") or ()) not in page_deferred
+        )
+        probed_object_keys.update(page_object_keys)
+        selected, selection_summary = _select_pending_object_cursor_batch_records(
+            records=proven_pending_records,
+            existing_proof_keys=set(),
+            existing_proof_object_keys=existing_proof_object_keys,
+            closed_hhmm=closed_hhmm,
+            max_objects=chunk_size,
+            max_proof_rows=max_proof_rows,
+            queue_mode=queue_mode,
+        )
+        selected_by_tier = dict(
+            selection_summary.get("selected_object_count_by_tier") or {}
+        )
+        candidate_objects_by_tier = dict(
+            candidate_census.get("pending_object_count_by_tier") or {}
+        )
+        if queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH:
+            required_live_objects = min(
+                chunk_size,
+                int(candidate_objects_by_tier.get("live") or 0),
+            )
+            has_target_chunk = (
+                required_live_objects > 0
+                and int(selected_by_tier.get("live") or 0)
+                >= required_live_objects
+            )
+        else:
+            has_target_chunk = (
+                int(selection_summary.get("selected_object_count") or 0)
+                >= chunk_size
+                and (
+                    int(selected_by_tier.get("live") or 0)
+                    >= min(
+                        DEFAULT_OBJECT_CURSOR_BATCH_LIVE_SLOTS_PER_CHUNK,
+                        int(candidate_objects_by_tier.get("live") or 0),
+                    )
+                )
+                and (
+                    int(selected_by_tier.get("backlog") or 0)
+                    >= min(
+                        chunk_size - DEFAULT_OBJECT_CURSOR_BATCH_LIVE_SLOTS_PER_CHUNK,
+                        int(candidate_objects_by_tier.get("backlog") or 0),
+                    )
+                )
+            )
+        if len(page_object_keys) < probe_object_limit:
+            proof_probe_complete = True
+        if has_target_chunk:
+            break
+        if proof_probe_complete:
+            break
+
+    if not selection_summary:
+        selected, selection_summary = _select_pending_object_cursor_batch_records(
+            records=proven_pending_records,
+            existing_proof_keys=set(),
+            existing_proof_object_keys=existing_proof_object_keys,
+            closed_hhmm=closed_hhmm,
+            max_objects=chunk_size,
+            max_proof_rows=max_proof_rows,
+            queue_mode=queue_mode,
+        )
+
+    selected_by_tier = dict(
+        selection_summary.get("selected_object_count_by_tier") or {}
+    )
+    selected_candidates_by_tier = dict(
+        selection_summary.get("selected_candidate_count_by_tier") or {}
+    )
+    candidate_count = int(candidate_census.get("candidate_count") or 0)
+    unprobed_candidate_count = max(0, candidate_count - len(probe_records))
+    if unprobed_candidate_count == 0:
+        proof_probe_complete = True
+    true_remaining_candidate_count = max(
+        0,
+        len(proven_pending_records)
+        + retry_deferred_candidate_count
+        - len(selected),
+    )
+    global_pending_upper_bound = max(
+        0,
+        candidate_count
+        - len(existing_proof_keys),
+    )
+    existing_by_asset: dict[str, int] = {}
+    for record in probe_records:
+        object_key = tuple(record.get("object_key") or ())
+        asset_kind = str(object_key[1]) if len(object_key) == 4 else ""
+        if _object_cursor_batch_proof_key(record) in existing_proof_keys:
+            if asset_kind:
+                existing_by_asset[asset_kind] = (
+                    existing_by_asset.get(asset_kind, 0) + 1
+                )
+    probed_queues, _ = _object_cursor_batch_pending_object_queues(
+        records=probe_records,
+        existing_proof_keys=existing_proof_keys,
+        closed_hhmm=closed_hhmm,
+    )
+    pending_candidates_by_tier = {
+        "live": unprobed_candidate_count,
+        "backlog": 0,
+    }
+    for tier, queues_by_asset in probed_queues.items():
+        pending_candidates_by_tier[tier] = (
+            pending_candidates_by_tier.get(tier, 0)
+            + sum(
+                len(object_records)
+                for queue in queues_by_asset.values()
+                for _, object_records in queue
+            )
+        )
+    pending_candidates_by_asset = {
+        asset_kind: max(
+            0,
+            int(count or 0)
+            - int(existing_by_asset.get(asset_kind) or 0),
+        )
+        for asset_kind, count in dict(
+            candidate_census.get("pending_candidate_count_by_asset_kind") or {}
+        ).items()
+    }
+    selection_summary.update(
+        {
+            "candidate_object_count": int(
+                candidate_census.get("candidate_object_count") or 0
+            ),
+            "candidate_count": candidate_count,
+            "existing_proof_count": len(existing_proof_keys),
+            "existing_proof_skipped_count": len(existing_proof_keys),
+            "pending_candidate_count": global_pending_upper_bound,
+            "remaining_candidate_count": max(
+                0,
+                global_pending_upper_bound - len(selected),
+            ),
+            "true_remaining_candidate_count": true_remaining_candidate_count,
+            "unprobed_candidate_count": unprobed_candidate_count,
+            "probe_page_count": probe_page_count,
+            "proof_probe_object_count": len(probed_object_keys),
+            "proof_probe_candidate_count": len(probe_records),
+            "proof_probe_existing_count": len(existing_proof_keys),
+            "proof_probe_complete": proof_probe_complete,
+            "retry_deferred_object_count": len(retry_deferred_object_keys),
+            "retry_deferred_candidate_count": retry_deferred_candidate_count,
+            "selected_live_object_count": int(selected_by_tier.get("live") or 0),
+            "selected_backlog_object_count": int(
+                selected_by_tier.get("backlog") or 0
+            ),
+            "selected_live_candidate_count": int(
+                selected_candidates_by_tier.get("live") or 0
+            ),
+            "selected_backlog_candidate_count": int(
+                selected_candidates_by_tier.get("backlog") or 0
+            ),
+            "backlog_cursor_minutes_per_object": max_minutes_per_object,
+            "pending_object_count_by_tier": dict(
+                candidate_census.get("pending_object_count_by_tier") or {}
+            ),
+            "pending_object_count_by_asset_kind": dict(
+                candidate_census.get("pending_object_count_by_asset_kind") or {}
+            ),
+            "pending_candidate_count_by_tier": pending_candidates_by_tier,
+            "pending_candidate_count_by_asset_kind": pending_candidates_by_asset,
+            "excluded_object_count": len(initial_excluded),
+            "queue_mode": queue_mode,
+        }
+    )
+    return selected, selection_summary, existing_proof_keys
+
+
+def _object_cursor_batch_provider_plans(
+    *,
+    selected_records: Sequence[Mapping[str, Any]],
+    observed_at: str,
+    provider_target_hhmm: str = "",
+) -> list[dict[str, Any]]:
+    records_by_identity: dict[
+        tuple[str, str, str], list[Mapping[str, Any]]
+    ] = {}
+    for record in selected_records:
+        object_key = tuple(record.get("object_key") or ())
+        if len(object_key) != 4:
+            continue
+        records_by_identity.setdefault(object_key[:3], []).append(record)
+    plans: list[dict[str, Any]] = []
+    for identity_key, identity_records in sorted(records_by_identity.items()):
+        ordered = sorted(
+            identity_records,
+            key=lambda item: (
+                _hhmm_int(item.get("target_hhmm")),
+                tuple(item.get("object_key") or ()),
+            ),
+        )
+        latest_target = max(
+            (str(item.get("target_hhmm") or "") for item in ordered),
+            key=_hhmm_int,
+        )
+        target_hhmm = str(provider_target_hhmm or latest_target)
+        pull_plans: list[dict[str, Any]] = []
+        for record in ordered:
+            payload = dict(record.get("payload") or {})
+            pull_plan = build_n3_c1_scoped_current_day_pull_plan(
+                payload,
+                target_minute_label=_hhmm_to_minute_label(target_hhmm),
+                observed_at=observed_at,
+                source_artifact_path=str(
+                    record.get("source_active_scope_artifact_path") or ""
+                ),
+                source_artifact_hash=str(
+                    record.get("source_active_scope_artifact_sha256") or ""
+                ),
+            )
+            if (
+                pull_plan.get("plan_status") != "planned"
+                or pull_plan.get("full_market_fallback_used") is True
+            ):
+                raise FastlaneShellBlocked(
+                    str(
+                        pull_plan.get("blocked_reason")
+                        or "object_cursor_batch_pull_plan_invalid"
+                    )
+                )
+            pull_plans.append(pull_plan)
+        merged_pull_plan = dict(pull_plans[0])
+        merged_plan_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for pull_plan in pull_plans:
+            for plan_row in pull_plan.get("plan_rows") or []:
+                if not isinstance(plan_row, Mapping):
+                    continue
+                key = (
+                    str(plan_row.get("direction") or ""),
+                    str(plan_row.get("condition_key") or ""),
+                )
+                merged_plan_rows[key] = dict(plan_row)
+        merged_pull_plan["plan_rows"] = [
+            merged_plan_rows[key] for key in sorted(merged_plan_rows)
+        ]
+        merged_pull_plan["scope_count"] = len(merged_pull_plan["plan_rows"])
+        merged_pull_plan["source_identity_dedup"] = True
+        payload = dict(ordered[-1].get("payload") or {})
+        provider_hash = _active_a_minute_batch_provider_source_run_hash(
+            payload,
+            target_hhmm=target_hhmm,
+        )
+        object_keys = sorted(
+            {
+                tuple(str(value) for value in item.get("object_key") or ())
+                for item in ordered
+            }
+        )
+        plans.append(
+            {
+                "for_trade_date": identity_key[0],
+                "target_hhmm": target_hhmm,
+                "source_run_hash": provider_hash,
+                "namespace_token": (
+                    f"{identity_key[0]}_{target_hhmm}_{provider_hash}"
+                ),
+                "inline_pull_plan_payload": merged_pull_plan,
+                "object_batch_key": list(object_keys[0]),
+                "object_batch_keys": [list(key) for key in object_keys],
+                "source_identity_key": list(identity_key),
+            }
+        )
+    return plans
+
+
+def _run_object_cursor_batch_single_chunk(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    previous_day_context_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    n3t_writer_adapter: Callable[..., Mapping[str, Any]] | None,
+    deadline_check: Callable[[str], None],
+    started: float,
+    now_monotonic: Any,
+    chunk_sequence: int = 0,
+    excluded_object_keys: set[tuple[str, str, str, str]] | None = None,
+    prefer_live_fastpath: bool = False,
+) -> dict[str, Any]:
+    queue_census_started = time.monotonic()
+    observed_at = _runner_observed_at(args)
+    closed_hhmm = _active_a_minute_batch_closed_hhmm(args, active_scope_artifacts)
+    if not closed_hhmm:
+        return _object_cursor_batch_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            selection_summary={},
+            source_result={},
+            previous_result={},
+            writer_result={},
+            batch_artifacts=[],
+            failure_records=[],
+            reason="object_cursor_batch_closed_minute_unavailable",
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+
+    post_close_max_objects = int(
+        getattr(args, "object_cursor_batch_post_close_max_objects", 0) or 0
+    )
+    post_close_probe_max_objects = int(
+        getattr(args, "object_cursor_batch_post_close_probe_max_objects", 0) or 0
+    )
+    cursor_floor_by_object = dict(
+        getattr(args, "object_cursor_batch_cursor_floor_by_object", {}) or {}
+    )
+    completed_object_keys = {
+        tuple(item)
+        for item in (
+            getattr(args, "object_cursor_batch_completed_object_keys", set())
+            or set()
+        )
+        if isinstance(item, (list, tuple)) and len(item) == 4
+    }
+    post_close_mode = _is_post_close_final_a_pass(args)
+    queue_mode = (
+        OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+        if prefer_live_fastpath and not post_close_mode
+        else OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+    )
+    chunk_size = min(
+        (
+            post_close_max_objects
+            if post_close_max_objects > 0
+            else (
+                DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_SIZE
+                if post_close_mode
+                else DEFAULT_OBJECT_CURSOR_COHORT_MAX_SOURCE_OBJECTS
+            )
+        ),
+        _current_day_source_provider_max_candidates(args),
+    )
+    probe_object_limit = (
+        post_close_probe_max_objects
+        if post_close_probe_max_objects > 0
+        else min(
+            _current_day_source_provider_max_candidates(args),
+            chunk_size * DEFAULT_OBJECT_CURSOR_BATCH_PROBE_CHUNK_COUNT,
+        )
+    )
+    invalid_existing_proof_keys: set[tuple[str, str, str]] = set()
+    priority_object_keys: set[tuple[str, str, str, str]] = set()
+    if (
+        queue_mode != OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+        and bool(getattr(args, "scheduler_quiet", False))
+        and not bool(
+            getattr(args, "object_cursor_batch_skip_invalid_priority", False)
+        )
+    ):
+        priority_probe_records = _object_cursor_batch_candidate_records(
+            active_scope_artifacts=active_scope_artifacts,
+            closed_hhmm=closed_hhmm,
+            max_minutes_per_object=1,
+            cursor_floor_by_object=cursor_floor_by_object,
+            completed_object_keys=completed_object_keys,
+        )
+        invalid_existing_proof_keys = _load_invalid_n3t_object_minute_proof_keys(
+            records=priority_probe_records
+        )
+        priority_object_keys = {
+            tuple(record.get("object_key") or ())
+            for record in priority_probe_records
+            if _object_cursor_batch_proof_key(record) in invalid_existing_proof_keys
+        }
+    max_minutes_per_object = (
+        DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT
+        if post_close_mode
+        else DEFAULT_OBJECT_CURSOR_BATCH_BACKLOG_MAX_MINUTES_PER_OBJECT
+    )
+    max_proof_rows = (
+        chunk_size * max_minutes_per_object
+        if post_close_mode
+        else min(
+            DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_MAX_PROOF_ROWS,
+            chunk_size * max_minutes_per_object,
+        )
+    )
+    retry_trade_date = next(
+        (
+            str(artifact.get("for_trade_date") or "")
+            for artifact in active_scope_artifacts
+            if str(artifact.get("for_trade_date") or "")
+        ),
+        observed_at[:10].replace("-", ""),
+    )
+    retry_state_path, retry_state = _load_object_cursor_batch_retry_state(
+        output_dir=Path(args.output_dir),
+        for_trade_date=retry_trade_date,
+    )
+    selected, selection_summary, existing_proof_keys = (
+        _probe_pending_object_cursor_batch_records(
+            active_scope_artifacts=active_scope_artifacts,
+            closed_hhmm=closed_hhmm,
+            probe_object_limit=probe_object_limit,
+            chunk_size=chunk_size,
+            max_minutes_per_object=max_minutes_per_object,
+            max_proof_rows=max_proof_rows,
+            priority_object_keys=(
+                set()
+                if queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+                else priority_object_keys
+            ),
+            cursor_floor_by_object=cursor_floor_by_object,
+            completed_object_keys=completed_object_keys,
+            excluded_object_keys=set(excluded_object_keys or set()),
+            retry_state=(retry_state if not post_close_mode else {"entries": {}}),
+            observed_at=observed_at,
+            queue_mode=queue_mode,
+        )
+    )
+    live_fastpath_selected_object_count = len(
+        {tuple(record.get("object_key") or ()) for record in selected}
+    )
+    if queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH and not selected:
+        queue_mode = OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+        if bool(getattr(args, "scheduler_quiet", False)) and not bool(
+            getattr(args, "object_cursor_batch_skip_invalid_priority", False)
+        ):
+            priority_probe_records = _object_cursor_batch_candidate_records(
+                active_scope_artifacts=active_scope_artifacts,
+                closed_hhmm=closed_hhmm,
+                max_minutes_per_object=1,
+                cursor_floor_by_object=cursor_floor_by_object,
+                completed_object_keys=completed_object_keys,
+            )
+            invalid_existing_proof_keys = (
+                _load_invalid_n3t_object_minute_proof_keys(
+                    records=priority_probe_records
+                )
+            )
+            priority_object_keys = {
+                tuple(record.get("object_key") or ())
+                for record in priority_probe_records
+                if _object_cursor_batch_proof_key(record)
+                in invalid_existing_proof_keys
+            }
+        selected, selection_summary, existing_proof_keys = (
+            _probe_pending_object_cursor_batch_records(
+                active_scope_artifacts=active_scope_artifacts,
+                closed_hhmm=closed_hhmm,
+                probe_object_limit=probe_object_limit,
+                chunk_size=chunk_size,
+                max_minutes_per_object=max_minutes_per_object,
+                max_proof_rows=max_proof_rows,
+                priority_object_keys=priority_object_keys,
+                cursor_floor_by_object=cursor_floor_by_object,
+                completed_object_keys=completed_object_keys,
+                excluded_object_keys=set(excluded_object_keys or set()),
+                retry_state=retry_state,
+                observed_at=observed_at,
+                queue_mode=queue_mode,
+            )
+        )
+    for record in selected:
+        record["queue_chunk_sequence"] = int(chunk_sequence)
+    selected_deadline_lags = [
+        max(
+            0,
+            int(
+                _minute_closed_to_observed_ms(
+                    for_trade_date=str((record.get("object_key") or [""])[0]),
+                    target_hhmm=str(record.get("target_hhmm") or ""),
+                    observed_at=observed_at,
+                )
+                or 0
+            )
+            - 120_000,
+        )
+        for record in selected
+    ]
+    queue_census_ms = int(
+        round((time.monotonic() - queue_census_started) * 1000)
+    )
+    selection_summary.update(
+        {
+            "closed_minute_label": _hhmm_to_minute_label(closed_hhmm),
+            "queue_policy": OBJECT_CURSOR_BATCH_QUEUE_POLICY,
+            "chunk_size": chunk_size,
+            "live_slots_per_chunk": (
+                chunk_size
+                if queue_mode == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+                else min(
+                    DEFAULT_OBJECT_CURSOR_BATCH_LIVE_SLOTS_PER_CHUNK,
+                    chunk_size,
+                )
+            ),
+            "max_objects": chunk_size,
+            "max_minutes_per_object": max_minutes_per_object,
+            "max_proof_rows": max_proof_rows,
+            "chunk_sequence": int(chunk_sequence),
+            "retry_state_path": str(retry_state_path),
+            "invalid_existing_proof_priority_count": len(
+                invalid_existing_proof_keys
+            ),
+            "invalid_existing_object_priority_count": len(priority_object_keys),
+            "queue_mode": queue_mode,
+            "live_fastpath_attempted": bool(
+                prefer_live_fastpath and not post_close_mode
+            ),
+            "live_fastpath_selected_object_count": (
+                live_fastpath_selected_object_count
+            ),
+            "queue_census_ms": queue_census_ms,
+            "oldest_proof_deadline_lag_ms": max(
+                selected_deadline_lags,
+                default=0,
+            ),
+        }
+    )
+    if not selected:
+        return _object_cursor_batch_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            selection_summary=selection_summary,
+            source_result={},
+            previous_result={},
+            writer_result={},
+            batch_artifacts=[],
+            failure_records=[],
+            reason=(
+                "object_cursor_batch_retry_deferred"
+                if int(selection_summary.get("retry_deferred_object_count") or 0)
+                else "object_cursor_batch_no_pending_proof"
+            ),
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+    remaining_runtime_seconds = float(args.max_runtime_seconds) - (
+        float(now_monotonic()) - float(started)
+    )
+    if remaining_runtime_seconds < DEFAULT_OBJECT_CURSOR_BATCH_MIN_SECONDS_TO_START_CHUNK:
+        selection_summary.update(
+            {
+                "selected_object_count": 0,
+                "selected_candidate_count": 0,
+                "selected_object_count_by_tier": {"live": 0, "backlog": 0},
+                "selected_object_count_by_asset_kind": {},
+                "selected_candidate_count_by_tier": {"live": 0, "backlog": 0},
+                "selected_candidate_count_by_asset_kind": {},
+                "processed_candidate_count_by_tier": {"live": 0, "backlog": 0},
+                "processed_candidate_count_by_asset_kind": {},
+                "failed_candidate_count_by_tier": {"live": 0, "backlog": 0},
+                "failed_candidate_count_by_asset_kind": {},
+                "remaining_candidate_count_by_tier": dict(
+                    selection_summary.get("pending_candidate_count_by_tier") or {}
+                ),
+                "remaining_candidate_count_by_asset_kind": dict(
+                    selection_summary.get("pending_candidate_count_by_asset_kind") or {}
+                ),
+                "remaining_candidate_count": int(
+                    selection_summary.get("pending_candidate_count") or 0
+                ),
+                "completed_chunk_count": 0,
+                "source_only_artifact_count": 0,
+            }
+        )
+        return _object_cursor_batch_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            selection_summary=selection_summary,
+            source_result={},
+            previous_result={},
+            writer_result={},
+            batch_artifacts=[],
+            failure_records=[],
+            reason="object_cursor_batch_chunk_incomplete",
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+    inline_source_adapter = getattr(current_day_source_provider_adapter, "inline_batch_adapter", None)
+    if not callable(inline_source_adapter):
+        raise FastlaneShellBlocked("object_cursor_batch_inline_source_provider_required")
+    provider_plans = _object_cursor_batch_provider_plans(
+        selected_records=selected,
+        observed_at=observed_at,
+        provider_target_hhmm=(
+            POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL.replace(":", "")
+            if _is_post_close_final_a_pass(args)
+            else ""
+        ),
+    )
+    source_result = dict(
+        inline_source_adapter(args=args, planned_artifacts=provider_plans) or {}
+    )
+    _validate_current_day_source_provider_result(source_result)
+    source_by_object: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    source_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
+    source_failure_by_object: dict[
+        tuple[str, str, str, str], dict[str, Any]
+    ] = {}
+    for source_artifact in source_result.get("source_artifacts") or []:
+        if not isinstance(source_artifact, Mapping):
+            continue
+        payload = source_artifact.get("payload")
+        if not isinstance(payload, Mapping):
+            raise FastlaneShellBlocked("object_cursor_batch_inline_source_payload_required")
+        object_keys = [
+            tuple(str(value) for value in item)
+            for item in source_artifact.get("object_batch_keys") or []
+            if isinstance(item, (list, tuple)) and len(item) == 4
+        ]
+        object_key = tuple(source_artifact.get("object_batch_key") or ())
+        if not object_keys and len(object_key) != 4:
+            object_key = _active_a_minute_batch_source_payload_fetch_group_key(payload)
+        if not object_keys and len(object_key) == 4:
+            object_keys = [tuple(str(value) for value in object_key)]
+        if not object_keys or not all(object_keys[0]):
+            raise FastlaneShellBlocked("object_cursor_batch_source_scope_mismatch")
+        for scoped_key in object_keys:
+            source_by_object[scoped_key] = dict(source_artifact)
+            source_by_identity[scoped_key[:3]] = dict(source_artifact)
+    for failed_candidate in source_result.get("failed_candidates") or []:
+        if not isinstance(failed_candidate, Mapping):
+            continue
+        failure_keys = [
+            tuple(str(value) for value in item)
+            for item in failed_candidate.get("object_batch_keys") or []
+            if isinstance(item, (list, tuple)) and len(item) == 4
+        ]
+        failure_key = tuple(failed_candidate.get("object_batch_key") or ())
+        if not failure_keys and len(failure_key) == 4:
+            failure_keys = [tuple(str(value) for value in failure_key)]
+        failure_metadata = {
+            field: failed_candidate[field]
+            for field in (
+                "reason",
+                "error_type",
+                "failure_kind",
+                "endpoint_id",
+                "failover_mode",
+                "retry_class",
+            )
+            if str(failed_candidate.get(field) or "")
+        }
+        for scoped_key in failure_keys:
+            source_failure_by_object[scoped_key] = dict(failure_metadata)
+
+    records_by_object: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for record in selected:
+        records_by_object.setdefault(tuple(record["object_key"]), []).append(dict(record))
+    staging_records: list[dict[str, Any]] = []
+    failure_records: list[dict[str, Any]] = []
+    processed_object_keys: set[tuple[str, str, str, str]] = set()
+    for object_key, object_records in sorted(records_by_object.items()):
+        source_artifact = source_by_object.get(object_key) or source_by_identity.get(
+            object_key[:3]
+        )
+        if not source_artifact:
+            source_failure = dict(source_failure_by_object.get(object_key) or {})
+            failure = _object_cursor_batch_failure(
+                object_key,
+                reason=str(
+                    source_failure.get("reason")
+                    or "current_day_source_provider_fetch_failed"
+                ),
+            )
+            failure.update(source_failure)
+            failure_records.append(failure)
+        else:
+            source_payload = dict(source_artifact.get("payload") or {})
+            for record in sorted(object_records, key=lambda item: _hhmm_int(item["target_hhmm"])):
+                try:
+                    payload = dict(record.get("payload") or {})
+                    target_hhmm = str(record.get("target_hhmm") or "")
+                    pull_plan = build_n3_c1_scoped_current_day_pull_plan(
+                        payload,
+                        target_minute_label=_hhmm_to_minute_label(target_hhmm),
+                        observed_at=observed_at,
+                        source_artifact_path=str(record.get("source_active_scope_artifact_path") or ""),
+                        source_artifact_hash=str(record.get("source_active_scope_artifact_sha256") or ""),
+                    )
+                    if pull_plan.get("plan_status") != "planned" or pull_plan.get("full_market_fallback_used") is True:
+                        raise FastlaneShellBlocked(
+                            str(pull_plan.get("blocked_reason") or "object_cursor_batch_pull_plan_invalid")
+                        )
+                    filtered_source = _source_rows_filtered_to_pull_plan(
+                        source_payload,
+                        pull_plan_payload=pull_plan,
+                    )
+                    staging = build_n3_c1_scoped_current_day_staging_artifact(
+                        payload,
+                        pull_plan_artifact=pull_plan,
+                        source_rows_artifact=filtered_source,
+                        target_hhmm=target_hhmm,
+                        observed_at=observed_at,
+                        source_pull_plan_path="inline://object_cursor_batch/pull_plan",
+                        source_pull_plan_hash=_json_payload_sha256(pull_plan),
+                        source_rows_artifact_path="inline://object_cursor_batch/current_day_source",
+                        source_rows_artifact_hash=str(source_artifact.get("sha256") or ""),
+                    )
+                    if staging.get("artifact_status") != "passed":
+                        raise FastlaneShellBlocked(
+                            str(staging.get("blocked_reason") or "object_cursor_batch_staging_invalid")
+                        )
+                    staging_written_at = datetime.now().astimezone().isoformat()
+                    staging.update(
+                        {
+                            "c1_lane_mode": OBJECT_CURSOR_BATCH_MODE,
+                            "source_written_at": source_payload.get("source_written_at"),
+                            "staging_written_at": staging_written_at,
+                            "minute_closed_to_source_ms": source_payload.get("minute_closed_to_source_ms"),
+                            "source_to_staging_ms": _elapsed_ms(
+                                started_at=source_payload.get("source_written_at"),
+                                completed_at=staging_written_at,
+                            ),
+                            "staging_to_proof_ms": None,
+                            "proof_to_action_ms": None,
+                        }
+                    )
+                    staging_records.append(
+                        {
+                            **record,
+                            "staging_payload": staging,
+                            "source_artifact": source_artifact,
+                        }
+                    )
+                    processed_object_keys.add(object_key)
+                except (FastlaneShellBlocked, ValueError) as exc:
+                    failure_records.append(
+                        _object_cursor_batch_failure(
+                            object_key,
+                            target_hhmm=str(record.get("target_hhmm") or ""),
+                            reason=str(exc),
+                        )
+                    )
+
+    previous_context_started = time.monotonic()
+    inline_previous_adapter = getattr(previous_day_context_provider_adapter, "inline_rows_batch_adapter", None)
+    if staging_records and not callable(inline_previous_adapter):
+        raise FastlaneShellBlocked("object_cursor_batch_inline_previous_day_provider_required")
+    previous_result = (
+        dict(
+            inline_previous_adapter(
+                args=args,
+                staging_payloads=[item["staging_payload"] for item in staging_records],
+            )
+            or {}
+        )
+        if staging_records
+        else {}
+    )
+    previous_rows = list(previous_result.get("previous_day_minute_rows") or [])
+    previous_context_ms = int(
+        round((time.monotonic() - previous_context_started) * 1000)
+    )
+    previous_rows_by_object: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for previous_row in previous_rows:
+        if not isinstance(previous_row, Mapping):
+            continue
+        previous_key = (
+            str(previous_row.get("asset_kind") or ""),
+            str(previous_row.get("identity_key") or ""),
+        )
+        if all(previous_key):
+            previous_rows_by_object.setdefault(previous_key, []).append(dict(previous_row))
+    missing_previous_objects = {
+        tuple(item)
+        for item in previous_result.get("missing_object_keys") or []
+        if isinstance(item, (list, tuple)) and len(item) == 2
+    }
+    proof_build_started = time.monotonic()
+    n3t_writer_inputs: list[dict[str, Any]] = []
+    proof_records: list[dict[str, Any]] = []
+    for record in staging_records:
+        object_key = tuple(record["object_key"])
+        target_hhmm = str(record.get("target_hhmm") or "")
+        if (object_key[1], object_key[2]) in missing_previous_objects:
+            failure_records.append(
+                _object_cursor_batch_failure(
+                    object_key,
+                    target_hhmm=target_hhmm,
+                    reason="previous_day_context_rows_missing",
+                )
+            )
+            continue
+        try:
+            payload = dict(record.get("payload") or {})
+            staging = dict(record.get("staging_payload") or {})
+            metric_source = build_n3_c1_n3t_metric_context_source_artifact(
+                payload,
+                staging_artifact=staging,
+                previous_day_minute_rows=previous_rows_by_object.get((object_key[1], object_key[2]), []),
+                target_hhmm=target_hhmm,
+                observed_at=observed_at,
+                source_staging_artifact_path="inline://object_cursor_batch/current_day_staging",
+                source_staging_artifact_hash=_json_payload_sha256(staging),
+            )
+            if metric_source.get("metric_context_status") != "ready":
+                raise FastlaneShellBlocked(
+                    str(metric_source.get("blocked_reason") or "metric_context_source_not_ready")
+                )
+            metric_payload = build_n3_c1_scoped_artifact_plan(
+                payload,
+                target_minute_label=_hhmm_to_minute_label(target_hhmm),
+                observed_at=observed_at,
+                source_artifact_path="inline://object_cursor_batch/metric_context_source",
+                source_artifact_hash=_json_payload_sha256(metric_source),
+                metric_context_rows=list(metric_source.get("metric_context_rows") or []),
+            )
+            if (
+                metric_payload.get("artifact_status") != "planned"
+                or metric_payload.get("metric_context_status") != "ready"
+            ):
+                raise FastlaneShellBlocked(
+                    str(metric_payload.get("blocked_reason") or "metric_context_not_ready")
+                )
+            proof_written_at = datetime.now().astimezone().isoformat()
+            metric_payload.update(
+                {
+                    "source_written_at": staging.get("source_written_at"),
+                    "staging_written_at": staging.get("staging_written_at"),
+                    "proof_written_at": proof_written_at,
+                    "minute_closed_to_source_ms": staging.get("minute_closed_to_source_ms"),
+                    "source_to_staging_ms": staging.get("source_to_staging_ms"),
+                    "staging_to_proof_ms": _elapsed_ms(
+                        started_at=staging.get("staging_written_at"),
+                        completed_at=proof_written_at,
+                    ),
+                    "proof_to_action_ms": None,
+                    "object_cursor_batch_inline": True,
+                }
+            )
+            metric_hash = _json_payload_sha256(metric_payload)
+            writer_input = {
+                "target_hhmm": target_hhmm,
+                "for_trade_date": object_key[0],
+                "source_run_hash": record.get("source_run_hash"),
+                "namespace_token": record.get("source_run_namespace"),
+                "n3t_metric_run_id": record.get("n3t_metric_run_id"),
+                "metric_context_artifact_path": "inline://object_cursor_batch/metric_context",
+                "metric_context_artifact_sha256": metric_hash,
+                "metric_context_payload": metric_payload,
+                "source_basis": "N3T_C1_CLOSED",
+                "metric_role": "action_confirmation",
+                "proof_consumer": "N5",
+                "not_n5_final_proof": False,
+            }
+            n3t_writer_inputs.append(writer_input)
+            proof_records.append({**record, "metric_payload": metric_payload, "metric_hash": metric_hash})
+        except (FastlaneShellBlocked, ValueError) as exc:
+            failure_records.append(
+                _object_cursor_batch_failure(
+                    object_key,
+                    target_hhmm=target_hhmm,
+                    reason=str(exc),
+                )
+            )
+
+    proof_build_ms = int(
+        round((time.monotonic() - proof_build_started) * 1000)
+    )
+    writer_started = time.monotonic()
+    writer_result: dict[str, Any] = {}
+    if n3t_writer_inputs:
+        if n3t_writer_adapter is None:
+            raise FastlaneShellBlocked("object_cursor_batch_n3t_writer_required")
+        writer_result = dict(n3t_writer_adapter(args=args, n3t_writer_inputs=n3t_writer_inputs) or {})
+        _validate_execute_result(writer_result)
+    writer_ms = int(round((time.monotonic() - writer_started) * 1000))
+    artifact_write_started = time.monotonic()
+    batch_artifacts = _write_object_cursor_batch_artifacts(
+        output_dir=Path(args.output_dir),
+        invocation_id=invocation_id,
+        selected_records=selected,
+        source_by_object=source_by_object,
+        previous_rows=previous_rows,
+        proof_records=proof_records,
+        failure_records=failure_records,
+        writer_result=writer_result,
+        observed_at=observed_at,
+    )
+    artifact_write_ms = int(
+        round((time.monotonic() - artifact_write_started) * 1000)
+    )
+    retry_state_result = {
+        "path": str(retry_state_path),
+        "written": False,
+        "active_entry_count": len(dict(retry_state.get("entries") or {})),
+    }
+    if not post_close_mode:
+        retry_state_result = _update_object_cursor_batch_retry_state(
+            path=retry_state_path,
+            retry_state=retry_state,
+            observed_at=observed_at,
+            proof_records=proof_records,
+            failure_records=failure_records,
+        )
+    existing_proof_keys.update(
+        _object_cursor_batch_proof_key(record)
+        for record in proof_records
+    )
+    processed_candidate_count = len(n3t_writer_inputs)
+    processed_by_tier = {"live": 0, "backlog": 0}
+    processed_by_asset: dict[str, int] = {}
+    for record in proof_records:
+        tier = str(record.get("queue_tier") or "backlog")
+        object_key = tuple(record.get("object_key") or ())
+        asset_kind = str(object_key[1]) if len(object_key) >= 2 else ""
+        processed_by_tier[tier] = processed_by_tier.get(tier, 0) + 1
+        if asset_kind:
+            processed_by_asset[asset_kind] = processed_by_asset.get(asset_kind, 0) + 1
+    selected_by_tier = dict(selection_summary.get("selected_candidate_count_by_tier") or {})
+    selected_by_asset = dict(selection_summary.get("selected_candidate_count_by_asset_kind") or {})
+    pending_by_tier = dict(selection_summary.get("pending_candidate_count_by_tier") or {})
+    pending_by_asset = dict(selection_summary.get("pending_candidate_count_by_asset_kind") or {})
+    failed_by_tier = {
+        tier: max(
+            0,
+            int(selected_by_tier.get(tier) or 0)
+            - int(processed_by_tier.get(tier) or 0),
+        )
+        for tier in sorted(set(selected_by_tier) | set(processed_by_tier))
+    }
+    failed_by_asset = {
+        asset_kind: max(
+            0,
+            int(selected_by_asset.get(asset_kind) or 0)
+            - int(processed_by_asset.get(asset_kind) or 0),
+        )
+        for asset_kind in sorted(set(selected_by_asset) | set(processed_by_asset))
+    }
+    remaining_by_tier = {
+        tier: max(
+            0,
+            int(pending_by_tier.get(tier) or 0)
+            - int(processed_by_tier.get(tier) or 0),
+        )
+        for tier in sorted(set(pending_by_tier) | set(processed_by_tier))
+    }
+    remaining_by_asset = {
+        asset_kind: max(
+            0,
+            int(pending_by_asset.get(asset_kind) or 0)
+            - int(processed_by_asset.get(asset_kind) or 0),
+        )
+        for asset_kind in sorted(set(pending_by_asset) | set(processed_by_asset))
+    }
+    selection_summary["remaining_candidate_count"] = max(
+        0,
+        int(selection_summary.get("pending_candidate_count") or 0)
+        - processed_candidate_count,
+    )
+    reason = (
+        "object_cursor_batch_chunk_incomplete"
+        if int(selection_summary.get("remaining_candidate_count") or 0) > 0
+        else "object_cursor_batch_complete"
+    )
+    selection_summary["processed_object_count"] = len(processed_object_keys)
+    selection_summary["attempted_object_keys"] = [
+        list(object_key)
+        for object_key in sorted(records_by_object)
+    ]
+    selection_summary["processed_candidate_count"] = processed_candidate_count
+    selection_summary["processed_candidate_count_by_tier"] = processed_by_tier
+    selection_summary["processed_candidate_count_by_asset_kind"] = processed_by_asset
+    selection_summary["failed_candidate_count"] = max(
+        0,
+        int(selection_summary.get("selected_candidate_count") or 0)
+        - processed_candidate_count,
+    )
+    selection_summary["failed_candidate_count_by_tier"] = failed_by_tier
+    selection_summary["failed_candidate_count_by_asset_kind"] = failed_by_asset
+    selection_summary["remaining_candidate_count_by_tier"] = remaining_by_tier
+    selection_summary["remaining_candidate_count_by_asset_kind"] = remaining_by_asset
+    selection_summary["true_remaining_candidate_count"] = max(
+        0,
+        int(selection_summary.get("true_remaining_candidate_count") or 0)
+        + int(selection_summary.get("failed_candidate_count") or 0),
+    )
+    selection_summary["completed_chunk_count"] = 1
+    selection_summary["existing_proof_count_after_chunk"] = len(existing_proof_keys)
+    selection_summary["retry_state_written"] = bool(
+        retry_state_result.get("written")
+    )
+    selection_summary["retry_state_active_entry_count"] = int(
+        retry_state_result.get("active_entry_count") or 0
+    )
+    selection_summary["source_only_artifact_count"] = sum(
+        1
+        for artifact in batch_artifacts
+        if artifact.get("chunk_status") == "source_only"
+    )
+    selection_summary.update(
+        {
+            "endpoint_selection_ms": int(
+                source_result.get("endpoint_selection_ms") or 0
+            ),
+            "provider_fetch_ms": int(
+                source_result.get("provider_fetch_ms") or 0
+            ),
+            "previous_day_context_ms": previous_context_ms,
+            "proof_build_ms": proof_build_ms,
+            "writer_ms": writer_ms,
+            "artifact_write_ms": artifact_write_ms,
+            "provider_offset_values": sorted(
+                {
+                    int(item.get("provider_offset") or 0)
+                    for item in source_result.get("candidate_results") or []
+                    if int(item.get("provider_offset") or 0) > 0
+                }
+            ),
+            "provider_connection_count": int(
+                source_result.get("provider_connection_count") or 0
+            ),
+        }
+    )
+    return _object_cursor_batch_manifest(
+        args=args,
+        invocation_id=invocation_id,
+        active_scope_artifacts=active_scope_artifacts,
+        selection_summary=selection_summary,
+        source_result=source_result,
+        previous_result=previous_result,
+        writer_result=writer_result,
+        batch_artifacts=batch_artifacts,
+        failure_records=failure_records,
+        reason=reason,
+        started=started,
+        now_monotonic=now_monotonic,
+    )
+
+
+def _object_cursor_batch_sum_count_maps(
+    manifests: Sequence[Mapping[str, Any]],
+    field: str,
+) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for manifest in manifests:
+        batch = manifest.get("object_cursor_batch")
+        if not isinstance(batch, Mapping):
+            continue
+        values = batch.get(field)
+        if not isinstance(values, Mapping):
+            continue
+        for key, value in values.items():
+            totals[str(key)] = totals.get(str(key), 0) + int(value or 0)
+    return totals
+
+
+def _object_cursor_batch_prefer_live_fastpath(
+    *,
+    chunk_sequence: int,
+    max_chunks: int,
+    manifests: Sequence[Mapping[str, Any]],
+) -> bool:
+    if chunk_sequence == 0:
+        return True
+    if chunk_sequence >= max_chunks - 1 or not manifests:
+        return False
+
+    previous_batch = manifests[-1].get("object_cursor_batch")
+    if not isinstance(previous_batch, Mapping):
+        return False
+    if (
+        str(previous_batch.get("queue_mode") or "")
+        != OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+    ):
+        return False
+
+    pending_by_tier = previous_batch.get("pending_object_count_by_tier")
+    if not isinstance(pending_by_tier, Mapping):
+        return False
+    remaining_live_objects = max(
+        0,
+        int(pending_by_tier.get("live") or 0)
+        - int(previous_batch.get("selected_live_object_count") or 0),
+    )
+    return remaining_live_objects >= DEFAULT_OBJECT_CURSOR_BATCH_CHUNK_SIZE
+
+
+def _merge_object_cursor_batch_chunk_manifests(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    manifests: Sequence[Mapping[str, Any]],
+    started: float,
+    now_monotonic: Any,
+) -> dict[str, Any]:
+    if not manifests:
+        raise FastlaneShellBlocked("object_cursor_batch_chunk_manifest_required")
+
+    last_manifest = manifests[-1]
+    merged = dict(last_manifest)
+    last_batch = dict(last_manifest.get("object_cursor_batch") or {})
+    batch_artifacts = [
+        dict(artifact)
+        for manifest in manifests
+        for artifact in (manifest.get("object_cursor_batch") or {}).get(
+            "batch_artifacts", []
+        )
+        if isinstance(artifact, Mapping)
+    ]
+    failure_records = [
+        dict(failure)
+        for manifest in manifests
+        for failure in (manifest.get("object_cursor_batch") or {}).get(
+            "failure_records", []
+        )
+        if isinstance(failure, Mapping)
+    ]
+    attempted_object_keys = sorted(
+        {
+            tuple(str(value) for value in object_key)
+            for manifest in manifests
+            for object_key in (manifest.get("object_cursor_batch") or {}).get(
+                "attempted_object_keys", []
+            )
+            if isinstance(object_key, (list, tuple)) and len(object_key) == 4
+        }
+    )
+    completed_chunk_count = sum(
+        int(
+            (manifest.get("object_cursor_batch") or {}).get(
+                "completed_chunk_count"
+            )
+            or 0
+        )
+        for manifest in manifests
+    )
+    reason = str(last_manifest.get("reason") or "")
+    if (
+        reason not in {
+            "object_cursor_batch_complete",
+            "object_cursor_batch_no_pending_proof",
+        }
+        and int(last_batch.get("remaining_candidate_count") or 0) > 0
+    ):
+        reason = "object_cursor_batch_chunk_incomplete"
+
+    sum_fields = (
+        "selected_object_count",
+        "selected_candidate_count",
+        "processed_object_count",
+        "processed_candidate_count",
+        "failed_candidate_count",
+        "provider_call_count",
+        "previous_day_database_connection_count",
+        "proof_row_count",
+        "source_only_artifact_count",
+        "probe_page_count",
+        "existing_proof_skipped_count",
+        "retry_deferred_object_count",
+        "selected_live_object_count",
+        "selected_backlog_object_count",
+        "selected_live_candidate_count",
+        "selected_backlog_candidate_count",
+        "live_fastpath_selected_object_count",
+    )
+    merged_batch = dict(last_batch)
+    for field in sum_fields:
+        merged_batch[field] = sum(
+            int((manifest.get("object_cursor_batch") or {}).get(field) or 0)
+            for manifest in manifests
+        )
+    for field in (
+        "selected_object_count_by_tier",
+        "selected_object_count_by_asset_kind",
+        "selected_candidate_count_by_tier",
+        "selected_candidate_count_by_asset_kind",
+        "processed_candidate_count_by_tier",
+        "processed_candidate_count_by_asset_kind",
+        "failed_candidate_count_by_tier",
+        "failed_candidate_count_by_asset_kind",
+    ):
+        merged_batch[field] = _object_cursor_batch_sum_count_maps(
+            manifests,
+            field,
+        )
+    merged_batch.update(
+        {
+            "queue_mode": (
+                "live_minute_fastpath_then_balanced_fair"
+                if any(
+                    bool(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "live_fastpath_attempted"
+                        )
+                    )
+                    for manifest in manifests
+                )
+                and len(manifests) > 1
+                else str(
+                    last_batch.get("queue_mode")
+                    or OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+                )
+            ),
+            "live_fastpath_attempted": any(
+                bool(
+                    (manifest.get("object_cursor_batch") or {}).get(
+                        "live_fastpath_attempted"
+                    )
+                )
+                for manifest in manifests
+            ),
+            "adaptive_live_capacity_enabled": (
+                not _is_post_close_final_a_pass(args)
+            ),
+            "live_fastpath_chunk_count": sum(
+                1
+                for manifest in manifests
+                if str(
+                    (manifest.get("object_cursor_batch") or {}).get(
+                        "queue_mode"
+                    )
+                    or ""
+                )
+                == OBJECT_CURSOR_BATCH_QUEUE_MODE_LIVE_FASTPATH
+            ),
+            "balanced_chunk_count": sum(
+                1
+                for manifest in manifests
+                if str(
+                    (manifest.get("object_cursor_batch") or {}).get(
+                        "queue_mode"
+                    )
+                    or OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+                )
+                == OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+            ),
+            "attempted_chunk_count": len(manifests),
+            "completed_chunk_count": completed_chunk_count,
+            "max_chunks_per_invocation": (
+                DEFAULT_OBJECT_CURSOR_BATCH_MAX_CHUNKS_PER_INVOCATION
+            ),
+            "attempted_object_keys": [list(key) for key in attempted_object_keys],
+            "batch_artifact_count": len(batch_artifacts),
+            "batch_artifacts": batch_artifacts,
+            "failure_records": failure_records,
+            "source_only_artifact_count": sum(
+                int(
+                    (manifest.get("object_cursor_batch") or {}).get(
+                        "source_only_artifact_count"
+                    )
+                    or 0
+                )
+                for manifest in manifests
+            ),
+            "chunk_summaries": [
+                {
+                    "chunk_sequence": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "chunk_sequence"
+                        )
+                        or 0
+                    ),
+                    "selected_object_count": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "selected_object_count"
+                        )
+                        or 0
+                    ),
+                    "processed_object_count": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "processed_object_count"
+                        )
+                        or 0
+                    ),
+                    "processed_candidate_count": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "processed_candidate_count"
+                        )
+                        or 0
+                    ),
+                    "failed_candidate_count": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "failed_candidate_count"
+                        )
+                        or 0
+                    ),
+                    "provider_call_count": int(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "provider_call_count"
+                        )
+                        or 0
+                    ),
+                    "queue_mode": str(
+                        (manifest.get("object_cursor_batch") or {}).get(
+                            "queue_mode"
+                        )
+                        or OBJECT_CURSOR_BATCH_QUEUE_MODE_BALANCED
+                    ),
+                    "reason": str(manifest.get("reason") or ""),
+                }
+                for manifest in manifests
+            ],
+        }
+    )
+
+    lane_results: dict[str, Any] = {}
+    for lane_name in ("c1_lane", "n3t_lane"):
+        last_lane = dict(
+            (last_manifest.get("lane_results") or {}).get(lane_name) or {}
+        )
+        for field in (
+            "selected_candidate_count",
+            "processed_candidate_count",
+            "failed_candidate_count",
+        ):
+            last_lane[field] = sum(
+                int(
+                    ((manifest.get("lane_results") or {}).get(lane_name) or {}).get(
+                        field
+                    )
+                    or 0
+                )
+                for manifest in manifests
+            )
+        last_lane["reason"] = reason
+        lane_results[lane_name] = last_lane
+
+    write_executed = any(
+        bool(manifest.get("writes_enabled")) for manifest in manifests
+    )
+    boundary: dict[str, Any] = dict(last_manifest.get("boundary") or {})
+    for key in set().union(
+        *[
+            set((manifest.get("boundary") or {}).keys())
+            for manifest in manifests
+        ]
+    ):
+        values = [
+            (manifest.get("boundary") or {}).get(key)
+            for manifest in manifests
+        ]
+        if all(isinstance(value, bool) for value in values):
+            boundary[key] = any(values)
+
+    source_result = dict(
+        last_manifest.get("current_day_source_provider_result") or {}
+    )
+    source_result.update(
+        {
+            "invocation_inline_payload_count": int(
+                merged_batch.get("provider_call_count") or 0
+            ),
+            "completed_chunk_count": completed_chunk_count,
+            "result_scope": "last_chunk_with_invocation_totals",
+        }
+    )
+    execute_result = dict(last_manifest.get("execute_result") or {})
+    execute_result.update(
+        {
+            "invocation_inserted_rows": int(
+                merged_batch.get("proof_row_count") or 0
+            ),
+            "completed_chunk_count": completed_chunk_count,
+            "result_scope": "last_chunk_with_invocation_totals",
+        }
+    )
+    merged.update(
+        {
+            "verdict": (
+                "N3_C1_N3T_FASTLANE_EXECUTE_PASS"
+                if write_executed
+                else "N3_C1_N3T_FASTLANE_READINESS_WAITING"
+            ),
+            "reason": reason,
+            "invocation_id": invocation_id,
+            "writes_enabled": write_executed,
+            "lane_results": lane_results,
+            "object_cursor_batch": merged_batch,
+            "current_day_source_provider_result": source_result,
+            "execute_result": execute_result,
+            "bounded": {
+                "max_runtime_seconds": float(args.max_runtime_seconds),
+                "elapsed_seconds": round(
+                    float(now_monotonic()) - float(started),
+                    6,
+                ),
+            },
+            "boundary": boundary,
+        }
+    )
+    return merged
+
+
+def _run_object_cursor_batch_hot_path(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    previous_day_context_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    n3t_writer_adapter: Callable[..., Mapping[str, Any]] | None,
+    deadline_check: Callable[[str], None],
+    started: float,
+    now_monotonic: Any,
+) -> dict[str, Any]:
+    # One invocation owns one provider session and one bounded A-minute cohort.
+    # Splitting the cohort into runner-level chunks would repeat endpoint probes.
+    max_chunks = DEFAULT_OBJECT_CURSOR_BATCH_MAX_CHUNKS_PER_INVOCATION
+    manifests: list[dict[str, Any]] = []
+    attempted_object_keys: set[tuple[str, str, str, str]] = set()
+    for chunk_sequence in range(max_chunks):
+        if chunk_sequence:
+            remaining_runtime_seconds = float(args.max_runtime_seconds) - (
+                float(now_monotonic()) - float(started)
+            )
+            if (
+                remaining_runtime_seconds
+                < DEFAULT_OBJECT_CURSOR_BATCH_MIN_SECONDS_TO_START_CHUNK
+            ):
+                break
+        manifest = _run_object_cursor_batch_single_chunk(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            current_day_source_provider_adapter=current_day_source_provider_adapter,
+            previous_day_context_provider_adapter=previous_day_context_provider_adapter,
+            n3t_writer_adapter=n3t_writer_adapter,
+            deadline_check=deadline_check,
+            started=started,
+            now_monotonic=now_monotonic,
+            chunk_sequence=chunk_sequence,
+            excluded_object_keys=set(attempted_object_keys),
+            prefer_live_fastpath=_object_cursor_batch_prefer_live_fastpath(
+                chunk_sequence=chunk_sequence,
+                max_chunks=max_chunks,
+                manifests=manifests,
+            ),
+        )
+        manifests.append(manifest)
+        attempted_object_keys.update(
+            tuple(str(value) for value in object_key)
+            for object_key in (
+                manifest.get("object_cursor_batch") or {}
+            ).get("attempted_object_keys", [])
+            if isinstance(object_key, (list, tuple)) and len(object_key) == 4
+        )
+        batch = manifest.get("object_cursor_batch") or {}
+        if int(batch.get("completed_chunk_count") or 0) <= 0:
+            break
+        if str(manifest.get("reason") or "") in {
+            "object_cursor_batch_complete",
+            "object_cursor_batch_no_pending_proof",
+        }:
+            break
+        if (
+            int(batch.get("processed_candidate_count") or 0) <= 0
+            and int(batch.get("failed_candidate_count") or 0) <= 0
+        ):
+            break
+    return _merge_object_cursor_batch_chunk_manifests(
+        args=args,
+        invocation_id=invocation_id,
+        manifests=manifests,
+        started=started,
+        now_monotonic=now_monotonic,
+    )
+
+
+def _post_close_final_a_resumable_gate(args: argparse.Namespace) -> dict[str, Any]:
+    session_phase = str(getattr(args, "fastlane_session_phase", "") or "").strip()
+    if session_phase != "post_close":
+        return {
+            "applicable": False,
+            "reason": "not_post_close",
+            "external_pull_allowed": False,
+        }
+    decision = dict(getattr(args, "fastlane_active_worker_decision", {}) or {})
+    if (
+        not _is_post_close_final_a_pass(args)
+        or decision.get("post_close_final_a_pass_allowed") is not True
+        or decision.get("external_c1_pull_allowed_once") is not True
+    ):
+        return {
+            "applicable": True,
+            "reason": "post_close_c1_provider_disabled",
+            "external_pull_allowed": False,
+        }
+    current_exchange_time = str(
+        getattr(args, "fastlane_current_exchange_time", "") or ""
+    ).strip()
+    if _hhmm_int(current_exchange_time) < POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:
+        return {
+            "applicable": True,
+            "reason": "post_close_final_a_close_grace_waiting",
+            "external_pull_allowed": False,
+            "current_exchange_time": current_exchange_time,
+            "close_grace_ready_hhmm": f"{POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:04d}",
+            "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+            "raw_source_close_label": "15:00",
+        }
+    return {
+        "applicable": True,
+        "reason": "post_close_final_a_resumable_object_batch_ready",
+        "external_pull_allowed": True,
+        "current_exchange_time": current_exchange_time,
+        "close_grace_ready_hhmm": f"{POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:04d}",
+        "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+        "raw_source_close_label": "15:00",
+        "source_chunk_size": DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE,
+        "proof_chunk_size": DEFAULT_POST_CLOSE_FINAL_A_PROOF_CHUNK_SIZE,
+    }
+
+
+def _post_close_final_a_object_token(object_key: Sequence[str]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [str(value) for value in object_key],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _post_close_final_a_source_cache_path(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    object_key: Sequence[str],
+) -> Path:
+    for_trade_date = str(getattr(args, "for_trade_date", "") or "")
+    normalized = tuple(str(value) for value in object_key)
+    if len(normalized) != 4 or normalized[0] != for_trade_date or not all(normalized):
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_scope_invalid")
+    return (
+        output_dir
+        / "post_close_final_a"
+        / "source_cache"
+        / (
+            f"{POST_CLOSE_FINAL_A_SOURCE_CACHE_ARTIFACT_TYPE}_"
+            f"{for_trade_date}_{_post_close_final_a_object_token(normalized)[:24]}.json"
+        )
+    )
+
+
+def _post_close_final_a_progress_marker_path(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+) -> Path:
+    for_trade_date = str(getattr(args, "for_trade_date", "") or "")
+    if not re.fullmatch(r"\d{8}", for_trade_date):
+        raise FastlaneShellBlocked("post_close_final_a_progress_trade_date_invalid")
+    return (
+        output_dir
+        / "post_close_final_a"
+        / f"{POST_CLOSE_FINAL_A_PROGRESS_ARTIFACT_TYPE}_{for_trade_date}.json"
+    )
+
+
+def _load_post_close_final_a_progress_marker(
+    path: Path,
+    *,
+    for_trade_date: str,
+) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid") from exc
+    if not isinstance(payload, Mapping):
+        raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+    result = dict(payload)
+    if (
+        result.get("artifact_type") != POST_CLOSE_FINAL_A_PROGRESS_ARTIFACT_TYPE
+        or str(result.get("for_trade_date") or "") != for_trade_date
+        or result.get("status") not in {"in_progress", "completed", "blocked"}
+        or result.get("target_physical_minute_label")
+        != POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL
+        or result.get("raw_source_close_label") != "15:00"
+        or not isinstance(result.get("object_progress"), list)
+    ):
+        raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+    for row in result.get("object_progress") or []:
+        if not isinstance(row, Mapping):
+            raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+        object_key = row.get("object_key")
+        if not isinstance(object_key, list) or len(object_key) != 4:
+            raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+    excluded_refs = result.get("no_evaluable_after_close_refs") or []
+    if not isinstance(excluded_refs, list):
+        raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+    for row in excluded_refs:
+        if not isinstance(row, Mapping):
+            raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+        object_key = row.get("object_key")
+        if not isinstance(object_key, list) or len(object_key) != 4:
+            raise FastlaneShellBlocked("post_close_final_a_progress_marker_invalid")
+    return result
+
+
+def _post_close_final_a_active_object_states(
+    *,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+) -> tuple[
+    dict[tuple[str, str, str, str], dict[str, str]],
+    list[dict[str, Any]],
+]:
+    states: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    no_evaluable_by_key: dict[
+        tuple[tuple[str, str, str, str], str, str, str], dict[str, Any]
+    ] = {}
+    final_hhmm = POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL.replace(":", "")
+    for artifact in active_scope_artifacts:
+        source = _read_optional_json_artifact(str(artifact.get("path") or ""))
+        if not source.get("exists"):
+            continue
+        payload = dict(source.get("payload") or {})
+        for object_row in payload.get("scope_rows") or []:
+            if not isinstance(object_row, Mapping):
+                continue
+            if str(object_row.get("scope_status") or "active") != "active":
+                continue
+            for ref in object_row.get("active_tracking_refs") or []:
+                if not isinstance(ref, Mapping):
+                    continue
+                object_key = (
+                    str(
+                        ref.get("for_trade_date")
+                        or object_row.get("for_trade_date")
+                        or payload.get("for_trade_date")
+                        or artifact.get("for_trade_date")
+                        or ""
+                    ),
+                    str(ref.get("asset_kind") or object_row.get("asset_kind") or ""),
+                    str(ref.get("identity_key") or object_row.get("identity_key") or ""),
+                    str(ref.get("direction") or object_row.get("direction") or ""),
+                )
+                if not all(object_key):
+                    continue
+                target_hhmm = _target_hhmm_from_active_ref(ref)
+                target_after_final_close = (
+                    target_hhmm
+                    and _hhmm_int(target_hhmm) > _hhmm_int(final_hhmm)
+                    and not _active_a_minute_batch_target_hhmms(
+                        for_trade_date=object_key[0],
+                        start_hhmm=target_hhmm,
+                        closed_hhmm=final_hhmm,
+                    )
+                )
+                if target_after_final_close:
+                    excluded_ref = {
+                        "object_key": list(object_key),
+                        "state_key": str(ref.get("state_key") or ""),
+                        "source_trigger_event_id": str(
+                            ref.get("source_trigger_event_id") or ""
+                        ),
+                        "source_trigger_run_id": str(
+                            ref.get("source_trigger_run_id") or ""
+                        ),
+                        "condition_key": str(ref.get("condition_key") or ""),
+                        "first_confirmation_minute_label": str(
+                            ref.get("first_confirmation_minute_label") or ""
+                        ),
+                        "next_unchecked_minute_label": str(
+                            ref.get("next_unchecked_minute_label") or ""
+                        ),
+                        "trigger_time": str(
+                            ref.get("trigger_time")
+                            or ref.get("source_trigger_event_time")
+                            or ""
+                        ),
+                        "target_hhmm": target_hhmm,
+                        "reason": "trigger_after_final_evaluable_minute",
+                    }
+                    excluded_key = (
+                        object_key,
+                        excluded_ref["source_trigger_event_id"],
+                        excluded_ref["state_key"],
+                        target_hhmm,
+                    )
+                    no_evaluable_by_key.setdefault(excluded_key, excluded_ref)
+                    continue
+                last_checked_hhmm = _target_hhmm_from_value(
+                    ref.get("last_checked_minute_label")
+                )
+                state = states.setdefault(
+                    object_key,
+                    {
+                        "active_target_hhmm": target_hhmm,
+                        "active_last_checked_hhmm": last_checked_hhmm,
+                    },
+                )
+                if target_hhmm and (
+                    not state["active_target_hhmm"]
+                    or _hhmm_int(target_hhmm)
+                    < _hhmm_int(state["active_target_hhmm"])
+                ):
+                    state["active_target_hhmm"] = target_hhmm
+                if last_checked_hhmm and (
+                    not state["active_last_checked_hhmm"]
+                    or _hhmm_int(last_checked_hhmm)
+                    > _hhmm_int(state["active_last_checked_hhmm"])
+                ):
+                    state["active_last_checked_hhmm"] = last_checked_hhmm
+    no_evaluable_refs = sorted(
+        no_evaluable_by_key.values(),
+        key=lambda row: (
+            tuple(row.get("object_key") or ()),
+            str(row.get("target_hhmm") or ""),
+            str(row.get("source_trigger_event_id") or ""),
+            str(row.get("state_key") or ""),
+        ),
+    )
+    return states, no_evaluable_refs
+
+
+def _post_close_final_a_progress_rows(
+    *,
+    active_states: Mapping[tuple[str, str, str, str], Mapping[str, str]],
+    prior_marker: Mapping[str, Any],
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    prior_by_key = {
+        tuple(str(value) for value in row.get("object_key") or []): dict(row)
+        for row in prior_marker.get("object_progress") or []
+        if isinstance(row, Mapping)
+        and isinstance(row.get("object_key"), list)
+        and len(row.get("object_key") or []) == 4
+    }
+    rows: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for object_key, active in sorted(active_states.items()):
+        prior = prior_by_key.get(object_key, {})
+        initial_target = str(
+            prior.get("initial_target_hhmm")
+            or active.get("active_target_hhmm")
+            or ""
+        )
+        last_completed = str(
+            prior.get("last_completed_proof_hhmm") or ""
+        )
+        active_last_checked = str(active.get("active_last_checked_hhmm") or "")
+        if active_last_checked:
+            last_completed = _max_canonical_hhmm(
+                for_trade_date=object_key[0],
+                left=last_completed,
+                right=active_last_checked,
+            )
+        rows[object_key] = {
+            "object_key": list(object_key),
+            "object_token": _post_close_final_a_object_token(object_key),
+            "initial_target_hhmm": initial_target,
+            "active_target_hhmm": str(active.get("active_target_hhmm") or ""),
+            "active_last_checked_hhmm": active_last_checked,
+            "last_completed_proof_hhmm": last_completed,
+            "last_failure_reason": str(prior.get("last_failure_reason") or ""),
+        }
+    return rows
+
+
+def _post_close_final_a_cursor_state(
+    progress_rows: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
+) -> tuple[
+    dict[tuple[str, str, str, str], str],
+    set[tuple[str, str, str, str]],
+]:
+    floors: dict[tuple[str, str, str, str], str] = {}
+    completed: set[tuple[str, str, str, str]] = set()
+    for object_key, progress in progress_rows.items():
+        last_completed = str(progress.get("last_completed_proof_hhmm") or "")
+        if _hhmm_to_minute_label(last_completed) == POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL:
+            completed.add(object_key)
+            continue
+        next_after_completed = (
+            _next_canonical_hhmm(
+                for_trade_date=object_key[0],
+                hhmm=last_completed,
+            )
+            if last_completed
+            else ""
+        )
+        active_target = str(progress.get("active_target_hhmm") or "")
+        floor = _max_canonical_hhmm(
+            for_trade_date=object_key[0],
+            left=active_target,
+            right=next_after_completed,
+        )
+        if floor:
+            floors[object_key] = floor
+    return floors, completed
+
+
+def _post_close_final_a_advance_existing_proofs(
+    *,
+    progress_rows: dict[tuple[str, str, str, str], dict[str, Any]],
+    candidate_records: Sequence[Mapping[str, Any]],
+    existing_proof_keys: set[tuple[str, str, str]],
+) -> None:
+    records_by_object: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+    for record in candidate_records:
+        records_by_object.setdefault(tuple(record.get("object_key") or ()), []).append(
+            record
+        )
+    floors, _ = _post_close_final_a_cursor_state(progress_rows)
+    for object_key, records in records_by_object.items():
+        expected = str(floors.get(object_key) or "")
+        if not expected:
+            continue
+        for record in sorted(records, key=lambda item: _hhmm_int(item.get("target_hhmm"))):
+            target_hhmm = str(record.get("target_hhmm") or "")
+            if target_hhmm != expected:
+                break
+            if _object_cursor_batch_proof_key(record) not in existing_proof_keys:
+                break
+            progress_rows[object_key]["last_completed_proof_hhmm"] = target_hhmm
+            expected = _next_canonical_hhmm(
+                for_trade_date=object_key[0],
+                hhmm=target_hhmm,
+            )
+            if not expected:
+                break
+
+
+def _load_post_close_final_a_source_cache(
+    path: Path,
+    *,
+    object_key: Sequence[str],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_invalid") from exc
+    normalized_key = [str(value) for value in object_key]
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("artifact_type") != POST_CLOSE_FINAL_A_SOURCE_CACHE_ARTIFACT_TYPE
+        or payload.get("object_key") != normalized_key
+        or payload.get("target_physical_minute_label")
+        != POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL
+        or payload.get("raw_source_close_label") != "15:00"
+        or not isinstance(payload.get("source_payload"), Mapping)
+    ):
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_invalid")
+    source_payload = dict(payload.get("source_payload") or {})
+    source_sha256 = _json_payload_sha256(source_payload)
+    if source_sha256 != str(payload.get("source_payload_sha256") or ""):
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_invalid")
+    final_rows = [
+        row
+        for row in source_payload.get("closed_minute_rows") or []
+        if isinstance(row, Mapping)
+        and _hhmm_to_minute_label(row.get("physical_c1_label"))
+        == POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL
+        and _hhmm_to_minute_label(row.get("raw_source_label")) == "15:00"
+    ]
+    if not final_rows:
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_final_row_missing")
+    return {
+        "path": str(path),
+        "target_hhmm": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL.replace(":", ""),
+        "for_trade_date": normalized_key[0],
+        "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
+        "source_run_hash": source_payload.get("source_run_hash"),
+        "source_run_namespace": source_payload.get("source_run_namespace"),
+        "row_count": int(source_payload.get("closed_minute_row_count") or 0),
+        "sha256": source_sha256,
+        "payload": source_payload,
+        "object_batch_key": normalized_key,
+        "source_cache_hit": True,
+    }
+
+
+def _persist_post_close_final_a_source_cache(
+    *,
+    args: argparse.Namespace,
+    output_dir: Path,
+    source_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    object_key = tuple(str(value) for value in source_artifact.get("object_batch_key") or ())
+    source_payload = source_artifact.get("payload")
+    if len(object_key) != 4 or not isinstance(source_payload, Mapping):
+        raise FastlaneShellBlocked("post_close_final_a_source_cache_scope_invalid")
+    source_payload = dict(source_payload)
+    path = _post_close_final_a_source_cache_path(
+        args,
+        output_dir=output_dir,
+        object_key=object_key,
+    )
+    cache_payload = {
+        "artifact_type": POST_CLOSE_FINAL_A_SOURCE_CACHE_ARTIFACT_TYPE,
+        "artifact_schema_version": "v1",
+        "producer_layer": "N3_market_data",
+        "for_trade_date": object_key[0],
+        "object_key": list(object_key),
+        "object_token": _post_close_final_a_object_token(object_key),
+        "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+        "raw_source_close_label": "15:00",
+        "source_payload_sha256": _json_payload_sha256(source_payload),
+        "source_payload": source_payload,
+        "cached_at": _wall_clock_observed_at(),
+        "database_written": False,
+        "writes_canonical_minute_bar_1m": False,
+        "writes_n3_outbox": False,
+        "touches_n4_n5_n6_outbox": False,
+    }
+    _write_atomic_compact_json(path, cache_payload)
+    return _load_post_close_final_a_source_cache(path, object_key=object_key)
+
+
+def _post_close_final_a_empty_source_result() -> dict[str, Any]:
+    return {
+        "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
+        "provider_name": "post_close_final_a_source_cache_v1",
+        "inline_payload_count": 0,
+        "cached_source_count": 0,
+        "available_source_count": 0,
+        "provider_call_count": 0,
+        "source_row_count": 0,
+        "source_artifacts": [],
+        "candidate_results": [],
+        "failed_candidate_count": 0,
+        "failed_candidates": [],
+        "market_data_pulled": False,
+        "database_written": False,
+        "runtime_execute": False,
+        "writes_canonical_minute_bar_1m": False,
+        "writes_n3_outbox": False,
+        "writes_common_event_outbox": False,
+        "touches_n4_n5_n6_outbox": False,
+        "updates_n4_outbox": False,
+        "scans_n5_db": False,
+        "touches_n6": False,
+        "full_market_fallback_used": False,
+    }
+
+
+def _fetch_post_close_final_a_source_chunk(
+    *,
+    args: argparse.Namespace,
+    output_dir: Path,
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    provider_plans: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    result = _post_close_final_a_empty_source_result()
+    if not provider_plans:
+        return result
+    if len(provider_plans) > DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE:
+        raise FastlaneShellBlocked("post_close_final_a_source_chunk_limit_exceeded")
+    inline_adapter = getattr(current_day_source_provider_adapter, "inline_batch_adapter", None)
+    if not callable(inline_adapter):
+        raise FastlaneShellBlocked("object_cursor_batch_inline_source_provider_required")
+    provider_result = dict(
+        inline_adapter(args=args, planned_artifacts=list(provider_plans)) or {}
+    )
+    _validate_current_day_source_provider_result(provider_result)
+    object_key_by_namespace = {
+        str(plan.get("namespace_token") or ""): list(
+            plan.get("object_batch_key") or []
+        )
+        for plan in provider_plans
+    }
+    object_key_by_source_hash = {
+        str(plan.get("source_run_hash") or ""): list(
+            plan.get("object_batch_key") or []
+        )
+        for plan in provider_plans
+    }
+    provider_failures: list[dict[str, Any]] = []
+    for failure in provider_result.get("failed_candidates") or []:
+        if not isinstance(failure, Mapping):
+            continue
+        item = dict(failure)
+        if not item.get("object_batch_key"):
+            item["object_batch_key"] = object_key_by_namespace.get(
+                str(item.get("namespace_token") or "")
+            ) or object_key_by_source_hash.get(
+                str(item.get("source_run_hash") or "")
+            ) or []
+        provider_failures.append(item)
+    persisted: list[dict[str, Any]] = []
+    cache_failures: list[dict[str, Any]] = []
+    for source_artifact in provider_result.get("source_artifacts") or []:
+        if not isinstance(source_artifact, Mapping):
+            continue
+        try:
+            persisted.append(
+                _persist_post_close_final_a_source_cache(
+                    args=args,
+                    output_dir=output_dir,
+                    source_artifact=source_artifact,
+                )
+            )
+        except FastlaneShellBlocked as exc:
+            cache_failures.append(
+                {
+                    "object_batch_key": list(
+                        source_artifact.get("object_batch_key") or []
+                    ),
+                    "reason": str(exc),
+                }
+            )
+    result.update(provider_result)
+    result.update(
+        {
+            "provider_call_count": len(provider_plans),
+            "inline_payload_count": len(persisted),
+            "available_source_count": len(persisted),
+            "source_artifacts": persisted,
+            "failed_candidate_count": int(
+                provider_result.get("failed_candidate_count") or 0
+            )
+            + len(cache_failures),
+            "failed_candidates": [
+                *provider_failures,
+                *cache_failures,
+            ],
+            "market_data_pulled": True,
+        }
+    )
+    return result
+
+
+def _post_close_final_a_cache_only_source_adapter(
+    *,
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> Callable[..., Mapping[str, Any]]:
+    def adapter(**_kwargs: Any) -> dict[str, Any]:
+        return _post_close_final_a_empty_source_result()
+
+    def inline_batch_adapter(
+        *,
+        args: argparse.Namespace,
+        planned_artifacts: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        result = _post_close_final_a_empty_source_result()
+        source_artifacts: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for plan in planned_artifacts:
+            object_key = tuple(str(value) for value in plan.get("object_batch_key") or ())
+            path = _post_close_final_a_source_cache_path(
+                args,
+                output_dir=output_dir,
+                object_key=object_key,
+            )
+            if not path.exists():
+                failures.append(
+                    {
+                        "object_batch_key": list(object_key),
+                        "reason": "post_close_final_a_source_cache_missing",
+                    }
+                )
+                continue
+            source_artifacts.append(
+                _load_post_close_final_a_source_cache(path, object_key=object_key)
+            )
+        result.update(
+            {
+                "cached_source_count": len(source_artifacts),
+                "available_source_count": len(source_artifacts),
+                "source_row_count": sum(
+                    int(item.get("row_count") or 0) for item in source_artifacts
+                ),
+                "source_artifacts": source_artifacts,
+                "failed_candidate_count": len(failures),
+                "failed_candidates": failures,
+            }
+        )
+        return result
+
+    setattr(adapter, "inline_batch_adapter", inline_batch_adapter)
+    return adapter
+
+
+def _post_close_final_a_advance_written_proofs(
+    *,
+    progress_rows: dict[tuple[str, str, str, str], dict[str, Any]],
+    batch_artifacts: Sequence[Mapping[str, Any]],
+) -> None:
+    floors, _ = _post_close_final_a_cursor_state(progress_rows)
+    for artifact in batch_artifacts:
+        object_key = tuple(str(value) for value in artifact.get("object_key") or ())
+        if object_key not in progress_rows:
+            continue
+        expected = str(floors.get(object_key) or "")
+        proof_labels = {
+            str(label)
+            for label in artifact.get("proof_target_minute_labels") or []
+        }
+        for label in artifact.get("target_minute_labels") or []:
+            target_hhmm = _target_hhmm_from_value(label)
+            if target_hhmm != expected:
+                break
+            if _hhmm_to_minute_label(target_hhmm) not in proof_labels:
+                break
+            progress_rows[object_key]["last_completed_proof_hhmm"] = target_hhmm
+            progress_rows[object_key]["last_failure_reason"] = ""
+            expected = _next_canonical_hhmm(
+                for_trade_date=object_key[0],
+                hhmm=target_hhmm,
+            )
+            if not expected:
+                break
+
+
+def _post_close_final_a_progress_payload(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    progress_rows: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
+    prior_marker: Mapping[str, Any],
+    output_dir: Path,
+    failure_records: Sequence[Mapping[str, Any]],
+    no_evaluable_after_close_refs: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    failures_by_key: dict[tuple[str, str, str, str], str] = {}
+    for failure in failure_records:
+        object_key = tuple(str(value) for value in failure.get("object_batch_key") or ())
+        if len(object_key) != 4:
+            object_key = (
+                str(failure.get("for_trade_date") or ""),
+                str(failure.get("asset_kind") or ""),
+                str(failure.get("identity_key") or ""),
+                str(failure.get("direction") or ""),
+            )
+        if len(object_key) == 4 and all(object_key):
+            failures_by_key[object_key] = str(
+                failure.get("reason") or "post_close_final_a_object_failed"
+            )
+    object_progress: list[dict[str, Any]] = []
+    completed_source_object_count = 0
+    completed_proof_object_count = 0
+    completed_proof_count = 0
+    remaining_proof_count = 0
+    for object_key, source in sorted(progress_rows.items()):
+        row = dict(source)
+        cache_path = _post_close_final_a_source_cache_path(
+            args,
+            output_dir=output_dir,
+            object_key=object_key,
+        )
+        source_cached = cache_path.exists()
+        if source_cached:
+            completed_source_object_count += 1
+        if object_key in failures_by_key:
+            row["last_failure_reason"] = failures_by_key[object_key]
+        initial_target = str(row.get("initial_target_hhmm") or "")
+        last_completed = str(row.get("last_completed_proof_hhmm") or "")
+        completed_labels = (
+            _active_a_minute_batch_target_hhmms(
+                for_trade_date=object_key[0],
+                start_hhmm=initial_target,
+                closed_hhmm=last_completed,
+            )
+            if initial_target and last_completed
+            else []
+        )
+        completed_proof_count += len(completed_labels)
+        if _hhmm_to_minute_label(last_completed) == POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL:
+            completed_proof_object_count += 1
+            remaining_labels: list[str] = []
+        else:
+            next_hhmm = (
+                _next_canonical_hhmm(
+                    for_trade_date=object_key[0],
+                    hhmm=last_completed,
+                )
+                if last_completed
+                else str(row.get("active_target_hhmm") or initial_target)
+            )
+            next_hhmm = _max_canonical_hhmm(
+                for_trade_date=object_key[0],
+                left=next_hhmm,
+                right=str(row.get("active_target_hhmm") or ""),
+            )
+            remaining_labels = (
+                _active_a_minute_batch_target_hhmms(
+                    for_trade_date=object_key[0],
+                    start_hhmm=next_hhmm,
+                    closed_hhmm=POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL.replace(":", ""),
+                )
+                if next_hhmm
+                else []
+            )
+        remaining_proof_count += len(remaining_labels)
+        row.update(
+            {
+                "source_cached": source_cached,
+                "source_cache_path": str(cache_path),
+                "completed_proof_count": len(completed_labels),
+                "remaining_proof_count": len(remaining_labels),
+            }
+        )
+        object_progress.append(row)
+    current_object_count = len(object_progress)
+    remaining_source_object_count = max(
+        0, current_object_count - completed_source_object_count
+    )
+    excluded_refs = [dict(row) for row in no_evaluable_after_close_refs]
+    excluded_object_keys = {
+        tuple(str(value) for value in row.get("object_key") or ())
+        for row in excluded_refs
+        if isinstance(row.get("object_key"), list)
+        and len(row.get("object_key") or []) == 4
+    }
+    completed = (
+        (current_object_count > 0 or bool(excluded_refs))
+        and remaining_source_object_count == 0
+        and remaining_proof_count == 0
+    )
+    object_scope_rows = [row["object_key"] for row in object_progress]
+    object_scope_sha256 = _json_payload_sha256(
+        {
+            "object_scope_rows": object_scope_rows,
+            "no_evaluable_after_close_refs": excluded_refs,
+        }
+    )
+    return {
+        "artifact_type": POST_CLOSE_FINAL_A_PROGRESS_ARTIFACT_TYPE,
+        "artifact_schema_version": "v1",
+        "producer_layer": "N3_market_data",
+        "for_trade_date": str(getattr(args, "for_trade_date", "") or ""),
+        "status": "completed" if completed else "in_progress",
+        "invocation_id": invocation_id,
+        "current_exchange_time": str(
+            getattr(args, "fastlane_current_exchange_time", "") or ""
+        ),
+        "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+        "raw_source_close_label": "15:00",
+        "object_scope_sha256": object_scope_sha256,
+        "prior_object_scope_sha256": str(
+            prior_marker.get("object_scope_sha256") or ""
+        ),
+        "object_scope_changed": bool(prior_marker)
+        and str(prior_marker.get("object_scope_sha256") or "")
+        != object_scope_sha256,
+        "current_object_count": current_object_count,
+        "no_evaluable_after_close_ref_count": len(excluded_refs),
+        "no_evaluable_after_close_object_count": len(excluded_object_keys),
+        "no_evaluable_after_close_refs": excluded_refs,
+        "completed_source_object_count": completed_source_object_count,
+        "remaining_source_object_count": remaining_source_object_count,
+        "completed_proof_object_count": completed_proof_object_count,
+        "completed_proof_count": completed_proof_count,
+        "remaining_proof_count": remaining_proof_count,
+        "failed_object_count": len(failures_by_key),
+        "source_chunk_size": DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE,
+        "proof_chunk_size": DEFAULT_POST_CLOSE_FINAL_A_PROOF_CHUNK_SIZE,
+        "object_progress": object_progress,
+        "database_written": False,
+        "writes_canonical_minute_bar_1m": False,
+        "writes_n3_outbox": False,
+        "touches_n4_n5_n6_outbox": False,
+        "updates_n4_outbox": False,
+        "scans_n5_db": False,
+        "full_market_fallback_used": False,
+    }
+
+
+def _post_close_object_cursor_batch_waiting_manifest(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    close_grace_pull: Mapping[str, Any],
+    started: float,
+    now_monotonic: Any,
+) -> dict[str, Any]:
+    reason = str(close_grace_pull.get("reason") or "post_close_c1_provider_disabled")
+    manifest = _object_cursor_batch_manifest(
+        args=args,
+        invocation_id=invocation_id,
+        active_scope_artifacts=active_scope_artifacts,
+        selection_summary={},
+        source_result={},
+        previous_result={},
+        writer_result={},
+        batch_artifacts=[],
+        failure_records=[],
+        reason=reason,
+        started=started,
+        now_monotonic=now_monotonic,
+    )
+    manifest["post_close_final_a_close_grace_pull"] = dict(close_grace_pull)
+    return manifest
+
+
+def _run_post_close_final_a_object_cursor_batch_hot_path(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    previous_day_context_provider_adapter: Callable[..., Mapping[str, Any]] | None,
+    n3t_writer_adapter: Callable[..., Mapping[str, Any]] | None,
+    deadline_check: Callable[[str], None],
+    started: float,
+    now_monotonic: Any,
+) -> dict[str, Any]:
+    output_dir = Path(args.output_dir)
+    close_grace_pull = _post_close_final_a_resumable_gate(args)
+    args.post_close_final_a_close_grace_pull = close_grace_pull
+    if close_grace_pull.get("external_pull_allowed") is not True:
+        return _post_close_object_cursor_batch_waiting_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            close_grace_pull=close_grace_pull,
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+
+    closed_hhmm = _active_a_minute_batch_closed_hhmm(args, active_scope_artifacts)
+    if closed_hhmm != POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL.replace(":", ""):
+        raise FastlaneShellBlocked("post_close_final_a_close_grace_target_mismatch")
+
+    active_states, no_evaluable_after_close_refs = (
+        _post_close_final_a_active_object_states(
+            active_scope_artifacts=active_scope_artifacts,
+        )
+    )
+    if not active_states and not no_evaluable_after_close_refs:
+        return _post_close_object_cursor_batch_waiting_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            close_grace_pull={
+                **close_grace_pull,
+                "reason": "post_close_final_a_active_object_scope_empty",
+                "external_pull_allowed": False,
+            },
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+    progress_path = _post_close_final_a_progress_marker_path(
+        args,
+        output_dir=output_dir,
+    )
+    prior_progress = _load_post_close_final_a_progress_marker(
+        progress_path,
+        for_trade_date=str(getattr(args, "for_trade_date", "") or ""),
+    )
+    progress_rows = _post_close_final_a_progress_rows(
+        active_states=active_states,
+        prior_marker=prior_progress,
+    )
+    preliminary_progress = _post_close_final_a_progress_payload(
+        args=args,
+        invocation_id=invocation_id,
+        progress_rows=progress_rows,
+        prior_marker=prior_progress,
+        output_dir=output_dir,
+        failure_records=[],
+        no_evaluable_after_close_refs=no_evaluable_after_close_refs,
+    )
+    if preliminary_progress.get("status") == "completed":
+        prior_completed_unchanged = (
+            prior_progress.get("status") == "completed"
+            and prior_progress.get("object_scope_sha256")
+            == preliminary_progress.get("object_scope_sha256")
+            and int(prior_progress.get("remaining_source_object_count") or 0) == 0
+            and int(prior_progress.get("remaining_proof_count") or 0) == 0
+            and int(preliminary_progress.get("remaining_source_object_count") or 0)
+            == 0
+            and int(preliminary_progress.get("remaining_proof_count") or 0) == 0
+        )
+        completed_progress = (
+            dict(prior_progress)
+            if prior_completed_unchanged
+            else preliminary_progress
+        )
+        if not prior_completed_unchanged:
+            _write_atomic_compact_json(progress_path, preliminary_progress)
+        completed_pull = {
+            **close_grace_pull,
+            "reason": "post_close_final_a_object_batch_completed",
+            "external_pull_allowed": False,
+            "current_object_count": int(
+                completed_progress.get("current_object_count") or 0
+            ),
+            "selected_source_object_count": 0,
+            "remaining_source_object_count": 0,
+            "remaining_proof_count": 0,
+            "progress_marker_path": str(progress_path),
+            "progress_marker_status": "completed",
+        }
+        manifest = _post_close_object_cursor_batch_waiting_manifest(
+            args=args,
+            invocation_id=invocation_id,
+            active_scope_artifacts=active_scope_artifacts,
+            close_grace_pull=completed_pull,
+            started=started,
+            now_monotonic=now_monotonic,
+        )
+        manifest["post_close_final_a_progress"] = {
+            key: value
+            for key, value in completed_progress.items()
+            if key != "object_progress"
+        }
+        return manifest
+    cursor_floors, completed_object_keys = _post_close_final_a_cursor_state(
+        progress_rows
+    )
+    probe_records = _object_cursor_batch_candidate_records(
+        active_scope_artifacts=active_scope_artifacts,
+        closed_hhmm=closed_hhmm,
+        max_minutes_per_object=DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT,
+        cursor_floor_by_object=cursor_floors,
+        completed_object_keys=completed_object_keys,
+    )
+    existing_proof_keys = _load_existing_n3t_object_minute_proof_keys(
+        records=probe_records
+    )
+    _post_close_final_a_advance_existing_proofs(
+        progress_rows=progress_rows,
+        candidate_records=probe_records,
+        existing_proof_keys=existing_proof_keys,
+    )
+    cursor_floors, completed_object_keys = _post_close_final_a_cursor_state(
+        progress_rows
+    )
+    candidate_records = _object_cursor_batch_candidate_records(
+        active_scope_artifacts=active_scope_artifacts,
+        closed_hhmm=closed_hhmm,
+        max_minutes_per_object=DEFAULT_OBJECT_CURSOR_BATCH_MAX_MINUTES_PER_OBJECT,
+        cursor_floor_by_object=cursor_floors,
+        completed_object_keys=completed_object_keys,
+    )
+    preview_existing_proof_keys = _load_existing_n3t_object_minute_proof_keys(
+        records=candidate_records
+    )
+    selected_preview, _preview_summary = _select_pending_object_cursor_batch_records(
+        records=candidate_records,
+        existing_proof_keys=preview_existing_proof_keys,
+        closed_hhmm=closed_hhmm,
+        max_objects=DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE,
+        max_proof_rows=DEFAULT_POST_CLOSE_FINAL_A_PROOF_CHUNK_SIZE,
+    )
+
+    source_candidate_records = _object_cursor_batch_candidate_records(
+        active_scope_artifacts=active_scope_artifacts,
+        closed_hhmm=closed_hhmm,
+        max_minutes_per_object=1,
+        cursor_floor_by_object={
+            object_key: closed_hhmm for object_key in active_states
+        },
+    )
+    source_record_by_object = {
+        tuple(record.get("object_key") or ()): dict(record)
+        for record in source_candidate_records
+    }
+    missing_source_keys = [
+        object_key
+        for object_key in sorted(active_states)
+        if not _post_close_final_a_source_cache_path(
+            args,
+            output_dir=output_dir,
+            object_key=object_key,
+        ).exists()
+    ]
+    preview_object_keys: list[tuple[str, str, str, str]] = []
+    for record in selected_preview:
+        object_key = tuple(record.get("object_key") or ())
+        if object_key not in preview_object_keys:
+            preview_object_keys.append(object_key)
+    prioritized_missing_keys = [
+        object_key
+        for object_key in preview_object_keys
+        if object_key in missing_source_keys
+    ]
+    prioritized_missing_keys.extend(
+        object_key
+        for object_key in missing_source_keys
+        if object_key not in prioritized_missing_keys
+    )
+    source_chunk_keys = prioritized_missing_keys[
+        :DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE
+    ]
+    missing_source_record_keys = [
+        object_key
+        for object_key in source_chunk_keys
+        if object_key not in source_record_by_object
+    ]
+    source_chunk_records = [
+        source_record_by_object[object_key]
+        for object_key in source_chunk_keys
+        if object_key in source_record_by_object
+    ]
+    provider_plans = _object_cursor_batch_provider_plans(
+        selected_records=source_chunk_records,
+        observed_at=_runner_observed_at(args),
+        provider_target_hhmm=closed_hhmm,
+    )
+    source_fetch_result = _fetch_post_close_final_a_source_chunk(
+        args=args,
+        output_dir=output_dir,
+        current_day_source_provider_adapter=current_day_source_provider_adapter,
+        provider_plans=provider_plans,
+    )
+    source_failures = [
+        dict(item)
+        for item in source_fetch_result.get("failed_candidates") or []
+        if isinstance(item, Mapping)
+    ]
+    source_failures.extend(
+        {
+            "object_batch_key": list(object_key),
+            "reason": "post_close_final_a_source_scope_record_missing",
+        }
+        for object_key in missing_source_record_keys
+    )
+
+    args.object_cursor_batch_post_close_max_objects = (
+        DEFAULT_POST_CLOSE_FINAL_A_SOURCE_CHUNK_SIZE
+    )
+    args.object_cursor_batch_post_close_probe_max_objects = len(active_states)
+    args.object_cursor_batch_cursor_floor_by_object = dict(cursor_floors)
+    args.object_cursor_batch_completed_object_keys = set(completed_object_keys)
+    args.object_cursor_batch_skip_invalid_priority = True
+    cache_only_adapter = _post_close_final_a_cache_only_source_adapter(
+        args=args,
+        output_dir=output_dir,
+    )
+    manifest = _run_object_cursor_batch_hot_path(
+        args=args,
+        invocation_id=invocation_id,
+        active_scope_artifacts=active_scope_artifacts,
+        current_day_source_provider_adapter=cache_only_adapter,
+        previous_day_context_provider_adapter=previous_day_context_provider_adapter,
+        n3t_writer_adapter=n3t_writer_adapter,
+        deadline_check=deadline_check,
+        started=started,
+        now_monotonic=now_monotonic,
+    )
+    batch = dict(manifest.get("object_cursor_batch") or {})
+    batch_artifacts = [
+        dict(item)
+        for item in batch.get("batch_artifacts") or []
+        if isinstance(item, Mapping)
+    ]
+    _post_close_final_a_advance_written_proofs(
+        progress_rows=progress_rows,
+        batch_artifacts=batch_artifacts,
+    )
+    pipeline_failures = [
+        dict(item)
+        for item in batch.get("failure_records") or []
+        if isinstance(item, Mapping)
+    ]
+    progress_payload = _post_close_final_a_progress_payload(
+        args=args,
+        invocation_id=invocation_id,
+        progress_rows=progress_rows,
+        prior_marker=prior_progress,
+        output_dir=output_dir,
+        failure_records=[*source_failures, *pipeline_failures],
+        no_evaluable_after_close_refs=no_evaluable_after_close_refs,
+    )
+    _write_atomic_compact_json(progress_path, progress_payload)
+
+    completed = progress_payload.get("status") == "completed"
+    reason = (
+        "post_close_final_a_object_batch_completed"
+        if completed
+        else "post_close_final_a_object_batch_chunk_incomplete"
+    )
+    close_grace_pull.update(
+        {
+            "reason": reason,
+            "external_pull_allowed": not completed,
+            "current_object_count": int(
+                progress_payload.get("current_object_count") or 0
+            ),
+            "selected_source_object_count": len(provider_plans),
+            "remaining_source_object_count": int(
+                progress_payload.get("remaining_source_object_count") or 0
+            ),
+            "remaining_proof_count": int(
+                progress_payload.get("remaining_proof_count") or 0
+            ),
+            "progress_marker_path": str(progress_path),
+            "progress_marker_status": str(progress_payload.get("status") or ""),
+        }
+    )
+    pipeline_source_result = dict(
+        manifest.get("current_day_source_provider_result") or {}
+    )
+    pipeline_source_result.update(
+        {
+            "provider_call_count": int(
+                source_fetch_result.get("provider_call_count") or 0
+            ),
+            "inline_payload_count": int(
+                source_fetch_result.get("inline_payload_count") or 0
+            ),
+            "cached_source_count": int(
+                pipeline_source_result.get("cached_source_count") or 0
+            ),
+            "market_data_pulled": bool(
+                source_fetch_result.get("market_data_pulled")
+            ),
+            "failed_candidate_count": len(source_failures),
+            "failed_candidates": source_failures,
+        }
+    )
+    manifest["reason"] = reason
+    manifest["post_close_final_a_close_grace_pull"] = dict(close_grace_pull)
+    manifest["post_close_final_a_progress"] = {
+        key: value
+        for key, value in progress_payload.items()
+        if key != "object_progress"
+    }
+    manifest["current_day_source_provider_result"] = pipeline_source_result
+    manifest["object_cursor_batch"].update(
+        {
+            "provider_call_count": int(
+                source_fetch_result.get("provider_call_count") or 0
+            ),
+            "source_cache_hit_count": int(
+                pipeline_source_result.get("cached_source_count") or 0
+            ),
+            "remaining_source_object_count": int(
+                progress_payload.get("remaining_source_object_count") or 0
+            ),
+            "remaining_proof_count": int(
+                progress_payload.get("remaining_proof_count") or 0
+            ),
+            "progress_marker_path": str(progress_path),
+            "progress_marker_status": str(progress_payload.get("status") or ""),
+        }
+    )
+    manifest["lane_results"]["c1_lane"].update(
+        {
+            "processed_candidate_count": int(
+                source_fetch_result.get("inline_payload_count") or 0
+            ),
+            "failed_candidate_count": len(source_failures),
+            "remaining_candidate_count": int(
+                progress_payload.get("remaining_source_object_count") or 0
+            ),
+            "reason": reason,
+        }
+    )
+    manifest["lane_results"]["n3t_lane"].update(
+        {
+            "remaining_candidate_count": int(
+                progress_payload.get("remaining_proof_count") or 0
+            ),
+            "reason": reason,
+        }
+    )
+    manifest["boundary"]["pulls_market_data"] = bool(
+        source_fetch_result.get("market_data_pulled")
+    )
+    return manifest
+
+
+def _object_cursor_batch_failure(
+    object_key: Sequence[str],
+    *,
+    reason: str,
+    target_hhmm: str = "",
+) -> dict[str, Any]:
+    return {
+        "for_trade_date": str(object_key[0]) if len(object_key) > 0 else "",
+        "asset_kind": str(object_key[1]) if len(object_key) > 1 else "",
+        "identity_key": str(object_key[2]) if len(object_key) > 2 else "",
+        "direction": str(object_key[3]) if len(object_key) > 3 else "",
+        "target_hhmm": str(target_hhmm or ""),
+        "reason": str(reason or "object_cursor_batch_failed"),
+    }
+
+
+def _json_payload_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_atomic_compact_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(encoded, encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def _claim_atomic_compact_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(fd, encoded[offset:])
+            if written <= 0:
+                raise OSError("atomic compact JSON claim write failed")
+            offset += written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_object_cursor_batch_artifacts(
+    *,
+    output_dir: Path,
+    invocation_id: str,
+    selected_records: Sequence[Mapping[str, Any]],
+    source_by_object: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
+    previous_rows: Sequence[Mapping[str, Any]],
+    proof_records: Sequence[Mapping[str, Any]],
+    failure_records: Sequence[Mapping[str, Any]],
+    writer_result: Mapping[str, Any],
+    observed_at: str,
+) -> list[dict[str, Any]]:
+    selected_by_object: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+    proof_by_object: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+    failures_by_object: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+    for record in selected_records:
+        selected_by_object.setdefault(tuple(record.get("object_key") or ()), []).append(record)
+    for record in proof_records:
+        proof_by_object.setdefault(tuple(record.get("object_key") or ()), []).append(record)
+    for failure in failure_records:
+        key = (
+            str(failure.get("for_trade_date") or ""),
+            str(failure.get("asset_kind") or ""),
+            str(failure.get("identity_key") or ""),
+            str(failure.get("direction") or ""),
+        )
+        failures_by_object.setdefault(key, []).append(failure)
+
+    written: list[dict[str, Any]] = []
+    batch_dir = output_dir / "object_cursor_batch"
+    for object_key, records in sorted(selected_by_object.items()):
+        if len(object_key) != 4:
+            continue
+        source_artifact = dict(source_by_object.get(object_key) or {})
+        source_payload = dict(source_artifact.get("payload") or {})
+        object_previous_rows = [
+            dict(row)
+            for row in previous_rows
+            if str(row.get("asset_kind") or "") == object_key[1]
+            and str(row.get("identity_key") or "") == object_key[2]
+        ]
+        targets = sorted(
+            {str(record.get("target_hhmm") or "") for record in records},
+            key=_hhmm_int,
+        )
+        object_proofs = sorted(
+            proof_by_object.get(object_key) or [],
+            key=lambda item: _hhmm_int(item.get("target_hhmm")),
+        )
+        object_failures = [dict(item) for item in failures_by_object.get(object_key) or []]
+        if len(object_proofs) == len(records) and not object_failures:
+            chunk_status = "completed"
+        elif object_failures:
+            chunk_status = "partial_failure" if object_proofs else "failed"
+        else:
+            chunk_status = "source_only"
+        input_hash = _json_payload_sha256(
+            {
+                "object_key": list(object_key),
+                "source_active_scope_artifact_sha256": sorted(
+                    {str(record.get("source_active_scope_artifact_sha256") or "") for record in records}
+                ),
+                "target_hhmms": targets,
+                "source_run_hashes": [str(record.get("source_run_hash") or "") for record in records],
+            }
+        )
+        identity_hash = hashlib.sha256("|".join(object_key).encode("utf-8")).hexdigest()[:12]
+        first_target = targets[0] if targets else "none"
+        last_target = targets[-1] if targets else "none"
+        path = (
+            batch_dir
+            / f"{OBJECT_CURSOR_BATCH_ARTIFACT_TYPE}_{object_key[0]}_{identity_hash}_{first_target}_{last_target}_{input_hash[:12]}.json"
+        )
+        payload = {
+            "artifact_type": OBJECT_CURSOR_BATCH_ARTIFACT_TYPE,
+            "artifact_schema_version": "v1",
+            "producer_layer": "N3_market_data",
+            "mode": OBJECT_CURSOR_BATCH_MODE,
+            "invocation_id": invocation_id,
+            "observed_at": observed_at,
+            "for_trade_date": object_key[0],
+            "asset_kind": object_key[1],
+            "identity_key": object_key[2],
+            "direction": object_key[3],
+            "input_hash": input_hash,
+            "queue_policy": str(records[0].get("queue_policy") or OBJECT_CURSOR_BATCH_QUEUE_POLICY),
+            "queue_tier": str(records[0].get("queue_tier") or "backlog"),
+            "chunk_sequence": int(records[0].get("queue_chunk_sequence") or 0),
+            "chunk_status": chunk_status,
+            "target_minute_labels": [_hhmm_to_minute_label(value) for value in targets],
+            "source_active_scope_artifact_paths": sorted(
+                {str(record.get("source_active_scope_artifact_path") or "") for record in records}
+            ),
+            "current_day_source": {
+                "source_run_hash": source_payload.get("source_run_hash"),
+                "source_run_namespace": source_payload.get("source_run_namespace"),
+                "source_provider": source_payload.get("source_provider"),
+                "source_adapter": source_payload.get("source_adapter"),
+                "source_version": source_payload.get("source_version"),
+                "source_written_at": source_payload.get("source_written_at"),
+                "closed_minute_row_count": int(source_payload.get("closed_minute_row_count") or 0),
+                "source_cache_path": source_payload.get("source_cache_path"),
+                "source_cache_sha256": source_payload.get(
+                    "source_cache_sha256"
+                ),
+                "source_cache_hit": bool(
+                    source_payload.get("source_cache_hit")
+                ),
+                "provider_offset": source_payload.get("provider_offset"),
+            },
+            "previous_day_context": {
+                "previous_day_minute_row_count": len(object_previous_rows),
+                "previous_day_minute_rows_sha256": _json_payload_sha256(
+                    {"rows": object_previous_rows}
+                ),
+                "rows_embedded": False,
+            },
+            "proofs": [
+                {
+                    "target_minute_label": _hhmm_to_minute_label(record.get("target_hhmm") or ""),
+                    "n3t_metric_run_id": record.get("n3t_metric_run_id"),
+                    "source_run_hash": record.get("source_run_hash"),
+                    "metric_context_sha256": record.get("metric_hash"),
+                    "metric_context_status": (record.get("metric_payload") or {}).get("metric_context_status"),
+                }
+                for record in object_proofs
+            ],
+            "failure_details": object_failures,
+            "writer_result": {
+                "write_executed": bool(writer_result.get("write_executed")),
+                "inserted_rows": int(writer_result.get("inserted_rows") or 0),
+                "target_table_counts": dict(writer_result.get("target_table_counts") or {}),
+            },
+            "boundary": {
+                "database_read": True,
+                "n3t_metric_db_written": bool(writer_result.get("db_write_executed")),
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "writes_n4_outbox": False,
+                "writes_n5_outbox": False,
+                "updates_n4_outbox": False,
+                "scans_n5_db": False,
+                "full_market_fallback_used": False,
+                "touches_n6": False,
+            },
+        }
+        _write_atomic_compact_json(path, payload)
+        written.append(
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "object_key": list(object_key),
+                "identity_key": object_key[2],
+                "target_minute_count": len(targets),
+                "target_minute_labels": [
+                    _hhmm_to_minute_label(value) for value in targets
+                ],
+                "proof_count": len(object_proofs),
+                "proof_target_minute_labels": [
+                    _hhmm_to_minute_label(record.get("target_hhmm") or "")
+                    for record in object_proofs
+                ],
+                "queue_tier": str(records[0].get("queue_tier") or "backlog"),
+                "chunk_sequence": int(records[0].get("queue_chunk_sequence") or 0),
+                "chunk_status": chunk_status,
+            }
+        )
+    return written
+
+
+def _object_cursor_batch_manifest(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    selection_summary: Mapping[str, Any],
+    source_result: Mapping[str, Any],
+    previous_result: Mapping[str, Any],
+    writer_result: Mapping[str, Any],
+    batch_artifacts: Sequence[Mapping[str, Any]],
+    failure_records: Sequence[Mapping[str, Any]],
+    reason: str,
+    started: float,
+    now_monotonic: Any,
+) -> dict[str, Any]:
+    selected_objects = int(selection_summary.get("selected_object_count") or 0)
+    selected_candidates = int(selection_summary.get("selected_candidate_count") or 0)
+    processed_candidates = int(selection_summary.get("processed_candidate_count") or 0)
+    remaining_candidates = int(selection_summary.get("remaining_candidate_count") or 0)
+    failed_candidates = int(selection_summary.get("failed_candidate_count") or len(failure_records))
+    write_executed = bool(writer_result.get("write_executed"))
+    verdict = "N3_C1_N3T_FASTLANE_EXECUTE_PASS" if write_executed else "N3_C1_N3T_FASTLANE_READINESS_WAITING"
+    lane_results = {
+        "c1_lane": {
+            "lane": "c1_lane",
+            "mode": OBJECT_CURSOR_BATCH_MODE,
+            "selected_candidate_count": selected_objects,
+            "processed_candidate_count": int(source_result.get("inline_payload_count") or 0),
+            "failed_candidate_count": int(source_result.get("failed_candidate_count") or 0),
+            "skipped_candidate_count": int(selection_summary.get("existing_proof_count") or 0),
+            "remaining_candidate_count": remaining_candidates,
+            "reason": reason,
+            "hard_blocker_count": 0,
+        },
+        "n3t_lane": {
+            "lane": "n3t_lane",
+            "mode": OBJECT_CURSOR_BATCH_MODE,
+            "selected_candidate_count": selected_candidates,
+            "processed_candidate_count": processed_candidates,
+            "failed_candidate_count": failed_candidates,
+            "skipped_candidate_count": int(selection_summary.get("existing_proof_count") or 0),
+            "remaining_candidate_count": remaining_candidates,
+            "reason": reason,
+            "hard_blocker_count": 0,
+        },
+    }
+    boundary = _boundary()
+    boundary.update(
+        {
+            "writes_db": bool(writer_result.get("db_write_executed")),
+            "writes_n3t_metric_db": bool(writer_result.get("db_write_executed")),
+            "pulls_market_data": bool(source_result.get("market_data_pulled")),
+            "writes_canonical_minute_bar_1m": False,
+            "writes_n3_outbox": False,
+            "touches_n4_n5_n6_outbox": False,
+            "scans_n5_db": False,
+            "full_market_fallback_used": False,
+        }
+    )
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "invocation_id": invocation_id,
+        "fastlane_lane_id": args.fastlane_lane_id,
+        "fastlane": {
+            "session_phase": getattr(args, "fastlane_session_phase", ""),
+            "active_worker_decision": getattr(args, "fastlane_active_worker_decision", {}),
+        },
+        "execute_requested": True,
+        "writes_enabled": write_executed,
+        "artifact_first_only": True,
+        "active_scope_artifact_count": len(active_scope_artifacts),
+        "lane_results": lane_results,
+        "object_cursor_batch": {
+            "artifact_type": OBJECT_CURSOR_BATCH_ARTIFACT_TYPE,
+            "mode": OBJECT_CURSOR_BATCH_MODE,
+            **dict(selection_summary),
+            "batch_artifact_count": len(batch_artifacts),
+            "batch_artifacts": [dict(item) for item in batch_artifacts],
+            "failure_records": [dict(item) for item in failure_records],
+            "provider_call_count": int(source_result.get("inline_payload_count") or 0),
+            "previous_day_database_connection_count": int(previous_result.get("database_connection_count") or 0),
+            "proof_row_count": int(writer_result.get("inserted_rows") or 0),
+            "source_only_artifact_count": int(
+                selection_summary.get("source_only_artifact_count") or 0
+            ),
+        },
+        "current_day_source_provider_result": dict(source_result),
+        "execute_result": dict(writer_result),
+        "bounded": {
+            "max_runtime_seconds": float(args.max_runtime_seconds),
+            "elapsed_seconds": round(float(now_monotonic()) - float(started), 6),
+        },
+        "boundary": boundary,
+    }
 
 
 def _active_a_minute_batch_target_hhmms(
@@ -2162,9 +6340,14 @@ def _active_a_minute_batch_provider_source_run_hash(
     *,
     target_hhmm: str,
 ) -> str:
+    object_key = _active_a_minute_batch_object_key(
+        payload,
+        target_hhmm=target_hhmm,
+    )
     return _short_scope_hash(
         "active_a_minute_provider_source_v1",
-        *_active_a_minute_batch_object_key(payload, target_hhmm=target_hhmm),
+        *object_key[:3],
+        str(target_hhmm),
     )
 
 
@@ -2246,13 +6429,168 @@ def _active_a_minute_batch_closed_minute_unavailable(
     return str(getattr(args, "fastlane_session_phase", "") or "") == "post_close"
 
 
-def _post_close_c1_provider_disabled(args: argparse.Namespace) -> bool:
-    return str(getattr(args, "fastlane_session_phase", "") or "").strip() == "post_close"
+def _post_close_final_a_c1_pull_attempt_marker_path(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+) -> Path:
+    for_trade_date = str(getattr(args, "for_trade_date", "") or "").strip()
+    if not re.fullmatch(r"\d{8}", for_trade_date):
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_trade_date_invalid")
+    return (
+        output_dir
+        / "post_close_final_a"
+        / f"{POST_CLOSE_FINAL_A_C1_PULL_ATTEMPT_ARTIFACT_TYPE}_{for_trade_date}.json"
+    )
+
+
+def _load_post_close_final_a_c1_pull_attempt_marker(
+    path: Path,
+    *,
+    for_trade_date: str,
+) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FastlaneShellBlocked(
+            "post_close_final_a_c1_pull_attempt_marker_invalid"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    result = dict(payload)
+    if result.get("artifact_type") != POST_CLOSE_FINAL_A_C1_PULL_ATTEMPT_ARTIFACT_TYPE:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if str(result.get("for_trade_date") or "") != for_trade_date:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if result.get("status") not in {"started", "completed", "failed"}:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if result.get("target_physical_minute_label") != POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if result.get("raw_source_close_label") != "15:00":
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if int(result.get("selected_provider_candidate_count") or 0) <= 0:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        str(result.get("selected_provider_scope_sha256") or ""),
+    ):
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    if int(result.get("full_scope_remaining_object_count") or 0) != 0:
+        raise FastlaneShellBlocked("post_close_final_a_c1_pull_attempt_marker_invalid")
+    return result
+
+
+def _post_close_final_a_c1_pull_gate(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+) -> dict[str, Any]:
+    session_phase = str(getattr(args, "fastlane_session_phase", "") or "").strip()
+    if session_phase != "post_close":
+        return {
+            "applicable": False,
+            "reason": "not_post_close",
+            "c1_selection_disabled": False,
+            "external_pull_allowed": True,
+        }
+    decision = dict(getattr(args, "fastlane_active_worker_decision", {}) or {})
+    if (
+        not _is_post_close_final_a_pass(args)
+        or decision.get("post_close_final_a_pass_allowed") is not True
+        or decision.get("external_c1_pull_allowed_once") is not True
+    ):
+        return {
+            "applicable": True,
+            "reason": "post_close_c1_provider_disabled",
+            "c1_selection_disabled": True,
+            "external_pull_allowed": False,
+        }
+    current_exchange_time = str(
+        getattr(args, "fastlane_current_exchange_time", "") or ""
+    ).strip()
+    current_hhmm = _hhmm_int(current_exchange_time)
+    if current_hhmm < POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:
+        return {
+            "applicable": True,
+            "reason": "post_close_final_a_close_grace_waiting",
+            "c1_selection_disabled": True,
+            "external_pull_allowed": False,
+            "current_exchange_time": current_exchange_time,
+            "close_grace_ready_hhmm": f"{POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:04d}",
+            "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+            "raw_source_close_label": "15:00",
+        }
+    marker_path = _post_close_final_a_c1_pull_attempt_marker_path(
+        args,
+        output_dir=output_dir,
+    )
+    for_trade_date = str(getattr(args, "for_trade_date", "") or "")
+    marker = _load_post_close_final_a_c1_pull_attempt_marker(
+        marker_path,
+        for_trade_date=for_trade_date,
+    )
+    if marker:
+        return {
+            "applicable": True,
+            "reason": "post_close_final_a_close_grace_pull_already_attempted",
+            "c1_selection_disabled": False,
+            "external_pull_allowed": False,
+            "current_exchange_time": current_exchange_time,
+            "close_grace_ready_hhmm": f"{POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:04d}",
+            "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+            "raw_source_close_label": "15:00",
+            "attempt_marker_path": str(marker_path),
+            "attempt_marker_status": str(marker.get("status") or ""),
+            "attempt_marker_exists": True,
+        }
+    return {
+        "applicable": True,
+        "reason": "post_close_final_a_close_grace_pull_ready",
+        "c1_selection_disabled": False,
+        "external_pull_allowed": True,
+        "current_exchange_time": current_exchange_time,
+        "close_grace_ready_hhmm": f"{POST_CLOSE_FINAL_A_CLOSE_GRACE_READY_HHMM:04d}",
+        "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+        "raw_source_close_label": "15:00",
+        "attempt_marker_path": str(marker_path),
+        "attempt_marker_status": "",
+        "attempt_marker_exists": False,
+    }
+
+
+def _apply_post_close_final_a_full_scope_coverage(
+    *,
+    close_grace_pull: dict[str, Any],
+    c1_summary: Mapping[str, Any],
+) -> None:
+    remaining_object_count = int(c1_summary.get("remaining_object_count") or 0)
+    close_grace_pull.update(
+        {
+            "full_scope_pending_object_count": int(
+                c1_summary.get("pending_object_count") or 0
+            ),
+            "full_scope_selected_object_count": int(
+                c1_summary.get("selected_object_count") or 0
+            ),
+            "full_scope_remaining_object_count": remaining_object_count,
+        }
+    )
+    if remaining_object_count > 0:
+        close_grace_pull.update(
+            {
+                "reason": "post_close_final_a_scope_exceeds_single_pull_limit",
+                "external_pull_allowed": False,
+            }
+        )
 
 
 def _post_close_c1_provider_disabled_summary(
     *,
     active_scope_artifacts: Sequence[Mapping[str, Any]],
+    reason: str = "post_close_c1_provider_disabled",
+    close_grace_pull: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     active_ref_count = 0
     for artifact in active_scope_artifacts:
@@ -2260,7 +6598,7 @@ def _post_close_c1_provider_disabled_summary(
         active_ref_count += len(_iter_active_scope_ref_records(payload))
     return {
         "mode": ACTIVE_A_MINUTE_BATCH_DIRECT_PROVIDER_MODE,
-        "reason": "post_close_c1_provider_disabled",
+        "reason": reason,
         "selected_candidate_count": 0,
         "selected_object_count": 0,
         "selected_ref_count": active_ref_count,
@@ -2270,6 +6608,7 @@ def _post_close_c1_provider_disabled_summary(
         "skipped_existing_ready_count": 0,
         "failed_candidate_count": 0,
         "remaining_candidate_count": len(active_scope_artifacts),
+        "post_close_final_a_close_grace_pull": dict(close_grace_pull or {}),
     }
 
 
@@ -2498,6 +6837,185 @@ def _run_active_a_minute_batch_direct_provider_adapter(
     return result
 
 
+def _post_close_final_a_c1_pull_attempt_payload(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    status: str,
+    planned_artifacts: Sequence[Mapping[str, Any]],
+    close_grace_pull: Mapping[str, Any] | None = None,
+    provider_result: Mapping[str, Any] | None = None,
+    error_type: str = "",
+) -> dict[str, Any]:
+    for_trade_date = str(getattr(args, "for_trade_date", "") or "")
+    raw_source = source_close_label_for_physical_start_label(
+        for_trade_date,
+        POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+    )
+    result = dict(provider_result or {})
+    grace = dict(close_grace_pull or {})
+    provider_scope_rows = sorted(
+        (
+            {
+                "for_trade_date": str(item.get("for_trade_date") or for_trade_date),
+                "target_hhmm": str(item.get("target_hhmm") or ""),
+                "source_run_hash": str(item.get("source_run_hash") or ""),
+                "source_run_namespace": str(item.get("source_run_namespace") or ""),
+            }
+            for item in planned_artifacts
+        ),
+        key=lambda item: (
+            item["for_trade_date"],
+            item["target_hhmm"],
+            item["source_run_namespace"],
+            item["source_run_hash"],
+        ),
+    )
+    return {
+        "artifact_type": POST_CLOSE_FINAL_A_C1_PULL_ATTEMPT_ARTIFACT_TYPE,
+        "artifact_schema_version": "v1",
+        "producer_layer": "N3_market_data",
+        "for_trade_date": for_trade_date,
+        "status": status,
+        "invocation_id": invocation_id,
+        "current_exchange_time": str(
+            getattr(args, "fastlane_current_exchange_time", "") or ""
+        ),
+        "target_physical_minute_label": POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL,
+        "raw_source_close_label": str(raw_source.get("raw_source_label") or ""),
+        "selected_provider_candidate_count": len(planned_artifacts),
+        "selected_provider_scope_sha256": _json_payload_sha256(
+            {"provider_scope_rows": provider_scope_rows}
+        ),
+        "full_scope_pending_object_count": int(
+            grace.get("full_scope_pending_object_count") or len(planned_artifacts)
+        ),
+        "full_scope_selected_object_count": int(
+            grace.get("full_scope_selected_object_count") or len(planned_artifacts)
+        ),
+        "full_scope_remaining_object_count": int(
+            grace.get("full_scope_remaining_object_count") or 0
+        ),
+        "source_artifact_written_count": int(
+            result.get("artifact_count")
+            or result.get("inline_payload_count")
+            or 0
+        ),
+        "source_row_count": int(result.get("source_row_count") or 0),
+        "failed_candidate_count": int(result.get("failed_candidate_count") or 0),
+        "external_pull_attempted": True,
+        "error_type": error_type,
+        "database_written": False,
+        "writes_canonical_minute_bar_1m": False,
+        "writes_n3_outbox": False,
+        "touches_n4_n5_n6_outbox": False,
+        "updates_n4_outbox": False,
+        "scans_n5_db": False,
+        "full_market_fallback_used": False,
+    }
+
+
+def _run_post_close_final_a_single_close_grace_provider_adapter(
+    *,
+    args: argparse.Namespace,
+    invocation_id: str,
+    active_scope_artifacts: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    current_day_source_provider_adapter: Callable[..., Mapping[str, Any]],
+    close_grace_pull: dict[str, Any],
+) -> dict[str, Any] | None:
+    if close_grace_pull.get("external_pull_allowed") is not True:
+        raise FastlaneShellBlocked("post_close_final_a_close_grace_pull_not_allowed")
+    marker_path = _post_close_final_a_c1_pull_attempt_marker_path(
+        args,
+        output_dir=output_dir,
+    )
+    invoked: dict[str, Any] = {
+        "value": False,
+        "planned_artifacts": [],
+    }
+
+    def guarded_provider(
+        *,
+        args: argparse.Namespace,
+        planned_artifacts: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        try:
+            _claim_atomic_compact_json(
+                marker_path,
+                _post_close_final_a_c1_pull_attempt_payload(
+                    args=args,
+                    invocation_id=invocation_id,
+                    status="started",
+                    planned_artifacts=planned_artifacts,
+                    close_grace_pull=close_grace_pull,
+                ),
+            )
+        except FileExistsError as exc:
+            raise FastlaneShellBlocked(
+                "post_close_final_a_close_grace_pull_already_attempted"
+            ) from exc
+        invoked["value"] = True
+        invoked["planned_artifacts"] = [dict(item) for item in planned_artifacts]
+        return current_day_source_provider_adapter(
+            args=args,
+            planned_artifacts=planned_artifacts,
+        )
+
+    try:
+        result = _run_active_a_minute_batch_direct_provider_adapter(
+            args=args,
+            active_scope_artifacts=active_scope_artifacts,
+            output_dir=output_dir,
+            current_day_source_provider_adapter=guarded_provider,
+        )
+    except Exception as exc:
+        if invoked["value"]:
+            _write_atomic_compact_json(
+                marker_path,
+                _post_close_final_a_c1_pull_attempt_payload(
+                    args=args,
+                    invocation_id=invocation_id,
+                    status="failed",
+                    planned_artifacts=invoked["planned_artifacts"],
+                    close_grace_pull=close_grace_pull,
+                    error_type=type(exc).__name__,
+                ),
+            )
+            close_grace_pull.update(
+                {
+                    "reason": "post_close_final_a_close_grace_pull_failed",
+                    "external_pull_allowed": False,
+                    "attempt_marker_exists": True,
+                    "attempt_marker_status": "failed",
+                    "attempt_marker_path": str(marker_path),
+                }
+            )
+        raise
+    if invoked["value"]:
+        _write_atomic_compact_json(
+            marker_path,
+            _post_close_final_a_c1_pull_attempt_payload(
+                args=args,
+                invocation_id=invocation_id,
+                status="completed",
+                planned_artifacts=invoked["planned_artifacts"],
+                close_grace_pull=close_grace_pull,
+                provider_result=result,
+            ),
+        )
+        close_grace_pull.update(
+            {
+                "reason": "post_close_final_a_close_grace_pull_completed",
+                "external_pull_allowed": False,
+                "attempt_marker_exists": True,
+                "attempt_marker_status": "completed",
+                "attempt_marker_path": str(marker_path),
+            }
+        )
+    return result
+
+
 def _materialize_active_a_minute_batch_direct_staging_artifacts(
     *,
     args: argparse.Namespace,
@@ -2704,7 +7222,19 @@ def _configured_previous_day_context_provider_adapter(
             provider_name=provider_name,
         )
 
+    def inline_rows_batch_adapter(
+        *,
+        args: argparse.Namespace,
+        staging_payloads: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return _load_previous_day_context_rows_for_object_cursor_batch(
+            args=args,
+            staging_payloads=staging_payloads,
+            provider_name=provider_name,
+        )
+
     setattr(adapter, "batch_adapter", batch_adapter)
+    setattr(adapter, "inline_rows_batch_adapter", inline_rows_batch_adapter)
     return adapter
 
 
@@ -2718,16 +7248,293 @@ def _configured_current_day_source_provider_adapter(
         raise FastlaneShellBlocked("current_day_source_provider_mismatch")
 
     def adapter(*, args: argparse.Namespace, planned_artifacts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        from ashare_v3.market.today_minute_execute import MootdxTodayMinuteAdapter
-
         return _build_current_day_source_rows_with_market_adapter(
             args=args,
             planned_artifacts=planned_artifacts,
-            market_adapter_factory=MootdxTodayMinuteAdapter,
+            market_adapter_factory=_manager_selected_current_day_market_adapter_factory(
+                planned_artifacts=planned_artifacts,
+            ),
             provider_name=provider_name,
         )
 
+    def inline_batch_adapter(
+        *,
+        args: argparse.Namespace,
+        planned_artifacts: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return _build_current_day_source_rows_with_market_adapter(
+            args=args,
+            planned_artifacts=planned_artifacts,
+            market_adapter_factory=_manager_selected_current_day_market_adapter_factory(
+                planned_artifacts=planned_artifacts,
+            ),
+            provider_name=provider_name,
+            persist_artifacts=False,
+        )
+
+    setattr(adapter, "inline_batch_adapter", inline_batch_adapter)
     return adapter
+
+
+def _required_object_failure_reason(metadata: Mapping[str, Any]) -> str:
+    failure_kind = str(metadata.get("failure_kind") or "")
+    if failure_kind == "candidate_health_persistence_failure":
+        return (
+            "current_day_source_provider_required_object_"
+            "health_persistence_failed"
+        )
+    if failure_kind == "consecutive_required_objects_empty":
+        return "current_day_source_provider_endpoint_wide_empty"
+    return "current_day_source_provider_cohort_aborted"
+
+
+def _manager_selected_current_day_market_adapter_factory(
+    *,
+    planned_artifacts: Sequence[Mapping[str, Any]],
+) -> Callable[[], Any]:
+    from ashare_v3.market.mootdx_batch_attempt import build_mootdx_minute_semantic_probe
+    from ashare_v3.market.today_minute_execute import MootdxTodayMinuteAdapter
+    from ashare_v3.mootdx_client import MootdxEndpointManager, create_mootdx_client
+
+    subscriptions_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    trade_dates: set[str] = set()
+    for planned in planned_artifacts:
+        inline_payload = planned.get("inline_pull_plan_payload")
+        if isinstance(inline_payload, Mapping):
+            payload = dict(inline_payload)
+        else:
+            pull_plan = _read_optional_json_artifact(str(planned.get("pull_plan_path") or ""))
+            if not pull_plan["exists"]:
+                raise FastlaneShellBlocked("scoped_pull_plan_missing_for_source_provider")
+            payload = dict(pull_plan.get("payload") or {})
+        if payload.get("artifact_type") != "n3_c1_scoped_current_day_pull_plan_v1":
+            raise FastlaneShellBlocked("scoped_pull_plan_contract_mismatch")
+        if _is_clean_noop_pull_plan_payload(payload):
+            continue
+        if payload.get("plan_status") != "planned":
+            raise FastlaneShellBlocked("scoped_pull_plan_not_planned")
+        for_trade_date = str(payload.get("for_trade_date") or planned.get("for_trade_date") or "")
+        if for_trade_date:
+            trade_dates.add(for_trade_date)
+        for plan_row in payload.get("plan_rows") or []:
+            if not isinstance(plan_row, Mapping):
+                continue
+            subscription = _subscription_from_plan_row(plan_row)
+            key = (
+                str(subscription.get("asset_kind") or ""),
+                str(subscription.get("identity_key") or ""),
+            )
+            subscriptions_by_key.setdefault(key, subscription)
+
+    if len(trade_dates) > 1:
+        raise FastlaneShellBlocked("current_day_source_provider_trade_date_mismatch")
+    for_trade_date = next(iter(trade_dates), "")
+    subscriptions = [
+        subscriptions_by_key[key]
+        for key in sorted(subscriptions_by_key)
+    ]
+    scope_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "for_trade_date": for_trade_date,
+                "subscriptions": [
+                    {
+                        "asset_kind": row["asset_kind"],
+                        "identity_key": row["identity_key"],
+                    }
+                    for row in subscriptions
+                ],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    batch_id = f"n3_c1_n3t_fastlane_current_day_source_{for_trade_date or 'unknown'}_{scope_hash}"
+    provider_offset = max(
+        (
+            _intraday_source_provider_offset(
+                for_trade_date=for_trade_date,
+                target_hhmm=str(item.get("target_hhmm") or ""),
+                cache_hit=False,
+            )
+            for item in planned_artifacts
+        ),
+        default=INTRADAY_SOURCE_CACHE_TAIL_OFFSET,
+    )
+    selection_lock = threading.Lock()
+    incident_lock = threading.Lock()
+    cohort_abort_event = threading.Event()
+    selection_state: dict[str, Any] = {
+        "initialized": False,
+        "manager": None,
+        "selection": None,
+        "error": None,
+        "elapsed_ms": 0,
+    }
+    incident_state: dict[str, Any] = {
+        "error_type": "",
+        "failure_kind": "",
+        "endpoint_id": "",
+        "failover_mode": "active",
+        "retry_class": "",
+        "transport_failure_record_count": 0,
+    }
+
+    def initialize_selection() -> tuple[Any, Any]:
+        with selection_lock:
+            if not selection_state["initialized"]:
+                selection_started = time.monotonic()
+                try:
+                    if not for_trade_date or not subscriptions:
+                        raise FastlaneShellBlocked(
+                            "current_day_source_provider_selection_scope_empty"
+                        )
+                    manager = MootdxEndpointManager.from_toml()
+                    selection = manager.select_for_batch(
+                        batch_id=batch_id,
+                        probe=build_mootdx_minute_semantic_probe(
+                            subscriptions=subscriptions,
+                            trade_date=for_trade_date,
+                            adapter_factory=lambda client: MootdxTodayMinuteAdapter(
+                                client=client,
+                                offset=provider_offset,
+                                intraday_trade_date=for_trade_date,
+                            ),
+                        ),
+                        required_checks=("minute_scope_sentinels",),
+                        failover_mode="active",
+                    )
+                    if not selection.selectable:
+                        raise FastlaneShellBlocked(
+                            "current_day_source_provider_endpoint_not_selectable:"
+                            f"{selection.selection_reason}"
+                        )
+                    selection_state["manager"] = manager
+                    selection_state["selection"] = selection
+                    with incident_lock:
+                        incident_state["endpoint_id"] = str(
+                            getattr(selection, "endpoint_id", "") or ""
+                        )
+                        incident_state["failover_mode"] = str(
+                            getattr(selection, "failover_mode", "") or "active"
+                        )
+                except Exception as exc:  # noqa: BLE001 - cache one fail-closed batch selection result.
+                    selection_state["error"] = exc
+                finally:
+                    selection_state["elapsed_ms"] = int(
+                        round((time.monotonic() - selection_started) * 1000)
+                    )
+                    selection_state["initialized"] = True
+            manager = selection_state["manager"]
+            selection = selection_state["selection"]
+            selection_error = selection_state["error"]
+        if selection_error is not None:
+            raise FastlaneShellBlocked(
+                "current_day_source_provider_endpoint_selection_failed:"
+                f"{type(selection_error).__name__}"
+            ) from selection_error
+        return manager, selection
+
+    def cohort_failure_metadata() -> dict[str, Any]:
+        with incident_lock:
+            return dict(incident_state)
+
+    def record_transport_failure(exc: BaseException) -> dict[str, Any]:
+        manager, selection = initialize_selection()
+        with incident_lock:
+            if incident_state["failure_kind"]:
+                return dict(incident_state)
+            metadata = {
+                "error_type": type(exc).__name__,
+                "failure_kind": "batch_transport_failure",
+                "endpoint_id": str(getattr(selection, "endpoint_id", "") or ""),
+                "failover_mode": "active",
+                "retry_class": "endpoint_transport_immediate",
+                "transport_failure_record_count": 1,
+            }
+            incident_state.update(metadata)
+            cohort_abort_event.set()
+        try:
+            manager.record_transport_failure(
+                metadata["endpoint_id"],
+                transport=str(getattr(selection, "transport", "") or "") or None,
+                failure_kind=metadata["failure_kind"],
+                detail=metadata["error_type"],
+            )
+        except Exception:  # noqa: BLE001 - an unavailable health cache must remain fail-closed.
+            with incident_lock:
+                incident_state["transport_failure_record_count"] = 0
+        with incident_lock:
+            return dict(incident_state)
+
+    def record_required_object_result(
+        *,
+        identity_key: str,
+        empty: bool,
+    ) -> dict[str, Any] | None:
+        manager, selection = initialize_selection()
+        with incident_lock:
+            if incident_state["failure_kind"]:
+                return dict(incident_state) if empty else None
+            record_result = getattr(manager, "record_required_object_result", None)
+            if not callable(record_result):
+                return None
+            endpoint_id = str(getattr(selection, "endpoint_id", "") or "")
+            try:
+                endpoint_wide_failure = record_result(
+                    endpoint_id,
+                    transport=str(getattr(selection, "transport", "") or "") or None,
+                    empty=bool(empty),
+                    object_identity=str(identity_key or ""),
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate local health persistence per candidate.
+                return {
+                    "error_type": type(exc).__name__,
+                    "failure_kind": "candidate_health_persistence_failure",
+                    "endpoint_id": endpoint_id,
+                    "failover_mode": "active",
+                    "retry_class": "local_health_persistence_immediate",
+                }
+            if not endpoint_wide_failure:
+                return None
+            incident_state.update(
+                {
+                    "error_type": "MootdxEndpointWideRequiredObjectsEmpty",
+                    "failure_kind": "consecutive_required_objects_empty",
+                    "endpoint_id": endpoint_id,
+                    "failover_mode": "active",
+                    "retry_class": "endpoint_transport_immediate",
+                    "transport_failure_record_count": 0,
+                }
+            )
+            cohort_abort_event.set()
+            return dict(incident_state)
+
+    def market_adapter_factory() -> Any:
+        if cohort_abort_event.is_set():
+            raise FastlaneShellBlocked(
+                "current_day_source_provider_cohort_aborted"
+            )
+        _, selection = initialize_selection()
+        adapter = MootdxTodayMinuteAdapter(
+            client=create_mootdx_client(selection),
+            offset=provider_offset,
+            intraday_trade_date=for_trade_date,
+        )
+        adapter.endpoint_selection_count = 1
+        adapter.endpoint_selection_ms = int(selection_state["elapsed_ms"] or 0)
+        return adapter
+
+    setattr(market_adapter_factory, "cohort_is_aborted", cohort_abort_event.is_set)
+    setattr(market_adapter_factory, "cohort_failure_metadata", cohort_failure_metadata)
+    setattr(market_adapter_factory, "record_transport_failure", record_transport_failure)
+    setattr(
+        market_adapter_factory,
+        "record_required_object_result",
+        record_required_object_result,
+    )
+    return market_adapter_factory
 
 
 def _configured_n3t_writer_adapter(args: argparse.Namespace) -> Callable[..., Mapping[str, Any]] | None:
@@ -2743,6 +7550,147 @@ def _configured_n3t_writer_adapter(args: argparse.Namespace) -> Callable[..., Ma
     return adapter
 
 
+def _adaptive_current_day_source_provider_concurrency(candidate_count: int) -> int:
+    count = max(0, int(candidate_count or 0))
+    if count >= 64:
+        return 16
+    return 8
+
+
+def _intraday_source_provider_offset(
+    *,
+    for_trade_date: str,
+    target_hhmm: str,
+    cache_hit: bool,
+) -> int:
+    if cache_hit:
+        return INTRADAY_SOURCE_CACHE_TAIL_OFFSET
+    labels = _canonical_ashare_1m_labels_cached(for_trade_date)
+    target_label = _hhmm_to_minute_label(target_hhmm)
+    ordinal = labels.index(target_label) + 1 if target_label in labels else 1
+    return min(
+        INTRADAY_SOURCE_CACHE_MAX_OFFSET,
+        max(
+            INTRADAY_SOURCE_CACHE_TAIL_OFFSET,
+            ordinal + INTRADAY_SOURCE_CACHE_LOOKAHEAD_ROWS,
+        ),
+    )
+
+
+def _intraday_source_cache_path(
+    *,
+    output_dir: Path,
+    for_trade_date: str,
+    asset_kind: str,
+    identity_key: str,
+) -> Path:
+    token = hashlib.sha256(
+        f"{for_trade_date}|{asset_kind}|{identity_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    return (
+        output_dir
+        / "intraday_source_cache"
+        / for_trade_date
+        / f"{INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE}_{token}.json"
+    )
+
+
+def _load_intraday_source_cache(
+    path: Path,
+    *,
+    for_trade_date: str,
+    asset_kind: str,
+    identity_key: str,
+) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    source = _read_optional_json_artifact(str(path))
+    payload = dict(source.get("payload") or {})
+    if (
+        payload.get("artifact_type") != INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE
+        or str(payload.get("for_trade_date") or "") != for_trade_date
+        or str(payload.get("asset_kind") or "") != asset_kind
+        or str(payload.get("identity_key") or "") != identity_key
+    ):
+        return {}
+    return payload
+
+
+def _merge_intraday_source_rows(
+    cached_rows: Sequence[Mapping[str, Any]],
+    fetched_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for source_name, source_rows in (
+        ("cache", cached_rows),
+        ("provider", fetched_rows),
+    ):
+        for row in source_rows:
+            if not isinstance(row, Mapping):
+                continue
+            key = (
+                str(row.get("asset_kind") or ""),
+                str(row.get("identity_key") or ""),
+                _hhmm_to_minute_label(row.get("physical_c1_label") or ""),
+            )
+            if not all(key):
+                raise FastlaneShellBlocked(
+                    "intraday_source_cache_row_scope_invalid"
+                )
+            candidate = dict(row)
+            existing = merged.get(key)
+            if existing is not None and source_name == "provider":
+                comparable = (
+                    "raw_source_label",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                )
+                if any(
+                    existing.get(field) != candidate.get(field)
+                    for field in comparable
+                ):
+                    raise FastlaneShellBlocked(
+                        "intraday_source_cache_label_conflict"
+                    )
+            merged[key] = candidate
+    return [
+        merged[key]
+        for key in sorted(
+            merged,
+            key=lambda item: (item[0], item[1], _hhmm_int(item[2])),
+        )
+    ]
+
+
+def _intraday_source_rows_cover_pull_plan(
+    rows: Sequence[Mapping[str, Any]],
+    plan_rows: Sequence[Mapping[str, Any]],
+) -> bool:
+    available = {
+        (
+            str(row.get("asset_kind") or ""),
+            str(row.get("identity_key") or ""),
+            _hhmm_to_minute_label(row.get("physical_c1_label") or ""),
+        )
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+    required = {
+        (
+            str(plan_row.get("asset_kind") or ""),
+            str(plan_row.get("identity_key") or ""),
+            _hhmm_to_minute_label(label),
+        )
+        for plan_row in plan_rows
+        for label in plan_row.get("required_physical_labels") or []
+    }
+    return bool(required) and required.issubset(available)
+
+
 def _build_current_day_source_rows_with_market_adapter(
     *,
     args: argparse.Namespace,
@@ -2750,26 +7698,153 @@ def _build_current_day_source_rows_with_market_adapter(
     market_adapter: Any | None = None,
     market_adapter_factory: Callable[[], Any] | None = None,
     provider_name: str,
+    persist_artifacts: bool = True,
 ) -> dict[str, Any]:
+    from ashare_v3.market.mootdx_batch_attempt import (
+        is_endpoint_transport_exception,
+    )
+
+    provider_fetch_started = time.monotonic()
     source_dir_text = str(getattr(args, "current_day_source_artifact_dir", "") or "").strip()
-    if not source_dir_text:
+    if persist_artifacts and not source_dir_text:
         raise FastlaneShellBlocked("current_day_source_artifact_dir_required")
     if market_adapter is None and market_adapter_factory is None:
         raise FastlaneShellBlocked("current_day_source_provider_adapter_required")
-    source_dir = Path(source_dir_text)
-    source_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = Path(source_dir_text or ".")
+    if persist_artifacts:
+        source_dir.mkdir(parents=True, exist_ok=True)
     artifact_count = 0
     source_row_count = 0
     source_artifacts: list[dict[str, Any]] = []
     failed_candidates: list[dict[str, Any]] = []
     candidate_results: list[dict[str, Any]] = []
-    provider_concurrency = min(_current_day_source_provider_concurrency(args), max(1, len(planned_artifacts)))
+    requested_concurrency = _current_day_source_provider_concurrency(args)
+    adaptive_concurrency = _adaptive_current_day_source_provider_concurrency(
+        len(planned_artifacts)
+    )
+    fixed_concurrency = bool(
+        getattr(
+            args,
+            "current_day_source_provider_concurrency_explicit",
+            int(
+                getattr(args, "current_day_source_provider_concurrency", 0)
+                or 0
+            )
+            > 0,
+        )
+    )
+    provider_concurrency = min(
+        (
+            requested_concurrency
+            if fixed_concurrency
+            else max(requested_concurrency, adaptive_concurrency)
+        ),
+        max(1, len(planned_artifacts)),
+        MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY,
+    )
     worker_local = threading.local()
     adapter_count_lock = threading.Lock()
     provider_adapter_instance_count = 0
+    provider_adapter_close_failure_count = 0
+    provider_adapters: list[Any] = []
+    endpoint_selection_ms = 0
+    cohort_is_aborted = getattr(
+        market_adapter_factory,
+        "cohort_is_aborted",
+        lambda: False,
+    )
+    cohort_failure_metadata = getattr(
+        market_adapter_factory,
+        "cohort_failure_metadata",
+        lambda: {},
+    )
+    transport_failure_recorder = getattr(
+        market_adapter_factory,
+        "record_transport_failure",
+        None,
+    )
+    required_object_recorder = getattr(
+        market_adapter_factory,
+        "record_required_object_result",
+        None,
+    )
+    failure_metadata_fields = (
+        "error_type",
+        "failure_kind",
+        "endpoint_id",
+        "failover_mode",
+        "retry_class",
+    )
+
+    def sanitized_failure_metadata(
+        value: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = dict(value or {})
+        return {
+            field: payload[field]
+            for field in failure_metadata_fields
+            if str(payload.get(field) or "")
+        }
+
+    def aborted_failure_metadata() -> dict[str, Any]:
+        metadata = sanitized_failure_metadata(cohort_failure_metadata())
+        incident_failure_kind = str(metadata.get("failure_kind") or "")
+        metadata["failure_kind"] = {
+            "batch_transport_failure": (
+                "cohort_aborted_after_transport_failure"
+            ),
+            "consecutive_required_objects_empty": (
+                "cohort_aborted_after_endpoint_wide_empty"
+            ),
+        }.get(
+            incident_failure_kind,
+            "cohort_aborted_after_endpoint_incident",
+        )
+        metadata.setdefault("retry_class", "endpoint_transport_immediate")
+        return metadata
+
+    def exception_failure_metadata(exc: BaseException) -> dict[str, Any]:
+        if not is_endpoint_transport_exception(exc):
+            return {
+                "error_type": type(exc).__name__,
+                "failure_kind": "candidate_program_failure",
+                "retry_class": "not_retryable",
+            }
+        if callable(transport_failure_recorder):
+            return sanitized_failure_metadata(transport_failure_recorder(exc))
+        return {
+            "error_type": type(exc).__name__,
+            "failure_kind": "batch_transport_failure",
+            "retry_class": "endpoint_transport_immediate",
+        }
+
+    def provider_row_conversion_failure(
+        exc: BaseException,
+    ) -> tuple[str, dict[str, Any]]:
+        data_quality_failure = isinstance(exc, FastlaneShellBlocked)
+        return (
+            (
+                "current_day_source_provider_row_conversion_failed"
+                if data_quality_failure
+                else "current_day_source_provider_row_program_failure"
+            ),
+            {
+                "error_type": type(exc).__name__,
+                "failure_kind": (
+                    "candidate_data_quality_failure"
+                    if data_quality_failure
+                    else "candidate_program_failure"
+                ),
+                "retry_class": (
+                    "object_quality_backoff"
+                    if data_quality_failure
+                    else "not_retryable"
+                ),
+            },
+        )
 
     def market_adapter_for_worker() -> Any:
-        nonlocal provider_adapter_instance_count
+        nonlocal provider_adapter_instance_count, endpoint_selection_ms
         if market_adapter_factory is None:
             return market_adapter
         candidate_market_adapter = getattr(worker_local, "market_adapter", None)
@@ -2778,6 +7853,18 @@ def _build_current_day_source_rows_with_market_adapter(
             worker_local.market_adapter = candidate_market_adapter
             with adapter_count_lock:
                 provider_adapter_instance_count += 1
+                provider_adapters.append(candidate_market_adapter)
+                endpoint_selection_ms = max(
+                    endpoint_selection_ms,
+                    int(
+                        getattr(
+                            candidate_market_adapter,
+                            "endpoint_selection_ms",
+                            0,
+                        )
+                        or 0
+                    ),
+                )
         return candidate_market_adapter
 
     def process_planned_artifact(planned: Mapping[str, Any]) -> dict[str, Any]:
@@ -2805,9 +7892,70 @@ def _build_current_day_source_rows_with_market_adapter(
         for_trade_date = str(payload.get("for_trade_date") or planned.get("for_trade_date") or "")
         if not namespace_token:
             namespace_token = f"{for_trade_date}_{target_hhmm}_{source_run_hash or 'unknown'}"
+        plan_rows = [
+            dict(row)
+            for row in payload.get("plan_rows") or []
+            if isinstance(row, Mapping)
+        ]
+        if bool(cohort_is_aborted()):
+            metadata = aborted_failure_metadata()
+            return {
+                "status": "failed",
+                "candidate_result": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "status": "failed",
+                    "reason": "current_day_source_provider_cohort_aborted",
+                    **metadata,
+                },
+                "failed_candidate": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "failure_count": 1,
+                    "reason": "current_day_source_provider_cohort_aborted",
+                    **metadata,
+                },
+            }
+        first_plan_row = plan_rows[0] if plan_rows else {}
+        asset_kind = str(first_plan_row.get("asset_kind") or "")
+        identity_key = str(first_plan_row.get("identity_key") or "")
+        output_dir_text = str(getattr(args, "output_dir", "") or "").strip()
+        cache_enabled = bool(not persist_artifacts and output_dir_text)
+        cache_path = _intraday_source_cache_path(
+            output_dir=Path(output_dir_text or source_dir),
+            for_trade_date=for_trade_date,
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+        )
+        cached_payload = (
+            _load_intraday_source_cache(
+                cache_path,
+                for_trade_date=for_trade_date,
+                asset_kind=asset_kind,
+                identity_key=identity_key,
+            )
+            if cache_enabled and asset_kind and identity_key
+            else {}
+        )
+        cached_rows = list(cached_payload.get("closed_minute_rows") or [])
+        cache_hit = bool(cached_rows)
+        provider_offset = _intraday_source_provider_offset(
+            for_trade_date=for_trade_date,
+            target_hhmm=target_hhmm,
+            cache_hit=cache_hit,
+        )
         try:
             candidate_market_adapter = market_adapter_for_worker()
+            if hasattr(candidate_market_adapter, "offset"):
+                candidate_market_adapter.offset = provider_offset
         except Exception as exc:  # noqa: BLE001 - isolate provider connection setup failures per candidate.
+            metadata = (
+                aborted_failure_metadata()
+                if bool(cohort_is_aborted())
+                else exception_failure_metadata(exc)
+            )
             return {
                 "status": "failed",
                 "candidate_result": {
@@ -2816,7 +7964,7 @@ def _build_current_day_source_rows_with_market_adapter(
                     "source_run_hash": source_run_hash,
                     "status": "failed",
                     "reason": "current_day_source_provider_adapter_init_failed",
-                    "error_type": type(exc).__name__,
+                    **metadata,
                 },
                 "failed_candidate": {
                     "namespace_token": namespace_token,
@@ -2824,36 +7972,104 @@ def _build_current_day_source_rows_with_market_adapter(
                     "source_run_hash": source_run_hash,
                     "failure_count": 1,
                     "reason": "current_day_source_provider_adapter_init_failed",
-                    "error_type": type(exc).__name__,
+                    **metadata,
                 },
             }
+        fetched_rows_by_subscription: dict[tuple[str, str], list[dict[str, Any]]] = {}
         rows: list[dict[str, Any]] = []
         plan_failures: list[dict[str, Any]] = []
-        for plan_row in payload.get("plan_rows") or []:
+        for plan_row in plan_rows:
             subscription = _subscription_from_plan_row(plan_row)
+            subscription_key = (
+                str(subscription.get("asset_kind") or ""),
+                str(subscription.get("identity_key") or ""),
+            )
+            fetched_rows = fetched_rows_by_subscription.get(subscription_key)
+            if fetched_rows is None:
+                if bool(cohort_is_aborted()):
+                    plan_failures.append(
+                        {
+                            "identity_key": subscription.get("identity_key"),
+                            "asset_kind": subscription.get("asset_kind"),
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_run_hash,
+                            "reason": "current_day_source_provider_cohort_aborted",
+                            **aborted_failure_metadata(),
+                        }
+                    )
+                    break
+                try:
+                    fetched_rows = list(
+                        candidate_market_adapter.fetch_minute_bars(
+                            subscription,
+                            for_trade_date,
+                        )
+                        or []
+                    )
+                    fetched_rows_by_subscription[subscription_key] = fetched_rows
+                except Exception as exc:  # noqa: BLE001 - isolate one provider candidate from the batch.
+                    metadata = exception_failure_metadata(exc)
+                    plan_failures.append(
+                        {
+                            "identity_key": subscription.get("identity_key"),
+                            "asset_kind": subscription.get("asset_kind"),
+                            "target_hhmm": target_hhmm,
+                            "source_run_hash": source_run_hash,
+                            "reason": "current_day_source_provider_fetch_failed",
+                            **metadata,
+                        }
+                    )
+                    if bool(cohort_is_aborted()):
+                        break
+                    continue
+                if callable(required_object_recorder):
+                    required_object_metadata = required_object_recorder(
+                        identity_key=str(
+                            subscription.get("identity_key") or ""
+                        ),
+                        empty=not fetched_rows,
+                    )
+                    if required_object_metadata:
+                        plan_failures.append(
+                            {
+                                "identity_key": subscription.get("identity_key"),
+                                "asset_kind": subscription.get("asset_kind"),
+                                "target_hhmm": target_hhmm,
+                                "source_run_hash": source_run_hash,
+                                "reason": _required_object_failure_reason(
+                                    required_object_metadata
+                                ),
+                                **sanitized_failure_metadata(
+                                    required_object_metadata
+                                ),
+                            }
+                        )
+                        break
             try:
-                fetched_rows = candidate_market_adapter.fetch_minute_bars(subscription, for_trade_date)
-            except Exception as exc:  # noqa: BLE001 - isolate one provider candidate from the batch.
+                rows.extend(
+                    _current_day_source_rows_from_provider_rows(
+                        provider_rows=list(fetched_rows or []),
+                        plan_row=plan_row,
+                        for_trade_date=for_trade_date,
+                        provider_name=provider_name,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate one provider row contract from the cohort.
+                reason, metadata = provider_row_conversion_failure(exc)
                 plan_failures.append(
                     {
-                        "identity_key": subscription.get("identity_key"),
-                        "asset_kind": subscription.get("asset_kind"),
+                        "identity_key": plan_row.get("identity_key"),
+                        "asset_kind": plan_row.get("asset_kind"),
                         "target_hhmm": target_hhmm,
                         "source_run_hash": source_run_hash,
-                        "reason": "current_day_source_provider_fetch_failed",
-                        "error_type": type(exc).__name__,
+                        "reason": reason,
+                        **metadata,
                     }
                 )
-                continue
-            rows.extend(
-                _current_day_source_rows_from_provider_rows(
-                    provider_rows=list(fetched_rows or []),
-                    plan_row=plan_row,
-                    for_trade_date=for_trade_date,
-                    provider_name=provider_name,
-                )
-            )
+                break
         if plan_failures:
+            first_failure = dict(plan_failures[0])
+            metadata = sanitized_failure_metadata(first_failure)
             return {
                 "status": "failed",
                 "candidate_result": {
@@ -2861,15 +8077,211 @@ def _build_current_day_source_rows_with_market_adapter(
                     "target_hhmm": target_hhmm,
                     "source_run_hash": source_run_hash,
                     "status": "failed",
-                    "reason": "current_day_source_provider_fetch_failed",
+                    "reason": str(
+                        first_failure.get("reason")
+                        or "current_day_source_provider_fetch_failed"
+                    ),
                     "failure_count": len(plan_failures),
+                    **metadata,
                 },
                 "failed_candidate": {
                     "namespace_token": namespace_token,
                     "target_hhmm": target_hhmm,
                     "source_run_hash": source_run_hash,
                     "failure_count": len(plan_failures),
+                    "reason": str(
+                        first_failure.get("reason")
+                        or "current_day_source_provider_fetch_failed"
+                    ),
+                    **metadata,
                     "failures": plan_failures,
+                },
+            }
+        cache_repair_reason = ""
+        try:
+            rows = _merge_intraday_source_rows(cached_rows, rows)
+        except FastlaneShellBlocked as exc:
+            if (
+                cache_hit
+                and str(exc) == "intraday_source_cache_label_conflict"
+            ):
+                rows = []
+                cache_repair_reason = str(exc)
+            else:
+                return {
+                    "status": "failed",
+                    "candidate_result": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "status": "failed",
+                        "reason": str(exc),
+                    },
+                    "failed_candidate": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "failure_count": 1,
+                        "reason": str(exc),
+                    },
+                }
+        cache_repaired = False
+        if (
+            cache_repair_reason
+            or not _intraday_source_rows_cover_pull_plan(rows, plan_rows)
+        ):
+            cache_repair_reason = (
+                cache_repair_reason
+                or "intraday_source_cache_scope_incomplete"
+            )
+            repair_offset = INTRADAY_SOURCE_CACHE_MAX_OFFSET
+            if hasattr(candidate_market_adapter, "offset"):
+                candidate_market_adapter.offset = repair_offset
+            repair_provider_rows: dict[
+                tuple[str, str], list[dict[str, Any]]
+            ] = {}
+            repair_rows: list[dict[str, Any]] = []
+            repair_failure_reason = ""
+            repair_failure_metadata: dict[str, Any] = {}
+            for plan_row in plan_rows:
+                try:
+                    if bool(cohort_is_aborted()):
+                        raise FastlaneShellBlocked(
+                            "current_day_source_provider_cohort_aborted"
+                        )
+                    subscription = _subscription_from_plan_row(plan_row)
+                    subscription_key = (
+                        str(subscription.get("asset_kind") or ""),
+                        str(subscription.get("identity_key") or ""),
+                    )
+                    provider_rows = repair_provider_rows.get(subscription_key)
+                    if provider_rows is None:
+                        provider_rows = list(
+                            candidate_market_adapter.fetch_minute_bars(
+                                subscription,
+                                for_trade_date,
+                            )
+                            or []
+                        )
+                        repair_provider_rows[subscription_key] = provider_rows
+                        if callable(required_object_recorder):
+                            required_object_metadata = required_object_recorder(
+                                identity_key=str(
+                                    subscription.get("identity_key") or ""
+                                ),
+                                empty=not provider_rows,
+                            )
+                            if required_object_metadata:
+                                required_object_reason = (
+                                    _required_object_failure_reason(
+                                        required_object_metadata
+                                    )
+                                )
+                                if (
+                                    required_object_reason
+                                    == "current_day_source_provider_required_object_health_persistence_failed"
+                                ):
+                                    repair_failure_reason = (
+                                        required_object_reason
+                                    )
+                                    repair_failure_metadata = (
+                                        sanitized_failure_metadata(
+                                            required_object_metadata
+                                        )
+                                    )
+                                    break
+                                raise FastlaneShellBlocked(
+                                    required_object_reason
+                                )
+                except Exception as exc:  # noqa: BLE001 - isolate bounded repair fetch failures.
+                    if bool(cohort_is_aborted()):
+                        repair_failure_metadata = aborted_failure_metadata()
+                        repair_failure_reason = (
+                            "current_day_source_provider_cohort_aborted"
+                        )
+                    else:
+                        repair_failure_metadata = exception_failure_metadata(exc)
+                        repair_failure_reason = (
+                            "intraday_source_cache_repair_failed"
+                        )
+                    break
+                try:
+                    repair_rows.extend(
+                        _current_day_source_rows_from_provider_rows(
+                            provider_rows=provider_rows,
+                            plan_row=plan_row,
+                            for_trade_date=for_trade_date,
+                            provider_name=provider_name,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate repair row conversion per candidate.
+                    (
+                        repair_failure_reason,
+                        repair_failure_metadata,
+                    ) = provider_row_conversion_failure(exc)
+                    break
+            if repair_failure_reason:
+                return {
+                    "status": "failed",
+                    "candidate_result": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "status": "failed",
+                        "reason": repair_failure_reason,
+                        **repair_failure_metadata,
+                    },
+                    "failed_candidate": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "failure_count": 1,
+                        "reason": repair_failure_reason,
+                        **repair_failure_metadata,
+                    },
+                }
+            try:
+                rows = _merge_intraday_source_rows([], repair_rows)
+            except FastlaneShellBlocked as exc:
+                return {
+                    "status": "failed",
+                    "candidate_result": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "status": "failed",
+                        "reason": "intraday_source_cache_repair_invalid",
+                        "error_type": type(exc).__name__,
+                        "repair_blocked_reason": str(exc),
+                    },
+                    "failed_candidate": {
+                        "namespace_token": namespace_token,
+                        "target_hhmm": target_hhmm,
+                        "source_run_hash": source_run_hash,
+                        "failure_count": 1,
+                        "reason": "intraday_source_cache_repair_invalid",
+                        "error_type": type(exc).__name__,
+                        "repair_blocked_reason": str(exc),
+                    },
+                }
+            provider_offset = repair_offset
+            cache_repaired = True
+        if not _intraday_source_rows_cover_pull_plan(rows, plan_rows):
+            return {
+                "status": "failed",
+                "candidate_result": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "status": "failed",
+                    "reason": "intraday_source_cache_scope_incomplete",
+                },
+                "failed_candidate": {
+                    "namespace_token": namespace_token,
+                    "target_hhmm": target_hhmm,
+                    "source_run_hash": source_run_hash,
+                    "failure_count": 1,
+                    "reason": "intraday_source_cache_scope_incomplete",
                 },
             }
         source_written_at = datetime.now().astimezone().isoformat()
@@ -2878,7 +8290,32 @@ def _build_current_day_source_rows_with_market_adapter(
             target_hhmm=target_hhmm,
             observed_at=source_written_at,
         )
-        plan_rows = [row for row in payload.get("plan_rows") or [] if isinstance(row, Mapping)]
+        source_cache_sha256 = ""
+        if cache_enabled:
+            source_cache_payload = {
+                "artifact_type": INTRADAY_SOURCE_CACHE_ARTIFACT_TYPE,
+                "artifact_schema_version": "v1",
+                "producer_layer": "N3_market_data",
+                "for_trade_date": for_trade_date,
+                "asset_kind": asset_kind,
+                "identity_key": identity_key,
+                "source_provider": provider_name,
+                "provider_offset": provider_offset,
+                "cache_hit": cache_hit,
+                "cache_repaired": cache_repaired,
+                "cache_repair_reason": cache_repair_reason,
+                "closed_minute_row_count": len(rows),
+                "closed_minute_rows": rows,
+                "updated_at": source_written_at,
+                "database_written": False,
+                "writes_canonical_minute_bar_1m": False,
+                "writes_n3_outbox": False,
+                "touches_n4_n5_n6_outbox": False,
+            }
+            _write_atomic_compact_json(cache_path, source_cache_payload)
+            source_cache_sha256 = hashlib.sha256(
+                cache_path.read_bytes()
+            ).hexdigest()
         artifact = {
             "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
             "artifact_schema_version": "v1",
@@ -2890,7 +8327,16 @@ def _build_current_day_source_rows_with_market_adapter(
             "source_run_namespace": namespace_token,
             "source_provider": provider_name,
             "source_adapter": getattr(candidate_market_adapter, "external_source", provider_name),
-            "source_version": getattr(candidate_market_adapter, "source_version", "unknown"),
+            "source_version": (
+                "mootdx.bars.today_minute.frequency8."
+                f"offset{provider_offset}"
+            ),
+            "source_cache_path": str(cache_path) if cache_enabled else "",
+            "source_cache_sha256": source_cache_sha256,
+            "source_cache_hit": cache_hit,
+            "source_cache_repaired": cache_repaired,
+            "source_cache_repair_reason": cache_repair_reason,
+            "provider_offset": provider_offset,
             "direction": str((plan_rows[0] if plan_rows else {}).get("direction") or ""),
             "source_written_at": source_written_at,
             "minute_closed_to_source_ms": minute_closed_to_source_ms,
@@ -2908,19 +8354,29 @@ def _build_current_day_source_rows_with_market_adapter(
             "full_market_fallback_used": False,
         }
         path = source_dir / f"n3_c1_scoped_current_day_source_rows_v1_{namespace_token}.json"
-        path.write_text(
-            json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        artifact_sha256 = _json_payload_sha256(artifact)
+        if persist_artifacts:
+            path.write_text(
+                json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            artifact_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
         source_artifact = {
-            "path": str(path),
+            "path": str(path) if persist_artifacts else f"inline://object_cursor_batch/{namespace_token}",
             "target_hhmm": target_hhmm,
             "for_trade_date": for_trade_date,
             "artifact_type": CURRENT_DAY_SOURCE_ROWS_TYPE,
             "source_run_hash": source_run_hash,
             "source_run_namespace": namespace_token,
             "row_count": len(rows),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "sha256": artifact_sha256,
+            "payload": artifact if not persist_artifacts else None,
+            "object_batch_key": list(planned.get("object_batch_key") or []),
+            "object_batch_keys": [
+                list(item)
+                for item in planned.get("object_batch_keys") or []
+                if isinstance(item, (list, tuple)) and len(item) == 4
+            ],
         }
         return {
             "status": "passed",
@@ -2932,19 +8388,55 @@ def _build_current_day_source_rows_with_market_adapter(
                 "source_run_hash": source_run_hash,
                 "status": "passed",
                 "row_count": len(rows),
-                "artifact_path": str(path),
+                "artifact_path": str(path) if persist_artifacts else source_artifact["path"],
                 "source_written_at": source_written_at,
                 "minute_closed_to_source_ms": minute_closed_to_source_ms,
+                "provider_offset": provider_offset,
+                "source_cache_hit": cache_hit,
+                "source_cache_repaired": cache_repaired,
+                "source_cache_repair_reason": cache_repair_reason,
             },
         }
 
-    if provider_concurrency <= 1 or len(planned_artifacts) <= 1:
-        processed_results = [process_planned_artifact(planned) for planned in planned_artifacts]
-    else:
-        with ThreadPoolExecutor(max_workers=provider_concurrency) as executor:
-            processed_results = list(executor.map(process_planned_artifact, planned_artifacts))
+    try:
+        if provider_concurrency <= 1 or len(planned_artifacts) <= 1:
+            processed_results = [
+                process_planned_artifact(planned)
+                for planned in planned_artifacts
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=provider_concurrency) as executor:
+                processed_results = list(
+                    executor.map(process_planned_artifact, planned_artifacts)
+                )
+    finally:
+        for adapter in provider_adapters:
+            client = getattr(adapter, "_client", None)
+            close = getattr(adapter, "close", None)
+            if not callable(close):
+                close = getattr(client, "close", None)
+            if not callable(close):
+                close = getattr(client, "disconnect", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - fetched rows remain valid.
+                provider_adapter_close_failure_count += 1
 
-    for item in processed_results:
+    for planned, item in zip(planned_artifacts, processed_results):
+        failed_candidate = item.get("failed_candidate")
+        if isinstance(failed_candidate, dict):
+            object_batch_key = list(planned.get("object_batch_key") or [])
+            object_batch_keys = [
+                list(value)
+                for value in planned.get("object_batch_keys") or []
+                if isinstance(value, (list, tuple)) and len(value) == 4
+            ]
+            if object_batch_key:
+                failed_candidate.setdefault("object_batch_key", object_batch_key)
+            if object_batch_keys:
+                failed_candidate.setdefault("object_batch_keys", object_batch_keys)
         status = str(item.get("status") or "")
         if status == "passed":
             artifact_count += 1
@@ -2955,12 +8447,44 @@ def _build_current_day_source_rows_with_market_adapter(
         if status == "failed":
             failed_candidates.append(dict(item.get("failed_candidate") or {}))
             candidate_results.append(dict(item.get("candidate_result") or {}))
+    cohort_metadata = dict(cohort_failure_metadata())
+    failure_kind_counts: dict[str, int] = {}
+    for failure in failed_candidates:
+        failure_kind = str(failure.get("failure_kind") or "")
+        if failure_kind:
+            failure_kind_counts[failure_kind] = (
+                failure_kind_counts.get(failure_kind, 0) + 1
+            )
     return {
         "adapter_type": "n3_c1_scoped_current_day_source_rows_provider_adapter_v1",
         "provider_name": provider_name,
         "provider_concurrency": provider_concurrency,
+        "adaptive_provider_concurrency": adaptive_concurrency,
         "provider_max_concurrency": MAX_CURRENT_DAY_SOURCE_PROVIDER_CONCURRENCY,
         "provider_adapter_instance_count": provider_adapter_instance_count,
+        "provider_adapter_close_failure_count": (
+            provider_adapter_close_failure_count
+        ),
+        "provider_connection_count": provider_adapter_instance_count,
+        "endpoint_selection_count": (
+            1 if planned_artifacts and market_adapter_factory is not None else 0
+        ),
+        "endpoint_selection_ms": endpoint_selection_ms,
+        "endpoint_id": str(cohort_metadata.get("endpoint_id") or ""),
+        "failover_mode": str(cohort_metadata.get("failover_mode") or ""),
+        "cohort_aborted": bool(cohort_is_aborted()),
+        "endpoint_transport_failure_record_count": int(
+            cohort_metadata.get("transport_failure_record_count") or 0
+        ),
+        "immediate_retry_candidate_count": sum(
+            1
+            for failure in failed_candidates
+            if failure.get("retry_class") == "endpoint_transport_immediate"
+        ),
+        "failure_kind_counts": failure_kind_counts,
+        "provider_fetch_ms": int(
+            round((time.monotonic() - provider_fetch_started) * 1000)
+        ),
         "concurrency_limited": provider_concurrency < len(planned_artifacts),
         "minute_closed_to_source_ms": max(
             (
@@ -2973,8 +8497,9 @@ def _build_current_day_source_rows_with_market_adapter(
         "source_to_staging_ms": None,
         "staging_to_proof_ms": None,
         "proof_to_action_ms": None,
-        "artifact_written": artifact_count > 0,
-        "artifact_count": artifact_count,
+        "artifact_written": persist_artifacts and artifact_count > 0,
+        "artifact_count": artifact_count if persist_artifacts else 0,
+        "inline_payload_count": artifact_count if not persist_artifacts else 0,
         "source_row_count": source_row_count,
         "source_artifacts": source_artifacts,
         "candidate_results": candidate_results,
@@ -3675,15 +9200,18 @@ def _metric_context_artifact_needs_open_boundary_previous_period_rebuild(payload
         if not isinstance(row, Mapping):
             continue
         metric_values = dict(row.get("metric_values") or {})
-        if str(metric_values.get("previous_120m_period_source") or "") != "not_available":
-            continue
-        if bool(metric_values.get("is_first_120m_of_day")):
-            continue
-        if metric_values.get("previous_120m_body_high") in {None, ""}:
-            continue
-        if metric_values.get("previous_120m_body_low") in {None, ""}:
-            continue
-        if _metric_context_row_has_open_boundary_source_gap(row):
+        if not previous_period_sources_are_valid(metric_values) and any(
+            metric_values.get(f"previous_{period}_body_high") not in {None, ""}
+            and metric_values.get(f"previous_{period}_body_low") not in {None, ""}
+            for period in ("1m", "5m", "30m", "120m")
+        ):
+            return True
+        if (
+            str(metric_values.get("previous_120m_period_source") or "") == "not_available"
+            and metric_values.get("previous_120m_body_high") not in {None, ""}
+            and metric_values.get("previous_120m_body_low") not in {None, ""}
+            and _metric_context_row_has_open_boundary_source_gap(row)
+        ):
             return True
     return False
 
@@ -3699,17 +9227,27 @@ def _metric_context_artifact_needs_rolling_window_rebuild(payload: Mapping[str, 
         if not isinstance(row, Mapping):
             continue
         metric_values = dict(row.get("metric_values") or {})
-        current_5m_amount = _rolling_current_amount_from_context_row(row, for_trade_date=source.get("for_trade_date"), size=5)
+        current_5m_amount = _fixed_current_amount_from_context_row(
+            row,
+            for_trade_date=source.get("for_trade_date"),
+            size=5,
+        )
         if current_5m_amount is not None:
             if _has_numeric_value(metric_values.get("current_5m_elapsed_amount")) and _numeric_delta(
                 metric_values.get("current_5m_elapsed_amount"), current_5m_amount
             ) > 0.000001:
                 return True
-            if _has_numeric_value(metric_values.get("current_5m_amount")) and _numeric_delta(
-                metric_values.get("current_5m_amount"), current_5m_amount
-            ) > 0.000001:
+            if (
+                _fixed_current_bucket_is_complete(row, size=5)
+                and _has_numeric_value(metric_values.get("current_5m_amount"))
+                and _numeric_delta(metric_values.get("current_5m_amount"), current_5m_amount) > 0.000001
+            ):
                 return True
-        current_30m_amount = _rolling_current_amount_from_context_row(row, for_trade_date=source.get("for_trade_date"), size=30)
+        current_30m_amount = _fixed_current_amount_from_context_row(
+            row,
+            for_trade_date=source.get("for_trade_date"),
+            size=30,
+        )
         if current_30m_amount is not None:
             if _has_numeric_value(metric_values.get("current_30m_closed_elapsed_amount")) and _numeric_delta(
                 metric_values.get("current_30m_closed_elapsed_amount"), current_30m_amount
@@ -3718,36 +9256,40 @@ def _metric_context_artifact_needs_rolling_window_rebuild(payload: Mapping[str, 
     return False
 
 
-def _rolling_current_amount_from_context_row(
+def _fixed_current_amount_from_context_row(
     row: Mapping[str, Any],
     *,
     for_trade_date: Any,
     size: int,
 ) -> float | None:
-    trade_date = str(for_trade_date or row.get("for_trade_date") or "")
-    labels = _canonical_ashare_1m_labels_cached(trade_date) if re.fullmatch(r"\d{8}", trade_date) else ()
-    if not labels or size <= 0:
+    if size <= 0:
         return None
-    rows_by_label: dict[str, Mapping[str, Any]] = {}
-    for item in row.get("closed_minute_rows") or []:
-        if not isinstance(item, Mapping) or item.get("fake_or_synthetic_row") is True:
-            continue
-        label = _hhmm_to_minute_label(item.get("physical_c1_label") or item.get("minute_label") or item.get("raw_source_label") or "")
-        if label in labels:
-            rows_by_label.setdefault(label, item)
-    if not rows_by_label:
+    period_index = _fixed_period_index_from_context_row(row)
+    if not period_index:
         return None
-    latest_label = max(rows_by_label, key=lambda label: labels.index(label))
-    position = labels.index(latest_label) + 1
-    start = max(0, position - size)
-    expected_labels = list(labels[start:position])
-    if expected_labels[:1] == ["09:30"] and "09:31" in expected_labels and "09:30" not in rows_by_label:
-        expected_labels = [label for label in expected_labels if label != "09:30"]
-    if len(expected_labels) < size:
+    position = max(period_index)
+    start = ((position - 1) // size) * size
+    expected_ordinals = list(range(start + 1, position + 1))
+    if any(ordinal not in period_index for ordinal in expected_ordinals):
         return None
-    if any(label not in rows_by_label for label in expected_labels):
-        return None
-    return sum(_numeric_value(rows_by_label[label].get("amount")) for label in expected_labels)
+    return sum(_numeric_value(period_index[ordinal].get("amount")) for ordinal in expected_ordinals)
+
+
+def _fixed_current_bucket_is_complete(row: Mapping[str, Any], *, size: int) -> bool:
+    if size <= 0:
+        return False
+    period_index = _fixed_period_index_from_context_row(row)
+    return bool(period_index and max(period_index) % size == 0)
+
+
+def _fixed_period_index_from_context_row(row: Mapping[str, Any]) -> dict[int, Mapping[str, Any]]:
+    return fixed_period_calculation_row_index(
+        [
+            item
+            for item in row.get("closed_minute_rows") or []
+            if isinstance(item, Mapping) and item.get("fake_or_synthetic_row") is not True
+        ]
+    )
 
 
 def _numeric_value(value: Any) -> float:
@@ -5068,6 +10610,83 @@ def _validate_current_day_source_provider_result(result: Mapping[str, Any]) -> N
             raise FastlaneShellBlocked(f"current_day_source_provider_{field}_forbidden")
 
 
+def _load_previous_day_context_rows_for_object_cursor_batch(
+    *,
+    args: argparse.Namespace,
+    staging_payloads: Sequence[Mapping[str, Any]],
+    provider_name: str,
+    dsn: str = "",
+    connect_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    expected: dict[str, dict[tuple[str, str], set[str]]] = {}
+    trade_dates: set[str] = set()
+    for staging in staging_payloads:
+        for_trade_date = str(staging.get("for_trade_date") or "")
+        if not re.fullmatch(r"\d{8}", for_trade_date):
+            raise FastlaneShellBlocked("object_cursor_batch_previous_day_trade_date_invalid")
+        trade_dates.add(for_trade_date)
+        candidate_expected = _expected_previous_day_context_keys(staging, for_trade_date=for_trade_date)
+        for asset_kind, identity_to_labels in candidate_expected.items():
+            for identity_and_physical, raw_labels in identity_to_labels.items():
+                expected.setdefault(asset_kind, {}).setdefault(identity_and_physical, set()).update(raw_labels)
+    if len(trade_dates) != 1:
+        raise FastlaneShellBlocked("object_cursor_batch_previous_day_trade_date_mismatch")
+    if not expected:
+        raise FastlaneShellBlocked("object_cursor_batch_previous_day_expected_rows_empty")
+    effective_dsn = str(dsn or os.environ.get("ASHARE_V3_POSTGRES_DSN") or "").strip()
+    if not effective_dsn:
+        raise FastlaneShellBlocked("previous_day_context_dsn_required")
+    if connect_factory is None:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except Exception as exc:  # pragma: no cover - import environment issue
+            raise FastlaneShellBlocked("previous_day_context_psycopg_required") from exc
+        connection_manager = psycopg.connect(
+            effective_dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on",
+            connect_timeout=10,
+        )
+    else:
+        connection_manager = connect_factory(effective_dsn)
+    for_trade_date = next(iter(trade_dates))
+    with connection_manager as connection:
+        with connection.cursor() as cur:
+            previous_trade_date = _fetch_previous_trade_date(cur, for_trade_date)
+            rows, missing = _fetch_previous_day_context_rows_with_missing(
+                cur,
+                expected,
+                for_trade_date,
+                previous_trade_date,
+            )
+    return {
+        "adapter_type": "n3_c1_n3t_previous_day_context_inline_batch_provider_adapter_v1",
+        "provider_name": provider_name,
+        "for_trade_date": for_trade_date,
+        "previous_trade_date": previous_trade_date,
+        "previous_day_minute_row_count": len(rows),
+        "previous_day_minute_rows": rows,
+        "missing_row_keys": [list(item) for item in missing],
+        "missing_object_keys": [
+            list(item)
+            for item in sorted({(asset_kind, identity_key) for asset_kind, identity_key, _physical, _raw in missing})
+        ],
+        "database_connection_count": 1,
+        "database_read": True,
+        "database_written": False,
+        "market_data_pulled": False,
+        "writes_canonical_minute_bar_1m": False,
+        "writes_n3_outbox": False,
+        "writes_common_event_outbox": False,
+        "touches_n4_n5_n6_outbox": False,
+        "updates_n4_outbox": False,
+        "scans_n5_db": False,
+        "touches_n6": False,
+        "full_market_fallback_used": False,
+    }
+
+
 def _build_previous_day_context_artifacts_batch_from_postgres(
     *,
     args: argparse.Namespace,
@@ -5320,37 +10939,10 @@ def _required_previous_day_metric_context_labels(
     labels: Sequence[str],
     current_labels: set[str],
 ) -> set[str]:
-    if not labels or not current_labels:
-        return set()
-    latest_label = max(current_labels, key=lambda value: labels.index(value))
-    position = labels.index(latest_label) + 1
-    open_boundary_gap = "09:30" not in current_labels and "09:31" in current_labels
-    required: set[str] = set()
-
-    for size in (1, 5, 30, 120):
-        current_start = ((position - 1) // size) * size
-        if current_start == 0:
-            required.update(labels[-size:])
-            continue
-        if (
-            current_start == 1
-            and size == 1
-            and labels[:2] == ["09:30", "09:31"]
-            and open_boundary_gap
-        ):
-            required.update(labels[-size:])
-
-    for size in (5, 30):
-        current_start = ((position - 1) // size) * size
-        same_window_labels = list(labels[current_start : current_start + size])
-        if (
-            same_window_labels[:1] == ["09:30"]
-            and "09:31" in same_window_labels
-            and open_boundary_gap
-        ):
-            same_window_labels = [label for label in same_window_labels if label != "09:30"]
-        required.update(same_window_labels)
-    return required
+    return required_previous_day_metric_context_labels(
+        labels=labels,
+        current_labels=current_labels,
+    )
 
 
 def _previous_day_context_raw_label(*, for_trade_date: str, physical_label: str) -> str:
@@ -5407,13 +10999,30 @@ def _fetch_previous_day_context_rows(
     for_trade_date: str,
     previous_trade_date: str,
 ) -> list[dict[str, Any]]:
+    output, missing = _fetch_previous_day_context_rows_with_missing(
+        cur,
+        expected,
+        for_trade_date,
+        previous_trade_date,
+    )
+    if missing:
+        raise FastlaneShellBlocked("previous_day_context_rows_missing")
+    return output
+
+
+def _fetch_previous_day_context_rows_with_missing(
+    cur: Any,
+    expected: Mapping[str, Mapping[tuple[str, str], set[str]]],
+    for_trade_date: str,
+    previous_trade_date: str,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str, str, str]]]:
     table_by_asset = {
         "stock": ("stock_minute_bar_1m", "stock_identity_key"),
         "index": ("index_minute_bar_1m", "index_identity_key"),
         "board": ("board_minute_bar_1m", "board_identity_key"),
     }
     output: list[dict[str, Any]] = []
-    missing: list[str] = []
+    missing: list[tuple[str, str, str, str]] = []
     for asset_kind, identity_to_labels in expected.items():
         table_name, identity_column = table_by_asset[asset_kind]
         identity_keys = sorted({identity for identity, _physical in identity_to_labels})
@@ -5462,7 +11071,7 @@ def _fetch_previous_day_context_rows(
             for raw_label in sorted(labels):
                 row = rows_by_key.get((identity_key, raw_label))
                 if not row:
-                    missing.append(f"{asset_kind}:{identity_key}:{physical_label}:{raw_label}")
+                    missing.append((asset_kind, identity_key, physical_label, raw_label))
                     continue
                 output.append(
                     {
@@ -5479,10 +11088,8 @@ def _fetch_previous_day_context_rows(
                         "fake_or_synthetic_row": False,
                     }
                 )
-    if missing:
-        raise FastlaneShellBlocked("previous_day_context_rows_missing")
     output.sort(key=lambda row: (row["asset_kind"], row["identity_key"], row["physical_c1_label"]))
-    return output
+    return output, missing
 
 
 def _json_number(value: Any) -> float | int | None:
@@ -5546,10 +11153,19 @@ def _current_day_source_rows_from_provider_rows(
         physical_label = _hhmm_to_minute_label(normalized.get("physical_c1_label") or "")
         if physical_label not in required_labels:
             continue
+        normalized_raw_label = _hhmm_to_minute_label(
+            normalized.get("raw_source_label") or ""
+        )
+        if (
+            physical_label == POST_CLOSE_FINAL_A_PHYSICAL_MINUTE_LABEL
+            and "15:00" in required_raw_labels
+            and normalized_raw_label != "15:00"
+        ):
+            continue
         output = {
             **scope,
             "physical_c1_label": physical_label,
-            "raw_source_label": _hhmm_to_minute_label(normalized.get("raw_source_label") or ""),
+            "raw_source_label": normalized_raw_label,
             "source_label_policy": normalized.get("source_label_policy") or SOURCE_CLOSE_LABEL_POLICY,
             "source_label_semantics": normalized.get("source_label_semantics") or "source_label",
             "physical_label_semantics": normalized.get("physical_label_semantics") or "physical_label",
@@ -5572,7 +11188,13 @@ def _dedupe_current_day_provider_morning_close_rows(rows: Sequence[Mapping[str, 
         if _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "13:00"
         and _hhmm_to_minute_label(row.get("raw_source_label") or "") in {"11:30", "13:00"}
     }
-    if not lunch_boundary_keys:
+    final_close_keys = {
+        _provider_morning_close_dedupe_key(row)
+        for row in rows
+        if _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "14:59"
+        and _hhmm_to_minute_label(row.get("raw_source_label") or "") in {"14:59", "15:00"}
+    }
+    if not lunch_boundary_keys and not final_close_keys:
         return [dict(row) for row in rows]
     deduped: list[dict[str, Any]] = []
     for row in rows:
@@ -5584,11 +11206,24 @@ def _dedupe_current_day_provider_morning_close_rows(rows: Sequence[Mapping[str, 
             and _provider_morning_close_dedupe_key(candidate) == row_dedupe_key
             for candidate in rows
         )
+        has_raw_1500 = any(
+            _hhmm_to_minute_label(candidate.get("physical_c1_label") or "") == "14:59"
+            and _hhmm_to_minute_label(candidate.get("raw_source_label") or "") == "15:00"
+            and _provider_morning_close_dedupe_key(candidate) == row_dedupe_key
+            for candidate in rows
+        )
         if (
             _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "13:00"
             and row_raw_label == "11:30"
             and row_dedupe_key in lunch_boundary_keys
             and has_raw_1300
+        ):
+            continue
+        if (
+            _hhmm_to_minute_label(row.get("physical_c1_label") or "") == "14:59"
+            and row_raw_label == "14:59"
+            and row_dedupe_key in final_close_keys
+            and has_raw_1500
         ):
             continue
         deduped.append(dict(row))
@@ -5770,7 +11405,7 @@ def _n3t_writer_latency_summary(
         "staging_to_proof_ms": [],
     }
     for item in n3t_writer_inputs:
-        source = _read_optional_json_artifact(str(item.get("metric_context_artifact_path") or ""))
+        source = _n3t_writer_metric_context_source(item)
         payload = source.get("payload") or {}
         for field in values:
             try:
@@ -5802,6 +11437,25 @@ def _n3t_writer_conflict_clause(columns: Sequence[str]) -> str:
     return f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {update_sql}"
 
 
+def _n3t_writer_metric_context_source(item: Mapping[str, Any]) -> dict[str, Any]:
+    metric_context_path = str(item.get("metric_context_artifact_path") or "")
+    inline_payload = item.get("metric_context_payload")
+    if isinstance(inline_payload, Mapping):
+        payload = dict(inline_payload)
+        expected_sha256 = str(item.get("metric_context_artifact_sha256") or "")
+        actual_sha256 = _json_payload_sha256(payload)
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise FastlaneShellBlocked("n3t_writer_inline_metric_context_sha256_mismatch")
+        return {
+            "exists": True,
+            "path": metric_context_path or "inline://object_cursor_batch/metric_context",
+            "payload": payload,
+            "sha256": actual_sha256,
+            "inline": True,
+        }
+    return _read_optional_json_artifact(metric_context_path)
+
+
 def _n3t_insert_rows_by_table(
     *,
     args: argparse.Namespace,
@@ -5812,7 +11466,7 @@ def _n3t_insert_rows_by_table(
     as_of_time = _runner_observed_at(args)
     for item in n3t_writer_inputs:
         metric_context_path = str(item.get("metric_context_artifact_path") or "")
-        source = _read_optional_json_artifact(metric_context_path)
+        source = _n3t_writer_metric_context_source(item)
         if not source["exists"]:
             raise FastlaneShellBlocked("n3t_writer_metric_context_artifact_missing")
         plan = build_n3t_scoped_metric_from_c1_artifact_plan(
@@ -5911,6 +11565,13 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def _apply_activation_config(args: argparse.Namespace) -> None:
+    args.current_day_source_provider_concurrency_explicit = (
+        int(
+            getattr(args, "current_day_source_provider_concurrency", 0)
+            or 0
+        )
+        > 0
+    )
     config_path = str(getattr(args, "activation_config", "") or "").strip()
     if not config_path:
         return
@@ -5920,6 +11581,7 @@ def _apply_activation_config(args: argparse.Namespace) -> None:
             validate_fastlane_write_enabled_activation_authorization(config)
         except ValueError as exc:
             raise FastlaneShellBlocked(str(exc)) from exc
+    args.for_trade_date = str(config.get("for_trade_date") or "")
     args.fastlane_lane_id = args.fastlane_lane_id or FASTLANE_LANE_ID
     args.active_scope_artifact_dir = args.active_scope_artifact_dir or str(
         config.get("n5_active_scope_artifact_dir") or ""
@@ -6621,6 +12283,35 @@ def _target_hhmm_from_active_ref(ref: Mapping[str, Any]) -> str:
         if target_hhmm:
             return target_hhmm
     return ""
+
+
+def _active_ref_cursor_confirms_existing_proof(ref: Mapping[str, Any]) -> bool:
+    last_checked_hhmm = _target_hhmm_from_value(
+        ref.get("last_checked_minute_label")
+    )
+    if not last_checked_hhmm:
+        return False
+    first_hhmm = _target_hhmm_from_value(
+        ref.get("first_confirmation_minute_label")
+        or ref.get("source_trigger_event_time")
+        or ref.get("trigger_time")
+        or ref.get("latest_n4_event_time")
+    )
+    return not first_hhmm or _hhmm_int(last_checked_hhmm) >= _hhmm_int(
+        first_hhmm
+    )
+
+
+def _active_scope_payload_cursor_confirms_existing_proof(
+    payload: Mapping[str, Any],
+) -> bool:
+    return any(
+        _active_ref_cursor_confirms_existing_proof(ref)
+        for object_row in payload.get("scope_rows") or []
+        if isinstance(object_row, Mapping)
+        for ref in object_row.get("active_tracking_refs") or []
+        if isinstance(ref, Mapping)
+    )
 
 
 def _max_canonical_hhmm(*, for_trade_date: str, left: str, right: str) -> str:

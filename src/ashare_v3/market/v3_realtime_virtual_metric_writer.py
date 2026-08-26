@@ -39,6 +39,12 @@ from ashare_v3.market.realtime_virtual_metric import (
     build_realtime_trigger_proof_metric_from_elapsed_amount,
     canonicalize_realtime_virtual_metric_fields,
 )
+from ashare_v3.market.artifact_blob import (
+    ArtifactBlobBlocked,
+    N3P_OVERLAY_BLOB_FIELDS,
+    canonical_json_bytes,
+    read_artifact_blob,
+)
 
 try:
     from check_condition_source_ready import DEFAULT_DSN
@@ -1289,6 +1295,41 @@ def _period_trigger_baseline_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _period_key_for_trade_date(trade_date: Any, period: str) -> str | None:
+    try:
+        value = datetime.strptime(str(trade_date), "%Y%m%d")
+    except (TypeError, ValueError):
+        return None
+    if period == "W":
+        iso_year, iso_week, _ = value.isocalendar()
+        return f"{iso_year}W{iso_week:02d}"
+    if period == "M":
+        return value.strftime("%Y%m")
+    if period == "Q":
+        return f"{value.year}Q{((value.month - 1) // 3) + 1}"
+    if period == "Y":
+        return str(value.year)
+    return None
+
+
+def _rollover_previous_avg_amount(item: Mapping[str, Any], *, period: str) -> tuple[Any, str]:
+    current_avg = decimal_or_none(item.get("current_amount_seed"))
+    current_total = decimal_or_none(item.get("current_amount_total_seed"))
+    current_trade_days = decimal_or_none(item.get("current_trade_days_seed"))
+    if current_avg is None or current_total is None or current_trade_days is None or current_trade_days <= 0:
+        raise VirtualMetricWriterBlocked(f"higher_period_rollover_seed_proof_invalid:{period}")
+    if not decimals_close(current_avg, current_total / current_trade_days):
+        raise VirtualMetricWriterBlocked(f"higher_period_rollover_seed_proof_mismatch:{period}")
+
+    trigger_baseline_value = item.get("trigger_previous_amount_baseline")
+    if trigger_baseline_value not in (None, ""):
+        trigger_baseline = decimal_or_none(trigger_baseline_value)
+        if trigger_baseline is None or not decimals_close(trigger_baseline, current_avg):
+            raise VirtualMetricWriterBlocked(f"higher_period_rollover_trigger_baseline_mismatch:{period}")
+        return trigger_baseline_value, "trigger_previous_amount_baseline"
+    return item.get("current_amount_seed"), "current_amount_seed"
+
+
 def higher_period_context_from_period_baseline_row(
     row: Mapping[str, Any],
     *,
@@ -1301,7 +1342,7 @@ def higher_period_context_from_period_baseline_row(
         item = periods.get(period)
         if not isinstance(item, Mapping):
             continue
-        context[period] = {
+        period_context = {
             "current_open": _first_present(item, "current_open", "current_open_seed"),
             "previous_open": item.get("previous_open"),
             "previous_close": item.get("previous_close"),
@@ -1322,6 +1363,41 @@ def higher_period_context_from_period_baseline_row(
             "freshness_status": item.get("freshness_status"),
             "baseline_source_trade_date": item.get("baseline_source_trade_date"),
         }
+        if period != "D":
+            source_period_key = _period_key_for_trade_date(row.get("source_trade_date"), period)
+            for_period_key = _period_key_for_trade_date(row.get("for_trade_date"), period)
+            baseline_period_key = item.get("period_key_current")
+            if not source_period_key or not for_period_key:
+                raise VirtualMetricWriterBlocked(f"higher_period_rollover_period_key_unavailable:{period}")
+            if baseline_period_key and str(baseline_period_key) != source_period_key:
+                raise VirtualMetricWriterBlocked(f"higher_period_rollover_baseline_period_key_mismatch:{period}")
+
+            rollover = source_period_key != for_period_key
+            period_context.update(
+                {
+                    "period_key_source": "source_trade_date_for_trade_date_guard",
+                    "source_period_key": source_period_key,
+                    "for_period_key": for_period_key,
+                    "baseline_period_key_current": baseline_period_key,
+                    "period_seed_applied": not rollover,
+                    "period_seed_reset_reason": "source_period_key_mismatch_for_trade_date" if rollover else None,
+                    "period_key_guard_pass": True,
+                }
+            )
+            if rollover:
+                promoted_previous_avg, promoted_source = _rollover_previous_avg_amount(item, period=period)
+                period_context.update(
+                    {
+                        "previous_amount": promoted_previous_avg,
+                        "previous_avg_amount": promoted_previous_avg,
+                        "current_amount_seed": 0,
+                        "current_amount_total_seed": 0,
+                        "current_trade_days_seed": 0,
+                        "elapsed_units": 0,
+                        "previous_avg_rollover_source": promoted_source,
+                    }
+                )
+        context[period] = period_context
     trace = {
         "period_trigger_baseline_source": source_kind,
         "source_context_run_id": str(row.get("run_id") or row.get("source_context_run_id") or ""),
@@ -1334,6 +1410,22 @@ def higher_period_context_from_period_baseline_row(
         "baseline_version": baseline.get("baseline_version"),
         "amount_metric_rule": baseline.get("amount_metric_rule"),
         "periods": sorted(context),
+        "period_seed_guards": {
+            period: {
+                key: context[period].get(key)
+                for key in (
+                    "source_period_key",
+                    "for_period_key",
+                    "baseline_period_key_current",
+                    "period_seed_applied",
+                    "period_seed_reset_reason",
+                    "period_key_guard_pass",
+                    "previous_avg_rollover_source",
+                )
+            }
+            for period in context
+            if period != "D"
+        },
     }
     return context, trace
 
@@ -2961,11 +3053,53 @@ def materialize_source_payload_from_contract(
     contract: Mapping[str, Any],
     source_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Apply preflight-materialized source inputs from the writer contract."""
+    """Apply legacy inline or v2 blob-referenced preflight source inputs."""
 
     output = dict(source_payload)
     overlay = contract.get("materialized_source_payload_overlay")
-    if not isinstance(overlay, Mapping):
+    overlay_ref = contract.get("materialized_source_payload_overlay_ref")
+    if overlay_ref is not None:
+        if not isinstance(overlay_ref, Mapping):
+            raise VirtualMetricWriterBlocked("BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_overlay_ref_invalid")
+        try:
+            referenced_overlay = read_artifact_blob(
+                overlay_ref,
+                base_path=str(contract.get("materialized_source_payload_overlay_ref_base_path") or "."),
+            )
+        except ArtifactBlobBlocked as exc:
+            raise VirtualMetricWriterBlocked(f"BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:{exc}") from exc
+        if not isinstance(referenced_overlay, Mapping):
+            raise VirtualMetricWriterBlocked("BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_overlay_ref_not_object")
+        if isinstance(overlay, Mapping) and dict(overlay) != dict(referenced_overlay):
+            raise VirtualMetricWriterBlocked("BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_overlay_v1_v2_mismatch")
+        overlay = referenced_overlay
+    if overlay is not None and not isinstance(overlay, Mapping):
+        return output
+    overlay = dict(overlay or {})
+
+    refs = contract.get("materialized_source_payload_refs")
+    if refs is not None:
+        if not isinstance(refs, Mapping) or set(refs) != set(N3P_OVERLAY_BLOB_FIELDS):
+            raise VirtualMetricWriterBlocked("BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_refs_invalid")
+        base_path = str(contract.get("materialized_source_payload_refs_base_path") or "")
+        if not base_path:
+            raise VirtualMetricWriterBlocked("BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_refs_base_path_missing")
+        for field in N3P_OVERLAY_BLOB_FIELDS:
+            reference = refs.get(field)
+            if not isinstance(reference, Mapping):
+                raise VirtualMetricWriterBlocked(
+                    f"BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_ref_invalid:{field}"
+                )
+            try:
+                value = read_artifact_blob(reference, base_path=base_path)
+            except ArtifactBlobBlocked as exc:
+                raise VirtualMetricWriterBlocked(f"BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:{exc}") from exc
+            if field in overlay and canonical_json_bytes(overlay[field]) != canonical_json_bytes(value):
+                raise VirtualMetricWriterBlocked(
+                    f"BLOCKED_N3P_PREFLIGHT_ARTIFACT_CONTRACT:materialized_source_payload_v1_v2_mismatch:{field}"
+                )
+            overlay[field] = value
+    if not overlay:
         return output
     for key, value in overlay.items():
         existing = output.get(key)

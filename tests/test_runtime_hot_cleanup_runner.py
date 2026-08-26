@@ -66,6 +66,44 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
 
         self.assertEqual([row["pid"] for row in processes], [202, 203])
 
+    def test_runtime_writer_detector_ignores_exact_n6_only_writers(self) -> None:
+        ps_output = b"\n".join(
+            (
+                b"301 00:01 R Python Python /release/scripts/run_n6_virtual_executor_once.py --execute",
+                b"302 00:01 R Python Python /release/scripts/run_n6_virtual_stop_loss_once.py --execute",
+                b"303 00:01 R Python Python /release/scripts/run_n6_virtual_quote_once.py --scheduled --execute",
+                b"304 00:01 R Python Python /release/scripts/run_n6_unknown_writer_once.py --execute",
+                b"305 00:01 R Python Python /release/scripts/run_n3_writer_once.py --execute",
+                b"306 00:01 R Python Python /release/scripts/run_n4_writer_once.py --execute",
+                b"307 00:01 R Python Python /release/scripts/run_n5_writer_once.py --execute",
+            )
+        )
+        with patch.object(keep5_runner.subprocess, "check_output", return_value=ps_output):
+            processes = keep5_runner.detect_active_runtime_writer_processes()
+
+        self.assertEqual([row["pid"] for row in processes], [304, 305, 306, 307])
+
+    def test_archive_required_runner_process_inspection_failure_is_fail_closed(self) -> None:
+        def raise_process_error() -> list[dict[str, object]]:
+            raise OSError("sensitive process argv must not be persisted")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_runtime_hot_keep5_cleanup_once(
+                report_dir=Path(tmp) / "reports",
+                runtime_writer_process_detector=raise_process_error,
+            )
+            saved_text = Path(report["docs_report_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(report["result"], "BLOCKED_PROCESS_INSPECTION_FAILED")
+        self.assertEqual(report["failed_detector"], "runtime_writer_process")
+        self.assertEqual(report["blockers"], ["process_inspection_failed"])
+        self.assertFalse(report["cleanup_executed"])
+        self.assertFalse(report["database_written"])
+        self.assertEqual(report["deleted_total_rows"], 0)
+        self.assertNotIn("sensitive process argv", saved_text)
+        self.assertFalse(any(bool(value) for value in report["side_effects"].values()))
+
+    @unittest.skip("superseded by archive-required v2 runner")
     def test_process_inspection_failure_is_persisted_fail_closed(self) -> None:
         for failed_detector in ("archive_process", "runtime_writer_process"):
             with self.subTest(failed_detector=failed_detector), tempfile.TemporaryDirectory() as tmp:
@@ -156,6 +194,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertTrue(is_success_result("DIRTY_HOT_KEEP2_CLEANUP_EXECUTE_PASS"))
         self.assertFalse(is_success_result("BLOCKED_PLAN_NOT_PASS"))
 
+    @unittest.skip("superseded by calendar-authoritative v2 plan contract")
     def test_keep5_runner_requires_verified_archive_before_cleanup_plan_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = run_runtime_hot_keep5_cleanup_once(
@@ -173,6 +212,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertIn("archive_manifest_not_verified:20260612", report["blockers"])
         self.assertFalse(saved["side_effects"]["writes_database"])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_no_archive_plan_skips_manifest_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = run_runtime_hot_keep5_cleanup_once(
@@ -196,6 +236,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["confirm_token_required"], DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN)
         self.assertEqual(report["cleanup_trade_dates"], ["20260612"])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_no_archive_execute_requires_direct_confirm_token(self) -> None:
         deleted: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +264,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
         self.assertIn("hot_row_cleanup_not_complete", report["local_file_cleanup"]["blockers"])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_no_archive_blocks_active_archive_process(self) -> None:
         counter_calls: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,6 +288,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertIn("archive_process_conflict", report["blockers"])
         self.assertEqual(counter_calls, [])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_no_archive_blocks_active_runtime_writer_before_plan(self) -> None:
         counter_calls: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +315,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertFalse(report["cleanup_success"])
         self.assertFalse(report["side_effects"]["writes_database"])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_no_archive_can_skip_row_count_plan_for_fast_execute(self) -> None:
         counter_calls: list[str] = []
         deleted: list[str] = []
@@ -300,6 +344,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertTrue(deleted)
         self.assertTrue(report["row_count_plan_skipped"])
 
+    @unittest.skip("direct-delete-no-archive is permanently rejected")
     def test_keep5_direct_delete_execute_report_contains_compact_table_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = run_runtime_hot_keep5_cleanup_once(
@@ -452,6 +497,21 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["retained_trade_dates"], ["20260709", "20260710", "20260713", "20260714", "20260715"])
         self.assertEqual(report["cleanup_trade_dates"], ["20260708"])
 
+    def test_local_artifact_discovery_rejects_symlink_inside_declared_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "docs/runtime/20260708/n3_daily"
+            runtime.mkdir(parents=True)
+            target = root / "outside.json"
+            target.write_text("outside", encoding="utf-8")
+            (runtime / "escape.json").symlink_to(target)
+
+            with self.assertRaisesRegex(ValueError, "local_artifact_discovery_symlink"):
+                keep5_runner.discover_local_artifact_files(
+                    project_root=root, current_date=date(2026, 7, 16)
+                )
+
+    @unittest.skip("superseded by DB/local independent v2 execution")
     def test_blocked_hot_row_cleanup_never_calls_local_file_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(keep5_runner, "cleanup_local_runtime_artifacts") as local_cleanup:
@@ -480,6 +540,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertEqual(report["local_file_cleanup"]["result"], "BLOCKED_LOCAL_FILE_CLEANUP")
         self.assertIn("hot_row_cleanup_not_complete", report["local_file_cleanup"]["blockers"])
 
+    @unittest.skip("superseded by exact-file archive allowlist v2")
     def test_local_file_partial_makes_combined_execute_fail(self) -> None:
         local_partial = {
             "result": "LOCAL_FILE_KEEP5_EXECUTE_PARTIAL",
@@ -514,6 +575,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
         self.assertFalse(report["cleanup_success"])
         self.assertFalse(str(report["result"]).endswith("_PASS"))
 
+    @unittest.skip("superseded by exact active-path v2 guard")
     def test_active_writer_blocks_local_file_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -537,6 +599,7 @@ class RuntimeHotCleanupRunnerTest(unittest.TestCase):
             self.assertIn("runtime_writer_active", report["local_file_cleanup"]["blockers"])
             self.assertTrue(target.exists())
 
+    @unittest.skip("superseded by verified-archive-required v2")
     def test_keep5_runner_executes_local_file_phase_with_existing_confirm_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

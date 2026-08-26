@@ -1,6 +1,6 @@
 # A股监控系统 v3 总控架构
 
-更新日期：2026-07-22
+更新日期：2026-08-23
 范围：总控视角，只整理当前架构、数据流、事件流和权威 lineage。本文档不替代 `AGENTS.md`、各层设计文档、执行报告或 JSON 证据。
 
 ## 1. 一句话架构
@@ -13,35 +13,34 @@ v3 的核心原则是：上游只产生可追溯事实，下游只消费正式�
 
 `runtime_control` 是 N1-N6 之外的总控控制面，只登记 runtime pipeline state machine / dashboard / command registry / rollback registry / timeline，不执行 N1-N6 命令，不修改 N1-N6 execute contract。dashboard v0.2 已新增 20260602 action-confirmation timeline detector：保留 20260527 nightly v0 七阶段，同时在 `/runtime/20260602` 和 `/api/runtime/20260602/dashboard` 只读展示 9 阶段 all PASS、N5 pending outbox=ActionExecuted 4 / ActionBlocked 1、N6 shadow rows=1/5/5/5、N2-N6 rollback paths complete；routes 仍只有 GET/HEAD，无 form、无 execute button。
 
+磁盘治理 Gate 0 已定义
+`runtime_hot_cleanup_archive_gated_disk_governance_v1`，但尚未执行。该控制面只
+允许后续独立请求一次选择一个阶段：暂停 exact cleanup scheduler、消费 N1 已
+验证归档的 exact allowlist 做本地回收、满足前置后的 Time Machine snapshot
+fallback、或以 archive-required plist 恢复 scheduler。归档仍属于
+`N1_ingestion`；PostgreSQL 业务事实 retention 分别属于 N3/N6 等对应层；
+runtime_control 不跨层归档或删除业务事实。热保留集合统一为
+`common_trade_calendar` 权威的当前交易日加前 5 个已完成交易日。
+
+2026-08-23 自然验收暴露一次性 archive batch 无法支撑连续运行，以及未来
+20260824 数据被错误纳入数据库计划。治理合同已增加
+`n1_local_artifact_archive_daily_bounded_install_v1`：后续由独立 N1 archive-only
+任务自然 23:00 为次日生成 verified batch，并原子发布
+`LocalArtifactArchiveCurrentPointer.v1`；自然 01:00 cleanup 将收窄为 pointer 驱动
+的 local-only 模式。当前治理定义、N1 runner 与 cleanup code-only 修复已完成；
+两个独立 LaunchAgent gate 和自然验收均未执行。
+
 ## 2. 分层职责
 
 | 层级 | layer_role | 职责 | 当前边界 |
 |---|---|---|---|
-| Runtime Control | `runtime_control` | runtime pipeline run/stage、WAIT_MANUAL_CONFIRM、dashboard v0/v0.2、execute command registry、rollback registry、pipeline timeline | 只登记和展示；不执行 nightly run，不连接数据库写业务事实，不改 N1-N6 execute contract |
+| Runtime Control | `runtime_control` | runtime pipeline run/stage、WAIT_MANUAL_CONFIRM、dashboard v0/v0.2、execute command registry、rollback registry、pipeline timeline、archive-gated disk-governance policy | 默认只登记和展示；命名 disk policy 也只能由独立请求执行单一控制阶段，不归档、不连接数据库写业务事实、不改 N1-N6 execute contract |
 | N1 | `N1_ingestion` | 外部原始数据、标准事实表、质量闸门、active source version、Parquet 归档、回滚审计 | 不计算条件，不拉盘中分钟 K，不写触发/动作/用户层 |
 | N2 | `N2_condition` | 基于 N1 active fact 生成 `condition_basis`、`condition_pool`、`minute_target_scope`、`condition_display_basis`，并冻结对称性目标价候选 | 不拉行情，不生成触发，不写动作、锁价、语音、sim、用户投影 |
 | N3 | `N3_market_data` | 从 N2 scope 去重生成行情订阅，拉取实时快照、今日分钟 K、前一日分钟 K，写 N3 标准事件，并生产 action-confirmation projection facts | 不改条件，不写 trigger/action/user，不直接写 Parquet 归档 |
 | N4 | `N4_trigger` | 本地化 N2 context，消费 N3 标准事件，生成 `TriggerMatched` / `TriggerPendingMarketData` | 不拉行情，不写 action/user/sim，不重算目标价、不锁价 |
 | N5 | `N5_action` | 消费 N4 标准事件，生成 action / hint / risk / position 标准事件 | 不改 N1-N4，不写用户投影，不播放语音，不真实交易，不重算目标价、不锁价、不决定清仓 |
-| N6 | `N6_user` | 用户投影、语音策略、mobile/card projection、sim shadow、持仓目标价解释；受控 N6 B 轨虚拟账户与 virtual-executor | 不回写 N1-N5，不直接读 trigger/action 裸表；虚拟执行仅按 `N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` 独立 gate 开放，永不连接真实券商 |
-
-### 2.1 N6 B 轨虚拟执行器前向治理登记
-
-自 2026-07-22 起，`N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` supersede 过去对“所有 N6 runtime 一律拒绝”的现行治理表述，但不改写任何历史 gate 或历史 BLOCKED 证据。例外只覆盖 N6 自有虚拟账户：
-
-```text
-N6_user explicit gate
--> versioned contract + preflight + exact rollback
--> immutable release + exact impact scope
--> bounded virtual-executor smoke PASS
--> confirmed queue governance complete
--> immediate bootout plan frozen
--> persistent virtual-executor eligible
-```
-
-proposal 仍由真人在 Web 完成创建与确认两次显式操作；executor 只能消费已确认申请，不能创建或确认申请。claim/apply 两层都必须重新校验开放交易日、交易时段、两分钟内 `passed/ok` 报价、本人 principal/account/scope、现金、服务端预算、100 股取整和 T+1。executor 使用独立 service role，所有 proposal/order/trade/cash/position/lot 必须完整审计并可立即停用。
-
-`runtime_control` 只登记权限和调度交接；migration、release/plist 切换、bounded smoke、队列处理和 executor 启停均只能在明确的 `N6_user` 独立 gate 执行。真实券商、真实订单、N6 回写 N1-N5、自动创建/确认 proposal、AI autonomous real trading 仍永久禁止。
+| N6 | `N6_user` | 用户投影、语音策略、mobile/card projection、sim shadow、持仓目标价解释 | 不回写 N1-N5，不直接读 trigger/action 裸表 |
 
 ## 3. 数据流
 
@@ -3794,27 +3793,3 @@ minute_target_scope -> market_data_subscription -> N3 facts/events -> N4 trigger
 ```
 
 因此，新增 `condition_display_basis` 不改变 N3/N4/N5 的正式输入合同。本次 N2-Display overwrite 已生成新的 active run；下游如要继续推进，必须按新 run lineage 重建 N3 subscription 和 N4 context。
-
-## 10. N3N6Q for N6 virtual-account quotes
-
-N3N6Q 已登记为 B轨 N6 虚拟账户的独立报价合同，当前状态为 `CONTRACT_REGISTERED_DESIGN_ONLY`，尚未实现 provider、live probe、数据库 schema、调度或止损执行。
-
-```text
-N6 position scope + cross-account identity dedup
-  -> QuoteIdentity(identity_key, exchange, stock_code)
-  -> N3N6Q stateless facade
-  -> Mootdx batch quote (max 80 per provider batch)
-  -> QuoteBatch v1
-  -> N6 freshness/trade-date validation and N6-only persistence
-```
-
-该接口不属于 A1/B1/B2/C1/N3P/N3T，不复用其 lineage、schema、facts、events、poller、worker 或 rollback。N3N6Q 不写 DB、不生成 outbox；N6 不把 principal/account/position/stop-loss 传给 N3N6Q。A轨/admin/status、N4、N5 和浏览器均不调用该接口。
-
-合同权威文件：
-
-```text
-docs/N3N6Q_FOR_N6_VIRTUAL_ACCOUNT_QUOTE_CONTRACT.md
-docs/N3N6Q_FOR_N6_VIRTUAL_ACCOUNT_QUOTE_CONTRACT.json
-```
-
-后续必须依次通过：`N3_market_data provider/fake-adapter gate -> read-only live probe gate -> N6_user quote persistence gate -> N6_user valuation/stop-loss gates`。任何一步都不自动授权下一步。
