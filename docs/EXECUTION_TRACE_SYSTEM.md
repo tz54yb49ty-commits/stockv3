@@ -582,3 +582,17 @@ x64/pip/venv/launcher postflight. All manual
 MSI, registry/cache/directory delete, cleanup, retry, business venv/dependency,
 Git/PG/D/WSL/Scheduler/N1-N6/NAS/Mac counters stay zero. Failure is append-only
 `BLOCKED_EVIDENCE_PRESERVED` and no N1.
+
+The append-only
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` trace binds
+parent `de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`/tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`, v8 uninstall consumed once with
+`0x643`, machine install zero, exact installer/log/cached-MSI hashes,
+product/package/component IDs, missing source/targets, eight remaining MSI
+registrations, stale PATH and the AppSearch/DrLocator cycle. It records
+the cyclic AppSearch property `TARGETDIR`,
+`policy_state=BLOCKED_MISSING_OFFICIAL_DIRECT_MSI_CONTRACT`, missing PSF
+authority, `runtime_execution_allowed=false`, and zero layout/direct-MSI/
+uninstall/machine-install/PATH/registry/cache/cleanup/business/W0/N1-N6
+mutation counters. The only terminal trace is `BLOCKED_EVIDENCE_PRESERVED`;
+there is no attempt, retry, cleanup, N1 handoff or executable command.

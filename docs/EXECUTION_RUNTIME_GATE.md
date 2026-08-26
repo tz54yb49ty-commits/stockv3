@@ -756,3 +756,20 @@ vector. Only 0/3010 is accepted. Final proof requires Program Files python,
 3.11.9 x64, pip, venv and exact launcher registration. Manual MSI, registry or
 cache/directory deletion, cleanup, retry, Store/3.12 authority, business venv/
 dependencies or any other Windows/N1-N6/Mac mutation rejects with evidence.
+
+### Python orphaned AppSearch-cycle v9 gate
+
+`policy_id=w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` and
+`phase_mode=w0_python311_orphaned_dependency_appsearch_cycle_recovery` are
+recognized only to return `REJECT`. The gate binds parent
+`de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`/tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`, v8 `/uninstall /quiet` result
+`0x643`, the exact PSF installer and log hashes, product/package/component IDs,
+cached MSI, unconditional TARGETDIR AppSearch and bidirectional DrLocator cycle.
+Official `/layout` documentation describes an offline download layout but does
+not define direct internal-MSI recovery. Policy state is
+`BLOCKED_MISSING_OFFICIAL_DIRECT_MSI_CONTRACT`,
+`runtime_execution_allowed=false`, and the mutation allowlist is empty. No
+evidence match can produce ACCEPT; layout, MSI, uninstall, machine install,
+retry, cleanup, PATH edit and N1 all fail closed.
+The terminal gate result is `BLOCKED_EVIDENCE_PRESERVED`.

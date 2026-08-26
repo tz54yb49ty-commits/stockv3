@@ -1232,3 +1232,24 @@ Only exit 0/3010 and exact 3.11.9 x64/pip/venv/launcher postflight compile.
 Manual MSI, registry/cache/directory deletion, cleanup, retry, 3.12 substitute,
 business venv/dependencies or any Git/PG/D/WSL/Scheduler/N1-N6/NAS/Mac change
 compiles to REJECT. Compiler success is not execution.
+
+### Windows W0 Python orphaned AppSearch-cycle recovery compilation (v9)
+
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` recognizes
+`phase_mode=w0_python311_orphaned_dependency_appsearch_cycle_recovery` only as
+a blocked governance node bound to parent
+`de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`, tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`, and consumed v8 result `0x643`.
+PSF documents bundle `/layout`, `/uninstall /quiet` and bundle name=value
+options, but not direct internal-MSI installation/repair, its exact public
+properties/features/context, dependency-provider coherence, or a safe bypass
+of the unconditional TARGETDIR AppSearch/DrLocator cycle. Generic `msiexec /i`
+does not supply that vendor contract; `MsiLocateComponent` is not guaranteed to
+select the correct product.
+
+The compiler emits only
+`BLOCKED_MISSING_OFFICIAL_DIRECT_MSI_CONTRACT -> BLOCKED_EVIDENCE_PRESERVED`.
+The mutation allowlist is empty; layout, direct MSI, uninstall, machine install,
+PATH/registry/cache edit and every W0/N1-N6 mutation compile to REJECT. A future
+revision needs new PSF authority and independent authorization; v8 is not
+retryable. Compiler recognition is not execution.

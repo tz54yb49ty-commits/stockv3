@@ -670,3 +670,18 @@ registry/cache/directory deletion,
 cleanup, retry, 3.12 substitution, business venv/dependency or any Git/PG/D/
 WSL/Scheduler/N1-N6/NAS/Mac change predicts fail-closed. Simulation PASS is not
 execution.
+
+### Python orphaned AppSearch-cycle v9 simulation
+
+Simulation recognizes
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` at parent
+`de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`/tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`. It models 1603/0x643, missing
+source and targets, cached MSI, component
+`{38C34B30-BDE1-5985-9CB6-DD1712EEB4E2}`, unconditional TARGETDIR AppSearch
+and the bidirectional DrLocator cycle. Supported `/layout` cannot prove a
+supported direct-payload install contract, correct context, bundle registration
+coherence or safe AppSearch behavior. Simulation has no MODIFY node and ends
+`BLOCKED_EVIDENCE_PRESERVED`; simulated success cannot authorize layout,
+direct MSI, `/uninstall /quiet`, machine install, retry, cleanup, D/PG/WSL/
+Scheduler/Git/N1-N6/NAS/Mac mutation or N1.

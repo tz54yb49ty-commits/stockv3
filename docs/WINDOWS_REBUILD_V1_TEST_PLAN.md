@@ -210,3 +210,27 @@ ChangeServiceConfig lpPassword is NULL. Require exit zero and read-only
 StartName verification before one start, then the existing final checks. Never
 rerun v6/CIM, add a password or extra option, change ACL/config/install/logon
 rights, retry or restore NetworkService. Failure remains Stopped and blocks N1.
+
+### V9 Python orphaned dependency/AppSearch-cycle governance gate
+
+Verify all nine governance files register
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` /
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery` and bind parent
+`de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`, tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`. Freeze installer SHA
+`5EE42C4EEE1E6B4464BB23722F90B45303F79442DF63083F05322F1785F5FDDE`, Burn log
+SHA `466865F69D8C291FC299A0BEA36E6B1E45B116DF4D506672AB158D401E1B78B9`, path
+log SHA `E4E8095B71B20C36DADC67384FF7FBDC989AE76FE429351E9F39615A4139CA08`, cached
+MSI SHA `8A5C585D2A718BA73A4D1BB7A675DDBF56C016B6B851F2D32E07FF5DA48B1A4C`,
+1603/0x643 and component `{38C34B30-BDE1-5985-9CB6-DD1712EEB4E2}`.
+Verify AppSearch targets `TARGETDIR` and the frozen `DrLocator` rows form the
+reported bidirectional cycle.
+
+Focused tests prove `policy_version=9`, exact evidence and missing authority are
+identical in AGENTS/Kernel and named throughout Compiler, Runtime Gate, Sandbox,
+Trace, Test Suite and this plan. Exact evidence still REJECTs because Python
+documents `/layout` only as offline payload download and does not support direct
+internal-MSI recovery. Layout/direct MSI/bundle uninstall/machine install,
+retry, manual PATH/registry/cache edit, cleanup, PG/D/WSL/Scheduler/Git/N1-N6/
+NAS/Mac mutation and N1 handoff remain zero. Expected terminal state:
+`BLOCKED_EVIDENCE_PRESERVED`.

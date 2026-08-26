@@ -406,6 +406,19 @@ def evaluate_python_1603_recovery(policy: dict[str, Any], request: dict[str, Any
     return policy["accept_decision"] if request == expected else "REJECT"
 
 
+def evaluate_python_appsearch_cycle_recovery(
+    policy: dict[str, Any], request: dict[str, Any]
+) -> str:
+    contract = policy["python311_orphaned_dependency_appsearch_cycle_recovery"]
+    if request.get("policy_id") != contract["policy_id"]:
+        return "REJECT"
+    if request.get("phase_mode") != contract["phase_mode"]:
+        return "REJECT"
+    # V9 is deliberately non-executable until PSF publishes a direct-payload
+    # recovery contract. Exact evidence is necessary but cannot produce ACCEPT.
+    return "REJECT"
+
+
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -550,7 +563,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 8)
+        self.assertEqual(self.policy["policy_version"], 9)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -807,6 +820,97 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                     "0/3010", "pip", "venv", "3.12", "N1",
                 ):
                     self.assertIn(value, document)
+
+    def test_python311_appsearch_cycle_v9_is_evidence_bound_and_blocked(self) -> None:
+        recovery = self.policy[
+            "python311_orphaned_dependency_appsearch_cycle_recovery"
+        ]
+        self.assertEqual(
+            recovery["policy_id"],
+            "w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1",
+        )
+        self.assertEqual(
+            recovery["phase_mode"],
+            "w0_python311_orphaned_dependency_appsearch_cycle_recovery",
+        )
+        self.assertEqual(
+            recovery["parent_policy_commit"],
+            "de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6",
+        )
+        self.assertEqual(
+            recovery["parent_policy_tree"],
+            "cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c",
+        )
+        self.assertEqual(
+            recovery["policy_state"],
+            "BLOCKED_MISSING_OFFICIAL_DIRECT_MSI_CONTRACT",
+        )
+        self.assertFalse(recovery["runtime_execution_allowed"])
+        self.assertEqual(recovery["runtime_mutation_allowlist"], [])
+        self.assertEqual(recovery["v8_uninstall_attempts_consumed"], 1)
+        self.assertEqual(recovery["v8_machine_install_attempts"], 0)
+        self.assertEqual(recovery["currently_authorized_attempts"], 0)
+        self.assertEqual(recovery["automatic_retry_attempts"], 0)
+        evidence = recovery["required_frozen_evidence"]
+        self.assertEqual(evidence["final_result"], "0x643")
+        self.assertEqual(evidence["path_internal_exception"], "0xc00000fd")
+        self.assertEqual(evidence["appsearch_sequence"], 50)
+        self.assertEqual(evidence["appsearch_property"], "TARGETDIR")
+        self.assertTrue(evidence["drlocator_bidirectional_cycle"])
+        self.assertEqual(len(evidence["remaining_msi_product_codes"]), 8)
+        self.assertIn("direct installation", recovery["missing_authority"][0])
+        exact_request = {
+            "policy_id": recovery["policy_id"],
+            "phase_mode": recovery["phase_mode"],
+            "required_frozen_evidence": evidence,
+        }
+        self.assertEqual(
+            evaluate_python_appsearch_cycle_recovery(self.policy, exact_request),
+            "REJECT",
+        )
+
+    def test_python311_appsearch_cycle_v9_full_chain_and_mutations_reject(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        for name, document in {
+            "Compiler": self.compiler,
+            "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox,
+            "Trace": self.trace,
+            "TestSuite": self.test_suite,
+            "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1",
+                    "w0_python311_orphaned_dependency_appsearch_cycle_recovery",
+                    "de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6",
+                    "cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c",
+                    "BLOCKED_EVIDENCE_PRESERVED",
+                    "AppSearch",
+                    "TARGETDIR",
+                    "DrLocator",
+                    "REJECT",
+                ):
+                    self.assertIn(value, document)
+        recovery = self.policy[
+            "python311_orphaned_dependency_appsearch_cycle_recovery"
+        ]
+        for field in (
+            "layout_attempts",
+            "direct_msi_attempts",
+            "bundle_uninstall_attempts",
+            "machine_wide_install_attempts",
+            "manual_path_edit_attempts",
+            "registry_or_cache_delete_attempts",
+            "msi_transform_or_modification_attempts",
+            "business_venv_or_dependency_attempts",
+            "postgresql_d_wsl_scheduler_git_n1_n6_nas_mac_mutations",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(recovery[field], 0)
+        self.assertFalse(recovery["n1_handoff_allowed"])
 
     def test_scheduler_inventory_is_dynamic_and_all_frozen_tasks_disable(self) -> None:
         inventory = self.policy["exact_allowlist"]["scheduler_inventory_contract"]

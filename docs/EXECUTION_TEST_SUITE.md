@@ -1630,3 +1630,17 @@ Negative fixtures reject wrong authority/evidence/path/hash/signer, active
 process, wrong order/arguments/exit, second attempt, manual MSI, registry/cache/
 directory deletion, cleanup, 3.12/Store authority, business venv/dependencies
 and every PostgreSQL/D/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation.
+
+Python AppSearch-cycle v9 fixtures register
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery_v1` and
+`w0_python311_orphaned_dependency_appsearch_cycle_recovery` across the full
+chain. They bind parent `de7fc6ca0b2bed6a59b2130ddba8bcd67d7065d6`/tree
+`cf247378267f8f47ddaf0a82a64fe4fcc6ad3c0c`, installer/log/MSI hashes,
+1603/0x643, product/package/component IDs, AppSearch sequence 50, TARGETDIR and
+the bidirectional DrLocator cycle. Positive governance coverage proves all nine
+files agree that `/layout` is an offline-download interface and the direct
+internal-MSI contract is missing. Runtime fixtures require REJECT for exact
+evidence and drift, and for layout, `msiexec`, repair, `/uninstall /quiet`,
+machine install, retry, PATH/registry/cache edits, cleanup, 3.12 substitution
+and every PG/D/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation. The only result is
+`BLOCKED_EVIDENCE_PRESERVED`; no ACCEPT fixture exists.
