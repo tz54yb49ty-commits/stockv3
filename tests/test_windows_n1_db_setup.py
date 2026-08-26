@@ -153,7 +153,7 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             path = Path(directory) / "stage.tmp"
             path.write_text("expected", encoding="utf-8")
             payload = (
-                '{"owner":"' + self.elevated_identity.sid + '","protected":true,"rules":['
+                '{"owner":"S-1-5-32-544","protected":true,"rules":['
                 '{"sid":"' + self.runtime_sid + '","deny":false,"rights":131487},'
                 '{"sid":"' + self.elevated_identity.sid + '","deny":false,"rights":2032127},'
                 '{"sid":"S-1-5-18","deny":false,"rights":2032127}]}'
@@ -161,6 +161,18 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             verify_staged_elevated_pgpass_acl(
                 path, runtime_sid=self.runtime_sid,
                 operator_sid=self.elevated_identity.sid, expected_content="expected",
+                run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
+            )
+
+    def test_final_acl_rejects_builtin_administrators_owner(self):
+        payload = (
+            '{"owner":"S-1-5-32-544","protected":true,"rules":['
+            '{"sid":"' + self.runtime_sid + '","deny":false,"rights":131487},'
+            '{"sid":"S-1-5-18","deny":false,"rights":2032127}]}'
+        )
+        with self.assertRaisesRegex(RuntimeError, "owner/inheritance"):
+            verify_pgpass_acl(
+                Path("pgpass.conf"), runtime_sid=self.runtime_sid,
                 run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
             )
 

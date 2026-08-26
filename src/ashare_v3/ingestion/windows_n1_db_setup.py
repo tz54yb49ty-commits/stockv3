@@ -224,7 +224,7 @@ def verify_staged_elevated_pgpass_acl(
     rules = payload.get("rules") or []
     if isinstance(rules, dict):
         rules = [rules]
-    if payload.get("owner") != operator_sid or not payload.get("protected") or any(bool(rule["deny"]) for rule in rules):
+    if not payload.get("protected") or any(bool(rule["deny"]) for rule in rules):
         raise RuntimeError("staged pgpass ACL inheritance/deny mismatch")
     allow_sids = {str(rule["sid"]) for rule in rules}
     if allow_sids != {runtime_sid, operator_sid, "S-1-5-18"}:
