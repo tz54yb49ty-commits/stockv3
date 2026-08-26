@@ -76,6 +76,7 @@ Final safety enforcement:
   - `n6_immutable_release_privileged_materialize_and_install_f67_v1`
   - `runtime_hot_cleanup_archive_gated_disk_governance_v1`
   - `n1_local_artifact_archive_daily_bounded_install_v1`
+  - `windows_rebuild_w0_bounded_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -449,6 +450,230 @@ runtime_control 写入硬规则：
 
 ```text
 runtime_control 是总控控制面，不是 N1-N6 业务层。
+
+`windows_rebuild_w0_bounded_v1` 是 Windows rebuild v2 的一次性、fail-closed
+W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它；只有后续独立、
+明确授权的 `runtime_control` 请求可以选择一个 phase 执行一次。W0 完整 PASS
+之前不得进入 `N1_ingestion`；Windows N1 必须从全新空 cluster 开始，Mac dump、
+记录、source_version 和 evidence 的导入次数必须全部为 0。
+
+<!-- policy:windows_rebuild_w0_bounded_v1:begin -->
+```json
+{
+  "policy_id": "windows_rebuild_w0_bounded_v1",
+  "policy_version": 1,
+  "policy_state": "POLICY_READY_NOT_EXECUTED",
+  "layer_role": "runtime_control",
+  "scope_mode": "windows_w0_bounded_once",
+  "default_runtime_execution_decision": "REJECT",
+  "accept_decision": "ACCEPT",
+  "governance_session_cannot_execute": true,
+  "execution_session_must_be_independent": true,
+  "explicit_current_request_authorization_required": true,
+  "baseline": {
+    "branch": "codex/windows-rebuild-v1",
+    "commit": "027b03d3ca16c554491b7a21bc840acaec869571",
+    "tree": "cdba2aafb8b1b87c6dc33b4af301398f8e42491d"
+  },
+  "phase_contract": {
+    "allowed_phase_modes": [
+      "w0_prepare_and_mutate",
+      "wsl_shutdown_native_control"
+    ],
+    "attempts_per_phase": 1,
+    "automatic_retry_attempts": 0,
+    "phase_combination_allowed": false,
+    "phase_order": [
+      "w0_prepare_and_mutate",
+      "wsl_shutdown_native_control"
+    ],
+    "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
+    "shutdown_phase_requires_frozen_pre_shutdown_evidence": true
+  },
+  "exact_allowlist": {
+    "scheduler_operations": [
+      "export_exact_definition",
+      "disable_exact_task"
+    ],
+    "scheduler_match_authority": [
+      "TaskName",
+      "TaskPath",
+      "Actions"
+    ],
+    "scheduler_match_expression": "(?i)AshareV3|Ashare[-_ ]?V3",
+    "legacy_service_name": "postgresql-x64-18",
+    "legacy_service_operations": [
+      "stop_once_if_running",
+      "set_startup_disabled_once"
+    ],
+    "software_products": [
+      "Git for Windows",
+      "PostgreSQL 16 x64"
+    ],
+    "software_package_ids": [
+      "Git.Git",
+      "PostgreSQL.PostgreSQL.16"
+    ],
+    "installer_version_hash_signature_must_be_frozen_before_install": true,
+    "postgresql_minimum_version": "16.14",
+    "postgresql_install_root": "D:\\PostgreSQL\\16",
+    "postgresql_data_directory": "D:\\PostgreSQL\\16\\data",
+    "postgresql_backup_staging": "D:\\PostgreSQL\\backup-staging",
+    "postgresql_listen_addresses": "127.0.0.1",
+    "postgresql_service_name": "AshareV3-PostgreSQL-16",
+    "postgresql_service_identity": "NT SERVICE\\AshareV3-PostgreSQL-16",
+    "c_directories": [
+      "C:\\AshareV3\\app",
+      "C:\\AshareV3\\config",
+      "C:\\AshareV3\\runtime",
+      "C:\\AshareV3\\logs",
+      "C:\\AshareV3\\seed-inbox",
+      "C:\\AshareV3\\evidence",
+      "C:\\AshareV3\\staging"
+    ],
+    "wsl_visible_drive_after_restart": "C",
+    "wsl_hidden_drive_after_restart": "D",
+    "read_only_capability_checks": [
+      "native_cpython_3_11_x64",
+      "TdxW_process_present",
+      "127.0.0.1:17709_listening"
+    ]
+  },
+  "empty_cluster_contract": {
+    "initdb_new_empty_cluster_only": true,
+    "mac_dump_import_attempts": 0,
+    "mac_record_import_attempts": 0,
+    "mac_source_version_import_attempts": 0,
+    "mac_evidence_import_attempts": 0,
+    "ashare_v3_business_database_create_attempts": 0,
+    "business_schema_create_or_migrate_attempts": 0,
+    "n1_n6_data_write_attempts": 0
+  },
+  "identity_acl_contract": {
+    "postgresql_identity_non_interactive": true,
+    "postgresql_identity_access_scope": [
+      "D:\\PostgreSQL\\16",
+      "D:\\PostgreSQL\\16\\data",
+      "D:\\PostgreSQL\\backup-staging"
+    ],
+    "application_identity_must_be_non_admin": true,
+    "codex_identity_must_be_non_admin": true,
+    "operator_identity_must_be_distinct_from_application_and_codex": true,
+    "application_and_codex_denied_rights": [
+      "read",
+      "list",
+      "write",
+      "create",
+      "delete",
+      "change_permissions",
+      "take_ownership"
+    ],
+    "fail_if_identity_or_effective_access_is_unproven": true
+  },
+  "required_pre_evidence": [
+    "native_and_wsl_identity",
+    "windows_build_and_architecture",
+    "c_and_d_directory_inventory_without_recursive_delete",
+    "c_and_d_owner_acl_sddl_and_effective_access",
+    "all_exact_asharev3_scheduler_definitions_and_states",
+    "legacy_postgresql_18_service_config_state_and_binary_data_paths",
+    "installed_git_python_postgresql_versions_and_paths",
+    "installer_package_ids_versions_sha256_and_signatures",
+    "TdxW_process_and_127_0_0_1_17709_owner",
+    "wsl_mounts_and_wsl_conf",
+    "process_and_service_inventory",
+    "baseline_commit_tree_and_policy_hash"
+  ],
+  "required_post_evidence": [
+    "all_exact_asharev3_scheduler_definitions_preserved_and_disabled",
+    "legacy_postgresql_18_service_stopped_and_disabled_with_files_untouched",
+    "git_for_windows_version",
+    "postgresql_16_version_at_least_16_14",
+    "postgresql_16_install_and_data_paths_on_d",
+    "new_cluster_identity_and_zero_business_objects",
+    "listen_addresses_exactly_127_0_0_1",
+    "c_and_d_owner_acl_sddl_and_effective_access",
+    "application_and_codex_d_access_denials",
+    "TdxW_process_and_127_0_0_1_17709_owner",
+    "mac_import_attempt_counts_all_zero",
+    "n1_n6_nas_and_business_write_attempt_counts_all_zero",
+    "wsl_c_visible_and_d_absent_after_native_restart",
+    "phase_attempt_counts_and_final_verdict"
+  ],
+  "required_zero_attempts": [
+    "scheduler_delete_attempts",
+    "scheduler_enable_attempts",
+    "legacy_postgresql_18_uninstall_attempts",
+    "legacy_postgresql_18_program_delete_attempts",
+    "legacy_postgresql_18_data_delete_attempts",
+    "recursive_delete_attempts",
+    "overwrite_existing_path_attempts",
+    "git_reset_hard_attempts",
+    "git_clean_attempts",
+    "tushare_install_import_call_attempts",
+    "mootdx_install_import_call_attempts",
+    "mac_worktree_write_attempts",
+    "mac_data_import_attempts",
+    "n1_n6_runtime_attempts",
+    "nas_operation_attempts",
+    "business_database_write_attempts",
+    "wsl_shutdown_attempts_in_prepare_phase"
+  ],
+  "forbidden": [
+    "Tushare",
+    "Mootdx",
+    "Mac dump restore",
+    "Mac records or source_version import",
+    "Mac evidence reuse",
+    "N1-N6 runtime",
+    "NAS operations",
+    "Task Scheduler enable or creation",
+    "business schema or business data",
+    "recursive delete",
+    "overwrite existing paths",
+    "git reset --hard",
+    "git clean"
+  ],
+  "rollback_and_recovery": {
+    "automatic_rollback": false,
+    "automatic_cleanup": false,
+    "scheduler_tasks_must_never_be_deleted": true,
+    "disabled_scheduler_tasks_remain_disabled_on_failure": true,
+    "legacy_postgresql_18_files_and_data_remain_untouched": true,
+    "new_postgresql_16_files_and_failed_cluster_are_preserved_as_evidence": true,
+    "no_existing_path_may_be_replaced": true,
+    "restore_or_recovery_requires_new_independent_authorization": true,
+    "failure_result": "BLOCKED_EVIDENCE_PRESERVED"
+  },
+  "n1_handoff": {
+    "requires_w0_pass": true,
+    "next_layer_role": "N1_ingestion",
+    "allowed_sources": [
+      "TQ",
+      "eltdx_finance",
+      "self_built_trade_calendar"
+    ],
+    "forbidden_sources": [
+      "Tushare",
+      "Mootdx",
+      "Mac_dump",
+      "Mac_records",
+      "Mac_source_version",
+      "Mac_evidence"
+    ],
+    "nas_deferred_until_after_n1": true
+  }
+}
+```
+<!-- policy:windows_rebuild_w0_bounded_v1:end -->
+
+该 policy 的 `w0_prepare_and_mutate` phase 在写入 `/etc/wsl.conf` 并封存全部
+pre-shutdown evidence 后必须输出 `RESTART_REQUIRED` 并停止；它对
+`wsl --shutdown` 的 attempt 必须为 0。只有另一独立、明确授权且从原生 Windows
+控制的 `wsl_shutdown_native_control` phase 才可执行一次 shutdown，并在重新连接后
+证明 WSL 仅显式挂载 C、D 不可见。任何 identity/ACL effective-access 证明不完整、
+已有目标路径冲突、版本不足、非空 cluster、Scheduler 漏项或 attempt 超界均必须
+fail-closed，保留证据，不得自动 retry、cleanup 或 rollback。
 
 新增 artifact-only 例外 `n6_immutable_release_install_bounded_v1` 仅允许在
 用户明确授权的 runtime_control 请求中，将一个已完成 attestation 的 N6

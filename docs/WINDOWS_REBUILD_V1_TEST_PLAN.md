@@ -35,25 +35,42 @@ release pass.
 
 ## Gate W0: native Windows environment
 
-- Install native CPython 3.11 x64 and resolve
+- W0 host mutation is default-deny.  It may run only in a later independent
+  `runtime_control` request that exactly satisfies
+  `windows_rebuild_w0_bounded_v1`; the policy-definition request must not use
+  the exception it defines.
+- Verify native CPython 3.11 x64.  Resolve
   `requirements-windows-py311.in` into
-  `requirements-windows-py311.lock` with exact versions and hashes.
+  `requirements-windows-py311.lock` with exact versions and hashes only after
+  its dependency graph excludes Tushare and Mootdx; otherwise fail closed
+  without generating or installing a lock.
 - Recreate a fresh venv using only the lock; verify imports for pandas,
-  pyarrow, psycopg, tushare, mootdx, FastAPI, Jinja2, Uvicorn, and eltdx.
+  pyarrow, psycopg, FastAPI, Jinja2, Uvicorn, and eltdx.  Verify that importing
+  Tushare or Mootdx is unavailable.
 - Verify the eltdx installed source is commit
   `b2b94b967f478408848d007c83cc7155367c3aa9`.
 - Verify the clean Git checkout commit and the release manifest.
-- Restore the PostgreSQL seed into a new database and compare the database
-  manifest; never use `--clean` against an existing cluster.
+- Install PostgreSQL 16.14 or newer under `D:\PostgreSQL\16`, initialize a new empty
+  cluster at `D:\PostgreSQL\16\data`, and bind only to `127.0.0.1`.
+  Mac dump, record, source-version, and evidence imports must each remain zero.
+  W0 must not create or migrate the `ashare_v3` business schema and must not
+  write N1-N6 data.
 - Confirm TdxW is logged in, `127.0.0.1:17709` is listening, and method-level
   TQ capability smokes pass.
 - Keep every AshareV3 Task Scheduler task disabled.
+- Preserve the stopped legacy PostgreSQL 18 program and data unchanged; do not
+  uninstall or delete it.  WSL shutdown is a separate native-control phase
+  after sealed evidence and `RESTART_REQUIRED`.
 
 ## Gate N1
 
+- Start only after an independent W0 PASS.  Build N1 from the empty Windows
+  cluster using only TQ, eltdx finance, and a self-built trade calendar.
+  Tushare, Mootdx, Mac dumps, Mac records, Mac source versions, and Mac evidence
+  are forbidden inputs.
 - Freeze non-empty TQ universes for list types 5, 9, 11, 12, and 14.
-- Restore the existing three-year daily-bar base, scan gaps, and fill each
-  security independently.
+- Build the three-year daily-bar base from zero in Windows and fill each
+  security independently; do not restore an existing base.
 - Maintain at least 90 calendar days of expectations; confirm a trading day
   only when valid daily bars cover at least 80% of the frozen list-type-5
   universe.
@@ -63,6 +80,7 @@ release pass.
 
 ## Gate NAS
 
+- NAS work starts only after Windows N1 acceptance; it is not part of W0.
 - Verify DSM share, filesystem, capacity, service account, quota, snapshot or
   versioning capability, and SMB access.
 - Complete one base backup, WAL/archive verification, logical dump manifest,
@@ -112,9 +130,10 @@ additive and not an N6 startup prerequisite.
 
 ## Safety and recovery drills
 
-- Delete a disposable clone under C: and restore it from the immutable GitHub
-  tag; do not touch the real worktree.
-- Restore a disposable PostgreSQL instance from NAS backup plus WAL.
+- Create a separate disposable clone under C: and validate recovery from the
+  immutable GitHub tag without deleting or touching the real worktree.
+- After N1 and NAS acceptance, restore a disposable PostgreSQL instance from
+  the Windows-origin backup plus WAL; never use a Mac database dump.
 - Verify WSL cannot see D: and Codex/application accounts cannot write, delete,
   change ACLs, or take ownership there.
 - Test NAS outage, WAL accumulation, checksum mismatch, TQ logout, port 17709
