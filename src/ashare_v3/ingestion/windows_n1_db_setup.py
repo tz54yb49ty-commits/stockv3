@@ -30,6 +30,7 @@ OPERATOR_NAME = r"TDX-STOCK\47894"
 RUNTIME_NAME = r"TDX-STOCK\ashare-ops"
 OPERATOR_RID = "1002"
 RUNTIME_RID = "1006"
+ACL_PATH_ENV = "ASHARE_V3_N1_ACL_PATH"
 ELEVATED_RUNTIME_PGPASS = Path(
     r"C:\Users\ashare-ops.tdx-stock\AppData\Roaming\postgresql\pgpass.conf"
 )
@@ -169,7 +170,9 @@ def read_pgpass_acl(
     run_command: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     script = (
-        "$acl=Get-Acl -LiteralPath $args[0];"
+        f"$aclPath=$env:{ACL_PATH_ENV};"
+        "if([string]::IsNullOrWhiteSpace($aclPath)){throw 'missing N1 ACL path'};"
+        "$acl=Get-Acl -LiteralPath $aclPath;"
         "$rules=@($acl.Access|ForEach-Object{[pscustomobject]@{"
         "sid=$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;"
         "deny=($_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny);"
@@ -178,9 +181,11 @@ def read_pgpass_acl(
         "[pscustomobject]@{owner=$ownerSid;"
         "protected=$acl.AreAccessRulesProtected;rules=$rules}|ConvertTo-Json -Compress -Depth 4"
     )
+    command_environment = os.environ.copy()
+    command_environment[ACL_PATH_ENV] = str(path)
     completed = run_command(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
-        check=True, capture_output=True, text=True,
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        check=True, capture_output=True, text=True, env=command_environment,
     )
     return json.loads(completed.stdout)
 

@@ -7,7 +7,7 @@ import inspect
 import unittest
 
 from ashare_v3.ingestion.windows_n1_db_setup import (
-    ELEVATED_RUNTIME_PGPASS, OPERATOR_DIRECT, OPERATOR_ELEVATED,
+    ACL_PATH_ENV, ELEVATED_RUNTIME_PGPASS, OPERATOR_DIRECT, OPERATOR_ELEVATED,
     RecoveryAuthorityEvidence, RecoveryResult, WindowsIdentityEvidence, assert_fresh_authority, merge_pgpass,
     grant_minimum_n1_privileges, pgpass_path_for_mode, postflight_empty_setup,
     validate_operator_identity, verify_pgpass_acl,
@@ -128,6 +128,25 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             Path("pgpass.conf"), runtime_sid=self.runtime_sid,
             run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
         )
+
+    def test_acl_subprocess_uses_environment_not_command_tail_for_path(self):
+        calls = []
+        payload = (
+            '{"owner":"' + self.runtime_sid + '","protected":true,"rules":['
+            '{"sid":"' + self.runtime_sid + '","deny":false,"rights":131487},'
+            '{"sid":"S-1-5-18","deny":false,"rights":2032127}]}'
+        )
+        path = Path(r"C:\Users\name with spaces\pgpass.conf")
+        verify_pgpass_acl(
+            path, runtime_sid=self.runtime_sid,
+            run_command=lambda args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(stdout=payload),
+        )
+        args, kwargs = calls[0]
+        self.assertEqual(args[-2], "-Command")
+        self.assertNotIn(str(path), args)
+        self.assertNotIn("$args[0]", args[-1])
+        self.assertIn(f"$env:{ACL_PATH_ENV}", args[-1])
+        self.assertEqual(kwargs["env"][ACL_PATH_ENV], str(path))
 
     def test_staged_elevated_acl_is_verified_before_operator_removal(self):
         with TemporaryDirectory() as directory:
