@@ -569,3 +569,16 @@ exit code, read-only StartName check, at most one start and final evidence.
 V6/CIM rerun, password/extra argument, ACL/config/install/logon-right mutation,
 retry, restoration and N1 counts remain zero. Failure is Stopped and
 `BLOCKED_EVIDENCE_PRESERVED`.
+
+The append-only `w0_python311_per_user_scope_collision_recovery_v1` trace binds
+parent `9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1`/tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`; Git 2.55.0.windows.5 unchanged;
+Python 3.11.9 installer path/hash/signature; 1603/0x643 Burn and dev-log facts;
+PerUser JustForMe/package-cache evidence; absent
+machine python; and no installer/msiexec process. It records one uninstall
+`/uninstall /quiet` attempt/result, between-step registration/executable proof,
+one exact machine install attempt/result accepting only 0/3010 and 3.11.9
+x64/pip/venv/launcher postflight. All manual
+MSI, registry/cache/directory delete, cleanup, retry, business venv/dependency,
+Git/PG/D/WSL/Scheduler/N1-N6/NAS/Mac counters stay zero. Failure is append-only
+`BLOCKED_EVIDENCE_PRESERVED` and no N1.

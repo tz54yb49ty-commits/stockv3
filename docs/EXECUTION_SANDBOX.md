@@ -657,3 +657,16 @@ password argument must yield NULL lpPassword; empty/nonempty password, CIM/V6
 rerun, extra options, ACL/config/install/logon-right mutation, early start,
 retry or fallback predicts fail-closed Stopped and no N1. Simulation PASS is
 not execution.
+
+Sandbox Simulation models `w0_python311_per_user_scope_collision_recovery_v1`
+only from parent `9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1`/tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`. It requires the exact 1603/0x643 PerUser
+collision evidence, Git 2.55.0.windows.5 unchanged, official Python 3.11.9
+installer identity/hash, JustForMe, missing Program Files python and no
+installer/msiexec process; then simulates one `/uninstall /quiet`,
+the between-step absence gate, and one exact all-users install in the same 47894
+session. Only 0/3010, pip and venv pass; non-0/3010 exit, manual MSI,
+registry/cache/directory deletion,
+cleanup, retry, 3.12 substitution, business venv/dependency or any Git/PG/D/
+WSL/Scheduler/N1-N6/NAS/Mac change predicts fail-closed. Simulation PASS is not
+execution.

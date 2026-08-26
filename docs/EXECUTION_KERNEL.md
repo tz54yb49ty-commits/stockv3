@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 7,
+  "policy_version": 8,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5396,6 +5396,7 @@ phase combination, retry or excess attempt returns `REJECT`.
       "w0_prepare_and_mutate",
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
+      "w0_python311_per_user_scope_collision_recovery",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -5405,6 +5406,7 @@ phase combination, retry or excess attempt returns `REJECT`.
       "w0_prepare_and_mutate",
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
+      "w0_python311_per_user_scope_collision_recovery",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -5509,6 +5511,73 @@ phase combination, retry or excess attempt returns `REJECT`.
     "third_party_distribution_forbidden": true,
     "business_venv_create_attempts": 0,
     "project_package_install_attempts": 0
+  },
+  "python311_per_user_scope_collision_recovery": {
+    "policy_id": "w0_python311_per_user_scope_collision_recovery_v1",
+    "phase_mode": "w0_python311_per_user_scope_collision_recovery",
+    "parent_policy_commit": "9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1",
+    "parent_policy_tree": "df8cbc4b01040542e2909b381014789f1d3b329b",
+    "attempts": 1,
+    "automatic_retry_attempts": 0,
+    "operator_identity": "TDX-STOCK\\47894",
+    "same_elevated_session_required": true,
+    "required_fresh_read_only_pre_state": {
+      "git_for_windows_version": "2.55.0.windows.5",
+      "git_mutation_attempts": 0,
+      "installer_path": "C:\\AshareV3\\staging\\installers\\python-3.11.9-amd64.exe",
+      "installer_sha256": "5EE42C4EEE1E6B4464BB23722F90B45303F79442DF63083F05322F1785F5FDDE",
+      "authenticode_status": "Valid",
+      "signer": "Python Software Foundation",
+      "prior_machine_wide_install_attempts": 1,
+      "prior_exit_code_decimal": 1603,
+      "prior_exit_code_hex": "0x643",
+      "machine_python_executable_exists": false,
+      "burn_bundle_scope": "PerUser",
+      "burn_core_and_exe_allusers_rolled_back": true,
+      "burn_dev_allusers_failure": "0x80070643",
+      "burn_final_result": "0x643",
+      "dev_main_engine_thread_exit": 1603,
+      "old_justforme_components": "Present",
+      "old_install_source_root": "C:\\Users\\47894\\AppData\\Local\\Package Cache",
+      "py_launcher_reported_versions": ["Astral", "CPython 3.12.12"],
+      "msiexec_or_python_installer_processes_present": false
+    },
+    "exact_uninstall": {
+      "program": "C:\\AshareV3\\staging\\installers\\python-3.11.9-amd64.exe",
+      "argument_vector": ["/uninstall", "/quiet"],
+      "attempts": 1,
+      "scope": "old_per_user_cpython_3_11_bundle_only",
+      "acceptable_exit_codes": [0, 3010]
+    },
+    "required_between_steps_read_only_state": {
+      "old_per_user_cpython311_bundle_and_components": "absent",
+      "standalone_python_launcher_may_remain": true,
+      "machine_python_executable_exists": false
+    },
+    "exact_machine_install": {
+      "program": "C:\\AshareV3\\staging\\installers\\python-3.11.9-amd64.exe",
+      "argument_vector": ["/quiet", "InstallAllUsers=1", "TargetDir=C:\\Program Files\\Python311", "PrependPath=1", "Include_pip=1", "Include_launcher=1", "InstallLauncherAllUsers=1", "Include_test=0", "Include_doc=0", "Shortcuts=0"],
+      "attempts": 1,
+      "acceptable_exit_codes": [0, 3010]
+    },
+    "required_post_state": {
+      "python_executable": "C:\\Program Files\\Python311\\python.exe",
+      "version": "3.11.9",
+      "pe_architecture": "x64",
+      "pip_available": true,
+      "venv_module_available": true,
+      "py_launcher_contains_exact_machine_python": true,
+      "microsoft_store_alias_is_authority": false,
+      "python_3_12_is_business_substitute": false
+    },
+    "manual_msiexec_component_operations": 0,
+    "registry_delete_attempts": 0,
+    "package_cache_or_directory_delete_attempts": 0,
+    "cleanup_attempts": 0,
+    "business_venv_create_attempts": 0,
+    "project_dependency_install_attempts": 0,
+    "failure_result": "BLOCKED_EVIDENCE_PRESERVED",
+    "n1_handoff_allowed": false
   },
   "postgresql16_installer_contract": {
     "publisher_supported_defaults_required": true,
@@ -5662,7 +5731,8 @@ phase combination, retry or excess attempt returns `REJECT`.
       "allowed_phase_modes": [
         "w0_prepare_and_mutate",
         "w0_postgresql_virtual_identity_1639_recovery",
-        "w0_postgresql_virtual_identity_22_recovery"
+        "w0_postgresql_virtual_identity_22_recovery",
+        "w0_python311_per_user_scope_collision_recovery"
       ],
       "allowed_admin_operations": [
         "exact_frozen_installer_once",
@@ -5674,7 +5744,8 @@ phase combination, retry or excess attempt returns `REJECT`.
       "restrict_exact_postgres_service_account_logon",
       "stage_exact_wsl_configuration",
       "invoke_exact_postgresql_1639_cim_change_and_verified_start",
-      "invoke_exact_postgresql_22_sc_config_null_password_and_verified_start"
+      "invoke_exact_postgresql_22_sc_config_null_password_and_verified_start",
+      "invoke_exact_python311_per_user_uninstall_then_machine_install"
       ]
     },
     "routine_and_elevated_identities_must_be_distinct": true,
@@ -5810,7 +5881,15 @@ phase combination, retry or excess attempt returns `REJECT`.
     "postgresql_22_recovery_cim_attempts",
     "postgresql_22_recovery_password_argument_attempts",
     "postgresql_22_recovery_acl_config_install_or_logon_right_attempts",
-    "postgresql_22_recovery_networkservice_restore_attempts"
+    "postgresql_22_recovery_networkservice_restore_attempts",
+    "python311_scope_collision_second_uninstall_attempts",
+    "python311_scope_collision_second_install_attempts",
+    "python311_scope_collision_manual_msiexec_attempts",
+    "python311_scope_collision_registry_delete_attempts",
+    "python311_scope_collision_package_cache_or_directory_delete_attempts",
+    "python311_scope_collision_cleanup_attempts",
+    "python311_scope_collision_git_mutation_attempts",
+    "python311_scope_collision_windows_resource_mutation_attempts"
   ],
   "forbidden": [
     "Tushare",

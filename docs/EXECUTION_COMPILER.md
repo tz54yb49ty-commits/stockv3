@@ -1217,3 +1217,18 @@ It verifies StartName before one start and applies the existing final checks.
 V6/CIM rerun, password argument, ACL/config/install/logon-right mutation, retry
 or fallback compiles to REJECT; failure ends Stopped with no N1. Compilation
 does not execute the phase.
+
+### Windows W0 Python 3.11 per-user scope collision recovery
+
+`w0_python311_per_user_scope_collision_recovery` compiles only under
+`w0_python311_per_user_scope_collision_recovery_v1`, bound to parent commit
+`9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1` and tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`. The DAG freezes Git
+2.55.0.windows.5 unchanged, exact PSF-signed Python 3.11.9 installer/hash,
+1603/0x643 PerUser Burn rollback and absent Program Files python; proves no
+installer/msiexec process; runs one official `/uninstall /quiet`; verifies old
+JustForMe 3.11 absent; then runs one exact all-users install argument vector.
+Only exit 0/3010 and exact 3.11.9 x64/pip/venv/launcher postflight compile.
+Manual MSI, registry/cache/directory deletion, cleanup, retry, 3.12 substitute,
+business venv/dependencies or any Git/PG/D/WSL/Scheduler/N1-N6/NAS/Mac change
+compiles to REJECT. Compiler success is not execution.

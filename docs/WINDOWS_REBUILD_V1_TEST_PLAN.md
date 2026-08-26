@@ -181,6 +181,22 @@ Verify StartName before one start; then require Running, UNRESTRICTED, only
 reinstall, use `sc.exe` for mutation, retry or restore NetworkService. Failure
 leaves the service Stopped with evidence preserved and N1 blocked.
 
+## W0 Python 3.11 per-user scope collision recovery
+
+Use only `w0_python311_per_user_scope_collision_recovery_v1`, bound to parent
+`9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1` and tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`. Freeze Git 2.55.0.windows.5
+unchanged, exact PSF Python 3.11.9 installer path/hash/signature, 1603/0x643
+PerUser Burn rollback, JustForMe/package-cache presence, absent Program Files
+python, py reporting only Astral/3.12.12 and no installer/msiexec process. In
+one 47894 session allow one official `/uninstall /quiet`; verify old per-user
+3.11 absent (standalone launcher may remain) and machine python still absent;
+then allow one exact all-users install vector. Accept only 0/3010 and verify
+exact Program Files Python 3.11.9 x64, pip, venv and launcher entry. Never use
+manual MSI, registry/cache/directory deletion, cleanup, retry, Store/3.12
+authority, business venv/dependencies, or change Git/PG/D/WSL/Scheduler/N1-N6/
+NAS/Mac. Failure preserves evidence and blocks N1.
+
 ## W0 PostgreSQL ReturnValue 22 recovery
 
 Only `w0_postgresql_virtual_identity_22_recovery` may follow v6 commit

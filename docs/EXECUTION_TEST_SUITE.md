@@ -1618,3 +1618,15 @@ password/NULL lpPassword, zero exit, StartName verification,
 one start and final checks. Negative tests reject wrong authority/state,
 V6/CIM rerun, empty/nonempty password argument, extra sc option, second attempt,
 ACL/config/install/logon-right mutation, early/repeated start, fallback and N1.
+
+Python 1603 fixtures register `w0_python311_per_user_scope_collision_recovery_v1`
+across all nine files. Positive coverage binds parent
+`9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1`/tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`, Git 2.55.0.windows.5 unchanged,
+exact Python 3.11.9 installer path/hash/signer, PerUser/JustForMe 1603/0x643
+evidence, no process, one `/uninstall /quiet`, between-step absence and one exact all-users install with only
+0/3010 accepted. Postflight requires exact 3.11.9 x64/pip/venv/launcher.
+Negative fixtures reject wrong authority/evidence/path/hash/signer, active
+process, wrong order/arguments/exit, second attempt, manual MSI, registry/cache/
+directory deletion, cleanup, 3.12/Store authority, business venv/dependencies
+and every PostgreSQL/D/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation.

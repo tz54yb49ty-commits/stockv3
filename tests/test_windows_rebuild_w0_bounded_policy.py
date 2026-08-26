@@ -379,6 +379,33 @@ def evaluate_22_recovery(policy: dict[str, Any], request: dict[str, Any]) -> str
     return policy["accept_decision"] if request == expected else "REJECT"
 
 
+def evaluate_python_1603_recovery(policy: dict[str, Any], request: dict[str, Any]) -> str:
+    contract = policy["python311_per_user_scope_collision_recovery"]
+    expected = {
+        "policy_id": "w0_python311_per_user_scope_collision_recovery_v1",
+        "phase_mode": contract["phase_mode"],
+        "parent_policy_commit": contract["parent_policy_commit"],
+        "parent_policy_tree": contract["parent_policy_tree"],
+        "attempts": 1,
+        "automatic_retry_attempts": 0,
+        "operator_identity": r"TDX-STOCK\47894",
+        "same_elevated_session_required": True,
+        "required_fresh_read_only_pre_state": contract["required_fresh_read_only_pre_state"],
+        "exact_uninstall": contract["exact_uninstall"],
+        "required_between_steps_read_only_state": contract["required_between_steps_read_only_state"],
+        "exact_machine_install": contract["exact_machine_install"],
+        "required_post_state": contract["required_post_state"],
+        "manual_msiexec_component_operations": 0,
+        "registry_delete_attempts": 0,
+        "package_cache_or_directory_delete_attempts": 0,
+        "cleanup_attempts": 0,
+        "business_venv_create_attempts": 0,
+        "project_dependency_install_attempts": 0,
+        "n1_handoff_allowed": False,
+    }
+    return policy["accept_decision"] if request == expected else "REJECT"
+
+
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -447,6 +474,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                 "w0_prepare_and_mutate",
                 "w0_postgresql_virtual_identity_1639_recovery",
                 "w0_postgresql_virtual_identity_22_recovery",
+                "w0_python311_per_user_scope_collision_recovery",
             ],
         )
         self.assertEqual(acl["routine_d_denial_scope"], r"D:\PostgreSQL\16")
@@ -522,7 +550,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 7)
+        self.assertEqual(self.policy["policy_version"], 8)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -709,6 +737,76 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         ):
             with self.subTest(overrides=overrides):
                 self.assertEqual(self.decision(**overrides), "REJECT")
+
+    def test_python311_1603_scope_collision_exact_recovery_contract(self) -> None:
+        recovery = self.policy["python311_per_user_scope_collision_recovery"]
+        request = {
+            "policy_id": "w0_python311_per_user_scope_collision_recovery_v1",
+            "phase_mode": recovery["phase_mode"],
+            "parent_policy_commit": recovery["parent_policy_commit"],
+            "parent_policy_tree": recovery["parent_policy_tree"],
+            "attempts": 1,
+            "automatic_retry_attempts": 0,
+            "operator_identity": r"TDX-STOCK\47894",
+            "same_elevated_session_required": True,
+            "required_fresh_read_only_pre_state": recovery["required_fresh_read_only_pre_state"],
+            "exact_uninstall": recovery["exact_uninstall"],
+            "required_between_steps_read_only_state": recovery["required_between_steps_read_only_state"],
+            "exact_machine_install": recovery["exact_machine_install"],
+            "required_post_state": recovery["required_post_state"],
+            "manual_msiexec_component_operations": 0,
+            "registry_delete_attempts": 0,
+            "package_cache_or_directory_delete_attempts": 0,
+            "cleanup_attempts": 0,
+            "business_venv_create_attempts": 0,
+            "project_dependency_install_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(evaluate_python_1603_recovery(self.policy, request), "ACCEPT")
+        for field, value in {
+            "parent_policy_commit": "0" * 40,
+            "parent_policy_tree": "0" * 40,
+            "attempts": 2,
+            "automatic_retry_attempts": 1,
+            "operator_identity": r"TDX-STOCK\ashare-ops",
+            "same_elevated_session_required": False,
+            "manual_msiexec_component_operations": 1,
+            "registry_delete_attempts": 1,
+            "package_cache_or_directory_delete_attempts": 1,
+            "cleanup_attempts": 1,
+            "business_venv_create_attempts": 1,
+            "project_dependency_install_attempts": 1,
+            "n1_handoff_allowed": True,
+        }.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request); bad[field] = value
+                self.assertEqual(evaluate_python_1603_recovery(self.policy, bad), "REJECT")
+        for section in (
+            "required_fresh_read_only_pre_state", "exact_uninstall",
+            "required_between_steps_read_only_state", "exact_machine_install",
+            "required_post_state",
+        ):
+            with self.subTest(section=section):
+                bad = copy.deepcopy(request); bad[section] = {"drift": True}
+                self.assertEqual(evaluate_python_1603_recovery(self.policy, bad), "REJECT")
+
+    def test_python311_1603_full_chain_semantics(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(encoding="utf-8")
+        for name, document in {
+            "Compiler": self.compiler, "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox, "Trace": self.trace,
+            "TestSuite": self.test_suite, "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_python311_per_user_scope_collision_recovery_v1",
+                    "9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1",
+                    "df8cbc4b01040542e2909b381014789f1d3b329b",
+                    "2.55.0.windows.5", "3.11.9", "1603", "0x643",
+                    "PerUser", "JustForMe", "/uninstall /quiet",
+                    "0/3010", "pip", "venv", "3.12", "N1",
+                ):
+                    self.assertIn(value, document)
 
     def test_scheduler_inventory_is_dynamic_and_all_frozen_tasks_disable(self) -> None:
         inventory = self.policy["exact_allowlist"]["scheduler_inventory_contract"]

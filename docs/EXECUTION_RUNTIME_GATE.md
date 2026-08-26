@@ -742,3 +742,17 @@ lpPassword. Exit must be zero, StartName must be read back before one start,
 and existing Running/virtual/SID/loopback/pg_isready/ACL-zero postchecks apply.
 V6 or CIM retry, password argument, extra option, ACL/config/install/logon-right
 mutation, retry or NetworkService restoration rejects and leaves Stopped.
+
+`w0_python311_per_user_scope_collision_recovery` requires policy
+`w0_python311_per_user_scope_collision_recovery_v1`, parent
+`9c8f80f9ca726fd00bdd30a625a4c5ed49cfddc1`/tree
+`df8cbc4b01040542e2909b381014789f1d3b329b`, unchanged Git
+2.55.0.windows.5, exact PSF-signed Python 3.11.9 installer/hash, frozen
+1603/0x643 PerUser/JustForMe rollback evidence, absent machine python and no
+installer/msiexec process. Gate permits the same 47894 session one official
+`/uninstall /quiet`, requires old per-user 3.11 removal while allowing only the
+standalone launcher to remain, then permits one exact machine-wide argument
+vector. Only 0/3010 is accepted. Final proof requires Program Files python,
+3.11.9 x64, pip, venv and exact launcher registration. Manual MSI, registry or
+cache/directory deletion, cleanup, retry, Store/3.12 authority, business venv/
+dependencies or any other Windows/N1-N6/Mac mutation rejects with evidence.
