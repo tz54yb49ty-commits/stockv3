@@ -276,3 +276,17 @@ registry existence/change/read-error continuation, Win32_Process CIM, short
 variable `H`, precheck mutation, v10 retry and identity/hash/path/env/attempt
 drift. Success/failure remain `ISOLATED_NATIVE_CPYTHON311_READY`/
 `BLOCKED_EVIDENCE_PRESERVED`; N1 remains false.
+
+### Materialized CPython root venv recovery gate
+
+Test `w0_python311_materialized_root_venv_recovery_v1` only in a later
+independent request at parent `e8c9f04393187cdfb4a75c8a10afa3e841368daf`,
+tree `3adcb1265928adc81c8d73ddda9c301cdbb3dd21`. Bind consumed v11, Windows error
+448/untrusted mount point, its materialized-only mutation and zero retry/
+cleanup. Preflight freezes the exact `cpython-3.11.15-windows-x86_64-none`
+python path and SHA, non-reparse root, CPython 3.11.15 x64/stdlib, process zero,
+absent `.venv` and unchanged PATH/HKCU/MSI/Git. The sole positive mutation is
+that python with `-m venv C:\AshareV3\.venv` once. Verify venv 3.11.15 x64,
+exact base_prefix, pip and only default ensurepip content, then STOP. Reject all
+uv/download/install/cleanup/root changes, packages, drift and D/PG/WSL/
+Scheduler/Mac/NAS/N1-N6.

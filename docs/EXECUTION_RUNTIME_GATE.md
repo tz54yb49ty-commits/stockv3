@@ -808,3 +808,15 @@ Registry::HKEY_CURRENT_USER\Software\Python=False` must match. `reg query`,
 registry existence/change/read-error continuation, Win32_Process CIM, v10
 retry or identity/hash/path/env/attempt drift REJECT. Every v10 uv, C-only,
 install/find/venv, immutable-state and zero-mutation field remains exact.
+
+### Materialized-root venv recovery gate
+
+The Gate may ACCEPT `w0_python311_materialized_root_venv_recovery_v1` only in
+a later independent `w0_python311_materialized_root_venv_recovery` request at
+parent `e8c9f04393187cdfb4a75c8a10afa3e841368daf`/tree
+`3adcb1265928adc81c8d73ddda9c301cdbb3dd21`. It requires consumed v11 Windows
+error 448 / untrusted mount point evidence; exact materialized python path/SHA; non-reparse root; CPython
+3.11.15 x64 and stdlib proof; zero matching processes; absent `.venv`; and
+unchanged PATH/HKCU/MSI/Git. Only one exact `-m venv C:\AshareV3\.venv`
+mutation is allowed. uv/download/install/cleanup/root change, drift, dependencies
+or D/PG/WSL/Scheduler/Mac/NAS/N1-N6 returns REJECT. Governance use is REJECT.

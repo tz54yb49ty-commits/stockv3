@@ -715,3 +715,14 @@ Registry::HKEY_CURRENT_USER\Software\Python=False`. `reg query`, registry
 existence/change/read-error continuation, Win32_Process CIM, short variable
 `H`, retry or drift fail closed. All v10 uv/env/install/find/venv and isolation
 fields remain unchanged. Simulation PASS is not execution or N1 authority.
+
+### Materialized-root venv recovery simulation
+
+Simulation binds `w0_python311_materialized_root_venv_recovery_v1` to parent
+`e8c9f04393187cdfb4a75c8a10afa3e841368daf`/tree
+`3adcb1265928adc81c8d73ddda9c301cdbb3dd21`, consumed v11 attempt and Windows
+error 448 / untrusted mount point. It proves the exact real-python path/SHA, ordinary non-reparse root,
+CPython 3.11.15 x64/stdlib, no matching process, absent target and unchanged
+PATH/HKCU/MSI/Git before modeling one exact `-m venv` mutation. It predicts
+fail-closed for uv/download/install/cleanup/materialized-root change, packages,
+drift or out-of-scope operations. Simulation PASS is neither execution nor N1.

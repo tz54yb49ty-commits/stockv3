@@ -461,7 +461,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 11,
+  "policy_version": 12,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -481,7 +481,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
-      "w0_python311_isolated_uv_absent_registry_recovery",
+      "w0_python311_materialized_root_venv_recovery",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -492,7 +492,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
-      "w0_python311_isolated_uv_absent_registry_recovery",
+      "w0_python311_materialized_root_venv_recovery",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -1021,6 +1021,105 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "n1_handoff_allowed": false
     },
     "windows_mutations_before_registry_precheck_success": 0,
+    "cleanup_attempts": 0,
+    "n1_handoff_allowed": false
+  },
+  "python311_materialized_root_venv_recovery": {
+    "policy_id": "w0_python311_materialized_root_venv_recovery_v1",
+    "phase_mode": "w0_python311_materialized_root_venv_recovery",
+    "parent_policy_commit": "e8c9f04393187cdfb4a75c8a10afa3e841368daf",
+    "parent_policy_tree": "3adcb1265928adc81c8d73ddda9c301cdbb3dd21",
+    "attempts": 1,
+    "automatic_retry_attempts": 0,
+    "governance_session_cannot_execute": true,
+    "execution_session_must_be_independent": true,
+    "prior_v11_execution": {
+      "policy_id": "w0_python311_isolated_uv_absent_registry_recovery_v1",
+      "attempts_consumed": 1,
+      "rerun_attempts_allowed": 0,
+      "terminal": "BLOCKED_EVIDENCE_PRESERVED",
+      "failure_stage": "managed_python_install_after_materialization",
+      "windows_os_error": 448,
+      "reason": "untrusted_mount_point",
+      "only_mutation": "materialized_cpython_download_under_exact_python_root",
+      "venv_create_attempts": 0,
+      "cleanup_attempts": 0,
+      "retry_attempts": 0
+    },
+    "required_fresh_read_only_pre_state": {
+      "account": "TDX-STOCK\\ashare-ops",
+      "sid": "S-1-5-21-2072264739-3883739137-88032818-1006",
+      "administrators_member": false,
+      "real_python_root": "C:\\AshareV3\\tools\\python\\cpython-3.11.15-windows-x86_64-none",
+      "real_python_executable": "C:\\AshareV3\\tools\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+      "python_executable_sha256": "6765C6B1685C86877FABE14D82240F3FAB2913A617A85E8D09E61DC40798013B",
+      "real_python_root_is_reparse_point": false,
+      "implementation": "CPython",
+      "version": "3.11.15",
+      "architecture": "x64",
+      "required_stdlib_imports": [
+        "ssl",
+        "sqlite3",
+        "ctypes",
+        "venv",
+        "ensurepip"
+      ],
+      "venv_target": "C:\\AshareV3\\.venv",
+      "venv_target_exists": false,
+      "process_enumeration": "Get-Process exact names python,pythonw,uv,msiexec,python-3.11.9-amd64",
+      "matching_process_count": 0,
+      "git_for_windows_version": "2.55.0.windows.5",
+      "user_path_utf16le_sha256": "E85FFD5D0AE1D921D5840C76D75B22F77291946F1B7815EFD5845A897BEC5D31",
+      "machine_path_utf16le_sha256": "AA5714E96C1419AC785E9C930EF3B4B2B972AA219FF2C124DE5DA51934558B53",
+      "hkcu_python_exists": false,
+      "legacy_msi_path": "C:\\WINDOWS\\Installer\\15c7d68.msi",
+      "legacy_msi_sha256": "8A5C585D2A718BA73A4D1BB7A675DDBF56C016B6B851F2D32E07FF5DA48B1A4C"
+    },
+    "exact_venv_creation": {
+      "program": "C:\\AshareV3\\tools\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+      "argument_vector": [
+        "-m",
+        "venv",
+        "C:\\AshareV3\\.venv"
+      ],
+      "attempts": 1,
+      "only_allowed_mutation_root": "C:\\AshareV3\\.venv",
+      "target_must_be_absent_before_attempt": true
+    },
+    "required_post_state": {
+      "venv_python": "C:\\AshareV3\\.venv\\Scripts\\python.exe",
+      "implementation": "CPython",
+      "version": "3.11.15",
+      "architecture": "x64",
+      "base_prefix": "C:\\AshareV3\\tools\\python\\cpython-3.11.15-windows-x86_64-none",
+      "pip_runnable": true,
+      "allowed_packages": "ensurepip_default_bootstrap_only",
+      "project_dependency_install_attempts": 0,
+      "user_and_machine_path_hashes_unchanged": true,
+      "hkcu_python_exists": false,
+      "legacy_msi_sha256_unchanged": true,
+      "git_for_windows_version": "2.55.0.windows.5",
+      "success_state": "MATERIALIZED_CPYTHON311_VENV_READY_STOP",
+      "failure_state": "BLOCKED_EVIDENCE_PRESERVED",
+      "n1_handoff_allowed": false
+    },
+    "forbidden_attempts": {
+      "uv_install_or_other_uv": 0,
+      "download": 0,
+      "psf_or_msi_install_repair_uninstall": 0,
+      "cleanup_or_delete": 0,
+      "materialized_python_root_modify": 0,
+      "path_or_registry": 0,
+      "project_package_install": 0,
+      "d_drive": 0,
+      "postgresql": 0,
+      "wsl": 0,
+      "scheduler": 0,
+      "mac": 0,
+      "nas": 0,
+      "n1_n6": 0
+    },
+    "terminal_after_python_verification": true,
     "cleanup_attempts": 0,
     "n1_handoff_allowed": false
   },

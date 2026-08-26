@@ -429,8 +429,14 @@ def evaluate_python_isolated_uv_install(
 def evaluate_python_isolated_uv_absent_registry_recovery(
     policy: dict[str, Any], request: dict[str, Any]
 ) -> str:
-    contract = policy["python311_isolated_uv_absent_registry_recovery"]
-    inherited = policy[contract["inherited_v10_contract"]["source_key"]]
+    # V11 reached terminal error 448 after consuming its single uv attempt.
+    return "REJECT"
+
+
+def evaluate_python_materialized_root_venv_recovery(
+    policy: dict[str, Any], request: dict[str, Any]
+) -> str:
+    contract = policy["python311_materialized_root_venv_recovery"]
     expected = {
         "policy_id": contract["policy_id"],
         "phase_mode": contract["phase_mode"],
@@ -440,27 +446,14 @@ def evaluate_python_isolated_uv_absent_registry_recovery(
         "automatic_retry_attempts": 0,
         "independent_execution_session": True,
         "governance_session": False,
-        "prior_v10_execution": contract["prior_v10_execution"],
+        "prior_v11_execution": contract["prior_v11_execution"],
         "required_fresh_read_only_pre_state": contract[
             "required_fresh_read_only_pre_state"
         ],
-        "registry_absence_contract": contract["registry_absence_contract"],
-        "inherited_v10_contract": contract["inherited_v10_contract"],
-        "operator": inherited["operator"],
-        "legacy_python_immutable_contract": inherited[
-            "legacy_python_immutable_contract"
-        ],
-        "uv_distribution": inherited["uv_distribution"],
-        "exact_directories_created": inherited["exact_directories_created"],
-        "process_environment": inherited["process_environment"],
-        "managed_python_install": inherited["managed_python_install"],
-        "managed_python_discovery": inherited["managed_python_discovery"],
-        "empty_venv": inherited["empty_venv"],
+        "exact_venv_creation": contract["exact_venv_creation"],
         "required_post_state": contract["required_post_state"],
-        "inherited_required_post_state": inherited["required_post_state"],
-        "required_zero_mutations": inherited["required_zero_mutations"],
-        "execution_script_safety": contract["execution_script_safety"],
-        "windows_mutations_before_registry_precheck_success": 0,
+        "forbidden_attempts": contract["forbidden_attempts"],
+        "terminal_after_python_verification": True,
         "cleanup_attempts": 0,
         "n1_handoff_allowed": False,
     }
@@ -611,7 +604,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 11)
+        self.assertEqual(self.policy["policy_version"], 12)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -1116,7 +1109,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             evaluate_python_isolated_uv_absent_registry_recovery(
                 self.policy, request
             ),
-            "ACCEPT",
+            "REJECT",
         )
         self.assertFalse(
             recovery["required_fresh_read_only_pre_state"]["hkcu_python_exists"]
@@ -1184,6 +1177,118 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                     "reg query",
                     "Get-Process",
                     "BLOCKED_EVIDENCE_PRESERVED",
+                ):
+                    self.assertIn(value, document)
+
+    def test_python311_materialized_root_venv_exact_contract(self) -> None:
+        recovery = self.policy["python311_materialized_root_venv_recovery"]
+        request = {
+            "policy_id": recovery["policy_id"],
+            "phase_mode": recovery["phase_mode"],
+            "parent_policy_commit": recovery["parent_policy_commit"],
+            "parent_policy_tree": recovery["parent_policy_tree"],
+            "attempts": 1,
+            "automatic_retry_attempts": 0,
+            "independent_execution_session": True,
+            "governance_session": False,
+            "prior_v11_execution": recovery["prior_v11_execution"],
+            "required_fresh_read_only_pre_state": recovery[
+                "required_fresh_read_only_pre_state"
+            ],
+            "exact_venv_creation": recovery["exact_venv_creation"],
+            "required_post_state": recovery["required_post_state"],
+            "forbidden_attempts": recovery["forbidden_attempts"],
+            "terminal_after_python_verification": True,
+            "cleanup_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(
+            evaluate_python_materialized_root_venv_recovery(self.policy, request),
+            "ACCEPT",
+        )
+        pre = recovery["required_fresh_read_only_pre_state"]
+        self.assertEqual(pre["version"], "3.11.15")
+        self.assertFalse(pre["real_python_root_is_reparse_point"])
+        self.assertEqual(
+            pre["python_executable_sha256"],
+            "6765C6B1685C86877FABE14D82240F3FAB2913A617A85E8D09E61DC40798013B",
+        )
+        self.assertEqual(
+            recovery["exact_venv_creation"]["argument_vector"],
+            ["-m", "venv", r"C:\AshareV3\.venv"],
+        )
+        for field, value in {
+            "parent_policy_commit": "0" * 40,
+            "parent_policy_tree": "0" * 40,
+            "attempts": 2,
+            "automatic_retry_attempts": 1,
+            "independent_execution_session": False,
+            "governance_session": True,
+            "prior_v11_execution": {"rerun_attempts_allowed": 1},
+            "required_fresh_read_only_pre_state": {
+                "real_python_root_is_reparse_point": True
+            },
+            "exact_venv_creation": {"argument_vector": ["-m", "venv", "wrong"]},
+            "required_post_state": {"version": "3.12"},
+            "forbidden_attempts": {"uv_install_or_other_uv": 1},
+            "terminal_after_python_verification": False,
+            "cleanup_attempts": 1,
+            "n1_handoff_allowed": True,
+        }.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request)
+                bad[field] = value
+                self.assertEqual(
+                    evaluate_python_materialized_root_venv_recovery(
+                        self.policy, bad
+                    ),
+                    "REJECT",
+                )
+        for field in pre:
+            with self.subTest(preflight_drift=field):
+                bad = copy.deepcopy(request)
+                bad["required_fresh_read_only_pre_state"][field] = "drift"
+                self.assertEqual(
+                    evaluate_python_materialized_root_venv_recovery(
+                        self.policy, bad
+                    ),
+                    "REJECT",
+                )
+        for field in recovery["forbidden_attempts"]:
+            with self.subTest(forbidden_attempt=field):
+                bad = copy.deepcopy(request)
+                bad["forbidden_attempts"][field] = 1
+                self.assertEqual(
+                    evaluate_python_materialized_root_venv_recovery(
+                        self.policy, bad
+                    ),
+                    "REJECT",
+                )
+
+    def test_python311_materialized_root_venv_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        for name, document in {
+            "Compiler": self.compiler,
+            "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox,
+            "Trace": self.trace,
+            "TestSuite": self.test_suite,
+            "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_python311_materialized_root_venv_recovery_v1",
+                    "w0_python311_materialized_root_venv_recovery",
+                    "e8c9f04393187cdfb4a75c8a10afa3e841368daf",
+                    "3adcb1265928adc81c8d73ddda9c301cdbb3dd21",
+                    "448",
+                    "untrusted mount point",
+                    "3.11.15",
+                    "-m venv",
+                    "BLOCKED_EVIDENCE_PRESERVED",
+                    "N1",
                 ):
                     self.assertIn(value, document)
 

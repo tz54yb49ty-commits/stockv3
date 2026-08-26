@@ -1296,3 +1296,16 @@ mutation/read-error continuation and Win32_Process CIM authority REJECT. Exact
 ashare-ops identity, PATH hashes, eight absent paths, MSI hash and Get-Process
 zero state are mandatory. All v10 uv/path/env/install/find/venv, immutable
 state, zero-mutation and no-cleanup/no-retry fields are inherited unchanged.
+
+### Windows W0 materialized-root venv recovery compilation
+
+`w0_python311_materialized_root_venv_recovery_v1` compiles only as one later
+independent `w0_python311_materialized_root_venv_recovery` attempt at parent
+`e8c9f04393187cdfb4a75c8a10afa3e841368daf`/tree
+`3adcb1265928adc81c8d73ddda9c301cdbb3dd21`. V11 is terminal after Windows
+error 448/untrusted mount point and its uv attempt is consumed. After exact
+read-only path/SHA/non-reparse/CPython 3.11.15 x64/stdlib/process and immutable
+PATH/HKCU/MSI/Git validation, the only compiled mutation is the real python
+with `-m venv C:\AshareV3\.venv` once. Any uv/download/PSF/MSI/cleanup/root
+modification, existing target, drift, package install or out-of-scope action
+compiles REJECT. Verified Python ends the phase without N1.

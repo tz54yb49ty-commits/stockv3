@@ -624,3 +624,14 @@ identity, PATH hashes, eight absent paths, MSI SHA, Get-Process zero and
 cleanup and out-of-scope counters remain zero. Inherited v10 fields remain
 trace-bound; terminals are `ISOLATED_NATIVE_CPYTHON311_READY` or
 `BLOCKED_EVIDENCE_PRESERVED`, with N1 false.
+
+The append-only `w0_python311_materialized_root_venv_recovery_v1` trace binds
+parent `e8c9f04393187cdfb4a75c8a10afa3e841368daf`/tree
+`3adcb1265928adc81c8d73ddda9c301cdbb3dd21`, v11 terminal Windows error 448 /
+untrusted mount point, consumed
+uv attempt, materialized-only mutation and cleanup/retry zero. Pre/post evidence
+records exact python path/SHA, non-reparse root, CPython 3.11.15 x64/stdlib,
+process zero, `.venv` absence, PATH hashes, HKCU absence, MSI SHA and Git.
+It records at most one exact `-m venv` attempt and venv version/x64/base_prefix/
+pip/default-ensurepip proof. All forbidden and out-of-scope counters stay zero;
+the phase ends READY_STOP or `BLOCKED_EVIDENCE_PRESERVED`, never N1.

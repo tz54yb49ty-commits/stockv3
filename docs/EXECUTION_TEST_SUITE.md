@@ -1675,3 +1675,15 @@ PATH hashes, eight absent paths, MSI hash, Get-Process zero and pre/post
 It asserts all inherited v10 sections equal. Negative fixtures reject
 `reg query`, registry existence/change/read-error continuation, mutation, v10 retry,
 CIM authority, short `H`, and identity/hash/path/env/attempt drift.
+
+Materialized-root venv fixtures register
+`w0_python311_materialized_root_venv_recovery_v1` and
+`w0_python311_materialized_root_venv_recovery` across all nine files. Positive
+evaluation binds parent `e8c9f04393187cdfb4a75c8a10afa3e841368daf`/tree
+`3adcb1265928adc81c8d73ddda9c301cdbb3dd21`, consumed v11 Windows error 448 /
+untrusted mount point, exact
+python path/SHA/non-reparse/3.11.15/x64/stdlib/process-zero, absent `.venv`,
+immutable PATH/HKCU/MSI/Git and one exact `-m venv` vector. Negative fixtures
+reject v11/uv retry, path/SHA/reparse/version/architecture/module/process or
+immutable-state drift, existing target, command/attempt drift, packages,
+cleanup/root modification and every out-of-scope mutation.
