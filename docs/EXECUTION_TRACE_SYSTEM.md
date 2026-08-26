@@ -613,3 +613,14 @@ pip/default-ensurepip inventory. Success records
 `BLOCKED_EVIDENCE_PRESERVED` and preserves partial paths. Retry, cleanup,
 admin/UAC, old MSI/bundle, PATH/registry, D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac,
 business dependency and N1-handoff counters remain zero. V9 stays REJECT.
+
+The append-only `w0_python311_isolated_uv_absent_registry_recovery_v1` trace
+binds parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`/tree
+`1302ccf7827fd250ba40cd92b2a66c968418f84e`, consumed v10, its exact
+pre-mutation failure and zero mutations. Before/after evidence records exact
+identity, PATH hashes, eight absent paths, MSI SHA, Get-Process zero and
+`Test-Path -LiteralPath Registry::HKEY_CURRENT_USER\Software\Python=False`.
+`reg query`, registry mutation/read-error continuation, CIM authority, retry,
+cleanup and out-of-scope counters remain zero. Inherited v10 fields remain
+trace-bound; terminals are `ISOLATED_NATIVE_CPYTHON311_READY` or
+`BLOCKED_EVIDENCE_PRESERVED`, with N1 false.

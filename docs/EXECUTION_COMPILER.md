@@ -1283,3 +1283,16 @@ old MSI/bundle/cache/target mutation, retry/cleanup, project dependencies or
 D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation compiles to REJECT. Failure
 preserves partial evidence; success is `ISOLATED_NATIVE_CPYTHON311_READY` but
 does not hand off N1. Compilation is not execution.
+
+### Windows W0 absent-registry recovery compilation (v11)
+
+`w0_python311_isolated_uv_absent_registry_recovery_v1` compiles only as the
+independent one-attempt `w0_python311_isolated_uv_absent_registry_recovery`
+phase at parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`, tree
+`1302ccf7827fd250ba40cd92b2a66c968418f84e`. V10 is consumed and cannot compile
+again. Pre/post registry probes are exactly `Test-Path -LiteralPath
+Registry::HKEY_CURRENT_USER\Software\Python=False`; `reg query`, registry
+mutation/read-error continuation and Win32_Process CIM authority REJECT. Exact
+ashare-ops identity, PATH hashes, eight absent paths, MSI hash and Get-Process
+zero state are mandatory. All v10 uv/path/env/install/find/venv, immutable
+state, zero-mutation and no-cleanup/no-retry fields are inherited unchanged.

@@ -422,7 +422,15 @@ def evaluate_python_appsearch_cycle_recovery(
 def evaluate_python_isolated_uv_install(
     policy: dict[str, Any], request: dict[str, Any]
 ) -> str:
-    contract = policy["python311_isolated_uv_managed_install"]
+    # V10 reached a terminal result and its single attempt is consumed.
+    return "REJECT"
+
+
+def evaluate_python_isolated_uv_absent_registry_recovery(
+    policy: dict[str, Any], request: dict[str, Any]
+) -> str:
+    contract = policy["python311_isolated_uv_absent_registry_recovery"]
+    inherited = policy[contract["inherited_v10_contract"]["source_key"]]
     expected = {
         "policy_id": contract["policy_id"],
         "phase_mode": contract["phase_mode"],
@@ -431,21 +439,28 @@ def evaluate_python_isolated_uv_install(
         "attempts": 1,
         "automatic_retry_attempts": 0,
         "independent_execution_session": True,
-        "operator": contract["operator"],
+        "governance_session": False,
+        "prior_v10_execution": contract["prior_v10_execution"],
         "required_fresh_read_only_pre_state": contract[
             "required_fresh_read_only_pre_state"
         ],
-        "legacy_python_immutable_contract": contract[
+        "registry_absence_contract": contract["registry_absence_contract"],
+        "inherited_v10_contract": contract["inherited_v10_contract"],
+        "operator": inherited["operator"],
+        "legacy_python_immutable_contract": inherited[
             "legacy_python_immutable_contract"
         ],
-        "uv_distribution": contract["uv_distribution"],
-        "exact_directories_created": contract["exact_directories_created"],
-        "process_environment": contract["process_environment"],
-        "managed_python_install": contract["managed_python_install"],
-        "managed_python_discovery": contract["managed_python_discovery"],
-        "empty_venv": contract["empty_venv"],
+        "uv_distribution": inherited["uv_distribution"],
+        "exact_directories_created": inherited["exact_directories_created"],
+        "process_environment": inherited["process_environment"],
+        "managed_python_install": inherited["managed_python_install"],
+        "managed_python_discovery": inherited["managed_python_discovery"],
+        "empty_venv": inherited["empty_venv"],
         "required_post_state": contract["required_post_state"],
-        "required_zero_mutations": contract["required_zero_mutations"],
+        "inherited_required_post_state": inherited["required_post_state"],
+        "required_zero_mutations": inherited["required_zero_mutations"],
+        "execution_script_safety": contract["execution_script_safety"],
+        "windows_mutations_before_registry_precheck_success": 0,
         "cleanup_attempts": 0,
         "n1_handoff_allowed": False,
     }
@@ -596,7 +611,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 10)
+        self.assertEqual(self.policy["policy_version"], 11)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -973,7 +988,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             "cleanup_attempts": 0,
             "n1_handoff_allowed": False,
         }
-        self.assertEqual(evaluate_python_isolated_uv_install(self.policy, request), "ACCEPT")
+        self.assertEqual(evaluate_python_isolated_uv_install(self.policy, request), "REJECT")
         self.assertEqual(recovery["operator"]["account"], r"TDX-STOCK\ashare-ops")
         self.assertFalse(recovery["operator"]["administrators_member"])
         self.assertEqual(recovery["operator"]["admin_or_uac_attempts"], 0)
@@ -1020,9 +1035,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             with self.subTest(field=field):
                 bad = copy.deepcopy(request)
                 bad[field] = value
-                self.assertEqual(
-                    evaluate_python_isolated_uv_install(self.policy, bad), "REJECT"
-                )
+                self.assertEqual(evaluate_python_isolated_uv_install(self.policy, bad), "REJECT")
 
         v9 = self.policy["python311_orphaned_dependency_appsearch_cycle_recovery"]
         self.assertEqual(
@@ -1058,6 +1071,119 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                     "ISOLATED_NATIVE_CPYTHON311_READY",
                     "BLOCKED_EVIDENCE_PRESERVED",
                     "N1",
+                ):
+                    self.assertIn(value, document)
+
+    def test_python311_absent_registry_v11_exact_contract_accepts(self) -> None:
+        recovery = self.policy[
+            "python311_isolated_uv_absent_registry_recovery"
+        ]
+        inherited = self.policy["python311_isolated_uv_managed_install"]
+        request = {
+            "policy_id": recovery["policy_id"],
+            "phase_mode": recovery["phase_mode"],
+            "parent_policy_commit": recovery["parent_policy_commit"],
+            "parent_policy_tree": recovery["parent_policy_tree"],
+            "attempts": 1,
+            "automatic_retry_attempts": 0,
+            "independent_execution_session": True,
+            "governance_session": False,
+            "prior_v10_execution": recovery["prior_v10_execution"],
+            "required_fresh_read_only_pre_state": recovery[
+                "required_fresh_read_only_pre_state"
+            ],
+            "registry_absence_contract": recovery["registry_absence_contract"],
+            "inherited_v10_contract": recovery["inherited_v10_contract"],
+            "operator": inherited["operator"],
+            "legacy_python_immutable_contract": inherited[
+                "legacy_python_immutable_contract"
+            ],
+            "uv_distribution": inherited["uv_distribution"],
+            "exact_directories_created": inherited["exact_directories_created"],
+            "process_environment": inherited["process_environment"],
+            "managed_python_install": inherited["managed_python_install"],
+            "managed_python_discovery": inherited["managed_python_discovery"],
+            "empty_venv": inherited["empty_venv"],
+            "required_post_state": recovery["required_post_state"],
+            "inherited_required_post_state": inherited["required_post_state"],
+            "required_zero_mutations": inherited["required_zero_mutations"],
+            "execution_script_safety": recovery["execution_script_safety"],
+            "windows_mutations_before_registry_precheck_success": 0,
+            "cleanup_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(
+            evaluate_python_isolated_uv_absent_registry_recovery(
+                self.policy, request
+            ),
+            "ACCEPT",
+        )
+        self.assertFalse(
+            recovery["required_fresh_read_only_pre_state"]["hkcu_python_exists"]
+        )
+        self.assertEqual(
+            recovery["registry_absence_contract"]["only_pre_and_post_probe"],
+            r"Test-Path -LiteralPath Registry::HKEY_CURRENT_USER\Software\Python",
+        )
+        self.assertEqual(len(recovery["required_fresh_read_only_pre_state"]["exact_absent_targets"]), 8)
+
+        negative = {
+            "parent_policy_commit": "0" * 40,
+            "parent_policy_tree": "0" * 40,
+            "attempts": 2,
+            "automatic_retry_attempts": 1,
+            "independent_execution_session": False,
+            "governance_session": True,
+            "prior_v10_execution": {"rerun_attempts_allowed": 1},
+            "required_fresh_read_only_pre_state": {"hkcu_python_exists": True},
+            "registry_absence_contract": {"only_pre_and_post_probe": "reg query"},
+            "operator": {"account": r"TDX-STOCK\47894"},
+            "uv_distribution": {"version": "latest"},
+            "exact_directories_created": [r"D:\Python"],
+            "process_environment": {"UV_PYTHON_NO_REGISTRY": "0"},
+            "managed_python_install": {"attempts": 2},
+            "managed_python_discovery": {"version": "3.12"},
+            "empty_venv": {"target": r"D:\.venv"},
+            "required_zero_mutations": {"registry_or_path": 1},
+            "execution_script_safety": {"short_variable_h_forbidden": False},
+            "windows_mutations_before_registry_precheck_success": 1,
+            "cleanup_attempts": 1,
+            "n1_handoff_allowed": True,
+        }
+        for field, value in negative.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request)
+                bad[field] = value
+                self.assertEqual(
+                    evaluate_python_isolated_uv_absent_registry_recovery(
+                        self.policy, bad
+                    ),
+                    "REJECT",
+                )
+
+    def test_python311_absent_registry_v11_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        for name, document in {
+            "Compiler": self.compiler,
+            "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox,
+            "Trace": self.trace,
+            "TestSuite": self.test_suite,
+            "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_python311_isolated_uv_absent_registry_recovery_v1",
+                    "w0_python311_isolated_uv_absent_registry_recovery",
+                    "a73b959e4360baf576c04f1a3d4a79f76b0f5bef",
+                    "1302ccf7827fd250ba40cd92b2a66c968418f84e",
+                    "Test-Path -LiteralPath",
+                    "Registry::HKEY_CURRENT_USER\\Software\\Python",
+                    "reg query",
+                    "Get-Process",
+                    "BLOCKED_EVIDENCE_PRESERVED",
                 ):
                     self.assertIn(value, document)
 

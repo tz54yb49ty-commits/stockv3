@@ -461,7 +461,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 10,
+  "policy_version": 11,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -481,7 +481,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
-      "w0_python311_isolated_uv_managed_install",
+      "w0_python311_isolated_uv_absent_registry_recovery",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -492,7 +492,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "w0_postgresql_virtual_identity_1639_recovery",
       "w0_postgresql_virtual_identity_22_recovery",
       "w0_python311_per_user_scope_collision_recovery",
-      "w0_python311_isolated_uv_managed_install",
+      "w0_python311_isolated_uv_absent_registry_recovery",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -938,6 +938,89 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "business_dependencies": 0
     },
     "failure_state": "BLOCKED_EVIDENCE_PRESERVED",
+    "cleanup_attempts": 0,
+    "n1_handoff_allowed": false
+  },
+  "python311_isolated_uv_absent_registry_recovery": {
+    "policy_id": "w0_python311_isolated_uv_absent_registry_recovery_v1",
+    "phase_mode": "w0_python311_isolated_uv_absent_registry_recovery",
+    "parent_policy_commit": "a73b959e4360baf576c04f1a3d4a79f76b0f5bef",
+    "parent_policy_tree": "1302ccf7827fd250ba40cd92b2a66c968418f84e",
+    "attempts": 1,
+    "automatic_retry_attempts": 0,
+    "governance_session_cannot_execute": true,
+    "execution_session_must_be_independent": true,
+    "prior_v10_execution": {
+      "policy_id": "w0_python311_isolated_uv_managed_install_v1",
+      "attempts_consumed": 1,
+      "rerun_attempts_allowed": 0,
+      "terminal": "BLOCKED_EVIDENCE_PRESERVED",
+      "exact_stage": "required_fresh_read_only_pre_state_before_first_mutation",
+      "reason": "absent_HKCU_Software_Python_misclassified_by_reg_query_under_ErrorActionPreference_Stop",
+      "windows_mutations": 0,
+      "download_install_expand_venv_directory_create_cleanup_retry_attempts": 0
+    },
+    "required_fresh_read_only_pre_state": {
+      "account": "TDX-STOCK\\ashare-ops",
+      "sid": "S-1-5-21-2072264739-3883739137-88032818-1006",
+      "administrators_member": false,
+      "git_for_windows_version": "2.55.0.windows.5",
+      "user_path_utf16le_sha256": "E85FFD5D0AE1D921D5840C76D75B22F77291946F1B7815EFD5845A897BEC5D31",
+      "machine_path_utf16le_sha256": "AA5714E96C1419AC785E9C930EF3B4B2B972AA219FF2C124DE5DA51934558B53",
+      "hkcu_python_exists": false,
+      "exact_absent_targets": [
+        "C:\\AshareV3\\tools",
+        "C:\\AshareV3\\tools\\uv-0.12.1",
+        "C:\\AshareV3\\tools\\python",
+        "C:\\AshareV3\\runtime\\uv-cache",
+        "C:\\AshareV3\\.venv",
+        "C:\\AshareV3\\staging\\installers\\uv-x86_64-pc-windows-msvc-0.12.1.zip",
+        "C:\\Program Files\\Python311",
+        "C:\\Users\\47894\\AppData\\Local\\Programs\\Python\\Python311"
+      ],
+      "legacy_msi_path": "C:\\WINDOWS\\Installer\\15c7d68.msi",
+      "legacy_msi_sha256": "8A5C585D2A718BA73A4D1BB7A675DDBF56C016B6B851F2D32E07FF5DA48B1A4C",
+      "process_enumeration": "Get-Process exact names python,pythonw,uv,msiexec,python-3.11.9-amd64",
+      "matching_process_count": 0,
+      "win32_process_cim_as_preflight_authority": false
+    },
+    "registry_absence_contract": {
+      "only_pre_and_post_probe": "Test-Path -LiteralPath Registry::HKEY_CURRENT_USER\\Software\\Python",
+      "required_pre_result": false,
+      "required_post_result": false,
+      "reg_query_absent_key_attempts": 0,
+      "registry_create_or_modify_attempts": 0,
+      "registry_read_error_allows_mutation": false
+    },
+    "inherited_v10_contract": {
+      "source_key": "python311_isolated_uv_managed_install",
+      "source_policy_id": "w0_python311_isolated_uv_managed_install_v1",
+      "all_fields_inherited_without_relaxation": true,
+      "exact_sections": [
+        "operator",
+        "legacy_python_immutable_contract",
+        "uv_distribution",
+        "exact_directories_created",
+        "process_environment",
+        "managed_python_install",
+        "managed_python_discovery",
+        "empty_venv",
+        "required_post_state",
+        "required_zero_mutations"
+      ]
+    },
+    "execution_script_safety": {
+      "short_variable_h_forbidden": true,
+      "hash_function_name": "Get-ExactFileSha256",
+      "remote_transport_is_policy_authority": false
+    },
+    "required_post_state": {
+      "hkcu_python_exists": false,
+      "success_state": "ISOLATED_NATIVE_CPYTHON311_READY",
+      "failure_state": "BLOCKED_EVIDENCE_PRESERVED",
+      "n1_handoff_allowed": false
+    },
+    "windows_mutations_before_registry_precheck_success": 0,
     "cleanup_attempts": 0,
     "n1_handoff_allowed": false
   },

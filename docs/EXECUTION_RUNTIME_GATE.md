@@ -795,3 +795,16 @@ admin/UAC, pipe-to-iex, overwrite, self-update, system/Store/3.12, registry/
 PATH/cleanup/dependency or D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation
 returns REJECT. Success is `ISOLATED_NATIVE_CPYTHON311_READY`; failure is
 `BLOCKED_EVIDENCE_PRESERVED`; both keep `n1_handoff_allowed=false`.
+
+### Isolated uv absent-registry v11 gate
+
+The Gate may ACCEPT `w0_python311_isolated_uv_absent_registry_recovery_v1`
+only in a later independent `w0_python311_isolated_uv_absent_registry_recovery`
+request at parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`/tree
+`1302ccf7827fd250ba40cd92b2a66c968418f84e`. V10 is consumed. The exact
+non-admin identity, PATH UTF16LE hashes, eight absent paths, MSI hash,
+Get-Process zero state and pre/post `Test-Path -LiteralPath
+Registry::HKEY_CURRENT_USER\Software\Python=False` must match. `reg query`,
+registry existence/change/read-error continuation, Win32_Process CIM, v10
+retry or identity/hash/path/env/attempt drift REJECT. Every v10 uv, C-only,
+install/find/venv, immutable-state and zero-mutation field remains exact.

@@ -703,3 +703,15 @@ extra interpreter/root/package, registry/PATH delta or any forbidden counter.
 Simulation PASS is not execution, never cleans partial state, never enables N1,
 and cannot override the v9 internal-MSI REJECT.
 The only simulated success is `ISOLATED_NATIVE_CPYTHON311_READY`.
+
+### Isolated uv absent-registry v11 simulation
+
+Simulation binds `w0_python311_isolated_uv_absent_registry_recovery_v1` to
+parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`/tree
+`1302ccf7827fd250ba40cd92b2a66c968418f84e` and treats v10 as consumed. Before
+any mutation it requires exact ashare-ops identity, PATH hashes, eight absent
+paths, MSI hash, Get-Process zero and `Test-Path -LiteralPath
+Registry::HKEY_CURRENT_USER\Software\Python=False`. `reg query`, registry
+existence/change/read-error continuation, Win32_Process CIM, short variable
+`H`, retry or drift fail closed. All v10 uv/env/install/find/venv and isolation
+fields remain unchanged. Simulation PASS is not execution or N1 authority.

@@ -1664,3 +1664,14 @@ overwrite/self-update; missing isolation env; system/Store/3.12/registry/PATH;
 multiple roots, prerelease or <3.11.9; missing stdlib/pip/base-prefix proof;
 extra venv packages; retry/cleanup; old MSI/bundle/cache/target change; and every
 D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac or business-dependency mutation.
+
+Isolated uv absent-registry v11 fixtures register
+`w0_python311_isolated_uv_absent_registry_recovery_v1` and
+`w0_python311_isolated_uv_absent_registry_recovery` across all nine files.
+Positive evaluation binds parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`/
+tree `1302ccf7827fd250ba40cd92b2a66c968418f84e`, consumed v10, exact identity,
+PATH hashes, eight absent paths, MSI hash, Get-Process zero and pre/post
+`Test-Path -LiteralPath Registry::HKEY_CURRENT_USER\Software\Python=False`.
+It asserts all inherited v10 sections equal. Negative fixtures reject
+`reg query`, registry existence/change/read-error continuation, mutation, v10 retry,
+CIM authority, short `H`, and identity/hash/path/env/attempt drift.

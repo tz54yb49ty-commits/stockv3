@@ -261,3 +261,18 @@ module/package/attempt drift, partial failure, admin/UAC, old MSI operations,
 pipe-to-iex, overwrite/self-update, PATH/registry, cleanup, project dependency,
 and D/PG/WSL/Scheduler/Git/N1-N6/NAS/Mac mutation. Failure preserves partial
 evidence as `BLOCKED_EVIDENCE_PRESERVED` without retry.
+
+### V11 absent HKCU Python registry recovery gate
+
+Test `w0_python311_isolated_uv_absent_registry_recovery_v1` only in a later
+independent phase at parent `a73b959e4360baf576c04f1a3d4a79f76b0f5bef`,
+tree `1302ccf7827fd250ba40cd92b2a66c968418f84e`; v10 is consumed. The positive
+fixture freezes non-admin ashare-ops, Git 2.55.0.windows.5, both PATH UTF16LE
+hashes, eight absent paths, legacy MSI SHA, exact Get-Process zero and only
+`Test-Path -LiteralPath Registry::HKEY_CURRENT_USER\Software\Python=False`
+before/after. Inherit all v10 uv URL/SHA, C paths, six environment values,
+install/find/venv, immutable state and zero-mutation fields. Reject `reg query`,
+registry existence/change/read-error continuation, Win32_Process CIM, short
+variable `H`, precheck mutation, v10 retry and identity/hash/path/env/attempt
+drift. Success/failure remain `ISOLATED_NATIVE_CPYTHON311_READY`/
+`BLOCKED_EVIDENCE_PRESERVED`; N1 remains false.
