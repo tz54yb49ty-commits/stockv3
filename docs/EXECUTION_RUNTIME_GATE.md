@@ -662,8 +662,9 @@ current WSL interop returns `REJECT`.
 For `w0_prepare_and_mutate`, Runtime Gate rechecks the dynamically frozen
 current exact Scheduler inventory, `postgresql-x64-18`, `Git.Git`,
 exact EDB `PostgreSQL.PostgreSQL.16` 16.15-1, conditional
-`Python.Python.3.11`, C/D path, service `postgresql-x64-16`, local account
-`TDX-STOCK\postgres`, empty-cluster, loopback-listener, ACL,
+`Python.Python.3.11`, C/D path, service `postgresql-x64-16`, transient
+`NT AUTHORITY\NetworkService`, final `NT SERVICE\postgresql-x64-16`,
+empty-cluster, loopback-listener, ACL,
 CPython/TdxW/17709 and evidence
 contracts in the Kernel policy. It requires Mac import, Tushare/Mootdx,
 N1-N6/NAS/business write, Scheduler creation/enable/delete, legacy uninstall/
@@ -693,18 +694,13 @@ Authenticode `Valid` and signer `EnterpriseDB Corporation`. Read-only account
 preflight also freezes exact staged path
 `C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe`;
 PostgreSQL execution is interactive GUI only, never winget/unattended.
-Read-only account
-preflight must resolve either missing local `TDX-STOCK\postgres` or the exact
-existing account. Only the missing state permits one installer account-create
-attempt. Existing-account password reset, another account, second attempt,
-group change or retry returns `REJECT`. Postflight requires service-logon only,
-local/RDP/network/batch interactive logon denied, and access limited to the
-exact PostgreSQL D roots while routine ashare-ops remains fully denied D.
-Historical PG18 `NT AUTHORITY\NetworkService` is quality evidence only and is
-not an allowed final PG16 identity.
+Gate permits NetworkService only through GUI install/empty-cluster bootstrap.
+It then requires service stopped, one StartName transition, SID type
+`UNRESTRICTED`, exact final virtual account, exact D ACLs and final
+NetworkService ACL count zero before any connection or business action.
 
-Because EDB uses one password for the database superuser and Windows service
-account, Gate permits secret entry only in the elevated installer GUI. Any
+The entered password belongs only to the database superuser; the virtual service
+account has no password. Gate permits secret entry only in the installer GUI. Any
 unattended secret, command-line/argv/environment/response-file/history/
 transcript/log/evidence/screenshot disclosure, or recorded secret value/hash
 returns `REJECT`. Evidence may contain only a redacted GUI-entry completion

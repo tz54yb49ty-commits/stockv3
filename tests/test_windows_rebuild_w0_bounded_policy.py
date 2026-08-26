@@ -150,9 +150,14 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "postgresql_authenticode_status": "Valid",
         "postgresql_installer_signer": "EnterpriseDB Corporation",
         "postgresql_service_name": "postgresql-x64-16",
-        "postgresql_service_account": r"TDX-STOCK\postgres",
-        "postgresql_service_account_preflight_state": "missing_local_postgres_account",
-        "postgresql_service_account_create_attempts": 1,
+        "postgresql_transient_installer_identity": r"NT AUTHORITY\NetworkService",
+        "postgresql_service_account": r"NT SERVICE\postgresql-x64-16",
+        "postgresql_service_stopped_before_transition": True,
+        "postgresql_service_identity_transition_attempts": 1,
+        "postgresql_service_sid_type": "UNRESTRICTED",
+        "postgresql_networkservice_acl_count_final": 0,
+        "postgresql_empty_business_db": True,
+        "postgresql_loopback_5432_verified": True,
         "postgresql_service_logon_only": True,
         "postgresql_interactive_logons_denied": True,
         "postgresql_networkservice_final_identity": False,
@@ -289,23 +294,23 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
         ],
         "postgresql_installer_signer": allowlist["postgresql_installer_signer"],
         "postgresql_service_name": pg["service_name"],
-        "postgresql_service_account": pg["service_account"],
+        "postgresql_transient_installer_identity": pg["transient_installer_identity"],
+        "postgresql_service_account": pg["final_service_account"],
     }
     if any(request.get(key) != value for key, value in exact_pg_values.items()):
         return reject
-    pg_state = request.get("postgresql_service_account_preflight_state")
-    pg_create_attempts = request.get("postgresql_service_account_create_attempts")
-    if pg_state == "missing_local_postgres_account":
-        if pg_create_attempts != pg["account_create_attempts_when_missing"]:
-            return reject
-    elif pg_state == "existing_exact_local_postgres_account":
-        if pg_create_attempts != pg["account_create_attempts_when_existing"]:
-            return reject
-    else:
+    if request.get("postgresql_service_identity_transition_attempts") != 1:
+        return reject
+    if request.get("postgresql_service_sid_type") != "UNRESTRICTED":
+        return reject
+    if request.get("postgresql_networkservice_acl_count_final") != 0:
         return reject
     for field in (
         "postgresql_service_logon_only",
         "postgresql_interactive_logons_denied",
+        "postgresql_service_stopped_before_transition",
+        "postgresql_empty_business_db",
+        "postgresql_loopback_5432_verified",
         "postgresql_secret_entered_only_in_elevated_gui",
         "postgresql_secret_redaction_audit_passed",
     ):
@@ -459,7 +464,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 4)
+        self.assertEqual(self.policy["policy_version"], 5)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -471,17 +476,12 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             r"C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe",
         )
         self.assertEqual(pg["service_name"], "postgresql-x64-16")
-        self.assertEqual(pg["service_account"], r"TDX-STOCK\postgres")
+        self.assertEqual(pg["transient_installer_identity"], r"NT AUTHORITY\NetworkService")
+        self.assertEqual(pg["final_service_account"], r"NT SERVICE\postgresql-x64-16")
         self.assertTrue(pg["networkservice_final_identity_forbidden"])
-        self.assertTrue(pg["password_shared_by_database_superuser_and_windows_service_account"])
+        self.assertEqual(pg["gui_password_scope"], "postgresql_database_superuser_only")
+        self.assertEqual(allowlist["postgresql_port"], 5432)
         self.assertEqual(self.decision(), "ACCEPT")
-        self.assertEqual(
-            self.decision(
-                postgresql_service_account_preflight_state="existing_exact_local_postgres_account",
-                postgresql_service_account_create_attempts=0,
-            ),
-            "ACCEPT",
-        )
 
     def test_postgresql_wrong_identity_attempt_or_secret_boundary_rejects(self) -> None:
         for overrides in (
@@ -496,18 +496,19 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             {"postgresql_service_name": "AshareV3-PostgreSQL-16"},
             {"postgresql_service_account": r"NT AUTHORITY\NetworkService"},
             {"postgresql_networkservice_final_identity": True},
-            {"postgresql_service_account_preflight_state": "unknown"},
-            {"postgresql_service_account_create_attempts": 2},
-            {
-                "postgresql_service_account_preflight_state": "existing_exact_local_postgres_account",
-                "postgresql_service_account_create_attempts": 1,
-            },
+            {"postgresql_transient_installer_identity": r"LocalSystem"},
+            {"postgresql_service_identity_transition_attempts": 2},
+            {"postgresql_service_stopped_before_transition": False},
+            {"postgresql_service_sid_type": "NONE"},
+            {"postgresql_networkservice_acl_count_final": 1},
+            {"postgresql_empty_business_db": False},
+            {"postgresql_loopback_5432_verified": False},
             {"postgresql_service_logon_only": False},
             {"postgresql_interactive_logons_denied": False},
             {"postgresql_secret_entered_only_in_elevated_gui": False},
             {"postgresql_secret_redaction_audit_passed": False},
             {"postgresql_secret_value_or_hash_recorded": True},
-            {"postgres_existing_account_password_reset_attempts": 1},
+            {"postgres_local_account_create_attempts": 1},
             {"postgres_secret_command_line_or_process_argv_attempts": 1},
         ):
             with self.subTest(overrides=overrides):
@@ -697,7 +698,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             self.assertIn(phase, suite)
         self.assertTrue(self.policy["governance_session_cannot_execute"])
 
-    def test_postgresql_v4_semantics_are_present_across_full_chain(self) -> None:
+    def test_postgresql_v5_semantics_are_present_across_full_chain(self) -> None:
         plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
             encoding="utf-8"
         )
@@ -714,11 +715,12 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                 for value in (
                     "16.15-1",
                     "postgresql-x64-16",
-                    r"TDX-STOCK\postgres",
+                    r"NT SERVICE\postgresql-x64-16",
                     "DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2",
                     "EnterpriseDB Corporation",
                     "Valid",
                     r"NT AUTHORITY\NetworkService",
+                    "UNRESTRICTED",
                     r"C:\AshareV3\staging\installers\postgresql-16.15-1-windows-x64-download-v1.exe",
                 ):
                     self.assertIn(value, document)

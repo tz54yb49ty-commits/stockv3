@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 4,
+  "policy_version": 5,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5455,8 +5455,10 @@ phase combination, retry or excess attempt returns `REJECT`.
     "postgresql_data_directory": "D:\\PostgreSQL\\16\\data",
     "postgresql_backup_staging": "D:\\PostgreSQL\\backup-staging",
     "postgresql_listen_addresses": "127.0.0.1",
+    "postgresql_port": 5432,
     "postgresql_service_name": "postgresql-x64-16",
-    "postgresql_service_account": "TDX-STOCK\\postgres",
+    "postgresql_transient_installer_identity": "NT AUTHORITY\\NetworkService",
+    "postgresql_service_account": "NT SERVICE\\postgresql-x64-16",
     "c_directories": [
       "C:\\AshareV3\\app",
       "C:\\AshareV3\\config",
@@ -5509,22 +5511,23 @@ phase combination, retry or excess attempt returns `REJECT`.
     "installation_mode": "interactive_gui_from_exact_staged_installer",
     "winget_unattended_execution_forbidden": true,
     "service_name": "postgresql-x64-16",
-    "service_account": "TDX-STOCK\\postgres",
+    "transient_installer_identity": "NT AUTHORITY\\NetworkService",
+    "transient_identity_allowed_only_during_gui_install_and_empty_cluster_bootstrap": true,
+    "final_service_account": "NT SERVICE\\postgresql-x64-16",
+    "local_account_create_attempts": 0,
+    "service_identity_transition_attempts": 1,
+    "service_must_be_stopped_before_identity_or_acl_transition": true,
+    "service_sid_type": "UNRESTRICTED",
+    "scm_virtual_account_password": "none",
+    "networkservice_acl_count_final": 0,
+    "final_gate_requires_service_name_startname_sid_acl_loopback_empty_business_and_zero_imports": true,
     "networkservice_final_identity_forbidden": true,
-    "service_account_preflight_states": [
-      "missing_local_postgres_account",
-      "existing_exact_local_postgres_account"
-    ],
-    "installer_may_create_account_only_when_missing": true,
-    "account_create_attempts_when_missing": 1,
-    "account_create_attempts_when_existing": 0,
-    "existing_account_password_reset_forbidden": true,
     "service_logon_only": true,
     "interactive_local_rdp_network_batch_logon_forbidden": true,
     "account_group_membership_change_forbidden": true,
     "gui_secret_entry_required": true,
     "unattended_install_with_secret_forbidden": true,
-    "password_shared_by_database_superuser_and_windows_service_account": true,
+    "gui_password_scope": "postgresql_database_superuser_only",
     "secret_forbidden_locations": [
       "command_line",
       "process_argv",
@@ -5585,7 +5588,7 @@ phase combination, retry or excess attempt returns `REJECT`.
     "elevated_operator_is_not_routine_codex_or_application": true,
     "operator_d_access_must_not_be_used_as_routine_acl_failure": true,
     "unknown_sid_rejected": true,
-    "account_create_password_group_or_privilege_change_forbidden_except_exact_edb_postgres_creation": true,
+    "account_create_password_group_or_privilege_change_forbidden": true,
     "postgresql_identity_non_interactive": true,
     "postgresql_identity_access_scope": [
       "D:\\PostgreSQL\\16",
@@ -5655,6 +5658,7 @@ phase combination, retry or excess attempt returns `REJECT`.
     "postgres_secret_absent_from_command_line_environment_logs_evidence_and_screenshots",
     "new_cluster_identity_and_zero_business_objects",
     "listen_addresses_exactly_127_0_0_1",
+    "postgresql_port_exactly_5432",
     "c_and_d_owner_acl_sddl_and_effective_access",
     "application_and_codex_d_access_denials",
     "TdxW_process_and_127_0_0_1_17709_owner",
@@ -5692,9 +5696,9 @@ phase combination, retry or excess attempt returns `REJECT`.
     "business_venv_create_attempts",
     "project_package_install_attempts",
     "non_postgresql_identity_account_create_attempts",
-    "postgres_account_create_attempts_without_missing_preflight",
-    "postgres_account_second_create_attempts",
-    "postgres_existing_account_password_reset_attempts",
+    "postgres_local_account_create_attempts",
+    "postgres_service_identity_second_transition_attempts",
+    "postgres_service_start_before_final_identity_acl_attempts",
     "postgres_secret_command_line_or_process_argv_attempts",
     "postgres_secret_environment_or_response_file_attempts",
     "postgres_secret_log_history_transcript_evidence_or_screenshot_attempts",
@@ -5719,11 +5723,10 @@ phase combination, retry or excess attempt returns `REJECT`.
     "Python 3.12 or 3.14 substitution",
     "Python source build or third-party distribution",
     "W0 business venv or project package install",
-    "new Windows account except one installer-created TDX-STOCK\\postgres when preflight proves it missing",
-    "password reset or password/group/privilege mutation outside the exact EDB GUI creation contract",
+    "new Windows local account or account password/group/privilege mutation",
     "PostgreSQL secret in command line, argv, environment, response file, history, transcript, log, evidence or screenshot",
-    "interactive logon for TDX-STOCK\\postgres",
-    "NT AUTHORITY\\NetworkService as final PostgreSQL 16 identity",
+    "NT AUTHORITY\\NetworkService after bounded installer bootstrap",
+    "final PostgreSQL 16 identity other than NT SERVICE\\postgresql-x64-16",
     "unknown or swapped routine/elevated SID",
     "routine identity in Administrators",
     "WSL interop enabled or appendWindowsPath true after restart",
@@ -5781,17 +5784,15 @@ PostgreSQL installation is frozen to official EDB 16.15-1 x64: package
 `https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe`,
 SHA-256 `DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
 Authenticode `Valid`, signer `EnterpriseDB Corporation`, service
-`postgresql-x64-16`, and local service account `TDX-STOCK\postgres`. Only when
-read-only preflight proves that exact local account missing may the installer
-create it once. Existing-account password reset, any other account creation,
-group change or automatic retry is forbidden. The account is service-logon
-only, with local/RDP/network/batch interactive logon forbidden and access
-limited to `D:\PostgreSQL\16` and `D:\PostgreSQL\backup-staging`.
-The historical PG18 `NT AUTHORITY\NetworkService` configuration is read-only
-quality evidence only and is explicitly rejected as the final PG16 identity.
+`postgresql-x64-16`. `NT AUTHORITY\NetworkService` is allowed only transiently
+during the official GUI install and empty-cluster bootstrap. Before any business
+connection/schema/N1-N6 action, the service must be stopped and changed once to
+passwordless virtual account `NT SERVICE\postgresql-x64-16`; SID type must be
+`UNRESTRICTED`. Only that SID receives the exact D-root ACLs and every
+NetworkService ACE on those roots must be removed. No local account is created.
 
-The EDB GUI password is a shared database-superuser/Windows-service-account
-secret. It must be entered only by the independent elevated operator in GUI
+The EDB GUI password is only the PostgreSQL database-superuser secret, never a
+Windows service-account password. It must be entered only by the elevated operator in GUI
 password controls. It may never appear in command lines, process argv,
 environment variables, response files, shell history, transcripts, logs,
 evidence or screenshots; neither its value nor a hash may be retained.

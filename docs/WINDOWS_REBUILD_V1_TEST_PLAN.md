@@ -45,8 +45,7 @@ release pass.
   `S-1-5-21-2072264739-3883739137-88032818-1002` as the distinct Administrators
   operator. Use 47894 only for the exact prepare admin allowlist; evaluate
   routine D denial only as ashare-ops. Do not create accounts or change
-  passwords, groups or privileges except that exact EDB installer may create
-  local `TDX-STOCK\postgres` once when read-only preflight proves it missing.
+  passwords, groups or privileges.
 - Read-only preflight native CPython 3.11 x64. If valid, perform zero Python
   mutation. If missing or damaged, allow exactly one official winget
   `Python.Python.3.11` machine-wide x64 install/repair at
@@ -58,8 +57,9 @@ release pass.
   `b2b94b967f478408848d007c83cc7155367c3aa9`.
 - Verify the clean Git checkout commit and the release manifest.
 - Install exact official EDB PostgreSQL 16.15-1 x64 under `D:\PostgreSQL\16`
-  using package `PostgreSQL.PostgreSQL.16`, service `postgresql-x64-16`, local
-  account `TDX-STOCK\postgres`, SHA-256
+  using package `PostgreSQL.PostgreSQL.16`, service `postgresql-x64-16`, transient
+  installer identity `NT AUTHORITY\NetworkService`, final passwordless virtual
+  account `NT SERVICE\postgresql-x64-16`, SHA-256
   `DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
   Authenticode `Valid`, signer `EnterpriseDB Corporation`; initialize a new empty
   cluster at `D:\PostgreSQL\16\data`, and bind only to `127.0.0.1`.
@@ -69,13 +69,13 @@ release pass.
   Mac dump, record, source-version, and evidence imports must each remain zero.
   W0 must not create or migrate the `ashare_v3` business schema and must not
   write N1-N6 data.
-- Require the postgres account to be service-logon only with local/RDP/network/
-  batch logon denied and access limited to the exact D PostgreSQL roots. Enter
-  the shared DB-superuser/service-account password only in the elevated EDB GUI;
+- After empty bootstrap, stop the service, change StartName exactly once to the
+  virtual account, set SID type UNRESTRICTED, grant exact D roots, remove every
+  NetworkService ACE, then verify start and loopback. Enter the database-
+  superuser-only password only in the elevated EDB GUI;
   never place it or its hash in CLI/argv/env/response files/history/transcripts/
-  logs/evidence/screenshots. Existing-account password reset and retry are
-  forbidden; historical PG18 `NT AUTHORITY\NetworkService` is not an allowed
-  final PG16 identity.
+  logs/evidence/screenshots. Local-account creation and retry are forbidden;
+  NetworkService is not an allowed final PG16 identity.
 - Confirm TdxW is logged in, `127.0.0.1:17709` is listening, and method-level
   TQ capability smokes pass.
 - Dynamically freeze every current TaskName or TaskPath belonging to AshareV3,

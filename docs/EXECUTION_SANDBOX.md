@@ -569,8 +569,9 @@ enable), stop plus disable of `postgresql-x64-18` (never uninstall or touch
 its program/data), packages `Git.Git` and `PostgreSQL.PostgreSQL.16` with
 PostgreSQL >=16.14, and these exact database resources:
 `D:\PostgreSQL\16`, `D:\PostgreSQL\16\data`,
-`D:\PostgreSQL\backup-staging`, service `postgresql-x64-16`, local account
-`TDX-STOCK\postgres`, and `listen_addresses=127.0.0.1`. The installer is exact
+`D:\PostgreSQL\backup-staging`, service `postgresql-x64-16`, transient
+`NT AUTHORITY\NetworkService`, final `NT SERVICE\postgresql-x64-16`, and
+`listen_addresses=127.0.0.1`. The installer is exact
 EDB 16.15-1 x64 with SHA-256
 `DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
 Authenticode `Valid`, signer `EnterpriseDB Corporation`.
@@ -622,16 +623,14 @@ EDB postgres-account creation contract, routine admin/SSH or
 integrity failure, elevated use outside prepare, or current-WSL interop predicts
 `REJECT`.
 
-Account simulation first resolves missing versus exact-existing
-`TDX-STOCK\postgres`. Missing permits the EDB installer to create that account
-once; existing permits zero create/reset attempts. It requires service-logon
-only, denies local/RDP/network/batch interactive logon and rejects any other
-account/group/privilege mutation. The shared database-superuser/service-account
-password is modeled only as redacted elevated-GUI entry. Any secret in command
+Simulation allows NetworkService only until empty bootstrap completes, then
+requires STOP -> one virtual-account StartName change -> SID type UNRESTRICTED
+-> exact virtual-account ACL -> NetworkService ACL removal -> verified start.
+The database-superuser-only password is modeled only as redacted GUI entry. Any secret in command
 line, argv, environment, response file, history, transcript, log, evidence or
 screenshot, including a retained secret hash, predicts fail-closed `REJECT`.
-The old PG18 `NT AUTHORITY\NetworkService` fact is modeled only as read-only
-quality evidence; using it as final PG16 identity predicts `REJECT`.
+NetworkService as final identity, ACL count above zero, local-user creation or
+starting before identity/ACL closure predicts `REJECT`.
 
 Restart simulation requires explicit C only, absent `/mnt/d`, `[interop]
 enabled=false`, `appendWindowsPath=false`, and Linux `ashare-codex` access to

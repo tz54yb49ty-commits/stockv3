@@ -486,7 +486,8 @@ access result, exact EDB 16.15-1 URL/version/SHA-256
 `DE926FEFAD00E313E212CD438C0F04BF033E200099AD56C012724EFCEBED79F2`,
 Authenticode `Valid`,
 signer `EnterpriseDB Corporation`,
-service `postgresql-x64-16`, local account `TDX-STOCK\postgres`, empty-cluster proof,
+service `postgresql-x64-16`, transient `NT AUTHORITY\NetworkService`, final
+`NT SERVICE\postgresql-x64-16`, empty-cluster proof,
 loopback-only configuration, CPython 3.11 x64, TdxW, `127.0.0.1:17709`, and
 the proposed WSL configuration. It records per-resource attempted/succeeded/
 failed mutation counts and proves every forbidden count is zero, including
@@ -510,18 +511,17 @@ signer and SHA-256, attempt/result, and postflight python.exe existence, PE x64,
 3.12/3.14, source/third-party, unknown uninstall, cleanup, business-venv and
 project-package attempts. Failure is append-only blocked evidence.
 
-PostgreSQL trace fields record the local postgres-account preflight state,
-account SID/groups/logon rights before and after, create-attempt count (one
-only when missing; otherwise zero), service image/data path and exact D ACL.
-They record that the EDB GUI password is shared by database superuser and
-Windows service account, but never record its value or hash. The trace stores
+PostgreSQL trace fields record GUI-summary identity, bootstrap completion,
+service stop, one StartName transition, `UNRESTRICTED` SID type, virtual-account
+SID resolution, exact D ACL before/after, NetworkService ACE removal/count zero,
+service image/data path and verified start. The GUI password is database-
+superuser-only and never a service-account password. The trace stores
 only redacted GUI-entry completion and redaction-audit PASS, plus zero counters
 for secret appearance in command line, argv, environment, response file,
-history, transcript, log, evidence or screenshot. Existing-account reset,
-interactive logon enablement, second create/install attempt, leakage or
+history, transcript, log, evidence or screenshot. Local-account creation,
+second transition/install attempt, early start, leakage or
 incomplete redaction evidence is fail-closed and append-only.
-The trace may record historical PG18 `NT AUTHORITY\NetworkService` only as
-non-authoritative quality evidence and must prove it was not selected for PG16.
+NetworkService after bootstrap is fail-closed; final ACL count must be zero.
 
 The shutdown trace requires and hash-binds that exact `RESTART_REQUIRED`
 prepare entry. It records frozen evidence before connection loss, one native
