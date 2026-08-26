@@ -10,10 +10,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_ID = "windows_rebuild_w0_bounded_v1"
+AGENTS_PATH = ROOT / "AGENTS.md"
+COMPILER_PATH = ROOT / "docs" / "EXECUTION_COMPILER.md"
+KERNEL_PATH = ROOT / "docs" / "EXECUTION_KERNEL.md"
 
 
-def load_policy() -> dict[str, Any]:
-    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+def load_policy_from(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
     begin = f"<!-- policy:{POLICY_ID}:begin -->"
     end = f"<!-- policy:{POLICY_ID}:end -->"
     block = text[text.index(begin) + len(begin) : text.index(end)]
@@ -21,6 +24,24 @@ def load_policy() -> dict[str, Any]:
     if match is None:
         raise AssertionError("W0 policy must contain exactly one valid JSON fence")
     return json.loads(match.group(1))
+
+
+def load_control_contracts(
+    agents_path: Path = AGENTS_PATH,
+    compiler_path: Path = COMPILER_PATH,
+    kernel_path: Path = KERNEL_PATH,
+) -> tuple[dict[str, Any], str]:
+    for path in (agents_path, compiler_path, kernel_path):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    agents_policy = load_policy_from(agents_path)
+    kernel_policy = load_policy_from(kernel_path)
+    if agents_policy != kernel_policy:
+        raise AssertionError("AGENTS and Kernel W0 policies must be identical")
+    compiler = compiler_path.read_text(encoding="utf-8")
+    if POLICY_ID not in compiler:
+        raise AssertionError("Compiler must recognize the W0 policy")
+    return agents_policy, compiler
 
 
 def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
@@ -66,7 +87,7 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.policy = load_policy()
+        cls.policy, cls.compiler = load_control_contracts()
         cls.request = canonical_request(cls.policy)
 
     def decision(self, **overrides: Any) -> str:
@@ -80,6 +101,9 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy["policy_state"], "POLICY_READY_NOT_EXECUTED")
 
     def test_general_or_same_governance_session_rejects(self) -> None:
+        self.assertEqual(
+            self.policy["default_runtime_execution_decision"], "REJECT"
+        )
         self.assertEqual(self.decision(policy_id="general_windows_setup"), "REJECT")
         self.assertEqual(self.decision(independent_execution_session=False), "REJECT")
         self.assertEqual(self.decision(phase_attempts=2), "REJECT")
@@ -136,6 +160,35 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             "wsl_shutdown_attempts_in_prepare_phase",
             self.policy["required_zero_attempts"],
         )
+
+    def test_compiler_matches_exact_policy_phases_resources_and_forbidden(self) -> None:
+        compiler = self.compiler
+        for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
+            self.assertIn(phase, compiler)
+        allowlist = self.policy["exact_allowlist"]
+        for value in (
+            allowlist["legacy_service_name"],
+            *allowlist["software_package_ids"],
+            allowlist["postgresql_install_root"],
+            allowlist["postgresql_backup_staging"],
+            allowlist["postgresql_service_identity"],
+        ):
+            self.assertIn(value, compiler)
+        for value in self.policy["n1_handoff"]["forbidden_sources"][:2]:
+            self.assertIn(value, compiler)
+        self.assertIn("PLAN exact phase", compiler)
+        self.assertIn("-> VALIDATE", compiler)
+        self.assertIn("-> MODIFY", compiler)
+        self.assertIn("-> VERIFY", compiler)
+        self.assertIn("-> FINALIZE", compiler)
+        self.assertIn("Compiler success alone does not authorize W0", compiler)
+
+    def test_missing_any_mandatory_control_document_fails(self) -> None:
+        missing = ROOT / "docs" / "__missing_w0_control_document__.md"
+        for field in ("agents_path", "compiler_path", "kernel_path"):
+            kwargs = {field: missing}
+            with self.subTest(field=field), self.assertRaises(FileNotFoundError):
+                load_control_contracts(**kwargs)
 
     def test_control_plan_references_policy_and_new_empty_cluster(self) -> None:
         plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
