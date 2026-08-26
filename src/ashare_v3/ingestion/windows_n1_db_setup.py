@@ -51,6 +51,30 @@ class SetupResult:
     business_row_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class RecoveryAuthorityEvidence:
+    database_exists: bool
+    database_owner: str | None
+    database_size: int | None
+    role_exists: bool
+    role_login: bool
+    role_superuser: bool
+    role_createdb: bool
+    role_createrole: bool
+    role_replication: bool
+    public_tables: tuple[str, ...]
+    table_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class RecoveryResult:
+    database: str
+    role: str
+    pgpass_path: Path
+    database_size: int
+    business_row_counts: dict[str, int]
+
+
 def assert_fresh_authority(admin_connection: Any) -> None:
     """Stop unless both database and role are absent; never repair partial state."""
     with admin_connection.cursor() as cur:
@@ -179,19 +203,89 @@ def write_user_pgpass(
     path = pgpass_path_for_mode(operator_mode, environment=environment, identity=evidence)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    temporary = path.with_name("pgpass.conf.windows_n1_tmp")
-    temporary.write_text(merge_pgpass(existing, password=password), encoding="utf-8")
+    temporary = path.with_name(f"pgpass.conf.windows_n1_{secrets.token_hex(8)}.tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        handle.write(merge_pgpass(existing, password=password))
     try:
         run_command(
-            ["icacls.exe", str(temporary), "/inheritance:r", "/grant:r", f"{RUNTIME_NAME}:(R,W)", "SYSTEM:(F)", "/setowner", RUNTIME_NAME],
+            ["icacls.exe", str(temporary), "/inheritance:r"],
+            check=True, capture_output=True, text=True,
+        )
+        run_command(
+            ["icacls.exe", str(temporary), "/grant:r", f"*{evidence.runtime_sid}:(R,W)", "*S-1-5-18:(F)"],
+            check=True, capture_output=True, text=True,
+        )
+        run_command(
+            ["icacls.exe", str(temporary), "/setowner", f"*{evidence.runtime_sid}"],
             check=True, capture_output=True, text=True,
         )
         acl_verifier(temporary, runtime_sid=evidence.runtime_sid, run_command=run_command)
         os.replace(temporary, path)
+        acl_verifier(path, runtime_sid=evidence.runtime_sid, run_command=run_command)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
     return path
+
+
+def validate_recovery_authority(evidence: RecoveryAuthorityEvidence) -> None:
+    expected_tables = N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES
+    if not evidence.database_exists or evidence.database_owner != "postgres":
+        raise RuntimeError("recovery requires existing postgres-owned ashare_v3")
+    if evidence.database_size is None or evidence.database_size <= 0:
+        raise RuntimeError("recovery database size evidence is invalid")
+    if not evidence.role_exists or not evidence.role_login:
+        raise RuntimeError("recovery requires existing LOGIN ashare_v3_user")
+    if any((evidence.role_superuser, evidence.role_createdb, evidence.role_createrole, evidence.role_replication)):
+        raise RuntimeError("recovery app role attributes exceed authority")
+    if set(evidence.public_tables) != expected_tables or len(evidence.public_tables) != len(expected_tables):
+        raise RuntimeError("recovery requires exact 14-table N1 canonical schema")
+    if set(evidence.table_counts) != expected_tables:
+        raise RuntimeError("recovery table count evidence is incomplete")
+    nonempty = {table: count for table, count in evidence.table_counts.items() if count != 0}
+    if nonempty:
+        raise RuntimeError(f"recovery requires exact empty N1 database: {sorted(nonempty)}")
+    if evidence.table_counts.get("common_trade_calendar") != 0:
+        raise RuntimeError("recovery requires empty common_trade_calendar")
+
+
+def inspect_recovery_authority(admin_connection: Any, database_connection: Any) -> RecoveryAuthorityEvidence:
+    from psycopg import sql
+    with admin_connection.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=%s),"
+            "(SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=%s),"
+            "(SELECT pg_database_size(datname) FROM pg_database WHERE datname=%s)",
+            (DATABASE, DATABASE, DATABASE),
+        )
+        database_exists, owner, database_size = cur.fetchone()
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=%s),"
+            "COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname=%s),false),"
+            "COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname=%s),false),"
+            "COALESCE((SELECT rolcreatedb FROM pg_roles WHERE rolname=%s),false),"
+            "COALESCE((SELECT rolcreaterole FROM pg_roles WHERE rolname=%s),false),"
+            "COALESCE((SELECT rolreplication FROM pg_roles WHERE rolname=%s),false)",
+            (APP_ROLE,) * 6,
+        )
+        role_exists, login, superuser, createdb, createrole, replication = cur.fetchone()
+    with database_connection.cursor() as cur:
+        cur.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+        )
+        tables = tuple(row[0] for row in cur.fetchall())
+        counts = {}
+        for table in tables:
+            cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table)))
+            counts[table] = int(cur.fetchone()[0])
+    evidence = RecoveryAuthorityEvidence(
+        bool(database_exists), str(owner) if owner is not None else None,
+        int(database_size) if database_size is not None else None,
+        bool(role_exists), bool(login), bool(superuser), bool(createdb),
+        bool(createrole), bool(replication), tables, counts,
+    )
+    validate_recovery_authority(evidence)
+    return evidence
 
 
 def grant_minimum_n1_privileges(admin_connection: Any) -> None:
@@ -207,14 +301,15 @@ def grant_minimum_n1_privileges(admin_connection: Any) -> None:
             cur.execute(sql.SQL("REVOKE CREATE ON SCHEMA public FROM PUBLIC"))
             cur.execute(sql.SQL("REVOKE ALL ON SCHEMA public FROM {}").format(sql.Identifier(APP_ROLE)))
             cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(APP_ROLE)))
+            cur.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(sql.Identifier(APP_ROLE)))
             cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
                 sql.SQL(",").join(sql.Identifier(name) for name in all_tables), sql.Identifier(APP_ROLE)
             ))
             cur.execute(sql.SQL("GRANT INSERT,UPDATE ON {} TO {}").format(
                 sql.SQL(",").join(sql.Identifier(name) for name in writable), sql.Identifier(APP_ROLE)
             ))
+            cur.execute(sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(sql.Identifier(APP_ROLE)))
             cur.execute(sql.SQL("GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(sql.Identifier(APP_ROLE)))
-            cur.execute(sql.SQL("REVOKE DELETE,TRUNCATE,REFERENCES,TRIGGER ON ALL TABLES IN SCHEMA public FROM {}").format(sql.Identifier(APP_ROLE)))
 
 
 def verify_app_authority(app_connection: Any) -> None:
@@ -304,3 +399,46 @@ def setup_database(
         if any(repository.business_row_counts().values()):
             raise RuntimeError("app-role empty-database verification failed")
     return SetupResult(DATABASE, APP_ROLE, pgpass_path, counts)
+
+
+def recover_empty_setup(
+    *, admin_password: str,
+    operator_identity: WindowsIdentityEvidence | None = None,
+) -> RecoveryResult:
+    """Recover credentials only for the exact, already-created empty N1 authority."""
+    import psycopg
+    from psycopg import sql
+    identity = operator_identity or read_windows_identity()
+    validate_operator_identity(OPERATOR_ELEVATED, identity)
+    app_password = secrets.token_urlsafe(48)
+    admin_kwargs = {
+        "host": HOST, "port": PORT, "dbname": ADMIN_DATABASE,
+        "user": "postgres", "password": admin_password, "connect_timeout": 8,
+    }
+    database_kwargs = {**admin_kwargs, "dbname": DATABASE}
+    with psycopg.connect(**admin_kwargs, autocommit=True) as admin_connection:
+        with psycopg.connect(**database_kwargs) as database_connection:
+            evidence = inspect_recovery_authority(admin_connection, database_connection)
+            grant_minimum_n1_privileges(database_connection)
+        with admin_connection.cursor() as cur:
+            cur.execute(
+                sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                    sql.Identifier(APP_ROLE), sql.Literal(app_password)
+                )
+            )
+    pgpass_path = write_user_pgpass(
+        password=app_password, operator_mode=OPERATOR_ELEVATED, identity=identity,
+    )
+    with psycopg.connect(
+        host=HOST, port=PORT, dbname=DATABASE, user=APP_ROLE,
+        password=app_password, connect_timeout=8,
+    ) as app_connection:
+        repository = WindowsN1PostgresRepository(app_connection)
+        repository.verify_authority()
+        verify_app_authority(app_connection)
+        counts = repository.business_row_counts()
+        if set(counts) != N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES or any(counts.values()):
+            raise RuntimeError("recovery app verification requires exact empty N1 authority")
+    return RecoveryResult(
+        DATABASE, APP_ROLE, pgpass_path, int(evidence.database_size), counts,
+    )
