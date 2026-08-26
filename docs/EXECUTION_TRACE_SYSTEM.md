@@ -475,7 +475,11 @@ counts by exact resource and a final `ACCEPT`, `REJECT`, `RESTART_REQUIRED`,
 overwritten or incomplete evidence is fail-closed and cannot authorize retry,
 continuation, rollback or execution.
 
-The prepare trace records before/after scheduled-task definitions and states,
+The prepare trace records the dynamically frozen current TaskName/TaskPath
+AshareV3 inventory, before/after definitions and states, current count, any
+prior-evidence count and their quality delta. It proves no historical fixed
+count was execution authority, every frozen definition was exported and every
+frozen task ended Disabled. It also records
 legacy `postgresql-x64-18` service configuration/state/path fingerprints,
 package identity/version/hash/signature, every exact C/D path and ACL/effective
 access result, the dedicated PostgreSQL service identity, empty-cluster proof,
@@ -487,6 +491,16 @@ overwrite, Mac import, Tushare/Mootdx, N1-N6, NAS, business write and
 prepare-phase `wsl --shutdown`. A WSL configuration change ends only with
 sealed pre-shutdown evidence and `RESTART_REQUIRED`; it never implies that the
 shutdown phase ran.
+
+Python trace fields record registry/launcher/Store-alias and executable
+preflight facts and exactly one state: valid, missing or damaged native 3.11
+x64. Valid records zero mutation. Missing/damaged may record one official
+`Python.Python.3.11` machine-wide x64 install/repair at
+`C:\Program Files\Python311`, frozen resolved safe 3.11.x version, publisher,
+signer and SHA-256, attempt/result, and postflight python.exe existence, PE x64,
+3.11.x, pip and venv-module results. It records zero second/retry, alias,
+3.12/3.14, source/third-party, unknown uninstall, cleanup, business-venv and
+project-package attempts. Failure is append-only blocked evidence.
 
 The shutdown trace requires and hash-binds that exact `RESTART_REQUIRED`
 prepare entry. It records frozen evidence before connection loss, one native

@@ -560,7 +560,10 @@ combined or retried, and form only the one-way order
 The prepare-phase model requires mutation count zero before simulation and
 freezes the baseline commit/tree, identity and effective access, exact paths,
 existing-path conflicts, installer version/hash/signature, process/service
-inventory and the exact AshareV3 scheduled-task set. It predicts `EXECUTE`
+inventory and the dynamically frozen current exact AshareV3 scheduled-task
+set. Historical task counts are quality evidence only; simulation records any
+prior/current count delta and rejects a fixed-count authority or omitted
+current TaskName/TaskPath member. It predicts `EXECUTE`
 only for export plus disable of exact matching tasks (never delete, create or
 enable), stop plus disable of `postgresql-x64-18` (never uninstall or touch
 its program/data), packages `Git.Git` and `PostgreSQL.PostgreSQL.16` with
@@ -582,6 +585,15 @@ hidden after restart. Any path conflict, unproven ACL/effective access,
 unexpected service/task/resource, destructive or overwrite operation,
 Tushare/Mootdx, Mac import, N1-N6, NAS, business write, or prepare-phase
 `wsl --shutdown` predicts fail-closed `REJECT` with evidence preserved.
+
+The model predicts one official `Python.Python.3.11` machine-wide x64
+install/repair at `C:\Program Files\Python311` only when read-only preflight
+proves native 3.11 missing or damaged. It freezes the highest current safe
+3.11.x version plus official publisher/signer/hash, then predicts verification
+of `python.exe`, PE x64, 3.11.x, pip and venv module. Valid Python predicts zero
+Python mutation. Wrong state/package/path/version, a second attempt, Store
+alias, 3.12/3.14, source/third-party build, unknown-Python uninstall, automatic
+retry/cleanup, business venv or project package predicts fail-closed `REJECT`.
 
 The native shutdown-phase model predicts `EXECUTE` only after a sealed
 `RESTART_REQUIRED` result and frozen pre-shutdown evidence from the prepare

@@ -646,14 +646,31 @@ authority, missing fields, unknown fields/resources, drift, path conflict,
 unproven identity/ACL effective access, combined phases, excess attempts or
 any forbidden operation returns `REJECT`.
 
-For `w0_prepare_and_mutate`, Runtime Gate rechecks the exact Scheduler,
-`postgresql-x64-18`, `Git.Git`, `PostgreSQL.PostgreSQL.16`, C/D path, service
+For `w0_prepare_and_mutate`, Runtime Gate rechecks the dynamically frozen
+current exact Scheduler inventory, `postgresql-x64-18`, `Git.Git`,
+`PostgreSQL.PostgreSQL.16`, conditional `Python.Python.3.11`, C/D path, service
 identity, empty-cluster, loopback-listener, ACL, CPython/TdxW/17709 and evidence
 contracts in the Kernel policy. It requires Mac import, Tushare/Mootdx,
 N1-N6/NAS/business write, Scheduler creation/enable/delete, legacy uninstall/
 delete, recursive delete, overwrite, reset/clean, automatic cleanup/rollback/
 retry and prepare-phase shutdown attempts all to remain zero. The phase must
 seal evidence, return `RESTART_REQUIRED` and stop before `wsl --shutdown`.
+
+Scheduler acceptance never depends on a historical fixed count. Gate requires
+the preflight to freeze every current task whose TaskName or TaskPath belongs
+to AshareV3, record prior-count drift as quality evidence, export each exact
+definition, and prove every frozen task Disabled after mutation.
+
+If native CPython 3.11 x64 is valid, Python mutation count must be zero. If and
+only if read-only preflight proves it missing or damaged, Gate permits one
+machine-wide x64 install/repair of official winget `Python.Python.3.11` at
+`C:\Program Files\Python311`, after freezing the resolved highest current safe
+3.11.x version, official publisher, signer and SHA-256. It then requires an
+existing `python.exe`, PE x64, exact 3.11.x, pip and venv-module verification.
+Wrong package/path/version, second attempt, Microsoft Store alias, 3.12/3.14,
+source/third-party distribution, business venv/project package mutation,
+unknown-Python uninstall, retry or cleanup returns `REJECT` with evidence
+preserved.
 
 For `wsl_shutdown_native_control`, Runtime Gate additionally requires the
 prior sealed `RESTART_REQUIRED` result and complete pre-shutdown evidence. It

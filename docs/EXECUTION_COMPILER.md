@@ -953,17 +953,24 @@ The prepare DAG is strictly one-way:
 PLAN exact phase, identities, versions, paths, resources and attempt budget
   -> VALIDATE baseline commit/tree/policy hash, pre-evidence, exact existing
               path inventory, installer package/version/SHA/signature,
-              Scheduler definitions, service state, ACL effective access,
+              dynamically frozen current Scheduler inventory and prior-count
+              quality delta, service state, ACL effective access, native
+              CPython 3.11 valid/missing/damaged state,
               TdxW/17709, mounts and forbidden-attempt counters
   -> MODIFY export and disable every exact AshareV3 task without deletion;
             stop/disable exact postgresql-x64-18 without uninstall/delete;
-            install Git.Git and PostgreSQL.PostgreSQL.16 only; create the exact
+            install Git.Git and PostgreSQL.PostgreSQL.16 only; only when
+            preflight proves native 3.11 missing/damaged, install/repair
+            Python.Python.3.11 once machine-wide x64 at
+            C:\Program Files\Python311; create the exact
             C/D directories and bounded ACLs; initialize only the new empty
             D:\PostgreSQL\16\data cluster; bind PostgreSQL only to 127.0.0.1;
             stage the WSL C-only/D-hidden configuration without shutdown
   -> VERIFY every required post-evidence item, zero Mac imports, zero business
             objects/data, zero forbidden attempts, exact versions/paths/ACLs,
-            all AshareV3 tasks disabled, legacy files untouched and TdxW/17709
+            all dynamically frozen AshareV3 tasks disabled, Python311
+            python.exe PE x64/version 3.11.x/pip/venv verified without venv or
+            package creation, legacy files untouched and TdxW/17709
   -> FINALIZE PASS or RESTART_REQUIRED/BLOCKED_EVIDENCE_PRESERVED
 ```
 
@@ -981,11 +988,14 @@ PLAN exact wsl_shutdown_native_control phase and one-attempt budget
 The compiled `affected_files` is empty. `affected_resources` is limited to the
 exact resources declared by the Kernel policy: discovered exact AshareV3 Task
 Scheduler definitions, service `postgresql-x64-18`, packages `Git.Git` and
-`PostgreSQL.PostgreSQL.16`, `D:\PostgreSQL\16`,
+`PostgreSQL.PostgreSQL.16`, conditional package `Python.Python.3.11`, exact
+`C:\Program Files\Python311`, `D:\PostgreSQL\16`,
 `D:\PostgreSQL\backup-staging`, the exact `C:\AshareV3` directory allowlist,
 service identity `NT SERVICE\AshareV3-PostgreSQL-16`, `/etc/wsl.conf`, the WSL
-instance in the separate shutdown phase, and read-only CPython/TdxW/17709
-capability checks. Any inferred path, existing-path overwrite, additional
+instance in the separate shutdown phase, and CPython/TdxW/17709 capability
+checks. Scheduler resources are the complete dynamic current TaskName/TaskPath
+membership frozen at preflight; a historical fixed count is quality evidence
+only. Any inferred path, existing-path overwrite, additional
 software, service, account, drive, Scheduler action or resource fails
 compilation.
 
@@ -995,6 +1005,11 @@ schema/data, Scheduler creation/enable/delete, legacy PostgreSQL uninstall or
 file deletion, recursive deletion, overwrite, `git reset --hard`, `git clean`,
 automatic cleanup/rollback/retry, and `wsl --shutdown` in the prepare phase all
 compile to `FINALIZE(REJECT)`. Compiler success alone does not authorize W0;
+Python install/repair without missing/damaged proof, a second attempt, a path
+other than `C:\Program Files\Python311`, a non-3.11.x version, Microsoft Store
+alias, 3.12/3.14 substitution, source build, third-party distribution, unknown
+Python uninstall, failed-directory cleanup, business venv creation or project
+package installation also compile to `FINALIZE(REJECT)`.
 the Runtime Gate remains `REJECT` unless the exact Kernel policy independently
 returns `ACCEPT`.
 

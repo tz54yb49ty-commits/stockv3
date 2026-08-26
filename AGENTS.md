@@ -461,7 +461,7 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 1,
+  "policy_version": 2,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -501,6 +501,15 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "Actions"
     ],
     "scheduler_match_expression": "(?i)AshareV3|Ashare[-_ ]?V3",
+    "scheduler_inventory_contract": {
+      "dynamic_preflight_exact_inventory_required": true,
+      "membership_authority": "current_TaskName_or_TaskPath_belongs_to_AshareV3",
+      "fixed_task_count_as_execution_authority_forbidden": true,
+      "historical_inventory_count_is_quality_evidence_only": true,
+      "before_inventory_count_and_prior_evidence_delta_required": true,
+      "export_every_frozen_definition_before_disable": true,
+      "after_every_frozen_task_must_be_disabled": true
+    },
     "legacy_service_name": "postgresql-x64-18",
     "legacy_service_operations": [
       "stop_once_if_running",
@@ -508,11 +517,13 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     ],
     "software_products": [
       "Git for Windows",
-      "PostgreSQL 16 x64"
+      "PostgreSQL 16 x64",
+      "CPython 3.11 x64"
     ],
     "software_package_ids": [
       "Git.Git",
-      "PostgreSQL.PostgreSQL.16"
+      "PostgreSQL.PostgreSQL.16",
+      "Python.Python.3.11"
     ],
     "installer_version_hash_signature_must_be_frozen_before_install": true,
     "postgresql_minimum_version": "16.14",
@@ -538,6 +549,36 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
       "TdxW_process_present",
       "127.0.0.1:17709_listening"
     ]
+  },
+  "python311_contract": {
+    "read_only_preflight_states": [
+      "valid_native_3_11_x64",
+      "missing_native_3_11",
+      "damaged_native_3_11"
+    ],
+    "install_or_repair_allowed_only_for_states": [
+      "missing_native_3_11",
+      "damaged_native_3_11"
+    ],
+    "package_id": "Python.Python.3.11",
+    "install_or_repair_attempts": 1,
+    "automatic_retry_attempts": 0,
+    "scope": "machine_wide_x64",
+    "install_root": "C:\\Program Files\\Python311",
+    "python_executable": "C:\\Program Files\\Python311\\python.exe",
+    "version_constraint": "3.11.x",
+    "secure_patch_selection": "highest_current_official_winget_3_11_x_at_preflight",
+    "resolved_version_publisher_signer_sha256_frozen_before_install": true,
+    "official_source_only": true,
+    "verify_pe_x64": true,
+    "verify_pip_available": true,
+    "verify_venv_module_available": true,
+    "microsoft_store_alias_forbidden": true,
+    "python_3_12_or_3_14_substitution_forbidden": true,
+    "source_build_forbidden": true,
+    "third_party_distribution_forbidden": true,
+    "business_venv_create_attempts": 0,
+    "project_package_install_attempts": 0
   },
   "empty_cluster_contract": {
     "initdb_new_empty_cluster_only": true,
@@ -575,9 +616,11 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "windows_build_and_architecture",
     "c_and_d_directory_inventory_without_recursive_delete",
     "c_and_d_owner_acl_sddl_and_effective_access",
-    "all_exact_asharev3_scheduler_definitions_and_states",
+    "dynamic_current_exact_asharev3_scheduler_inventory_definitions_and_states",
+    "scheduler_current_count_and_prior_evidence_count_delta_as_quality_evidence",
     "legacy_postgresql_18_service_config_state_and_binary_data_paths",
     "installed_git_python_postgresql_versions_and_paths",
+    "native_python311_registry_launcher_alias_executable_pe_version_pip_venv_state",
     "installer_package_ids_versions_sha256_and_signatures",
     "TdxW_process_and_127_0_0_1_17709_owner",
     "wsl_mounts_and_wsl_conf",
@@ -585,9 +628,11 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "baseline_commit_tree_and_policy_hash"
   ],
   "required_post_evidence": [
-    "all_exact_asharev3_scheduler_definitions_preserved_and_disabled",
+    "all_dynamically_frozen_exact_asharev3_scheduler_definitions_preserved_and_disabled",
+    "scheduler_before_inventory_delta_quality_evidence",
     "legacy_postgresql_18_service_stopped_and_disabled_with_files_untouched",
     "git_for_windows_version",
+    "native_python311_executable_pe_x64_version_3_11_x_pip_and_venv",
     "postgresql_16_version_at_least_16_14",
     "postgresql_16_install_and_data_paths_on_d",
     "new_cluster_identity_and_zero_business_objects",
@@ -617,7 +662,15 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "n1_n6_runtime_attempts",
     "nas_operation_attempts",
     "business_database_write_attempts",
-    "wsl_shutdown_attempts_in_prepare_phase"
+    "wsl_shutdown_attempts_in_prepare_phase",
+    "python311_install_or_repair_attempts_without_missing_or_damaged_preflight",
+    "python311_second_install_or_repair_attempts",
+    "python311_microsoft_store_alias_attempts",
+    "python311_3_12_or_3_14_substitution_attempts",
+    "python311_source_build_attempts",
+    "python311_third_party_distribution_attempts",
+    "business_venv_create_attempts",
+    "project_package_install_attempts"
   ],
   "forbidden": [
     "Tushare",
@@ -628,6 +681,11 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "N1-N6 runtime",
     "NAS operations",
     "Task Scheduler enable or creation",
+    "fixed historical Scheduler task count as execution authority",
+    "Microsoft Store Python alias",
+    "Python 3.12 or 3.14 substitution",
+    "Python source build or third-party distribution",
+    "W0 business venv or project package install",
     "business schema or business data",
     "recursive delete",
     "overwrite existing paths",
@@ -641,6 +699,9 @@ W0 主机治理例外。定义或修改该 policy 的治理会话不得使用它
     "disabled_scheduler_tasks_remain_disabled_on_failure": true,
     "legacy_postgresql_18_files_and_data_remain_untouched": true,
     "new_postgresql_16_files_and_failed_cluster_are_preserved_as_evidence": true,
+    "failed_python311_install_or_repair_is_preserved_as_evidence": true,
+    "unknown_existing_python_must_not_be_uninstalled": true,
+    "failed_python311_directory_must_not_be_automatically_cleaned": true,
     "no_existing_path_may_be_replaced": true,
     "restore_or_recovery_requires_new_independent_authorization": true,
     "failure_result": "BLOCKED_EVIDENCE_PRESERVED"
@@ -674,6 +735,19 @@ pre-shutdown evidence 后必须输出 `RESTART_REQUIRED` 并停止；它对
 证明 WSL 仅显式挂载 C、D 不可见。任何 identity/ACL effective-access 证明不完整、
 已有目标路径冲突、版本不足、非空 cluster、Scheduler 漏项或 attempt 超界均必须
 fail-closed，保留证据，不得自动 retry、cleanup 或 rollback。
+
+Scheduler authority 必须来自当次只读 preflight：动态枚举当前所有 `TaskName` 或
+`TaskPath` 属于 AshareV3 的任务，冻结 exact inventory，逐项导出后全部 Disable。
+历史 10 个或现场 9 个等数量只能作为 quality evidence；数量漂移必须写入 before
+差异，但任何固定数量都不得成为执行权威或遗漏当前成员。
+
+同一 prepare phase 只有在只读 preflight 证明原生 CPython 3.11 x64 缺失或损坏时，
+才可对 official winget `Python.Python.3.11` 执行一次 machine-wide install/repair，
+精确 root 为 `C:\Program Files\Python311`。preflight 必须把当前最高可用安全
+3.11.x 补丁版本、官方 publisher、signer 和 SHA-256 冻结后再安装；成功后必须证明
+`python.exe` 存在、PE x64、版本为 3.11.x 且 pip/venv module 可用。Microsoft
+Store alias、3.12/3.14 替代、源码构建、第三方分发、业务 venv 或项目包安装均为
+`REJECT`。失败不得自动 retry、卸载未知旧 Python 或清理目录，只能保留证据。
 
 新增 artifact-only 例外 `n6_immutable_release_install_bounded_v1` 仅允许在
 用户明确授权的 runtime_control 请求中，将一个已完成 attestation 的 N6

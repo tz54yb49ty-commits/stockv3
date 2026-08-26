@@ -39,14 +39,13 @@ release pass.
   `runtime_control` request that exactly satisfies
   `windows_rebuild_w0_bounded_v1`; the policy-definition request must not use
   the exception it defines.
-- Verify native CPython 3.11 x64.  Resolve
-  `requirements-windows-py311.in` into
-  `requirements-windows-py311.lock` with exact versions and hashes only after
-  its dependency graph excludes Tushare and Mootdx; otherwise fail closed
-  without generating or installing a lock.
-- Recreate a fresh venv using only the lock; verify imports for pandas,
-  pyarrow, psycopg, FastAPI, Jinja2, Uvicorn, and eltdx.  Verify that importing
-  Tushare or Mootdx is unavailable.
+- Read-only preflight native CPython 3.11 x64. If valid, perform zero Python
+  mutation. If missing or damaged, allow exactly one official winget
+  `Python.Python.3.11` machine-wide x64 install/repair at
+  `C:\Program Files\Python311`, freezing the highest current safe 3.11.x
+  version, official publisher, signer and SHA-256 first. Verify python.exe,
+  PE x64, 3.11.x, pip and venv module. Do not create a business venv, resolve
+  the project lock, or install project packages in W0; otherwise fail closed.
 - Verify the eltdx installed source is commit
   `b2b94b967f478408848d007c83cc7155367c3aa9`.
 - Verify the clean Git checkout commit and the release manifest.
@@ -57,7 +56,10 @@ release pass.
   write N1-N6 data.
 - Confirm TdxW is logged in, `127.0.0.1:17709` is listening, and method-level
   TQ capability smokes pass.
-- Keep every AshareV3 Task Scheduler task disabled.
+- Dynamically freeze every current TaskName or TaskPath belonging to AshareV3,
+  export each exact definition, then prove all frozen tasks Disabled. Record
+  any historical/current count drift as quality evidence; never use a fixed
+  task count as authority.
 - Preserve the stopped legacy PostgreSQL 18 program and data unchanged; do not
   uninstall or delete it.  WSL shutdown is a separate native-control phase
   after sealed evidence and `RESTART_REQUIRED`.

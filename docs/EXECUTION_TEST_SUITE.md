@@ -1544,3 +1544,19 @@ outside the exact allowlist. Tests must also prove zero N1-N6 runtime or data
 write, zero Mac dump/record/source_version/evidence import, zero Tushare or
 Mootdx install/import/call, zero NAS/business database action, and no Scheduler
 enablement. This governance-definition suite never executes W0.
+
+Python fixtures must accept a valid native 3.11 x64 with zero mutation, and
+must accept exactly one official `Python.Python.3.11` machine-wide x64
+install/repair at `C:\Program Files\Python311` only for a read-only missing or
+damaged result with frozen highest-current-safe 3.11.x publisher/signer/hash.
+They must reject a valid-state install, wrong package/path/version/architecture,
+unfrozen provenance, Store alias, 3.12/3.14 substitute, source/third-party
+distribution, second attempt/retry, unknown-Python uninstall, cleanup, business
+venv or project package install. Postflight must require python.exe, PE x64,
+3.11.x, pip and venv module.
+
+Scheduler fixtures must accept any nonnegative current inventory count only
+when every current TaskName or TaskPath belonging to AshareV3 is dynamically
+frozen, exported and Disabled. Prior count and a 10-to-9 or any other drift are
+quality evidence only. Fixed-count authority, omitted current membership, or
+any frozen task not Disabled must reject.

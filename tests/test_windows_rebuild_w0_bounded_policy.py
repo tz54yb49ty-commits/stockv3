@@ -83,6 +83,23 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "pre_evidence_complete": True,
         "identity_acl_effective_access_proven": True,
         "existing_target_path_conflict": False,
+        "scheduler_dynamic_inventory_frozen": True,
+        "scheduler_fixed_count_used_as_authority": False,
+        "scheduler_prior_count_delta_quality_evidence_complete": True,
+        "scheduler_after_every_frozen_task_disabled": True,
+        "scheduler_current_count": 9,
+        "python311_preflight_state": "missing_native_3_11",
+        "python311_package_id": policy["python311_contract"]["package_id"],
+        "python311_install_root": policy["python311_contract"]["install_root"],
+        "python311_python_executable": policy["python311_contract"][
+            "python_executable"
+        ],
+        "python311_resolved_version": "3.11.9",
+        "python311_current_safe_patch_resolved": True,
+        "python311_official_publisher_signer_sha256_frozen": True,
+        "python311_machine_wide_x64": True,
+        "python311_install_or_repair_attempts": 1,
+        "python311_post_verify_complete": True,
         **{name: 0 for name in policy["required_zero_attempts"]},
     }
 
@@ -107,6 +124,52 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
             return reject
     if request.get("existing_target_path_conflict") is not False:
         return reject
+    for field in (
+        "scheduler_dynamic_inventory_frozen",
+        "scheduler_prior_count_delta_quality_evidence_complete",
+        "scheduler_after_every_frozen_task_disabled",
+    ):
+        if request.get(field) is not True:
+            return reject
+    if request.get("scheduler_fixed_count_used_as_authority") is not False:
+        return reject
+    if not isinstance(request.get("scheduler_current_count"), int):
+        return reject
+    if request["scheduler_current_count"] < 0:
+        return reject
+    python_contract = policy["python311_contract"]
+    python_state = request.get("python311_preflight_state")
+    python_attempts = request.get("python311_install_or_repair_attempts")
+    if python_state == "valid_native_3_11_x64":
+        if python_attempts != 0:
+            return reject
+    elif python_state in python_contract["install_or_repair_allowed_only_for_states"]:
+        if python_attempts != python_contract["install_or_repair_attempts"]:
+            return reject
+    else:
+        return reject
+    if python_attempts == 1:
+        if request.get("python311_package_id") != python_contract["package_id"]:
+            return reject
+        if request.get("python311_install_root") != python_contract["install_root"]:
+            return reject
+        if (
+            request.get("python311_python_executable")
+            != python_contract["python_executable"]
+        ):
+            return reject
+        if re.fullmatch(
+            r"3\.11\.\d+", request.get("python311_resolved_version", "")
+        ) is None:
+            return reject
+        for field in (
+            "python311_official_publisher_signer_sha256_frozen",
+            "python311_current_safe_patch_resolved",
+            "python311_machine_wide_x64",
+            "python311_post_verify_complete",
+        ):
+            if request.get(field) is not True:
+                return reject
     if any(request.get(name) != 0 for name in policy["required_zero_attempts"]):
         return reject
     return policy["accept_decision"]
@@ -181,7 +244,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         self.assertEqual(allowlist["legacy_service_name"], "postgresql-x64-18")
         self.assertEqual(
             allowlist["software_package_ids"],
-            ["Git.Git", "PostgreSQL.PostgreSQL.16"],
+            ["Git.Git", "PostgreSQL.PostgreSQL.16", "Python.Python.3.11"],
         )
         self.assertEqual(
             allowlist["postgresql_backup_staging"],
@@ -196,6 +259,59 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             self.policy["required_zero_attempts"],
         )
 
+    def test_python311_missing_or_damaged_allows_one_exact_repair(self) -> None:
+        contract = self.policy["python311_contract"]
+        self.assertEqual(contract["package_id"], "Python.Python.3.11")
+        self.assertEqual(contract["install_root"], r"C:\Program Files\Python311")
+        self.assertEqual(contract["scope"], "machine_wide_x64")
+        self.assertEqual(contract["version_constraint"], "3.11.x")
+        self.assertEqual(self.decision(), "ACCEPT")
+        self.assertEqual(
+            self.decision(python311_preflight_state="damaged_native_3_11"),
+            "ACCEPT",
+        )
+        self.assertEqual(
+            self.decision(
+                python311_preflight_state="valid_native_3_11_x64",
+                python311_install_or_repair_attempts=0,
+            ),
+            "ACCEPT",
+        )
+
+    def test_python311_wrong_boundary_or_multiple_attempts_rejects(self) -> None:
+        for overrides in (
+            {"python311_preflight_state": "valid_native_3_11_x64"},
+            {"python311_preflight_state": "unknown"},
+            {"python311_package_id": "Python.Python.3.12"},
+            {"python311_install_root": r"C:\Users\47894\Python311"},
+            {"python311_python_executable": r"C:\Windows\python.exe"},
+            {"python311_resolved_version": "3.12.0"},
+            {"python311_install_or_repair_attempts": 2},
+            {"python311_official_publisher_signer_sha256_frozen": False},
+            {"python311_current_safe_patch_resolved": False},
+            {"python311_machine_wide_x64": False},
+            {"python311_post_verify_complete": False},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.decision(**overrides), "REJECT")
+
+    def test_scheduler_inventory_is_dynamic_and_all_frozen_tasks_disable(self) -> None:
+        inventory = self.policy["exact_allowlist"]["scheduler_inventory_contract"]
+        self.assertTrue(inventory["dynamic_preflight_exact_inventory_required"])
+        self.assertTrue(inventory["fixed_task_count_as_execution_authority_forbidden"])
+        self.assertEqual(self.decision(scheduler_current_count=9), "ACCEPT")
+        self.assertEqual(self.decision(scheduler_current_count=10), "ACCEPT")
+        self.assertEqual(
+            self.decision(scheduler_dynamic_inventory_frozen=False), "REJECT"
+        )
+        self.assertEqual(
+            self.decision(scheduler_fixed_count_used_as_authority=True), "REJECT"
+        )
+        self.assertEqual(
+            self.decision(scheduler_after_every_frozen_task_disabled=False),
+            "REJECT",
+        )
+
     def test_compiler_matches_exact_policy_phases_resources_and_forbidden(self) -> None:
         compiler = self.compiler
         for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
@@ -207,6 +323,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             allowlist["postgresql_install_root"],
             allowlist["postgresql_backup_staging"],
             allowlist["postgresql_service_identity"],
+            self.policy["python311_contract"]["install_root"],
         ):
             self.assertIn(value, compiler)
         for value in self.policy["n1_handoff"]["forbidden_sources"][:2]:
@@ -270,6 +387,8 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         for value in (
             self.policy["exact_allowlist"]["legacy_service_name"],
             *self.policy["n1_handoff"]["forbidden_sources"][:2],
+            self.policy["python311_contract"]["package_id"],
+            self.policy["python311_contract"]["install_root"],
         ):
             self.assertIn(value, trace)
 
@@ -292,6 +411,9 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             "Mootdx install/import/call",
             "current WSL/SSH self-disconnect",
             "never executes W0",
+            "Python.Python.3.11",
+            "C:\\Program Files\\Python311",
+            "10-to-9",
         ):
             self.assertIn(value, suite)
         for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
@@ -322,6 +444,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             allowlist["postgresql_service_name"],
             allowlist["postgresql_service_identity"],
             allowlist["postgresql_listen_addresses"],
+            self.policy["python311_contract"]["install_root"],
         ):
             self.assertIn(value, sandbox)
         for path in allowlist["c_directories"]:
@@ -340,6 +463,9 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         self.assertIn("otherwise fail closed", plan)
         self.assertIn("Build the three-year daily-bar base from zero", plan)
         self.assertIn("never use a Mac database dump", plan)
+        self.assertIn("Python.Python.3.11", plan)
+        self.assertIn(r"C:\Program Files\Python311", plan)
+        self.assertIn("never use a fixed", plan)
 
 
 if __name__ == "__main__":
