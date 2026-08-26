@@ -73,6 +73,15 @@ class RecoveryResult:
     pgpass_path: Path
     database_size: int
     business_row_counts: dict[str, int]
+    external_acl_postflight_required: bool = True
+
+
+@dataclass(frozen=True)
+class PostflightResult:
+    database: str
+    role: str
+    pgpass_path: Path
+    business_row_counts: dict[str, int]
 
 
 def assert_fresh_authority(admin_connection: Any) -> None:
@@ -155,24 +164,32 @@ def pgpass_path_for_mode(
     return Path(appdata) / "postgresql" / "pgpass.conf"
 
 
-def verify_pgpass_acl(
+def read_pgpass_acl(
     path: Path, *, runtime_sid: str,
     run_command: Callable[..., Any] = subprocess.run,
-) -> None:
+) -> dict[str, Any]:
     script = (
         "$acl=Get-Acl -LiteralPath $args[0];"
         "$rules=@($acl.Access|ForEach-Object{[pscustomobject]@{"
         "sid=$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;"
         "deny=($_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny);"
         "rights=[int]$_.FileSystemRights}});"
-        "[pscustomobject]@{owner=$acl.Owner.Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "$ownerSid=[Security.Principal.NTAccount]::new($acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "[pscustomobject]@{owner=$ownerSid;"
         "protected=$acl.AreAccessRulesProtected;rules=$rules}|ConvertTo-Json -Compress -Depth 4"
     )
     completed = run_command(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
         check=True, capture_output=True, text=True,
     )
-    payload = json.loads(completed.stdout)
+    return json.loads(completed.stdout)
+
+
+def verify_pgpass_acl(
+    path: Path, *, runtime_sid: str,
+    run_command: Callable[..., Any] = subprocess.run,
+) -> None:
+    payload = read_pgpass_acl(path, runtime_sid=runtime_sid, run_command=run_command)
     rules = payload.get("rules") or []
     if isinstance(rules, dict):
         rules = [rules]
@@ -191,12 +208,36 @@ def verify_pgpass_acl(
         raise RuntimeError("pgpass ACL rights are insufficient")
 
 
+def verify_staged_elevated_pgpass_acl(
+    path: Path, *, runtime_sid: str, operator_sid: str,
+    expected_content: str,
+    run_command: Callable[..., Any] = subprocess.run,
+) -> None:
+    if path.read_text(encoding="utf-8") != expected_content:
+        raise RuntimeError("staged pgpass content mismatch")
+    payload = read_pgpass_acl(path, runtime_sid=runtime_sid, run_command=run_command)
+    rules = payload.get("rules") or []
+    if isinstance(rules, dict):
+        rules = [rules]
+    if payload.get("owner") != operator_sid or not payload.get("protected") or any(bool(rule["deny"]) for rule in rules):
+        raise RuntimeError("staged pgpass ACL inheritance/deny mismatch")
+    allow_sids = {str(rule["sid"]) for rule in rules}
+    if allow_sids != {runtime_sid, operator_sid, "S-1-5-18"}:
+        raise RuntimeError("staged pgpass ACL principal mismatch")
+    rights = {sid: 0 for sid in allow_sids}
+    for rule in rules:
+        rights[str(rule["sid"])] |= int(rule["rights"])
+    if rights[runtime_sid] & 0x3 != 0x3 or rights[operator_sid] != 2032127 or rights["S-1-5-18"] != 2032127:
+        raise RuntimeError("staged pgpass ACL rights mismatch")
+
+
 def write_user_pgpass(
     *, password: str, operator_mode: str = OPERATOR_DIRECT,
     identity: WindowsIdentityEvidence | None = None,
     environ: dict[str, str] | None = None,
     run_command: Callable[..., Any] = subprocess.run,
     acl_verifier: Callable[..., None] = verify_pgpass_acl,
+    staged_acl_verifier: Callable[..., None] = verify_staged_elevated_pgpass_acl,
 ) -> Path:
     environment = os.environ if environ is None else environ
     evidence = identity or read_windows_identity(run_command)
@@ -204,24 +245,45 @@ def write_user_pgpass(
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     temporary = path.with_name(f"pgpass.conf.windows_n1_{secrets.token_hex(8)}.tmp")
+    expected_content = merge_pgpass(existing, password=password)
     with temporary.open("x", encoding="utf-8") as handle:
-        handle.write(merge_pgpass(existing, password=password))
+        handle.write(expected_content)
     try:
         run_command(
             ["icacls.exe", str(temporary), "/inheritance:r"],
             check=True, capture_output=True, text=True,
         )
-        run_command(
-            ["icacls.exe", str(temporary), "/grant:r", f"*{evidence.runtime_sid}:(R,W)", "*S-1-5-18:(F)"],
-            check=True, capture_output=True, text=True,
-        )
-        run_command(
-            ["icacls.exe", str(temporary), "/setowner", f"*{evidence.runtime_sid}"],
-            check=True, capture_output=True, text=True,
-        )
-        acl_verifier(temporary, runtime_sid=evidence.runtime_sid, run_command=run_command)
-        os.replace(temporary, path)
-        acl_verifier(path, runtime_sid=evidence.runtime_sid, run_command=run_command)
+        if operator_mode == OPERATOR_ELEVATED:
+            run_command(
+                ["icacls.exe", str(temporary), "/grant:r", f"*{evidence.runtime_sid}:(R,W)", "*S-1-5-18:(F)", f"*{evidence.sid}:(F)"],
+                check=True, capture_output=True, text=True,
+            )
+            staged_acl_verifier(
+                temporary, runtime_sid=evidence.runtime_sid,
+                operator_sid=evidence.sid, expected_content=expected_content,
+                run_command=run_command,
+            )
+            os.replace(temporary, path)
+            run_command(
+                ["icacls.exe", str(path), "/setowner", f"*{evidence.runtime_sid}"],
+                check=True, capture_output=True, text=True,
+            )
+            run_command(
+                ["icacls.exe", str(path), "/remove:g", f"*{evidence.sid}"],
+                check=True, capture_output=True, text=True,
+            )
+        else:
+            run_command(
+                ["icacls.exe", str(temporary), "/grant:r", f"*{evidence.runtime_sid}:(R,W)", "*S-1-5-18:(F)"],
+                check=True, capture_output=True, text=True,
+            )
+            run_command(
+                ["icacls.exe", str(temporary), "/setowner", f"*{evidence.runtime_sid}"],
+                check=True, capture_output=True, text=True,
+            )
+            acl_verifier(temporary, runtime_sid=evidence.runtime_sid, run_command=run_command)
+            os.replace(temporary, path)
+            acl_verifier(path, runtime_sid=evidence.runtime_sid, run_command=run_command)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -442,3 +504,29 @@ def recover_empty_setup(
     return RecoveryResult(
         DATABASE, APP_ROLE, pgpass_path, int(evidence.database_size), counts,
     )
+
+
+def postflight_empty_setup(
+    *, operator_identity: WindowsIdentityEvidence | None = None,
+) -> PostflightResult:
+    """Read-only ashare-ops proof for final ACL, pgpass discovery, and empty N1 authority."""
+    import psycopg
+    identity = operator_identity or read_windows_identity()
+    validate_operator_identity(OPERATOR_DIRECT, identity)
+    verify_pgpass_acl(ELEVATED_RUNTIME_PGPASS, runtime_sid=identity.runtime_sid)
+    with psycopg.connect(PASSWORDLESS_APP_DSN, connect_timeout=8) as app_connection:
+        repository = WindowsN1PostgresRepository(app_connection)
+        repository.verify_authority()
+        verify_app_authority(app_connection)
+        with app_connection.cursor() as cur:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+            )
+            public_tables = {row[0] for row in cur.fetchall()}
+        expected_tables = N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES
+        if public_tables != expected_tables:
+            raise RuntimeError("postflight requires exact 14-table N1 canonical schema")
+        counts = repository.business_row_counts()
+        if set(counts) != expected_tables or any(counts.values()):
+            raise RuntimeError("postflight requires exact empty N1 authority")
+    return PostflightResult(DATABASE, APP_ROLE, ELEVATED_RUNTIME_PGPASS, counts)

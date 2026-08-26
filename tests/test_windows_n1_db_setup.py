@@ -8,9 +8,10 @@ import unittest
 
 from ashare_v3.ingestion.windows_n1_db_setup import (
     ELEVATED_RUNTIME_PGPASS, OPERATOR_DIRECT, OPERATOR_ELEVATED,
-    RecoveryAuthorityEvidence, WindowsIdentityEvidence, assert_fresh_authority, merge_pgpass,
-    grant_minimum_n1_privileges, pgpass_path_for_mode, validate_operator_identity, verify_pgpass_acl,
-    validate_recovery_authority, write_user_pgpass,
+    RecoveryAuthorityEvidence, RecoveryResult, WindowsIdentityEvidence, assert_fresh_authority, merge_pgpass,
+    grant_minimum_n1_privileges, pgpass_path_for_mode, postflight_empty_setup,
+    validate_operator_identity, verify_pgpass_acl,
+    validate_recovery_authority, verify_staged_elevated_pgpass_acl, write_user_pgpass,
 )
 from ashare_v3.ingestion.windows_n1_postgres import FORBIDDEN_WRITE_TABLES, N1_WRITABLE_TABLES
 
@@ -92,6 +93,7 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
 
     def test_elevated_write_targets_runtime_profile_not_operator_profile(self):
         calls = []
+        staged_checks = []
         with TemporaryDirectory() as directory:
             # Replace the frozen Windows path only for this filesystem fake.
             import ashare_v3.ingestion.windows_n1_db_setup as module
@@ -102,15 +104,21 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
                     password="memory-only-app-secret", operator_mode=OPERATOR_ELEVATED,
                     identity=self.elevated_identity, environ={"APPDATA": "operator-profile"},
                     run_command=lambda args, **kwargs: calls.append((args, kwargs)),
-                    acl_verifier=lambda *args, **kwargs: None,
+                    acl_verifier=lambda *args, **kwargs: self.fail("elevated operator must not read final ACL"),
+                    staged_acl_verifier=lambda *args, **kwargs: staged_checks.append((args, kwargs)),
                 )
             finally:
                 module.ELEVATED_RUNTIME_PGPASS = original
             self.assertEqual(path, Path(directory) / "runtime" / "pgpass.conf")
             self.assertNotIn("operator-profile", str(path))
             self.assertNotIn("memory-only-app-secret", repr(calls))
+            self.assertIn(f"*{self.elevated_identity.sid}:(F)", calls[1][0])
+            self.assertEqual(calls[2][0][2], "/setowner")
+            self.assertEqual(calls[3][0][2], "/remove:g")
+            self.assertEqual(len(staged_checks), 1)
 
     def test_acl_proof_allows_only_runtime_and_system(self):
+        self.assertIn("NTAccount]::new($acl.Owner)", inspect.getsource(verify_pgpass_acl.__globals__["read_pgpass_acl"]))
         payload = (
             '{"owner":"' + self.runtime_sid + '","protected":true,"rules":['
             '{"sid":"' + self.runtime_sid + '","deny":false,"rights":131487},'
@@ -120,6 +128,37 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
             Path("pgpass.conf"), runtime_sid=self.runtime_sid,
             run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
         )
+
+    def test_staged_elevated_acl_is_verified_before_operator_removal(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "stage.tmp"
+            path.write_text("expected", encoding="utf-8")
+            payload = (
+                '{"owner":"' + self.elevated_identity.sid + '","protected":true,"rules":['
+                '{"sid":"' + self.runtime_sid + '","deny":false,"rights":131487},'
+                '{"sid":"' + self.elevated_identity.sid + '","deny":false,"rights":2032127},'
+                '{"sid":"S-1-5-18","deny":false,"rights":2032127}]}'
+            )
+            verify_staged_elevated_pgpass_acl(
+                path, runtime_sid=self.runtime_sid,
+                operator_sid=self.elevated_identity.sid, expected_content="expected",
+                run_command=lambda *args, **kwargs: SimpleNamespace(stdout=payload),
+            )
+
+    def test_recovery_declares_external_acl_postflight_pending(self):
+        result = RecoveryResult(
+            "ashare_v3", "ashare_v3_user", Path("pgpass.conf"), 1,
+            {table: 0 for table in N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES},
+        )
+        self.assertTrue(result.external_acl_postflight_required)
+
+    def test_ashare_ops_postflight_is_passwordless_and_read_only(self):
+        source = inspect.getsource(postflight_empty_setup)
+        self.assertIn("OPERATOR_DIRECT", source)
+        self.assertIn("PASSWORDLESS_APP_DSN", source)
+        self.assertIn("verify_pgpass_acl", source)
+        self.assertIn("verify_app_authority", source)
+        self.assertNotIn("password=", source)
 
     def recovery_evidence(self, **overrides):
         tables = tuple(sorted(N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES))
@@ -165,7 +204,7 @@ class WindowsN1DatabaseSetupTest(unittest.TestCase):
                         password="new-memory-secret", operator_mode=OPERATOR_ELEVATED,
                         identity=self.elevated_identity, environ={},
                         run_command=lambda *args, **kwargs: None,
-                        acl_verifier=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("acl failed")),
+                        staged_acl_verifier=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("acl failed")),
                     )
             finally:
                 module.ELEVATED_RUNTIME_PGPASS = original
