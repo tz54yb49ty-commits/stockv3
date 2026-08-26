@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -18,6 +17,7 @@ from ashare_v3.ingestion.windows_n1_bootstrap import N1_BOOTSTRAP_STAGES, Window
 from ashare_v3.ingestion.windows_n1_postgres import WindowsN1PostgresRepository
 from ashare_v3.ingestion.windows_n1_production import WindowsN1ProductionHandlers
 from ashare_v3.ingestion.windows_n1_sources import EltdxWindowsSource, TQHttpClient, TQWindowsSource
+from ashare_v3.ingestion.windows_n1_db_setup import PASSWORDLESS_APP_DSN
 
 
 def main() -> int:
@@ -26,7 +26,6 @@ def main() -> int:
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--schema-only", action="store_true")
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--schema-path", default=str(Path(__file__).resolve().parents[1] / "sql" / "001_raw_ingestion_schema.sql"))
     args = parser.parse_args()
     if sum((args.plan, args.schema_only, args.execute)) != 1:
         parser.error("choose exactly one of --plan, --schema-only, or --execute")
@@ -45,20 +44,15 @@ def main() -> int:
         "touches_n2_n6": False,
         }, ensure_ascii=False, indent=2))
         return 0
-    dsn = os.environ.get("ASHARE_V3_POSTGRES_DSN")
-    service = os.environ.get("PGSERVICE")
-    if not dsn and not service:
-        raise SystemExit("missing secure database authority: set ASHARE_V3_POSTGRES_DSN or PGSERVICE")
     import psycopg
-    connect_arg = dsn or f"service={service}"
-    with psycopg.connect(connect_arg) as connection:
+    with psycopg.connect(PASSWORDLESS_APP_DSN, connect_timeout=8) as connection:
         repository = WindowsN1PostgresRepository(connection)
         if args.schema_only:
-            repository.apply_schema(Path(args.schema_path))
+            repository.verify_authority()
             counts = repository.business_row_counts()
             if any(counts.values()):
                 raise SystemExit(f"schema-only row-count invariant failed: {counts}")
-            print(json.dumps({"result": "SCHEMA_READY", "business_row_counts": counts, "database_written": True, "business_rows_written": 0, "calendar_rows_written": 0, "downstream_rows_written": 0}, ensure_ascii=False))
+            print(json.dumps({"result": "SCHEMA_READY", "business_row_counts": counts, "database_written": False, "business_rows_written": 0, "calendar_rows_written": 0, "downstream_rows_written": 0}, ensure_ascii=False))
             return 0
         from eltdx import TdxClient
         tq = TQWindowsSource(TQHttpClient(base_url=config.tq_url))
