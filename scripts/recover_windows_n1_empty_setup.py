@@ -45,6 +45,7 @@ def main() -> int:
         "mac_import_count": 0,
         "n1_business_writes": 0,
         "n2_n6_writes": 0,
+        "external_acl_postflight_required": result.external_acl_postflight_required,
     }, ensure_ascii=False, indent=2))
     return 0
 
