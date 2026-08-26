@@ -15,6 +15,8 @@ COMPILER_PATH = ROOT / "docs" / "EXECUTION_COMPILER.md"
 KERNEL_PATH = ROOT / "docs" / "EXECUTION_KERNEL.md"
 RUNTIME_GATE_PATH = ROOT / "docs" / "EXECUTION_RUNTIME_GATE.md"
 SANDBOX_PATH = ROOT / "docs" / "EXECUTION_SANDBOX.md"
+TRACE_PATH = ROOT / "docs" / "EXECUTION_TRACE_SYSTEM.md"
+TEST_SUITE_PATH = ROOT / "docs" / "EXECUTION_TEST_SUITE.md"
 
 
 def load_policy_from(path: Path) -> dict[str, Any]:
@@ -34,13 +36,17 @@ def load_control_contracts(
     kernel_path: Path = KERNEL_PATH,
     runtime_gate_path: Path = RUNTIME_GATE_PATH,
     sandbox_path: Path = SANDBOX_PATH,
-) -> tuple[dict[str, Any], str, str, str]:
+    trace_path: Path = TRACE_PATH,
+    test_suite_path: Path = TEST_SUITE_PATH,
+) -> tuple[dict[str, Any], str, str, str, str, str]:
     for path in (
         agents_path,
         compiler_path,
         kernel_path,
         runtime_gate_path,
         sandbox_path,
+        trace_path,
+        test_suite_path,
     ):
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -57,7 +63,13 @@ def load_control_contracts(
     sandbox = sandbox_path.read_text(encoding="utf-8")
     if POLICY_ID not in sandbox:
         raise AssertionError("Sandbox must recognize the W0 policy")
-    return agents_policy, compiler, runtime_gate, sandbox
+    trace = trace_path.read_text(encoding="utf-8")
+    if POLICY_ID not in trace:
+        raise AssertionError("Trace must recognize the W0 policy")
+    test_suite = test_suite_path.read_text(encoding="utf-8")
+    if POLICY_ID not in test_suite:
+        raise AssertionError("Test Suite must recognize the W0 policy")
+    return agents_policy, compiler, runtime_gate, sandbox, trace, test_suite
 
 
 def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
@@ -103,9 +115,14 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.policy, cls.compiler, cls.runtime_gate, cls.sandbox = (
-            load_control_contracts()
-        )
+        (
+            cls.policy,
+            cls.compiler,
+            cls.runtime_gate,
+            cls.sandbox,
+            cls.trace,
+            cls.test_suite,
+        ) = load_control_contracts()
         cls.request = canonical_request(cls.policy)
 
     def decision(self, **overrides: Any) -> str:
@@ -209,6 +226,8 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             "kernel_path",
             "runtime_gate_path",
             "sandbox_path",
+            "trace_path",
+            "test_suite_path",
         ):
             kwargs = {field: missing}
             with self.subTest(field=field), self.assertRaises(FileNotFoundError):
@@ -229,6 +248,54 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             *self.policy["n1_handoff"]["forbidden_sources"][:2],
         ):
             self.assertIn(value, gate)
+        self.assertTrue(self.policy["governance_session_cannot_execute"])
+
+    def test_trace_matches_phases_counts_and_incomplete_evidence_rejects(self) -> None:
+        trace = self.trace
+        for value in (
+            "append-only",
+            "before/after evidence hashes",
+            "attempt number (exactly one)",
+            "counts by exact resource",
+            "RESTART_REQUIRED",
+            "reconnect",
+            "forbidden count is zero",
+            "incomplete evidence",
+            "fail-closed",
+            "C is visible and D is absent",
+        ):
+            self.assertIn(value, trace)
+        for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
+            self.assertIn(phase, trace)
+        for value in (
+            self.policy["exact_allowlist"]["legacy_service_name"],
+            *self.policy["n1_handoff"]["forbidden_sources"][:2],
+        ):
+            self.assertIn(value, trace)
+
+    def test_test_suite_registers_full_chain_and_exact_negative_boundaries(
+        self,
+    ) -> None:
+        suite = self.test_suite
+        for value in (
+            "five-way AGENTS/Compiler/Kernel/RuntimeGate/Sandbox consistency",
+            "six-way consistency when Trace is included",
+            "seventh full-chain control document",
+            "Missing",
+            "any document",
+            "mutually exclusive",
+            "one attempt each",
+            "Exact negative-boundary tests",
+            "zero N1-N6 runtime or data",
+            "zero Mac dump/record/source_version/evidence import",
+            "zero Tushare or",
+            "Mootdx install/import/call",
+            "current WSL/SSH self-disconnect",
+            "never executes W0",
+        ):
+            self.assertIn(value, suite)
+        for phase in self.policy["phase_contract"]["allowed_phase_modes"]:
+            self.assertIn(phase, suite)
         self.assertTrue(self.policy["governance_session_cannot_execute"])
 
     def test_sandbox_matches_policy_and_simulation_never_executes(self) -> None:
