@@ -9,8 +9,10 @@ import json
 import plistlib
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+from zoneinfo import ZoneInfo
 
 from ashare_v3.runtime_control.n5_n3t_fastlane import (
     FASTLANE_LABELS,
@@ -24,6 +26,9 @@ from generate_n5_n3t_fastlane_db_artifact_summary import (
     build_db_summary,
     _load_raw_db_snapshot,
 )
+
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -70,7 +75,10 @@ def build_monitor_report(args: argparse.Namespace) -> dict[str, Any]:
     launchd_states = _load_launchd_states(args.launchd_state_path)
     plist_summaries = _read_plist_summaries(Path(args.launchagents_dir))
     recent_log_manifests = _read_recent_log_manifests(Path(args.log_dir))
-    stderr_snapshots = _read_recent_stderr_snapshots(Path(args.log_dir))
+    stderr_snapshots = _read_recent_stderr_snapshots(
+        Path(args.log_dir),
+        for_trade_date=args.for_trade_date,
+    )
     chain_evidence = _load_chain_evidence(args)
     report = build_fastlane_trading_day_monitor_review(
         for_trade_date=args.for_trade_date,
@@ -251,28 +259,65 @@ def _read_recent_log_manifests(log_dir: Path) -> dict[str, Any]:
     return manifests
 
 
-def _read_recent_stderr_snapshots(log_dir: Path) -> dict[str, Any]:
+def _read_recent_stderr_snapshots(
+    log_dir: Path,
+    *,
+    for_trade_date: str,
+) -> dict[str, Any]:
     snapshots: dict[str, Any] = {}
+    trade_date_start_epoch = _trade_date_start_epoch(for_trade_date)
     for label in FASTLANE_LABELS.values():
         path = log_dir / f"{label}.err.log"
+        source_mtime = _source_mtime_for_label(label)
+        current_error_boundary_epoch = max(trade_date_start_epoch, source_mtime)
         if not path.exists():
-            snapshots[label] = {"exists": False, "size": 0, "has_current_error": False}
+            snapshots[label] = {
+                "exists": False,
+                "size": 0,
+                "source_mtime_epoch": source_mtime,
+                "trade_date_start_epoch": trade_date_start_epoch,
+                "current_error_boundary_epoch": current_error_boundary_epoch,
+                "has_runtime_error": False,
+                "has_current_error": False,
+                "error_classification": "no_runtime_error",
+            }
             continue
         stat = path.stat()
         tail = _tail_text(path)
         has_runtime_error = bool(
             re.search(r"\b(?:Traceback|Error|Exception|TabError|SyntaxError|NameError|AttributeError)\b", tail)
         )
-        source_mtime = _source_mtime_for_label(label)
+        if not has_runtime_error:
+            error_classification = "no_runtime_error"
+        elif stat.st_mtime < trade_date_start_epoch:
+            error_classification = "stale_before_trade_date"
+        elif stat.st_mtime < source_mtime:
+            error_classification = "stale_before_source_revision"
+        else:
+            error_classification = "current_session_error"
         snapshots[label] = {
             "exists": True,
             "size": stat.st_size,
             "mtime_epoch": stat.st_mtime,
             "source_mtime_epoch": source_mtime,
+            "trade_date_start_epoch": trade_date_start_epoch,
+            "current_error_boundary_epoch": current_error_boundary_epoch,
             "has_runtime_error": has_runtime_error,
-            "has_current_error": has_runtime_error and stat.st_mtime >= source_mtime,
+            "has_current_error": error_classification == "current_session_error",
+            "error_classification": error_classification,
         }
     return snapshots
+
+
+def _trade_date_start_epoch(for_trade_date: str) -> float:
+    value = str(for_trade_date or "")
+    if not re.fullmatch(r"\d{8}", value):
+        raise ValueError("fastlane_for_trade_date_invalid")
+    try:
+        trade_date_start = datetime.strptime(value, "%Y%m%d").replace(tzinfo=SHANGHAI_TZ)
+    except ValueError as exc:
+        raise ValueError("fastlane_for_trade_date_invalid") from exc
+    return trade_date_start.timestamp()
 
 
 def _tail_json_lines(path: Path, *, max_bytes: int = 131072, max_lines: int = 10) -> list[dict[str, Any]]:

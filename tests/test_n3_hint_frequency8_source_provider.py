@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import tempfile
 import unittest
@@ -6,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from ashare_v3.mootdx_client import EndpointConfig, EndpointSelection, MootdxEndpointManager
+from ashare_v3.quote_transport import create_quote_transport
 
 MIDDAY_BRIDGE_PROOF_KIND = "index_board_1m_hint_projection_v1_midday_bridge_v1"
 
@@ -31,6 +34,95 @@ def _args(**overrides):
         )
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _hint_scope(count: int) -> dict:
+    return {
+        "for_trade_date": "20260630",
+        "index_1m_objects": [
+            {
+                "asset_kind": "index",
+                "identity_key": f"index:SH:00000{index}",
+                "exchange": "SH",
+                "code": f"00000{index}",
+                "name": f"index-{index}",
+            }
+            for index in range(count)
+        ],
+        "board_1m_objects": [],
+    }
+
+
+def _hint_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    endpoints = (
+        EndpointConfig("primary", "115.238.56.198", 7709, 10, True, False, "x", "x", "protocol_passed"),
+        EndpointConfig("secondary", "180.153.18.170", 7709, 20, True, False, "x", "x", "protocol_passed"),
+    )
+    return MootdxEndpointManager(
+        endpoint_pool_version="test",
+        transport="mootdx",
+        endpoints=endpoints,
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def _passing_hint_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {
+        "checks": {
+            "stock_quote": True,
+            "stock_daily_bars": True,
+            "index_daily_bars": True,
+            "scope_sentinels": True,
+            "minute_scope_sentinels": True,
+        }
+    }
+
+
+class _HintClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]], *, empty_primary: int) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+        self.empty_primary = empty_primary
+
+    def index_bars(self, *, symbol: str, **kwargs):
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and int(symbol[-1]) < self.empty_primary:
+            return []
+        return [
+            {
+                "code": symbol,
+                "datetime": "2026-06-30 10:16",
+                "open": 1,
+                "high": 2,
+                "low": 1,
+                "close": 2,
+                "vol": 10,
+                "amount": 20,
+            }
+        ]
+
+    def index(self, **kwargs):
+        return self.index_bars(**kwargs)
+
+
+class TdxConnectionError(Exception):
+    pass
+
+
+class _HintExceptionClient(_HintClient):
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        super().__init__(endpoint_id, calls, empty_primary=0)
+
+    def index_bars(self, *, symbol: str, **kwargs):
+        if self.endpoint_id == "primary" and symbol == "000001":
+            self.calls.append((self.endpoint_id, symbol))
+            raise TdxConnectionError("hint provider transport failed")
+        return super().index_bars(symbol=symbol, **kwargs)
 
 
 def _report():
@@ -707,6 +799,231 @@ def _context_row(asset_kind, identity_key, *, condition_key="BUY_HINT", status="
 
 
 class N3HintFrequency8SourceProviderTest(unittest.TestCase):
+    def test_tdxpy_bj_stock_scope_blocks_before_probe_or_business_fetch(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        scope = _hint_scope(1)
+        scope["index_1m_objects"][0].update(
+            asset_kind="stock",
+            identity_key="stock:BJ:830001",
+            exchange="BJ",
+            code="830001",
+        )
+        probe_calls: list[str] = []
+        business_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            health_path = Path(tmp) / "health.json"
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=scope,
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=_hint_manager(health_path, mode="active"),
+                endpoint_probe=lambda endpoint, make_client: probe_calls.append(endpoint.endpoint_id),
+                endpoint_client_factory=lambda selection: business_calls.append(selection.endpoint_id),
+                transport="tdxpy",
+            )
+
+            self.assertFalse(health_path.exists())
+
+        self.assertEqual(result["result"], "BLOCKED_N3_TDXPY_BJ_STOCK_QUOTE_UNSUPPORTED")
+        self.assertEqual(result["transport"], "tdxpy")
+        self.assertEqual(result["unsupported_identity_keys"], ["stock:BJ:830001"])
+        self.assertEqual(probe_calls, [])
+        self.assertEqual(business_calls, [])
+
+    def test_hint_adapter_composes_with_real_tdxpy_transport_without_market_kwarg(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import N3HintFrequency8MarketFetchAdapter
+
+        class FakeTdxpyApi:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def connect(self, host, port, *, time_out):  # noqa: ANN001, ANN201
+                self.calls.append(("connect", host, port, time_out))
+                return self
+
+            def get_index_bars(self, frequency, market, code, start, count):  # noqa: ANN001, ANN201
+                self.calls.append(("index_bars", frequency, market, code, start, count))
+                return [{"datetime": "2026-06-30 10:16", "open": 1, "high": 2, "low": 1, "close": 2}]
+
+            def disconnect(self) -> None:
+                self.calls.append(("disconnect",))
+
+        selection = EndpointSelection(
+            endpoint_pool_version="test",
+            endpoint_id="primary",
+            host="127.0.0.1",
+            port=7709,
+            transport="tdxpy",
+            health_state="healthy",
+            health_checked_at=None,
+            probe_summary={"passed": True},
+            attempt_id="attempt-1",
+            selection_reason="test",
+            failover_mode="observe",
+            selectable=True,
+        )
+        api = FakeTdxpyApi()
+        transport = create_quote_transport(
+            selection,
+            transport="tdxpy",
+            tdxpy_api_factory=lambda **kwargs: api,
+        )
+        adapter = N3HintFrequency8MarketFetchAdapter(client_factory=lambda: transport)
+
+        rows = adapter.fetch_index_board_1m_rows(
+            obj={"asset_kind": "board", "code": "881001"},
+            symbol="881001",
+            frequency=8,
+            market=1,
+        )
+        transport.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn(("index_bars", 8, 1, "881001", 0, 800), api.calls)
+        self.assertEqual(api.calls[-1], ("disconnect",))
+
+    def test_hint_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _hint_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def index_bars(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise AssertionError("local HINT invariant bug")
+
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=_hint_scope(1),
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=manager,
+                endpoint_probe=_passing_hint_probe,
+                endpoint_client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        attempt = result["mootdx_batch_attempt"]["attempts"][0]
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(attempt["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(attempt["retry_allowed"])
+
+    def test_production_entrypoint_delegates_default_transport_to_shared_batch_factory(self) -> None:
+        from scripts import n3_hint_frequency8_source_provider as provider
+
+        signature = inspect.signature(provider.fetch_n3_hint_frequency8_market_rows_from_adapter)
+        self.assertIsNone(signature.parameters["endpoint_client_factory"].default)
+        self.assertNotIn("create_mootdx_client", inspect.getsource(provider))
+
+    def test_hint_provider_one_empty_then_nonempty_does_not_fetch_secondary(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=_hint_scope(2),
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=_hint_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_hint_probe,
+                endpoint_client_factory=lambda selection: _HintClient(selection.endpoint_id, calls, empty_primary=1),
+            )
+
+        self.assertEqual(calls, [("primary", "000000"), ("primary", "000001")])
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3_hint_frequency8_20260630__attempt_1")
+
+    def test_hint_provider_three_empty_objects_replay_secondary_from_first(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=_hint_scope(3),
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=_hint_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_hint_probe,
+                endpoint_client_factory=lambda selection: _HintClient(selection.endpoint_id, calls, empty_primary=3),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "000000"),
+                ("primary", "000001"),
+                ("primary", "000002"),
+                ("secondary", "000000"),
+                ("secondary", "000001"),
+                ("secondary", "000002"),
+            ],
+        )
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3_hint_frequency8_20260630__attempt_2")
+
+    def test_hint_provider_observe_three_empty_objects_never_fetches_secondary(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=_hint_scope(3),
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=_hint_manager(Path(tmp) / "health.json", mode="observe"),
+                endpoint_probe=_passing_hint_probe,
+                endpoint_client_factory=lambda selection: _HintClient(selection.endpoint_id, calls, empty_primary=3),
+            )
+
+        self.assertEqual(calls, [("primary", "000000"), ("primary", "000001"), ("primary", "000002")])
+        self.assertTrue(str(result["result"]).startswith("BLOCKED"))
+
+    def test_hint_provider_transport_exception_replays_secondary_from_first(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8MarketFetchAdapter,
+            fetch_n3_hint_frequency8_market_rows_from_adapter,
+        )
+
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            result = fetch_n3_hint_frequency8_market_rows_from_adapter(
+                args=_args(),
+                scope=_hint_scope(2),
+                adapter=N3HintFrequency8MarketFetchAdapter(),
+                endpoint_manager=_hint_manager(Path(tmp) / "health.json", mode="active"),
+                endpoint_probe=_passing_hint_probe,
+                endpoint_client_factory=lambda selection: _HintExceptionClient(selection.endpoint_id, calls),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "000000"),
+                ("primary", "000001"),
+                ("secondary", "000000"),
+                ("secondary", "000001"),
+            ],
+        )
+        self.assertEqual(result["mootdx_batch_attempt"]["winning_attempt_id"], "n3_hint_frequency8_20260630__attempt_2")
+
     def test_hint_proof_preflight_retargets_stale_source_target_to_actual_hhmm(self) -> None:
         from scripts.n3_combined_child_real_runners import N3RealIODependencies
         from scripts.n3_hint_frequency8_source_provider import (
@@ -1599,6 +1916,69 @@ class N3HintFrequency8SourceProviderTest(unittest.TestCase):
             self.assertFalse(payload["database_written"])
             self.assertFalse(payload["writes_outbox"])
             self.assertFalse(payload["touches_n4_n5_n6"])
+
+    def test_final_artifact_payload_and_report_preserve_complete_endpoint_attempt(self) -> None:
+        from scripts.n3_hint_frequency8_source_provider import (
+            N3HintFrequency8SourceArtifactWriter,
+            _build_source_payload,
+            _fetch_report_from_payload,
+        )
+
+        endpoint_attempt = {
+            "batch_id": "n3_hint_frequency8_20260630",
+            "batch_status": "passed",
+            "winning_attempt_id": "n3_hint_frequency8_20260630__attempt_2",
+            "attempts": [
+                {"attempt_id": "n3_hint_frequency8_20260630__attempt_1", "endpoint_id": "primary"},
+                {
+                    "attempt_id": "n3_hint_frequency8_20260630__attempt_2",
+                    "endpoint_id": "secondary",
+                    "endpoint_host": "192.0.2.2",
+                    "endpoint_port": 7709,
+                },
+            ],
+        }
+        row = {
+            "asset_kind": "index",
+            "identity_key": "index:SH:000001",
+            "bar_time": "2026-06-30T10:16:00+08:00",
+            "minute_label": "10:16",
+            "trade_date": "20260630",
+            "open": 1,
+            "high": 2,
+            "low": 1,
+            "close": 2,
+            "amount": 100,
+        }
+        payload = _build_source_payload(
+            args=_args(),
+            scope=_scope(board=False),
+            fetched={
+                "proof_input_time": "2026-06-30T10:16:00+08:00",
+                "index_board_1m_rows": [row],
+                "mootdx_batch_attempt": endpoint_attempt,
+            },
+        )
+        report = _fetch_report_from_payload(scope=_scope(board=False), payload=payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = N3HintFrequency8SourceArtifactWriter(output_root=tmpdir).write_n3_hint_frequency8_artifacts(
+                args=_args(),
+                report=_report(),
+                dependencies=SimpleNamespace(),
+                payload=payload,
+                fetch_report=report,
+            )
+            written_payload = json.loads(Path(artifact["payload_path"]).read_text())
+            written_report = json.loads(Path(artifact["report_path"]).read_text())
+
+        self.assertEqual(written_payload["mootdx_batch_attempt"], endpoint_attempt)
+        self.assertEqual(written_report["mootdx_batch_attempt"], endpoint_attempt)
+        self.assertEqual(written_payload["index_board_1m_rows"][0]["endpoint_id"], "secondary")
+        self.assertEqual(
+            written_payload["index_board_1m_rows"][0]["attempt_id"],
+            endpoint_attempt["winning_attempt_id"],
+        )
 
     def test_source_fetch_waits_when_target_minute_is_ahead_of_common_latest_source(self) -> None:
         from scripts.n3_combined_child_real_runners import N3RealIODependencies

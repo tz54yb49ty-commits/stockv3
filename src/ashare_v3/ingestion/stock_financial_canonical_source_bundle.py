@@ -47,7 +47,15 @@ from ashare_v3.ingestion.stock_financial_canonical_metrics import (
 
 
 SOURCE_BUNDLE_BATCH_ID = "stock_financial_canonical_source_bundle_20260529_v1"
-FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION = "financial_canonical_snapshot_v1"
+FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V1 = "financial_canonical_snapshot_v1"
+FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2 = "financial_canonical_snapshot_v2"
+FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION = FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2
+SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS = frozenset(
+    {
+        FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V1,
+        FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2,
+    }
+)
 DEFAULT_SMALL_SAMPLE_SIZE = 10
 INCREMENTAL_DELTA_FULL_FETCH_GUARD_RATIO = 0.20
 DEFAULT_TUSHARE_CACHE_PATH = Path("tmp/N1_stock_financial_canonical_source_bundle_20260529_tushare_cache.json")
@@ -674,6 +682,104 @@ def merge_financial_only_daily_basic_rows(
     }
 
 
+def _snapshot_identity_rows(
+    payload: Mapping[str, Any],
+    *,
+    identity_key: str,
+    row_key: str,
+) -> list[dict[str, Any]] | None:
+    entry = (payload.get("rows_by_identity") or {}).get(identity_key)
+    if not isinstance(entry, Mapping):
+        return None
+    if payload.get("schema_version") == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V1:
+        rows = entry.get(row_key) or []
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+            return None
+        if not all(isinstance(row, Mapping) for row in rows):
+            return None
+        return [dict(row) for row in rows]
+    prefix = "financial" if row_key == "financial_rows" else "forecast"
+    offset = entry.get(f"{prefix}_row_offset")
+    count = entry.get(f"{prefix}_row_count")
+    rows = payload.get(row_key)
+    if (
+        isinstance(offset, bool)
+        or isinstance(count, bool)
+        or not isinstance(offset, int)
+        or not isinstance(count, int)
+        or offset < 0
+        or count < 0
+        or not isinstance(rows, Sequence)
+        or isinstance(rows, (str, bytes, bytearray))
+    ):
+        return None
+    selected = rows[offset : offset + count]
+    if len(selected) != count or not all(isinstance(row, Mapping) for row in selected):
+        return None
+    return [dict(row) for row in selected]
+
+
+def validate_financial_canonical_snapshot(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    schema_version = payload.get("schema_version")
+    if schema_version not in SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS:
+        return None
+    expected_raw = [str(key) for key in payload.get("expected_identity_keys") or []]
+    expected = sorted(set(expected_raw))
+    rows_by_identity = payload.get("rows_by_identity")
+    if (
+        not expected
+        or len(expected) != len(expected_raw)
+        or not isinstance(rows_by_identity, Mapping)
+        or sorted(str(key) for key in rows_by_identity) != expected
+    ):
+        return None
+    financial_rows = payload.get("financial_rows") or []
+    if not isinstance(financial_rows, Sequence) or isinstance(financial_rows, (str, bytes, bytearray)):
+        return None
+    if not all(isinstance(row, Mapping) for row in financial_rows):
+        return None
+    financial_rows = [dict(row) for row in financial_rows]
+    if any(
+        str(row.get("stock_identity_key") or "") not in set(expected)
+        for row in financial_rows
+    ):
+        return None
+    declared_count = payload.get("expected_identity_count")
+    declared_hash = payload.get("expected_identity_sha256")
+    if declared_count is not None and (isinstance(declared_count, bool) or not isinstance(declared_count, int) or declared_count != len(expected)):
+        return None
+    if declared_hash is not None and str(declared_hash) != identity_keys_sha256(expected):
+        return None
+    if schema_version == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2:
+        forecast_rows = payload.get("forecast_rows") or []
+        if not isinstance(forecast_rows, Sequence) or isinstance(forecast_rows, (str, bytes, bytearray)):
+            return None
+        if not all(isinstance(row, Mapping) for row in forecast_rows):
+            return None
+        if (
+            payload.get("financial_rows_sha256") != canonical_payload_sha256(financial_rows)
+            or payload.get("forecast_rows_sha256") != canonical_payload_sha256(list(forecast_rows))
+            or payload.get("rows_by_identity_sha256") != canonical_payload_sha256(rows_by_identity)
+        ):
+            return None
+        for row_key in ("financial_rows", "forecast_rows"):
+            cursor = 0
+            for identity_key in expected:
+                rows = _snapshot_identity_rows(payload, identity_key=identity_key, row_key=row_key)
+                entry = rows_by_identity[identity_key]
+                prefix = "financial" if row_key == "financial_rows" else "forecast"
+                if (
+                    rows is None
+                    or entry.get(f"{prefix}_row_offset") != cursor
+                    or any(str(row.get("stock_identity_key") or "") != identity_key for row in rows)
+                ):
+                    return None
+                cursor += len(rows)
+            if cursor != len(payload.get(row_key) or []):
+                return None
+    return dict(payload)
+
+
 def load_financial_canonical_snapshot_v1(path: str | Path | None) -> dict[str, Any] | None:
     if not path:
         return None
@@ -686,35 +792,7 @@ def load_financial_canonical_snapshot_v1(path: str | Path | None) -> dict[str, A
         return None
     if not isinstance(payload, Mapping):
         return None
-    if payload.get("schema_version") != FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION:
-        return None
-    expected_raw = [str(key) for key in payload.get("expected_identity_keys") or []]
-    expected = sorted(set(expected_raw))
-    rows_by_identity = payload.get("rows_by_identity")
-    if (
-        not expected
-        or len(expected) != len(expected_raw)
-        or not isinstance(rows_by_identity, Mapping)
-        or sorted(str(key) for key in rows_by_identity) != expected
-    ):
-        return None
-    financial_rows = [
-        dict(row)
-        for row in payload.get("financial_rows") or []
-        if isinstance(row, Mapping)
-    ]
-    if any(
-        str(row.get("stock_identity_key") or "") not in set(expected)
-        for row in financial_rows
-    ):
-        return None
-    declared_count = payload.get("expected_identity_count")
-    declared_hash = payload.get("expected_identity_sha256")
-    if declared_count is not None and int(declared_count) != len(expected):
-        return None
-    if declared_hash is not None and str(declared_hash) != identity_keys_sha256(expected):
-        return None
-    return dict(payload)
+    return validate_financial_canonical_snapshot(payload)
 
 
 def stable_snapshot_source_signature(previous_entry: Mapping[str, Any]) -> str:
@@ -748,7 +826,7 @@ def compute_financial_canonical_delta(
             "reasons_by_identity": {identity_key: "full_rebuild_confirmed" for identity_key in identities},
             "reason_distribution": {"full_rebuild_confirmed": len(identities)},
         }
-    if not previous_snapshot or previous_snapshot.get("schema_version") != FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION:
+    if not previous_snapshot or previous_snapshot.get("schema_version") not in SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS:
         raise StockFinancialCanonicalSourceBundleBlocked(
             "financial_canonical_snapshot_v1_missing; full rebuild requires explicit --full-rebuild-confirmed"
         )
@@ -766,7 +844,7 @@ def compute_financial_canonical_delta(
         if not isinstance(previous_entry, Mapping):
             reasons_by_identity[identity_key] = "new_identity"
             continue
-        previous_rows = snapshot_financial_rows(previous_entry)
+        previous_rows = snapshot_rows_for_identity(previous_snapshot, identity_key, "financial_rows")
         if previous_rows:
             changed = financial_source_payload_changed(rows, previous_rows)
         else:
@@ -840,11 +918,12 @@ def split_financial_rows_by_source(rows: Sequence[Mapping[str, Any]]) -> tuple[l
 def snapshot_rows_for_identity(previous_snapshot: Mapping[str, Any] | None, identity_key: str, row_key: str) -> list[dict[str, Any]]:
     if not previous_snapshot:
         return []
-    entry = (previous_snapshot.get("rows_by_identity") or {}).get(identity_key)
-    if not isinstance(entry, Mapping):
+    rows = _snapshot_identity_rows(previous_snapshot, identity_key=identity_key, row_key=row_key)
+    if rows is None:
+        if previous_snapshot.get("schema_version") == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2:
+            raise StockFinancialCanonicalSourceBundleBlocked("financial_canonical_snapshot_v2_invalid_row_offset_index")
         return []
-    rows = entry.get(row_key) or []
-    return [dict(row) for row in rows if isinstance(row, Mapping)]
+    return rows
 
 
 def merge_incremental_source_rows(
@@ -891,25 +970,48 @@ def build_financial_canonical_snapshot_v1(
         for identity_key, rows in financial_by_identity.items()
     }
     forecast_by_identity = group_rows_by_identity_key(forecast_rows)
+    expected = sorted({str(key) for key in expected_identity_keys})
+    if not expected or len(expected) != len(list(expected_identity_keys)):
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_canonical_snapshot_expected_identity_keys_invalid")
+    unexpected_financial = sorted(set(financial_by_identity) - set(expected))
+    unexpected_forecast = sorted(set(forecast_by_identity) - set(expected))
+    if unexpected_financial or unexpected_forecast:
+        raise StockFinancialCanonicalSourceBundleBlocked("financial_canonical_snapshot_rows_outside_expected_identity_keys")
+    flat_financial_rows: list[dict[str, Any]] = []
+    flat_forecast_rows: list[dict[str, Any]] = []
     rows_by_identity: dict[str, Any] = {}
-    for identity_key in sorted({str(key) for key in expected_identity_keys}):
+    for identity_key in expected:
+        identity_financial_rows = sorted(
+            (json_strict_safe(row) for row in financial_by_identity.get(identity_key) or []),
+            key=canonical_payload_sha256,
+        )
+        identity_forecast_rows = sorted(
+            (json_strict_safe(row) for row in forecast_by_identity.get(identity_key) or []),
+            key=canonical_payload_sha256,
+        )
         rows_by_identity[identity_key] = {
             "source_signature": signature_by_identity.get(identity_key) or current_signature_by_identity.get(identity_key) or financial_source_signature([]),
-            "financial_rows": json_strict_safe(financial_by_identity.get(identity_key) or []),
-            "forecast_rows": json_strict_safe(forecast_by_identity.get(identity_key) or []),
+            "financial_row_offset": len(flat_financial_rows),
+            "financial_row_count": len(identity_financial_rows),
+            "forecast_row_offset": len(flat_forecast_rows),
+            "forecast_row_count": len(identity_forecast_rows),
         }
+        flat_financial_rows.extend(identity_financial_rows)
+        flat_forecast_rows.extend(identity_forecast_rows)
     return {
         "schema_version": FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION,
         "source_trade_date": source_trade_date,
         "active_source_version": active_source_version,
-        "expected_identity_keys": sorted({str(key) for key in expected_identity_keys}),
-        "expected_identity_count": len(sorted({str(key) for key in expected_identity_keys})),
+        "expected_identity_keys": expected,
+        "expected_identity_count": len(expected),
         "expected_identity_sha256": identity_keys_sha256(expected_identity_keys),
-        "financial_rows": json_strict_safe(list(financial_rows)),
-        "financial_rows_sha256": canonical_payload_sha256(list(financial_rows)),
-        "forecast_rows": json_strict_safe(list(forecast_rows)),
+        "financial_rows": flat_financial_rows,
+        "financial_rows_sha256": canonical_payload_sha256(flat_financial_rows),
+        "forecast_rows": flat_forecast_rows,
+        "forecast_rows_sha256": canonical_payload_sha256(flat_forecast_rows),
         "daily_basic_rows": json_strict_safe(list(daily_basic_rows)),
         "rows_by_identity": rows_by_identity,
+        "rows_by_identity_sha256": canonical_payload_sha256(rows_by_identity),
         "source_probe": json_strict_safe(dict(source_probe)),
     }
 

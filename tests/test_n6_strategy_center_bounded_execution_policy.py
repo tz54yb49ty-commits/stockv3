@@ -35,9 +35,9 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "database_role": policy["database_role"],
         "principal_id": 11,
         "user_id": 22,
-        "selection_revision_id": coexistence["required_selection_revision_id"],
-        "trade_date": coexistence["required_trade_date"],
-        "current_trade_date": coexistence["required_trade_date"],
+        "selection_revision_id": 20,
+        "trade_date": "20260724",
+        "current_trade_date": "20260724",
         "declared_write_tables": list(policy["allowed_write_tables"]),
         "observation_dml_contract": copy.deepcopy(
             policy["observation_dml_contract"]
@@ -114,9 +114,6 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
         coexistence = policy["virtual_executor_coexistence_contract"]
         exact_fields = {
             "virtual_executor_phase_mode": coexistence["phase_mode"],
-            "selection_revision_id": coexistence["required_selection_revision_id"],
-            "trade_date": coexistence["required_trade_date"],
-            "current_trade_date": coexistence["required_trade_date"],
             "virtual_executor_launch_agent_label": coexistence[
                 "launch_agent_label"
             ],
@@ -385,8 +382,7 @@ class N6StrategyCenterBoundedExecutionPolicyTest(unittest.TestCase):
         self.assertEqual(self.decision(), "ACCEPT")
         cases = {
             "virtual_executor_phase_mode": "general_bounded_canary",
-            "selection_revision_id": 19,
-            "current_trade_date": "20260724",
+            "current_trade_date": "20260725",
             "virtual_executor_launch_agent_label": "com.ashare-v3.n6.other",
             "virtual_executor_launch_agent_plist_path": "/tmp/other.plist",
             "virtual_executor_database_role": "n6_strategy_worker",
@@ -426,6 +422,33 @@ class N6StrategyCenterBoundedExecutionPolicyTest(unittest.TestCase):
         for field in coexistence["required_false_fields"]:
             with self.subTest(field=field):
                 self.assertEqual(self.decision(**{field: True}), "REJECT")
+
+    def test_reviewed_n6_date_authority_is_dynamic_and_fail_closed(self) -> None:
+        coexistence = self.policy["virtual_executor_coexistence_contract"]
+        self.assertEqual(
+            coexistence["trade_date_authority"],
+            "reviewed_n6_display_basis_consensus",
+        )
+        self.assertEqual(len(coexistence["required_authority_views"]), 3)
+        self.assertNotIn("required_trade_date", coexistence)
+        self.assertNotIn("required_selection_revision_id", coexistence)
+        self.assertEqual(self.decision(selection_revision_id=21), "ACCEPT")
+        self.assertEqual(
+            coexistence["membership_rule"],
+            "max_trade_date_lte_source_trade_date",
+        )
+        self.assertEqual(
+            self.decision(
+                common_trade_calendar_authority_requested=True,
+            ),
+            "REJECT",
+        )
+        self.assertEqual(
+            self.decision(
+                n1_n5_raw_table_authority_requested=True,
+            ),
+            "REJECT",
+        )
 
     def test_normal_start_interval_pid_runs_change_is_not_drift(self) -> None:
         coexistence = self.policy["virtual_executor_coexistence_contract"]

@@ -34,6 +34,15 @@ PASS_FILE = Path(
 )
 
 
+class _StatWithUid:
+    def __init__(self, source: object, uid: int) -> None:
+        self._source = source
+        self.st_uid = uid
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._source, name)
+
+
 class N6StrategyCenterLaunchdPlanTest(unittest.TestCase):
     def setUp(self) -> None:
         self.validation_patch = patch.object(
@@ -94,18 +103,18 @@ class N6StrategyCenterLaunchdPlanTest(unittest.TestCase):
             "--history-path",
             "--release-id",
             "--signal-source-user-id 1",
-            "--max-runtime-seconds 12",
+            "--max-runtime-seconds 20",
             "--execute --runtime-authorized",
         ):
             self.assertIn(required, joined)
-        self.assertEqual(MAX_RUNTIME_SECONDS, 12)
+        self.assertEqual(MAX_RUNTIME_SECONDS, 20)
         self.assertEqual(START_INTERVAL_SECONDS, 5)
         max_runtime_index = plist["ProgramArguments"].index(
             "--max-runtime-seconds"
         )
         self.assertEqual(
             plist["ProgramArguments"][max_runtime_index + 1],
-            "12",
+            "20",
         )
         for forbidden in (
             "--trade-date",
@@ -267,8 +276,83 @@ class N6StrategyCenterLaunchdPlanTest(unittest.TestCase):
                         self.assertEqual(attestation["tree"], "b" * 40)
                         self.assertEqual(
                             attestation["entity_validation"],
+                            "uniform-owner(root-or-current-user)+"
                             "file-set+git-blob-sha1+git-mode+read-only",
                         )
+                        self.assertEqual(
+                            attestation["release_owner_uid"], planner_module.os.getuid()
+                        )
+                        self.assertEqual(
+                            attestation["release_owner_authority"], "current_user"
+                        )
+
+                        original_lstat = Path.lstat
+
+                        def root_owned_lstat(path: Path) -> object:
+                            result = original_lstat(path)
+                            if path == release or release in path.parents:
+                                return _StatWithUid(result, 0)
+                            return result
+
+                        with patch.object(Path, "lstat", root_owned_lstat):
+                            root_attestation = _validate_immutable_release(release)
+                        self.assertEqual(root_attestation["release_owner_uid"], 0)
+                        self.assertEqual(
+                            root_attestation["release_owner_authority"], "root"
+                        )
+
+                        def mixed_owner_lstat(path: Path) -> object:
+                            result = original_lstat(path)
+                            if path == release or release in path.parents:
+                                nonroot_owner = (
+                                    1
+                                    if planner_module.os.getuid() == 0
+                                    else planner_module.os.getuid()
+                                )
+                                owner = 0 if path != authority else nonroot_owner
+                                return _StatWithUid(result, owner)
+                            return result
+
+                        with patch.object(Path, "lstat", mixed_owner_lstat):
+                            with self.assertRaisesRegex(
+                                ValueError, "file owner/hardlink authority invalid"
+                            ):
+                                _validate_immutable_release(release)
+
+                        def mixed_directory_owner_lstat(path: Path) -> object:
+                            result = original_lstat(path)
+                            if path == release or release in path.parents:
+                                nonroot_owner = (
+                                    1
+                                    if planner_module.os.getuid() == 0
+                                    else planner_module.os.getuid()
+                                )
+                                owner = 0 if path != src_dir else nonroot_owner
+                                return _StatWithUid(result, owner)
+                            return result
+
+                        with patch.object(
+                            Path, "lstat", mixed_directory_owner_lstat
+                        ):
+                            with self.assertRaisesRegex(
+                                ValueError,
+                                "directory authority/read-only mode invalid",
+                            ):
+                                _validate_immutable_release(release)
+
+                        def foreign_owner_lstat(path: Path) -> object:
+                            result = original_lstat(path)
+                            if path == release or release in path.parents:
+                                return _StatWithUid(
+                                    result, planner_module.os.getuid() + 1
+                                )
+                            return result
+
+                        with patch.object(Path, "lstat", foreign_owner_lstat):
+                            with self.assertRaisesRegex(
+                                ValueError, "root authority/read-only mode invalid"
+                            ):
+                                _validate_immutable_release(release)
 
                         authority.chmod(0o644)
                         with self.assertRaisesRegex(

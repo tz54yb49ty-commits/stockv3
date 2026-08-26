@@ -1,0 +1,160 @@
+{
+  "schema": "WindowsRebuildReleaseBaseline.v1",
+  "release_name": "windows-rebuild-v1",
+  "release_state": "BASELINE_ONLY_NOT_RUNNABLE",
+  "created_on": "2026-08-26",
+  "layer_role": "runtime_control",
+  "source_authority": {
+    "mac_worktree": "/Users/chuanfuchen/Documents/A股监控系统v3",
+    "source_branch": "codex/new-demand-n2-n5-20260710",
+    "source_head": "bd91c2afa1b007b325d48eb85a99a3d8a61c5e54",
+    "source_head_tree": "d87609ab7c45b3bbcb73fabe25a2ce830cfb0633",
+    "local_history_preservation_branch": "codex/mac-authority-preservation-local-20260826",
+    "local_history_preservation_commit": "6e9059c275c94c88df42ee0b87d369e05a1f89a8",
+    "github_snapshot_branch": "codex/mac-authority-preservation-20260826",
+    "github_snapshot_commit": "92ec8d8b193509fa4389cd06480de60f80c2c4e3",
+    "preservation_tree": "c6be0b38fcd28c3b4d4e87d9e7a7e886176443de",
+    "preserved_changed_paths": 14
+  },
+  "github_parent": {
+    "branch": "main",
+    "commit": "2a12b96df220fef4d7a8b26f225ed6c85eaec665"
+  },
+  "history_boundary": {
+    "mode": "filtered_code_snapshot",
+    "snapshot_commit": "92ec8d8b193509fa4389cd06480de60f80c2c4e3",
+    "filtered_payload_commit": "4a79fd12cee952716b807e066e8e1c66bf6fd8ef",
+    "filtered_payload_tree": "6ff671f030d69a04eb24151f8aac11e4f032b772",
+    "reason": "The Mac authority line contains 312 commits and 18,871,621,101 bytes of blobs not present on GitHub, including historical files larger than GitHub's per-file limit. The release branch therefore carries a cryptographically bound code snapshot instead of that runtime-artifact history.",
+    "source_tree_file_count": 6133,
+    "source_tree_bytes": 43200075,
+    "filtered_tree_file_count": 1099,
+    "filtered_tree_bytes": 27192105
+  },
+  "include_policy": {
+    "root_files": [
+      ".gitignore",
+      "AGENTS.md",
+      "pyproject.toml"
+    ],
+    "complete_directories": [
+      "ci",
+      "configs",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "canonical_docs": [
+      "docs/Architecture.md",
+      "docs/Roadmap.md",
+      "docs/Tasks.md",
+      "docs/V3_RAW_DATA_INGESTION_DESIGN.md",
+      "docs/V3_EXISTING_RAW_TO_INGESTION_MAPPING.md",
+      "docs/V3_LAYERED_SYSTEM_ARCHITECTURE.md",
+      "docs/V3_CONDITION_LAYER_DEVELOPMENT_DESIGN.md",
+      "docs/V3_N3_MARKET_DATA_LAYER_DEVELOPMENT_DESIGN.md",
+      "docs/N2_FINAL_CONDITION_LAYER_CLOSURE.md",
+      "docs/N2_F_SCOPE_CONSUMPTION_CONTRACT.md",
+      "docs/V3_N4_TRIGGER_LAYER_DEVELOPMENT_DESIGN.md",
+      "docs/V3_N5_ACTION_LAYER_DEVELOPMENT_DESIGN.md",
+      "docs/V3_TRIGGER_ACTION_RUNTIME_SPEC.md",
+      "docs/N4_TRIGGER_RULE_SPEC_ATOMIC_REVISED.md",
+      "docs/V3_SYMMETRY_TARGET_PRICE_SPEC.md",
+      "docs/N4_N5_TRIGGER_ACTION_STATE_FLOW_v0.1.md",
+      "docs/N5_CANONICAL_ACTION_FLOW_v0.1.md",
+      "docs/RUNTIME_PIPELINE_CONTROL_V0.md",
+      "docs/RUNTIME_NIGHTLY_SOP.md"
+    ],
+    "sql_rule": "Include tracked sql paths whose path does not match 20[0-9]{6}.",
+    "sql_file_count": 181,
+    "gate0_additions": [
+      "windows-rebuild-manifest.json",
+      "requirements-windows-py311.in",
+      "docs/WINDOWS_REBUILD_V1_TEST_PLAN.md"
+    ]
+  },
+  "exclude_policy": {
+    "mac_untracked_freeze": {
+      "total": 3178,
+      "promoted_after_review": [
+        "scripts/run_local_artifact_archive_daily_once.py",
+        "tests/test_local_artifact_archive_daily_once.py"
+      ],
+      "excluded_sql": 3021,
+      "excluded_markdown": 155,
+      "preserved_in_original_worktree": true,
+      "note": "Concurrent runtime writers increased the untracked count after the freeze; every post-freeze artifact is also excluded."
+    },
+    "tracked_source_exclusions": {
+      "historical_docs": 4044,
+      "date_scoped_sql": 983,
+      "logs": 4,
+      "mac_launchd": 1,
+      "stale_root_plan_or_log": 2
+    },
+    "always_excluded": [
+      "database dumps and PGDATA",
+      "runtime artifacts and cursors",
+      "data lake and Parquet data",
+      "logs and caches",
+      ".env files, tokens, passwords, and NAS credentials",
+      "Mac LaunchAgent configuration as Windows scheduler authority",
+      "old Windows evidence, sealed artifacts, and old runtime commit references"
+    ]
+  },
+  "dependency_authority": {
+    "python": "CPython 3.11 x64 on native Windows",
+    "resolver_input": "requirements-windows-py311.in",
+    "lock_file": "requirements-windows-py311.lock",
+    "lock_status": "PENDING_NATIVE_WINDOWS_PY311_RESOLUTION",
+    "eltdx": {
+      "version": "1.2.0",
+      "tag_object": "8cc408fa2077cad9b4f241c61da3519141972884",
+      "peeled_commit": "b2b94b967f478408848d007c83cc7155367c3aa9"
+    },
+    "tq": "Provided by the installed native TdxW/TQ runtime; not a pip package."
+  },
+  "gate0_verification": {
+    "json_manifest_parse": "PASS",
+    "python_source_compile": {
+      "result": "PASS",
+      "file_count": 857
+    },
+    "focused_archive_governance_tests": {
+      "result": "PASS",
+      "tests_run": 48,
+      "skipped": 12
+    },
+    "complete_legacy_unittest_discovery": {
+      "result": "FAIL",
+      "tests_run": 4612,
+      "failures": 54,
+      "errors": 214,
+      "skipped": 19,
+      "duration_seconds": 357.221,
+      "classification": [
+        "Many legacy tests require date-scoped rollback SQL and historical report fixtures intentionally excluded by the release allowlist.",
+        "Additional current-source failures remain in minute-label semantics, static structured-query audit expectations, and other legacy assertions.",
+        "This result blocks the immutable release tag but does not invalidate the code-snapshot baseline branch."
+      ]
+    }
+  },
+  "publication": {
+    "branch": "codex/windows-rebuild-v1",
+    "final_tag": "windows-rebuild-v1.0.0",
+    "final_tag_status": "DEFERRED",
+    "tag_release_conditions": [
+      "Native Windows Python 3.11 hash lock is generated and replayed successfully.",
+      "TQ and eltdx adapters are implemented in their authorized N1/N3 layer sessions.",
+      "Targeted and cross-platform tests pass from a clean release worktree.",
+      "Windows checkout and manifest verification pass."
+    ]
+  },
+  "forbidden_in_gate0": [
+    "database dump or restore",
+    "Windows connection or mutation",
+    "software installation",
+    "Task Scheduler creation",
+    "N1-N6 business runtime execution"
+  ]
+}

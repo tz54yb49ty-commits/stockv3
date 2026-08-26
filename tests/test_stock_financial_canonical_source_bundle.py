@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +9,7 @@ from zipfile import ZipFile
 from ashare_v3.ingestion.stock_financial_canonical_metrics import SOURCE_TDX, SOURCE_TUSHARE_FALLBACK
 from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
     StockFinancialCanonicalSourceBundleBlocked,
+    build_financial_canonical_snapshot_v1,
     build_source_bundle_report,
     canonical_payload_sha256,
     cached_tushare_symbol_entry,
@@ -15,13 +18,19 @@ from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
     fetch_tushare_rows_from_client,
     financial_source_signature,
     incremental_delta_guard_probe,
+    merge_incremental_source_rows,
     parse_symbol_shard,
     select_probe_symbols,
+    load_financial_canonical_snapshot_v1,
     validate_source_bundle_request,
     merge_financial_only_rows,
     SOURCE_MOOTDX_AFFAIR,
 )
+from ashare_v3.ingestion.stock_financial_canonical_metrics import (
+    snapshot_payload_to_metrics_snapshot,
+)
 from ashare_v3.ingestion.mootdx_financial_source import (
+    AFFAIR_REMOTE_MANIFEST_FALLBACK_WARNING,
     MootdxAffairFinancialSource,
     MootdxFinancialSource,
     MootdxFinancialSourceError,
@@ -55,6 +64,15 @@ def write_valid_affair_zip(root: Path, report_period: str) -> Path:
             bytes(range(256)) * 8,
         )
     return path
+
+
+def affair_manifest_item(path: Path) -> dict:
+    payload = path.read_bytes()
+    return {
+        "filename": path.name,
+        "hash": hashlib.md5(payload).hexdigest(),
+        "filesize": len(payload),
+    }
 
 
 def affair_raw_row(
@@ -106,6 +124,83 @@ def tdx_row(identity_key: str, report_period: str = "20260331", announcement_dat
 
 
 class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
+    def test_snapshot_v2_flat_rows_once_offsets_dual_read_and_metrics_handoff(self) -> None:
+        first = tdx_row("stock:SH:600000")
+        second = tdx_row("stock:SH:600001")
+        forecast = {"stock_identity_key": "stock:SH:600001", "forecast_type": "预增"}
+        snapshot_v2 = build_financial_canonical_snapshot_v1(
+            source_trade_date="20260821",
+            active_source_version="stock_financial_20260821_v1",
+            expected_identity_keys=["stock:SH:600001", "stock:SH:600000"],
+            current_signature_rows=[second, first],
+            financial_rows=[second, first],
+            forecast_rows=[forecast],
+            daily_basic_rows=[],
+            source_probe={},
+        )
+        self.assertEqual(snapshot_v2["schema_version"], "financial_canonical_snapshot_v2")
+        self.assertNotIn("financial_rows", snapshot_v2["rows_by_identity"]["stock:SH:600000"])
+        self.assertEqual(snapshot_v2["rows_by_identity"]["stock:SH:600000"]["financial_row_offset"], 0)
+        self.assertEqual(snapshot_v2["rows_by_identity"]["stock:SH:600001"]["financial_row_offset"], 1)
+        self.assertEqual(snapshot_payload_to_metrics_snapshot(snapshot_v2)["source_probe"]["uses_financial_canonical_snapshot_v2"], True)
+        snapshot_v1 = {
+            "schema_version": "financial_canonical_snapshot_v1",
+            "expected_identity_keys": ["stock:SH:600000"],
+            "rows_by_identity": {
+                "stock:SH:600000": {
+                    "source_signature": financial_source_signature([first]),
+                    "financial_rows": [first],
+                    "forecast_rows": [],
+                }
+            },
+            "financial_rows": [first],
+        }
+        with TemporaryDirectory() as temp_dir:
+            v1_path = Path(temp_dir) / "v1.json"
+            v2_path = Path(temp_dir) / "v2.json"
+            tampered_v2_path = Path(temp_dir) / "tampered-v2.json"
+            v1_path.write_text(json.dumps(snapshot_v1), encoding="utf-8")
+            v2_path.write_text(json.dumps(snapshot_v2), encoding="utf-8")
+            tampered_v2 = json.loads(json.dumps(snapshot_v2))
+            tampered_v2["rows_by_identity"]["stock:SH:600000"]["financial_row_offset"] = 1
+            tampered_v2_path.write_text(json.dumps(tampered_v2), encoding="utf-8")
+            self.assertEqual(load_financial_canonical_snapshot_v1(v1_path)["schema_version"], "financial_canonical_snapshot_v1")
+            self.assertEqual(load_financial_canonical_snapshot_v1(v2_path)["schema_version"], "financial_canonical_snapshot_v2")
+            self.assertIsNone(load_financial_canonical_snapshot_v1(tampered_v2_path))
+
+    def test_snapshot_v2_incremental_and_full_rebuild_hashes_match(self) -> None:
+        expected = ["stock:SH:600000", "stock:SH:600001"]
+        full_rows = [tdx_row(expected[1]), tdx_row(expected[0])]
+        full_snapshot = build_financial_canonical_snapshot_v1(
+            source_trade_date="20260821",
+            active_source_version="stock_financial_20260821_v1",
+            expected_identity_keys=expected,
+            current_signature_rows=full_rows,
+            financial_rows=full_rows,
+            forecast_rows=[],
+            daily_basic_rows=[],
+            source_probe={},
+        )
+        incremental_rows, incremental_forecasts = merge_incremental_source_rows(
+            expected_identity_keys=expected,
+            previous_snapshot=full_snapshot,
+            delta_financial_rows=[tdx_row(expected[1])],
+            delta_forecast_rows=[],
+            delta_identity_keys=[expected[1]],
+        )
+        incremental_snapshot = build_financial_canonical_snapshot_v1(
+            source_trade_date="20260821",
+            active_source_version="stock_financial_20260821_v1",
+            expected_identity_keys=expected,
+            current_signature_rows=full_rows,
+            financial_rows=incremental_rows,
+            forecast_rows=incremental_forecasts,
+            daily_basic_rows=[],
+            source_probe={},
+        )
+        for field in ("financial_rows_sha256", "forecast_rows_sha256", "rows_by_identity_sha256"):
+            self.assertEqual(incremental_snapshot[field], full_snapshot[field])
+
     def test_incremental_delta_selects_only_new_or_changed_symbols(self) -> None:
         unchanged = tdx_row("stock:SH:600000")
         changed = {**tdx_row("stock:SH:600001"), "announcement_date": "20260510"}
@@ -947,18 +1042,19 @@ class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
-    def test_affair_source_uses_latest_ten_local_packages_without_manifest_or_download(self) -> None:
+    def test_affair_source_refreshes_manifest_and_reuses_unchanged_local_packages(self) -> None:
         parse_calls = []
         manifest_calls = []
         download_calls = []
+        manifest = []
 
         def files_fn():
             manifest_calls.append(True)
-            raise AssertionError("local cache must not request the remote manifest")
+            return manifest
 
         def download_fn(_item):
             download_calls.append(True)
-            raise AssertionError("local cache must not download packages")
+            raise AssertionError("unchanged local packages must not be downloaded")
 
         def parse_fn(**kwargs):
             parse_calls.append(kwargs)
@@ -967,9 +1063,11 @@ class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir)
             for report_period in AFFAIR_TEST_PERIODS:
-                write_valid_affair_zip(cache_dir, report_period)
-            (cache_dir / "gpcw20260630.zip").write_bytes(b"x" * 164)
-            write_valid_affair_zip(cache_dir, "20260930")
+                manifest.append(
+                    affair_manifest_item(
+                        write_valid_affair_zip(cache_dir, report_period)
+                    )
+                )
             source = MootdxAffairFinancialSource(
                 files_fn=files_fn,
                 parse_fn=parse_fn,
@@ -983,20 +1081,167 @@ class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
             )
 
         self.assertEqual(len(rows), 10)
-        self.assertEqual(manifest_calls, [])
+        self.assertEqual(manifest_calls, [True])
         self.assertEqual(download_calls, [])
         self.assertEqual(len(parse_calls), 10)
         self.assertTrue(all(call["header"] == "raw" for call in parse_calls))
         self.assertTrue(all(row["announcement_date"] == "20010428" for row in rows))
         self.assertEqual(source.last_lineage["package_count"], 10)
-        self.assertEqual(source.last_lineage["manifest_request_count"], 0)
+        self.assertEqual(source.last_lineage["manifest_request_count"], 1)
         self.assertEqual(source.last_lineage["package_download_count"], 0)
-        self.assertTrue(source.last_lineage["local_cache_used"])
-        self.assertEqual(source.last_lineage["placeholder_filenames"], ["gpcw20260630.zip"])
-        self.assertNotIn(
-            "gpcw20260930.zip",
+        self.assertEqual(source.last_lineage["package_reuse_count"], 10)
+        self.assertFalse(source.last_lineage["local_cache_used"])
+        self.assertTrue(source.last_lineage["remote_manifest_available"])
+        self.assertEqual(source.last_lineage["manifest_source"], "remote_manifest")
+
+    def test_affair_source_downloads_only_changed_package_from_fresh_manifest(self) -> None:
+        parse_calls = []
+        download_calls = []
+
+        def parse_fn(**kwargs):
+            parse_calls.append(kwargs)
+            return [affair_raw_row()]
+
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as remote_dir:
+            cache_dir = Path(temp_dir)
+            remote_root = Path(remote_dir)
+            local_by_name = {
+                path.name: path
+                for path in (
+                    write_valid_affair_zip(cache_dir, period)
+                    for period in AFFAIR_TEST_PERIODS
+                )
+            }
+            placeholder_path = cache_dir / "gpcw20260630.zip"
+            placeholder_path.write_bytes(b"x" * 164)
+            remote_manifest = [
+                affair_manifest_item(local_by_name[f"gpcw{period}.zip"])
+                for period in AFFAIR_TEST_PERIODS[1:]
+            ]
+            changed_path = write_valid_affair_zip(remote_root, "20260630")
+            changed_payload = changed_path.read_bytes()
+            remote_manifest.append(affair_manifest_item(changed_path))
+
+            def download_fn(item):
+                download_calls.append(item["filename"])
+                return (remote_root / item["filename"]).read_bytes()
+
+            source = MootdxAffairFinancialSource(
+                files_fn=lambda: remote_manifest,
+                parse_fn=parse_fn,
+                download_fn=download_fn,
+                cache_dir=cache_dir,
+            )
+            rows = source.fetch_all_financial_metrics(
+                expected_identity_keys=["stock:SH:600000"],
+                source_trade_date="20260720",
+            )
+            refreshed_payload = placeholder_path.read_bytes()
+
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(download_calls, ["gpcw20260630.zip"])
+        self.assertEqual(refreshed_payload, changed_payload)
+        self.assertEqual(len(parse_calls), 10)
+        self.assertEqual(source.last_lineage["package_download_count"], 1)
+        self.assertEqual(source.last_lineage["package_reuse_count"], 9)
+        self.assertIn(
+            "gpcw20260630.zip",
             [item["filename"] for item in source.last_lineage["package_manifest"]],
         )
+        self.assertNotIn(
+            "gpcw20231231.zip",
+            [item["filename"] for item in source.last_lineage["package_manifest"]],
+        )
+
+    def test_affair_source_falls_back_to_verified_local_cache_when_manifest_is_unavailable(self) -> None:
+        parse_calls = []
+
+        def parse_fn(**kwargs):
+            parse_calls.append(kwargs)
+            return [affair_raw_row()]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            for report_period in AFFAIR_TEST_PERIODS:
+                write_valid_affair_zip(cache_dir, report_period)
+            source = MootdxAffairFinancialSource(
+                files_fn=lambda: (_ for _ in ()).throw(OSError("offline")),
+                parse_fn=parse_fn,
+                cache_dir=cache_dir,
+            )
+            rows = source.fetch_all_financial_metrics(
+                expected_identity_keys=["stock:SH:600000"],
+                source_trade_date="20260710",
+            )
+
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(parse_calls), 10)
+        self.assertEqual(source.last_lineage["manifest_request_count"], 1)
+        self.assertFalse(source.last_lineage["remote_manifest_available"])
+        self.assertTrue(source.last_lineage["local_cache_used"])
+        self.assertEqual(source.last_lineage["manifest_source"], "local_cache")
+        self.assertEqual(source.last_lineage["package_download_count"], 0)
+        self.assertEqual(source.last_lineage["package_reuse_count"], 10)
+        self.assertEqual(
+            source.last_lineage["package_download_count"]
+            + source.last_lineage["package_reuse_count"],
+            source.last_lineage["package_count"],
+        )
+        self.assertIn(
+            AFFAIR_REMOTE_MANIFEST_FALLBACK_WARNING,
+            source.last_lineage["warning_codes"],
+        )
+        self.assertIn(
+            {
+                "severity": "P1",
+                "code": AFFAIR_REMOTE_MANIFEST_FALLBACK_WARNING,
+            },
+            source.last_lineage["quality_warnings"],
+        )
+
+    def test_affair_source_does_not_fall_back_after_valid_manifest_download_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as remote_dir:
+            cache_dir = Path(temp_dir)
+            remote_root = Path(remote_dir)
+            local_by_name = {
+                path.name: path
+                for path in (
+                    write_valid_affair_zip(cache_dir, period)
+                    for period in AFFAIR_TEST_PERIODS
+                )
+            }
+            remote_manifest = [
+                affair_manifest_item(local_by_name[f"gpcw{period}.zip"])
+                for period in AFFAIR_TEST_PERIODS[1:]
+            ]
+            remote_manifest.append(
+                affair_manifest_item(
+                    write_valid_affair_zip(remote_root, "20260630")
+                )
+            )
+            placeholder_path = cache_dir / "gpcw20260630.zip"
+            placeholder_payload = b"x" * 164
+            placeholder_path.write_bytes(placeholder_payload)
+            source = MootdxAffairFinancialSource(
+                files_fn=lambda: remote_manifest,
+                parse_fn=lambda **_: [affair_raw_row()],
+                download_fn=lambda _: (_ for _ in ()).throw(OSError("download failed")),
+                cache_dir=cache_dir,
+            )
+
+            with self.assertRaisesRegex(OSError, "download failed"):
+                source.fetch_all_financial_metrics(
+                    expected_identity_keys=["stock:SH:600000"],
+                    source_trade_date="20260720",
+                )
+            self.assertEqual(
+                placeholder_path.read_bytes(),
+                placeholder_payload,
+            )
+            self.assertEqual(
+                list(cache_dir.glob(".gpcw20260630.zip.*.tmp")),
+                [],
+            )
 
     def test_affair_source_parses_changed_file_and_excludes_unverified_or_future_rows(self) -> None:
         parse_calls = []
@@ -1013,7 +1258,7 @@ class StockFinancialCanonicalSourceBundleTest(unittest.TestCase):
             for report_period in AFFAIR_TEST_PERIODS:
                 write_valid_affair_zip(cache_dir, report_period)
             source = MootdxAffairFinancialSource(
-                files_fn=lambda: self.fail("manifest must not be called"),
+                files_fn=lambda: (_ for _ in ()).throw(OSError("offline")),
                 parse_fn=parse_fn,
                 cache_dir=cache_dir,
             )

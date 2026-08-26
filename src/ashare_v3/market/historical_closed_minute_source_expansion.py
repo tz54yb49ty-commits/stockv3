@@ -18,6 +18,14 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    MootdxBatchObjectTracker,
+    MootdxEndpointTransportError,
+    build_mootdx_minute_semantic_probe,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+)
 from ashare_v3.market.previous_day_preload_execute import (
     bulk_upsert_minute_bars,
     utc_now_iso,
@@ -26,6 +34,7 @@ from ashare_v3.market.previous_day_preload_execute import (
 )
 from ashare_v3.market.query_audit_phase3 import audited_n3_market_execute_connect
 from ashare_v3.market.today_minute_execute import MootdxTodayMinuteAdapter
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
 
 try:
     from check_condition_source_ready import DEFAULT_DSN
@@ -259,6 +268,11 @@ def build_minute_records_for_candidates(
                         "source_previous_day_minute_run_id": candidate.get("source_previous_day_minute_run_id"),
                         "source_trace": candidate.get("source_trace"),
                         "raw_payload": row.get("raw_payload"),
+                        "mootdx_batch_attempt": row.get("mootdx_batch_attempt"),
+                        "attempt_id": row.get("attempt_id"),
+                        "endpoint_id": row.get("endpoint_id"),
+                        "endpoint_host": row.get("endpoint_host"),
+                        "endpoint_port": row.get("endpoint_port"),
                         "old_system_read": False,
                         "stale_v1_b1_c1_reused": False,
                         "fake_realtime_snapshot": False,
@@ -312,6 +326,134 @@ def build_adapter_rows(
                 }
             )
     return rows_by_identity, fetch_results
+
+
+def prepare_mootdx_historical_batch(
+    *,
+    payload: Mapping[str, Any],
+    manager: MootdxEndpointManager,
+    probe: Callable[..., Mapping[str, Any]],
+    client_factory: Callable[[EndpointSelection], Any] | None = None,
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    list[dict[str, Any]],
+    MootdxBatchAttemptOutcome[Any],
+]:
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=str(payload["target_expansion_run_id"]),
+        probe=probe,
+        client_factory=client_factory,
+        required_checks=("minute_scope_sentinels",),
+        fetch_batch=lambda client, selection: _prepare_complete_historical_attempt(
+            payload=payload,
+            adapter=MootdxTodayMinuteAdapter(client=client),
+            object_tracker=MootdxBatchObjectTracker(manager, selection),
+        ),
+    )
+    if outcome.status != "passed":
+        return {}, [], outcome
+    rows_by_identity, fetch_results = outcome.result
+    provenance = outcome.to_provenance()
+    winning = next(
+        (
+            dict(attempt)
+            for attempt in provenance.get("attempts") or []
+            if attempt.get("attempt_id") == provenance.get("winning_attempt_id")
+        ),
+        {},
+    )
+    for rows in rows_by_identity.values():
+        for row in rows:
+            row["mootdx_batch_attempt"] = provenance
+            row["attempt_id"] = winning.get("attempt_id")
+            row["endpoint_id"] = winning.get("endpoint_id")
+            row["endpoint_host"] = winning.get("endpoint_host")
+            row["endpoint_port"] = winning.get("endpoint_port")
+    return rows_by_identity, fetch_results, outcome
+
+
+def _prepare_complete_historical_attempt(
+    *,
+    payload: Mapping[str, Any],
+    adapter: Any,
+    object_tracker: MootdxBatchObjectTracker,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    rows_by_identity: dict[str, list[dict[str, Any]]] = {}
+    fetch_results: list[dict[str, Any]] = []
+    for candidate in payload.get("missing_candidates") or []:
+        trade_date = str(candidate.get("data_trade_date") or payload.get("for_trade_date") or "")
+        try:
+            fetched_value = adapter.fetch_minute_bars(candidate, trade_date)
+        except Exception as exc:  # noqa: BLE001 - preserve local program and contract errors.
+            if is_endpoint_transport_exception(exc):
+                raise MootdxEndpointTransportError(str(exc)) from exc
+            raise
+        fetched = list(fetched_value)
+        rows_by_identity[_candidate_fetch_key(candidate)] = fetched
+        rows = _filter_until_latest(
+            fetched,
+            _candidate_latest_minute(candidate, payload),
+        )
+        expected = int(
+            candidate.get("expected_minute_rows")
+            or payload.get("bar_count_per_object_until_latest_closed_minute")
+            or 0
+        )
+        object_result = object_tracker.record(
+            identity_key=_candidate_fetch_key(candidate),
+            value=rows,
+            empty=len(rows) == 0,
+        )
+        fetch_results.append(
+            {
+                "asset_kind": candidate.get("asset_kind"),
+                "identity_key": candidate.get("identity_key"),
+                "required_data_kind": candidate.get("required_data_kind"),
+                "data_trade_date": trade_date,
+                "status": (
+                    "fetched"
+                    if len(rows) == expected
+                    else "missing"
+                    if object_result.status == "empty_required_object"
+                    else "partial"
+                ),
+                "row_count": len(rows),
+                "expected_row_count": expected,
+                "source": SOURCE_ADAPTER,
+            }
+        )
+    return rows_by_identity, fetch_results
+
+
+def build_historical_minute_semantic_probe(
+    payload: Mapping[str, Any],
+) -> Callable[..., Mapping[str, Any]]:
+    candidates = list(payload.get("missing_candidates") or [])
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        trade_date = str(candidate.get("data_trade_date") or payload.get("for_trade_date") or "")
+        grouped.setdefault(trade_date, []).append(candidate)
+    probes = [
+        build_mootdx_minute_semantic_probe(
+            subscriptions=rows,
+            trade_date=trade_date,
+            adapter_factory=lambda client: MootdxTodayMinuteAdapter(client=client),
+        )
+        for trade_date, rows in sorted(grouped.items())
+    ]
+
+    def probe(endpoint: Any, make_client: Callable[[str], Any]) -> Mapping[str, Any]:
+        results = [item(endpoint, make_client) for item in probes]
+        return {
+            "checks": {
+                "minute_scope_sentinels": bool(results)
+                and all(bool((result.get("checks") or {}).get("minute_scope_sentinels")) for result in results)
+            },
+            "target_trade_dates": sorted(grouped),
+        }
+
+    return probe
 
 
 def _count_target_rows(cur: Any, run_id: str) -> dict[str, Any]:
@@ -473,6 +615,13 @@ def _quality_items(payload: Mapping[str, Any], object_results: Sequence[Mapping[
                 },
             }
         )
+    batch_attempt = payload.get("mootdx_batch_attempt")
+    if isinstance(batch_attempt, Mapping):
+        for item in items:
+            item["details"] = {
+                **dict(item.get("details") or {}),
+                "mootdx_batch_attempt": dict(batch_attempt),
+            }
     return items
 
 
@@ -572,6 +721,11 @@ def write_expansion_to_db(
                                 "writes_outbox": False,
                                 "old_system_read": False,
                                 "stale_v1_b1_c1_reused": False,
+                                "mootdx_batch_attempt": (
+                                    dict(payload["mootdx_batch_attempt"])
+                                    if isinstance(payload.get("mootdx_batch_attempt"), Mapping)
+                                    else None
+                                ),
                             }
                         ),
                     ),
@@ -621,6 +775,97 @@ def write_expansion_to_db(
     }
 
 
+def write_failed_historical_attempt_to_db(
+    *,
+    dsn: str,
+    payload: Mapping[str, Any],
+    outcome: MootdxBatchAttemptOutcome[Any],
+) -> dict[str, Any]:
+    expansion_run_id = str(payload["target_expansion_run_id"])
+    pre_counts = capture_target_counts(dsn=dsn, run_id=expansion_run_id)
+    dirty = {key: value for key, value in pre_counts["table_counts"].items() if int(value or 0) != 0}
+    if dirty or any(int(value or 0) != 0 for value in pre_counts["event_refs"].values()):
+        raise HistoricalClosedMinuteSourceExpansionBlocked(
+            f"historical closed-minute source expansion blocked: target run not clean {pre_counts}"
+        )
+    provenance = outcome.to_provenance()
+    candidate_count = len(payload.get("missing_candidates") or [])
+    quality_items = [
+        {
+            "run_id": expansion_run_id,
+            "source_condition_run_id": payload["source_condition_run_id"],
+            "for_trade_date": payload["for_trade_date"],
+            "source_trade_date": payload["source_trade_date"],
+            "data_domain": "common",
+            "layer_scope": "market_data_run",
+            "table_name": None,
+            "gate_code": "v3_20260616_historical_closed_minute_endpoint_attempt",
+            "gate_name": "V3 20260616 historical closed-minute endpoint attempt",
+            "severity": "P0",
+            "status": "failed",
+            "expected_value": "one complete endpoint attempt passes before any fact write",
+            "actual_value": str(outcome.status),
+            "identity_key": None,
+            "details": {
+                "mootdx_batch_attempt": provenance,
+                "success_fact_written": False,
+                "success_event_written": False,
+            },
+        }
+    ]
+    with audited_n3_market_execute_connect(
+        dsn,
+        stage_id="v3_20260616_historical_closed_minute_source_expansion",
+        source_run_id=expansion_run_id,
+        row_factory=dict_row,
+    ) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO common_market_data_run (
+                      run_id, source_condition_run_id, for_trade_date, source_trade_date,
+                      prev_trade_date, mode, status, p0_count, p1_count, p2_count,
+                      source_scope_row_count, candidate_row_count, subscription_row_count,
+                      subscription_object_count, dedup_ratio, generated_by,
+                      market_data_pulled, market_data_fact_written,
+                      downstream_layers_touched, worker_started,
+                      started_at, finished_at, raw_json
+                    )
+                    VALUES (%s, %s, %s, %s, %s, 'execute', 'failed', 1, 0, 0,
+                            %s, %s, %s, %s, 1.0, 'V3-historical-closed-minute-source-expansion',
+                            true, false, false, false, now(), now(), %s)
+                    """,
+                    (
+                        expansion_run_id,
+                        payload["source_condition_run_id"],
+                        payload["for_trade_date"],
+                        payload["source_trade_date"],
+                        payload["source_trade_date"],
+                        candidate_count,
+                        candidate_count,
+                        candidate_count,
+                        candidate_count,
+                        Jsonb(
+                            {
+                                "stage": "V3_20260616_N3_HISTORICAL_CLOSED_MINUTE_SOURCE_EXPANSION",
+                                "blocked_reason": "atomic_mootdx_batch_failed_before_fact_write",
+                                "writes_outbox": False,
+                                "mootdx_batch_attempt": provenance,
+                            }
+                        ),
+                    ),
+                )
+                _insert_quality_items(cur, quality_items)
+    post_counts = capture_target_counts(dsn=dsn, run_id=expansion_run_id)
+    return {
+        "pre_counts": pre_counts,
+        "post_counts": post_counts,
+        "quality_item_count": 1,
+        "p_counts": {"P0": 1, "P1": 0, "P2": 0},
+    }
+
+
 def format_report_markdown(report: Mapping[str, Any]) -> str:
     return (
         "# V3 20260616 N3 Historical Closed-Minute Source Expansion Report\n\n"
@@ -643,6 +888,9 @@ def run_historical_closed_minute_source_expansion(
     execute: bool = False,
     user_confirmed: bool = False,
     adapter: Any | None = None,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_every: int = 100,
 ) -> dict[str, Any]:
@@ -705,13 +953,54 @@ def run_historical_closed_minute_source_expansion(
         write_json(json_report_path, report)
         write_text(markdown_report_path, format_report_markdown(report))
         return report
-    resolved_adapter = adapter or MootdxTodayMinuteAdapter()
-    adapter_rows, fetch_results = build_adapter_rows(
-        payload=payload,
-        adapter=resolved_adapter,
-        progress_callback=progress_callback,
-        progress_every=progress_every,
-    )
+    batch_outcome: MootdxBatchAttemptOutcome[Any] | None = None
+    if adapter is None:
+        adapter_rows, fetch_results, batch_outcome = prepare_mootdx_historical_batch(
+            payload=payload,
+            manager=endpoint_manager or MootdxEndpointManager.from_toml(),
+            probe=endpoint_probe or build_historical_minute_semantic_probe(payload),
+            client_factory=endpoint_client_factory,
+        )
+    else:
+        adapter_rows, fetch_results = build_adapter_rows(
+            payload=payload,
+            adapter=adapter,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
+    if batch_outcome is not None and batch_outcome.status != "passed":
+        failure_write = write_failed_historical_attempt_to_db(
+            dsn=dsn,
+            payload=payload,
+            outcome=batch_outcome,
+        )
+        report = {
+            "stage": "V3_20260616_N3_HISTORICAL_CLOSED_MINUTE_SOURCE_EXPANSION",
+            "result": "BLOCKED",
+            "blocked_reason": "atomic_mootdx_batch_failed_before_db_write",
+            "data_quality_status": "missing",
+            "target_expansion_run_id": expansion_run_id,
+            "started_at": started_at,
+            "finished_at": utc_now_iso(),
+            "mootdx_batch_attempt": batch_outcome.to_provenance(),
+            "database_written": True,
+            "failure_run_and_quality_written": True,
+            "quality_item_count": failure_write["quality_item_count"],
+            "P0_P1_P2": failure_write["p_counts"],
+            "pre_counts": failure_write["pre_counts"],
+            "post_counts": failure_write["post_counts"],
+            "success_fact_written": False,
+            "success_event_written": False,
+            "forbidden_scope": forbidden_scope,
+        }
+        write_json(json_report_path, report)
+        write_text(markdown_report_path, format_report_markdown(report))
+        return report
+    if batch_outcome is not None:
+        payload = {
+            **dict(payload),
+            "mootdx_batch_attempt": batch_outcome.to_provenance(),
+        }
     failed_fetches = [item for item in fetch_results if item.get("status") == "failed"]
     if failed_fetches:
         report = {

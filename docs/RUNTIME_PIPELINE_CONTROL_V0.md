@@ -1,8 +1,9 @@
 # Runtime Pipeline Control v0
 
-更新日期：2026-05-27
+更新日期：2026-08-21
 layer_role：`runtime_control`
-范围：runtime orchestration / dashboard，只登记和展示 pipeline 状态，不执行 nightly run。
+范围：runtime orchestration / dashboard / disk-governance policy。默认只登记和展示；
+命名磁盘治理 policy 只能由后续独立请求执行一个精确阶段，本治理定义任务不执行。
 
 ## 1. 定位
 
@@ -163,7 +164,11 @@ runtime_pipeline_timeline
 `/n6/archive-status` 是 hot runtime keep-5 清理状态页，默认只读展示最近一次 cleanup 是否成功、保留/清理日期、blocker 和表级删除汇总。
 页面不得提供 cleanup execute 按钮，不得嵌入 cleanup confirm token，也不得在 N6 web 进程内写数据库。
 
-同一个 `com.ashare-v3.runtime-hot-cleanup-keep5-daily` 任务在完成既有 hot-row cleanup 后，直接清理最近 5 个有效交易日以外的 N3/N4/N5 每日本地文件；不做归档、不新增第二个 LaunchAgent。文件范围仅限 `docs/runtime/<YYYYMMDD>` 下的 N3/N4/N5 前缀项、固定 N3/N4 `tmp` 日报文件名，以及固定 N5 monitor/precheck/repair 日期目录。非法日期、未来日期、未知文件、symlink 和 active writer 均跳过。
+`com.ashare-v3.runtime-hot-cleanup-keep5-daily` 的历史实现会在 hot-row cleanup
+后直接删除部分本地文件，且不要求归档。该行为和相关报告保留为历史证据，但从
+`runtime_hot_cleanup_archive_gated_disk_governance_v1` 生效起，不再是合法执行或
+scheduler restore 路径。当前任务只定义治理合同，不修改或加载 plist，不手工补跑
+cleanup。
 
 本地文件结果写入现有：
 
@@ -180,8 +185,9 @@ GET /api/n6/ui/v1/archive-preview
 只读生成 keep-5 归档计划：
 
 ```text
-retention_trade_days=5
-retention_policy=latest_trade_dates
+retention_trade_days=6
+retention_policy=current_trade_date_plus_previous_5_completed_trade_dates_v1
+trade_calendar_authority=common_trade_calendar
 archive_root=/Volumes/MacRaid/stock_db_archive/v3_runtime
 ```
 
@@ -193,30 +199,80 @@ POST /api/n6/ui/v1/archive-execute
 
 只在用户提交 `confirm_token=ARCHIVE_KEEP_5` 后登记 bounded one-shot archive job artifact。该接口不得在 N6 web 进程内直接执行 SQL cleanup、不得直接删除本地目录、不得 shell 拼接命令。真正归档和本地 hot cleanup 仍必须通过后续 runtime_control / N1 archive execute gate，且必须先验证 manifest、row_count、checksum 和 restore 证据。
 
-keep-5 direct cleanup 硬规则：
+archive-gated 磁盘治理硬规则：
 
 ```text
-最近 5 个交易日必须保留在 hot store。
-daily cleanup 默认 direct-delete-no-archive，归档后置，不作为 cleanup 前置。
-direct cleanup 只能删除 5 日以外 hot runtime rows。
-存在 active archive/cleanup 进程、active N3/N4/N5/N6 runtime writer、retained-date overlap、
-downstream/outbox/checkpoint blocker 时，wrapper 必须 BLOCK。
+policy_id=runtime_hot_cleanup_archive_gated_disk_governance_v1
+retained_set=当前交易日 + 前 5 个已完成交易日
+trade_calendar_authority=common_trade_calendar
+data_volume_free_target_bytes=268435456000
+local_artifact_archive_root=/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts
+local_artifact_archive_current_pointer=/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts/current_verified_batch.json
+cleanup_live_mode=verified-archive-required + local-only
+database_archive_root=/Volumes/MacRaid/stock_db_archive/v3_runtime
+direct-delete-no-archive=REJECT
+manual_cleanup_replay=REJECT
 ```
 
-daily keep-5 direct cleanup 调度草案：
+policy 只允许四个互斥阶段，每个阶段必须由独立 `runtime_control` 请求明确授权：
 
 ```text
-01:00 com.ashare-v3.runtime-hot-cleanup-keep5-daily
-  -> scripts/run_runtime_hot_keep5_cleanup_once.py
-     --execute
-     --direct-delete-no-archive
-     --skip-row-count-plan
-     --confirm-token RUNTIME_HOT_KEEP5_DIRECT_DELETE_NO_ARCHIVE_CONFIRMED
-  -> 只清理不在最近 5 个交易日内的 hot runtime rows，不执行 archive。
+cleanup_scheduler_quiesce
+archive_verified_local_reclaim
+time_machine_snapshot_fallback
+cleanup_scheduler_archive_gated_restore
 ```
 
-上述 LaunchAgent 只能由显式 manual load gate 安装/加载。
-patch / plan gate 只能生成 plist 草案，不得执行 `launchctl bootstrap/bootout/kickstart`。
+持久修复后的 `cleanup_scheduler_archive_gated_restore` 必须把 live cleanup plist
+收窄为 `--local-archive-current-pointer-path` 加 `--local-only`。它不得继续绑定某个
+一次性 batch 的四个固定 evidence path，也不得计划或执行 PostgreSQL DELETE。
+数据库 retention 仍由独立 N3/N4/N6 layer gate 管理。
+
+quiesce 只能 bootout exact cleanup label 一次并状态驱动等待 job/PID 消失，不得
+触碰 N3P、N4、N5、N6 Web 或其他业务服务。归档本身属于独立
+`N1_ingestion` gate；runtime_control 不得创建 archive，只能消费已冻结的逐文件
+`LocalArtifactArchiveManifest.v1`。每个 manifest entry 必须包含 source path、
+trade_date、family、device/inode/mode/mtime、logical/allocated bytes、source SHA、
+archive path/archive SHA、引用分类和 restore proof id；batch summary 必须绑定
+manifest SHA、文件数、总字节和 `RESTORE_PROOF_PASS`。
+
+## 5.2 N1 archive-only daily installer contract
+
+独立 policy `n1_local_artifact_archive_daily_bounded_install_v1` 只允许安装 exact
+label `com.ashare-v3.n1.local-artifact-archive-daily`，每日 23:00、
+`RunAtLoad=false`、`KeepAlive=false`。安装 gate 属于 `runtime_control`，但不运行
+归档；自然 23:00 归档属于 `N1_ingestion`。
+
+daily runner 面向次日 01:00 cleanup date，以只读 `common_trade_calendar` 计算
+“次日 + 前 5 个已完成交易日”，复用 cleanup 的四 family exact discovery，只复制
+当前非保留 regular files。只有 `LocalArtifactArchiveManifest.v1`、summary、exact
+allowlist 和 isolation restore proof 全部互相 SHA 绑定后，才可原子发布：
+
+```text
+/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts/current_verified_batch.json
+schema_version=LocalArtifactArchiveCurrentPointer.v1
+```
+
+pointer 必须绑定 `for_cleanup_date`、batch id、retained dates、entry count，以及四份
+evidence 的 exact path/SHA。空候选日也发布 verified empty batch。writer、MacRaid、
+calendar、symlink、identity、hash、restore proof 或 publish 任一失败时保持旧 pointer
+不变，不等待、不 retry；source delete、数据库写入和业务服务操作始终为 0。
+
+local reclaim 只能删除 manifest 中的 exact regular-file path。执行瞬间必须逐项
+重新核对 identity/size/SHA、非 symlink、source/archive hash equality、retained
+date exclusion、active lineage exclusion 和 writer absence。按旧 N3P → 旧 intraday
+→ 旧 post-close → 旧 runtime，且各 family 内按最旧 trade date 逐批处理；每批后
+实测 `df`，Data 卷可用空间达到 250 GiB 立即停止。禁止 glob、broad recursive
+delete、未归档文件、数据库删除、自动 retry、old-dirty repo、Release 和 Codex
+session。
+
+只有 archived local reclaim 完成后仍低于 250 GiB，snapshot fallback 才可删除
+执行时重新冻结且 `purgeable=true` 的 exact `com.apple.TimeMachine.*.local`
+snapshot；`com.apple.os.update*` snapshot 永远禁止。restore 前 exact plist 必须
+证明已移除 `--direct-delete-no-archive` 和
+`RUNTIME_HOT_KEEP5_DIRECT_DELETE_NO_ARCHIVE_CONFIRMED`，并已切换为
+verified-archive-required；只允许 bootstrap exact plist 一次，不 kickstart。
+后续 cleanup 验收只认自然 01:00，不手工制造样本。
 
 archive-only execute wrapper 合同：
 
@@ -247,7 +303,14 @@ manifest/report 必须记录 table_timings[]，至少包含 layer、table、read
 archive-only execute 仍不得写 runtime PostgreSQL、不得执行 hot cleanup、不得删除本地 docs/tmp/DB rows、不得消费 outbox/inbox/checkpoint。
 ```
 
-keep-5 manifest-gated hot cleanup 合同：
+历史 keep-5 PostgreSQL manifest-gated hot cleanup 合同（等待 Gate 3 替换）：
+
+以下内容仅记录现有数据库 cleanup 结构，不受
+`runtime_hot_cleanup_archive_gated_disk_governance_v1` 授权。其
+`latest_hot_trade_dates` 日期域、driver-table discovery、事务粒度和 resume/retry
+语义均不得用于新的磁盘治理执行；在独立 Gate 3 完成 calendar-authoritative 日期、
+DB/local 解耦、50-row inbox 微事务和 durable progress journal 实现前，保持
+fail-closed。
 
 ```text
 retention_trade_days=5

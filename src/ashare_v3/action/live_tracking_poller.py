@@ -257,9 +257,9 @@ def build_live_tracking_plan(
             prior = latest_tracking_state(state_key)
             terminal_ref_reopened = False
             if _is_terminal_tracking(prior):
-                if not _can_reopen_expired_tracking_from_latest_match(prior, state):
+                if not _can_reopen_terminal_tracking_from_latest_match(prior, state):
                     continue
-                state = _reopen_expired_tracking_from_latest_match(prior, state)
+                state = _reopen_terminal_tracking_from_latest_match(prior, state)
                 terminal_ref_reopened = True
             action_eligible_required = (
                 terminal_ref_reopened
@@ -297,6 +297,11 @@ def build_live_tracking_plan(
                 _replace_tracking_update(tracking_updates, planned_update_keys, expired)
                 latest_planned_by_key[state_key] = expired
                 active_by_key.pop(expired["state_key"], None)
+            elif prior and str(prior.get("action_state") or "") == "executed":
+                boundary = _record_executed_inactive_episode_boundary(prior, row)
+                if boundary is not None:
+                    _replace_tracking_update(tracking_updates, planned_update_keys, boundary)
+                    latest_planned_by_key[state_key] = boundary
             continue
 
         if _is_trigger_state_changed_active(row):
@@ -1078,11 +1083,12 @@ def _is_terminal_tracking(row: Mapping[str, Any] | None) -> bool:
     return bool(row) and str(row.get("action_state") or "") in TERMINAL_TRACKING_STATES
 
 
-def _can_reopen_expired_tracking_from_latest_match(
+def _can_reopen_terminal_tracking_from_latest_match(
     prior: Mapping[str, Any] | None,
     latest: Mapping[str, Any],
 ) -> bool:
-    if not prior or str(prior.get("action_state") or "") != "expired":
+    prior_action_state = str((prior or {}).get("action_state") or "")
+    if not prior or prior_action_state not in {"expired", "executed"}:
         return False
     if str(latest.get("source_trigger_event_type") or "") != "TriggerMatched":
         return False
@@ -1098,22 +1104,55 @@ def _can_reopen_expired_tracking_from_latest_match(
     prior_event_time = datetime_or_none(prior.get("latest_n4_event_time"))
     if latest_event_time is None:
         return False
-    return prior_event_time is None or latest_event_time >= prior_event_time
+    if prior_event_time is not None and latest_event_time < prior_event_time:
+        return False
+    if prior_action_state == "expired":
+        return True
+    boundary = normalize_mapping(
+        normalize_mapping(prior.get("raw_json") or {}).get("terminal_episode_inactive_boundary")
+        or {}
+    )
+    if str(boundary.get("source_trigger_event_type") or "") != "TriggerStateChanged":
+        return False
+    if _bool_value(boundary.get("trigger_live"), default=True):
+        return False
+    boundary_event_id = str(boundary.get("source_trigger_event_id") or "")
+    closed_source_trigger_event_id = str(
+        boundary.get("closed_source_trigger_event_id") or ""
+    )
+    boundary_event_time = datetime_or_none(boundary.get("source_trigger_event_time"))
+    if (
+        not boundary_event_id
+        or closed_source_trigger_event_id != prior_event_id
+        or boundary_event_time is None
+    ):
+        return False
+    return latest_event_time >= boundary_event_time
 
 
-def _reopen_expired_tracking_from_latest_match(
+def _reopen_terminal_tracking_from_latest_match(
     prior: Mapping[str, Any],
     latest: Mapping[str, Any],
 ) -> dict[str, Any]:
     reopened = dict(_normalize_tracking_row(latest))
     raw_json = normalize_mapping(reopened.get("raw_json") or {})
+    prior_raw_json = normalize_mapping(prior.get("raw_json") or {})
+    inactive_boundary = normalize_mapping(
+        prior_raw_json.get("terminal_episode_inactive_boundary") or {}
+    )
     raw_json["terminal_ref_reopen_allowed"] = True
+    if inactive_boundary:
+        raw_json["terminal_episode_inactive_boundary"] = inactive_boundary
     raw_json["terminal_ref_reopen_trace"] = {
         "prior_action_state": str(prior.get("action_state") or ""),
         "prior_source_trigger_event_id": str(
             prior.get("source_trigger_event_id") or prior.get("latest_n4_event_id") or ""
         ),
         "prior_latest_n4_event_time": prior.get("latest_n4_event_time"),
+        "inactive_boundary_event_id": str(
+            inactive_boundary.get("source_trigger_event_id") or ""
+        ),
+        "inactive_boundary_event_time": inactive_boundary.get("source_trigger_event_time"),
         "reopened_by_source_trigger_event_id": str(reopened.get("source_trigger_event_id") or ""),
         "reopened_by_latest_n4_event_time": reopened.get("latest_n4_event_time"),
     }
@@ -1131,6 +1170,41 @@ def _reopen_expired_tracking_from_latest_match(
         }
     )
     return reopened
+
+
+def _record_executed_inactive_episode_boundary(
+    prior: Mapping[str, Any],
+    event_row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    event_time = datetime_or_none(event_row.get("event_time"))
+    prior_event_time = datetime_or_none(prior.get("latest_n4_event_time"))
+    if event_time is None or (prior_event_time is not None and event_time < prior_event_time):
+        return None
+    payload = _payload(event_row)
+    boundary = dict(_normalize_tracking_row(prior))
+    boundary.update(
+        {
+            "trigger_live": False,
+            "current_status": str(_value(event_row, payload, "current_status") or "inactive"),
+            "latest_n4_event_id": str(event_row.get("event_id") or ""),
+            "latest_n4_event_type": "TriggerStateChanged",
+            "latest_n4_event_time": event_row.get("event_time"),
+        }
+    )
+    raw_json = normalize_mapping(boundary.get("raw_json") or {})
+    raw_json["terminal_episode_inactive_boundary"] = {
+        "source_trigger_event_id": str(event_row.get("event_id") or ""),
+        "source_trigger_event_type": "TriggerStateChanged",
+        "source_trigger_event_time": event_row.get("event_time"),
+        "closed_source_trigger_event_id": str(
+            prior.get("source_trigger_event_id") or prior.get("latest_n4_event_id") or ""
+        ),
+        "trigger_live": False,
+        "current_status": str(_value(event_row, payload, "current_status") or "inactive"),
+    }
+    raw_json["trigger_state_changed_payload"] = payload
+    boundary["raw_json"] = raw_json
+    return boundary
 
 
 def _is_active_tracking(row: Mapping[str, Any]) -> bool:

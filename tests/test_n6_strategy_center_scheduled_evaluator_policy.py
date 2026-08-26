@@ -11,19 +11,16 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_ID = "n6_strategy_center_display_only_scheduled_evaluator_v1"
-F464_POLICY_ID = "n6_strategy_center_display_only_scheduled_evaluator_f464_v1"
 POLICY_BEGIN = f"<!-- policy:{POLICY_ID}:begin -->"
 POLICY_END = f"<!-- policy:{POLICY_ID}:end -->"
 BOUNDED_POLICY_ID = "n6_strategy_center_display_only_bounded_run_once_v1"
 WEB_POLICY_ID = "n6_user_web_immutable_release_bounded_rebind_v1"
 
 
-def load_policy(policy_id: str = POLICY_ID) -> dict[str, Any]:
+def load_policy() -> dict[str, Any]:
     text = (ROOT / "docs" / "EXECUTION_KERNEL.md").read_text(encoding="utf-8")
-    policy_begin = f"<!-- policy:{policy_id}:begin -->"
-    policy_end = f"<!-- policy:{policy_id}:end -->"
-    start = text.index(policy_begin) + len(policy_begin)
-    end = text.index(policy_end, start)
+    start = text.index(POLICY_BEGIN) + len(POLICY_BEGIN)
+    end = text.index(POLICY_END, start)
     fenced = text[start:end].strip()
     match = re.fullmatch(r"```json\s*(\{.*\})\s*```", fenced, re.DOTALL)
     if match is None:
@@ -79,7 +76,7 @@ def expected_program_arguments(
 
 
 def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
-    current_trade_date = "20260723"
+    current_trade_date = "20260724"
     release_commit = policy["required_integrated_implementation_commit"]
     release_path = f"{policy['release_root']}/20260722_170000__{release_commit}"
     runtime_env_path = (
@@ -119,8 +116,10 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "trade_date": current_trade_date,
         "current_trade_date": current_trade_date,
         policy["onsite_current_date_field"]: current_trade_date,
-        policy["trade_calendar_date_field"]: current_trade_date,
-        policy["trade_calendar_open_field"]: True,
+        **{
+            field: current_trade_date
+            for field in policy["reviewed_trade_date_fields"].values()
+        },
         "release_path": release_path,
         "runtime_env_path": runtime_env_path,
         "runner_path": runner_path,
@@ -346,7 +345,10 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
     trade_date = request.get(policy["trade_date_field"])
     current_trade_date = request.get(policy["current_trade_date_field"])
     onsite_current_date = request.get(policy["onsite_current_date_field"])
-    trade_calendar_date = request.get(policy["trade_calendar_date_field"])
+    reviewed_trade_dates = [
+        request.get(field)
+        for field in policy["reviewed_trade_date_fields"].values()
+    ]
     canary_trade_date = request.get("canary_trade_date")
     if any(
         not isinstance(value, str) or re.fullmatch(r"\d{8}", value) is None
@@ -354,17 +356,16 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
             trade_date,
             current_trade_date,
             onsite_current_date,
-            trade_calendar_date,
             canary_trade_date,
+            *reviewed_trade_dates,
         )
     ):
         return reject
     if (
         trade_date != current_trade_date
         or current_trade_date != onsite_current_date
-        or trade_calendar_date != current_trade_date
+        or any(value != current_trade_date for value in reviewed_trade_dates)
         or canary_trade_date != current_trade_date
-        or request.get(policy["trade_calendar_open_field"]) is not True
     ):
         return reject
 
@@ -478,14 +479,14 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy["runtime_gate_decision"], "ACCEPT")
         self.assertEqual(self.policy["default_runtime_execution_decision"], "REJECT")
 
-    def test_658_release_accepts_and_2d89_release_rejects(self) -> None:
+    def test_d85_release_accepts_and_legacy_release_rejects(self) -> None:
         self.assertEqual(
             self.policy["required_integrated_implementation_commit"],
-            "658ebb3995a7c539ac211258c378af6499635df4",
+            "d85df6328bde223e912dabc3bd65e16df984aa45",
         )
         self.assertEqual(
             self.policy["required_integrated_implementation_tree"],
-            "016f154e6716ce0c4f2c7dcee74808e9f95c6dc9",
+            "d6d5ae1d68a1255ea9f05d8e7ce40a837a572ea1",
         )
         self.assertEqual(
             self.policy["required_stable_replay_ancestor_commit"],
@@ -564,22 +565,17 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
         )
         self.assertEqual(self.policy["historical_canary_trade_dates"], ["20260722"])
         self.assertEqual(
-            self.policy["trade_calendar_open_field"],
-            "common_trade_calendar_is_open",
-        )
-        self.assertEqual(
             self.policy["onsite_current_date_field"],
             "onsite_asia_shanghai_date",
         )
-        self.assertEqual(
-            self.policy["trade_calendar_date_field"],
-            "common_trade_calendar_trade_date",
-        )
-        self.assertEqual(self.request["canary_trade_date"], "20260723")
-        self.assertEqual(self.request["current_trade_date"], "20260723")
+        self.assertEqual(len(self.policy["reviewed_trade_date_fields"]), 3)
+        self.assertNotIn("trade_calendar_date_field", self.policy)
+        self.assertNotIn("trade_calendar_open_field", self.policy)
+        self.assertEqual(self.request["canary_trade_date"], "20260724")
+        self.assertEqual(self.request["current_trade_date"], "20260724")
         self.assertEqual(self.decision(canary_policy_id=WEB_POLICY_ID), "REJECT")
         self.assertEqual(self.decision(canary_trade_date="20260722"), "REJECT")
-        self.assertEqual(self.decision(canary_trade_date="20260724"), "REJECT")
+        self.assertEqual(self.decision(canary_trade_date="20260725"), "REJECT")
         self.assertEqual(
             self.decision(canary_release_commit_sha="a" * 40),
             "REJECT",
@@ -779,30 +775,31 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
 
     def test_current_open_trade_date_and_closed_day_policy_fail_closed(self) -> None:
         self.assertEqual(self.decision(), "ACCEPT")
+        reviewed = self.policy["reviewed_trade_date_fields"]
         self.assertEqual(
             self.decision(
                 trade_date="20260722",
                 current_trade_date="20260722",
                 canary_trade_date="20260722",
-                common_trade_calendar_trade_date="20260722",
+                **{field: "20260722" for field in reviewed.values()},
             ),
             "REJECT",
         )
         self.assertEqual(
             self.decision(
-                trade_date="20260724",
-                current_trade_date="20260724",
-                canary_trade_date="20260724",
-                common_trade_calendar_trade_date="20260724",
+                trade_date="20260725",
+                current_trade_date="20260725",
+                canary_trade_date="20260725",
+                **{field: "20260725" for field in reviewed.values()},
             ),
             "REJECT",
         )
         self.assertEqual(self.decision(trade_date="20260722"), "REJECT")
-        self.assertEqual(self.decision(trade_date="20260724"), "REJECT")
+        self.assertEqual(self.decision(trade_date="20260725"), "REJECT")
         self.assertEqual(self.decision(current_trade_date="20260722"), "REJECT")
-        self.assertEqual(self.decision(current_trade_date="20260724"), "REJECT")
+        self.assertEqual(self.decision(current_trade_date="20260725"), "REJECT")
         self.assertEqual(self.decision(canary_trade_date="20260722"), "REJECT")
-        self.assertEqual(self.decision(canary_trade_date="20260724"), "REJECT")
+        self.assertEqual(self.decision(canary_trade_date="20260725"), "REJECT")
         self.assertEqual(self.decision(trade_date="2026-07-23"), "REJECT")
         self.assertEqual(self.decision(canary_trade_date="2026-07-23"), "REJECT")
         self.assertEqual(
@@ -810,11 +807,7 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
             "REJECT",
         )
         self.assertEqual(
-            self.decision(common_trade_calendar_trade_date="20260722"),
-            "REJECT",
-        )
-        self.assertEqual(
-            self.decision(common_trade_calendar_is_open=False),
+            self.decision(stock_reviewed_for_trade_date="20260723"),
             "REJECT",
         )
         self.assertEqual(self.decision(non_current_trade_date_requested=True), "REJECT")
@@ -1119,7 +1112,6 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
             "trade_touched",
             "real_broker_connected",
             "voice_mobile_sim_requested",
-            "virtual_executor_loaded_or_running",
             "migration_or_schema_requested",
         )
         for field in fields:
@@ -1140,306 +1132,16 @@ class N6StrategyCenterScheduledEvaluatorPolicyTest(unittest.TestCase):
             "docs/EXECUTION_COMPILER.md",
             "docs/EXECUTION_KERNEL.md",
             "docs/EXECUTION_RUNTIME_GATE.md",
+            "docs/EXECUTION_SANDBOX.md",
+            "docs/EXECUTION_TEST_SUITE.md",
+            "docs/EXECUTION_TRACE_SYSTEM.md",
         )
         for path in paths:
             with self.subTest(path=path):
                 text = (ROOT / path).read_text(encoding="utf-8")
-                self.assertIn(F464_POLICY_ID, text)
+                self.assertIn(POLICY_ID, text)
                 self.assertIn(BOUNDED_POLICY_ID, text)
                 self.assertIn(WEB_POLICY_ID, text)
-
-
-def canonical_f464_request(policy: dict[str, Any]) -> dict[str, Any]:
-    exact_fields = (
-        "required_release",
-        "required_release_git_blobs",
-        "temporal_confluence_v2_lineage",
-        "required_runtime_file_sha256",
-        "required_migration_live_predicate",
-        "required_live_web",
-        "required_evaluator_before_state",
-        "required_evaluator_target",
-        "required_activation_chain",
-        "required_virtual_executor",
-        "required_canary_scope",
-        "required_canary_result",
-        "scheduler_contract",
-        "activation_operation_counts",
-        "failure_compensation_contract",
-        "required_transition_order",
-        "required_zero_side_effect_counts",
-    )
-    request = {
-        "policy_id": policy["policy_id"],
-        "layer_role": policy["layer_role"],
-        **{field: copy.deepcopy(policy[field]) for field in exact_fields},
-    }
-    request.update({field: True for field in policy["required_true_fields"]})
-    request.update({field: False for field in policy["required_false_fields"]})
-    return request
-
-
-def evaluate_f464(policy: dict[str, Any], request: dict[str, Any]) -> str:
-    reject = policy["default_runtime_execution_decision"]
-    if request.get("policy_id") != policy["policy_id"]:
-        return reject
-    if request.get("layer_role") != policy["layer_role"]:
-        return reject
-    exact_fields = (
-        "required_release",
-        "required_release_git_blobs",
-        "temporal_confluence_v2_lineage",
-        "required_runtime_file_sha256",
-        "required_migration_live_predicate",
-        "required_live_web",
-        "required_evaluator_before_state",
-        "required_evaluator_target",
-        "required_activation_chain",
-        "required_virtual_executor",
-        "required_canary_scope",
-        "required_canary_result",
-        "scheduler_contract",
-        "activation_operation_counts",
-        "failure_compensation_contract",
-        "required_transition_order",
-        "required_zero_side_effect_counts",
-    )
-    if any(request.get(field) != policy[field] for field in exact_fields):
-        return reject
-    if any(request.get(field) is not True for field in policy["required_true_fields"]):
-        return reject
-    if any(request.get(field) is not False for field in policy["required_false_fields"]):
-        return reject
-    if any(value != 0 for value in request["required_zero_side_effect_counts"].values()):
-        return reject
-    return policy["accept_decision"]
-
-
-class N6StrategyCenterScheduledEvaluatorF464PolicyTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.policy = load_policy(F464_POLICY_ID)
-        cls.request = canonical_f464_request(cls.policy)
-
-    def decision(self, **changes: Any) -> str:
-        request = copy.deepcopy(self.request)
-        request.update(changes)
-        return evaluate_f464(self.policy, request)
-
-    def mutate(self, field: str, key: str, value: Any) -> str:
-        changed = copy.deepcopy(self.request[field])
-        changed[key] = value
-        return self.decision(**{field: changed})
-
-    def test_f464_is_the_only_runtime_gate_policy_and_legacy_rejects_f464(self) -> None:
-        self.assertEqual(self.decision(), "ACCEPT")
-        self.assertEqual(self.policy["supersedes_policy_id"], POLICY_ID)
-        self.assertEqual(self.policy["legacy_policy_f464_decision"], "REJECT")
-        legacy = load_policy(POLICY_ID)
-        legacy_request = canonical_request(legacy)
-        self.assertEqual(
-            evaluate(
-                legacy,
-                {
-                    **legacy_request,
-                    "release_path": (
-                        f"{legacy['release_root']}/20260726_000001__"
-                        "f4641e9c4cd4dff1a817f779d28007fe7cdffe62"
-                    ),
-                    "release_commit_sha": (
-                        "f4641e9c4cd4dff1a817f779d28007fe7cdffe62"
-                    ),
-                    "release_tree_sha": (
-                        "c654cbc03c0341c9b3490a02a432b136984c43ce"
-                    ),
-                },
-            ),
-            "REJECT",
-        )
-        runtime_gate = (ROOT / "docs" / "EXECUTION_RUNTIME_GATE.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(F464_POLICY_ID, runtime_gate)
-        self.assertNotIn(f"`{POLICY_ID}`, or", runtime_gate)
-
-    def test_exact_f464_release_blobs_and_temporal_lineage_are_frozen(self) -> None:
-        self.assertEqual(
-            self.policy["required_release"],
-            {
-                "commit": "f4641e9c4cd4dff1a817f779d28007fe7cdffe62",
-                "tree": "c654cbc03c0341c9b3490a02a432b136984c43ce",
-            },
-        )
-        for field in (
-            "required_release_git_blobs",
-            "temporal_confluence_v2_lineage",
-            "required_runtime_file_sha256",
-        ):
-            changed = copy.deepcopy(self.policy[field])
-            first = next(iter(changed))
-            changed[first] = "f" * 40
-            with self.subTest(field=field):
-                self.assertEqual(self.decision(**{field: changed}), "REJECT")
-
-    def test_exact_live_migration_web_plist_package_and_chain_hashes(self) -> None:
-        self.assertEqual(
-            self.policy["required_live_web"]["plist_sha256"],
-            "7532979992d8e73a02a6bf81c0a43fa89e49843589d348792abfd62e3b0e64b8",
-        )
-        self.assertEqual(
-            self.policy["required_evaluator_before_state"]["source_plist_sha256"],
-            "60e9446a89b5f84ff5dee874eab6d05974c4e2dd6fb63a30c2d77074bb0c501a",
-        )
-        self.assertEqual(
-            self.policy["required_evaluator_target"]["target_plist_sha256"],
-            "a0219e9585c8e67c905805c9d603d854aa2fb67e44857b240e4509cc7d4fe936",
-        )
-        self.assertEqual(
-            self.policy["required_evaluator_target"][
-                "offline_activation_manifest_sha256"
-            ],
-            "b80edef162d08b857c81677f20166987c7c03a32af6cabf0dd1632af04da2afa",
-        )
-        self.assertEqual(self.policy["required_activation_chain"]["event_count"], 78)
-        for field in (
-            "required_migration_live_predicate",
-            "required_live_web",
-            "required_evaluator_before_state",
-            "required_evaluator_target",
-            "required_activation_chain",
-        ):
-            changed = copy.deepcopy(self.policy[field])
-            first = next(iter(changed))
-            changed[first] = "drift"
-            with self.subTest(field=field):
-                self.assertEqual(self.decision(**{field: changed}), "REJECT")
-
-    def test_exact_20260727_single_scope_canary_and_cas_are_required(self) -> None:
-        self.assertEqual(self.policy["required_trade_date"], "20260727")
-        self.assertEqual(
-            self.policy["required_canary_scope"],
-            {
-                "principal_id": 12,
-                "principal_type": "human_user",
-                "user_id": 11,
-                "selection_revision_id": 22,
-                "selection_revision_no": 1,
-                "package_key": "package_1",
-                "package_version": "v2",
-            },
-        )
-        self.assertEqual(
-            self.mutate("required_canary_scope", "user_id", 12),
-            "REJECT",
-        )
-        for invalid_principal_type in ("user", "admin", "unknown"):
-            with self.subTest(principal_type=invalid_principal_type):
-                self.assertEqual(
-                    self.mutate(
-                        "required_canary_scope",
-                        "principal_type",
-                        invalid_principal_type,
-                    ),
-                    "REJECT",
-                )
-        self.assertEqual(
-            self.mutate(
-                "required_canary_result", "all_cas_predicates_match", False
-            ),
-            "REJECT",
-        )
-        self.assertEqual(
-            self.mutate(
-                "required_canary_result", "fresh_business_increment_count", 1
-            ),
-            "REJECT",
-        )
-        self.assertEqual(self.decision(cas_drift_detected=True), "REJECT")
-
-    def test_scheduler_is_bounded_pending_first_display_shadow_only(self) -> None:
-        expected = {
-            "start_interval_seconds": 5,
-            "run_at_load": False,
-            "keep_alive": False,
-            "max_runtime_seconds": 12,
-            "max_scopes_per_tick": 1,
-            "pending_precedes_active": True,
-            "active_scope_cursor_mode": "persistent_round_robin",
-            "transaction_scope": "single_principal_user_revision",
-            "all_users_transaction": False,
-            "display_only": True,
-            "shadow_only": True,
-        }
-        for key, value in expected.items():
-            with self.subTest(key=key):
-                self.assertEqual(self.policy["scheduler_contract"][key], value)
-        self.assertEqual(
-            self.mutate("scheduler_contract", "all_users_transaction", True),
-            "REJECT",
-        )
-        self.assertEqual(self.decision(all_users_transaction_requested=True), "REJECT")
-
-    def test_source_target_source_order_and_absent_label_operations_are_exact(self) -> None:
-        self.assertEqual(
-            self.policy["required_transition_order"],
-            [
-                "frozen_source",
-                "validated_f464_target",
-                "frozen_source_on_failure_only",
-            ],
-        )
-        operations = self.policy["activation_operation_counts"]
-        self.assertEqual(operations["primary_atomic_plist_replace"], 1)
-        self.assertEqual(operations["primary_bootstrap"], 1)
-        self.assertEqual(operations["primary_bootout"], 0)
-        self.assertEqual(operations["primary_kickstart"], 0)
-        self.assertEqual(operations["primary_start"], 0)
-        self.assertEqual(
-            self.mutate("activation_operation_counts", "primary_bootout", 1),
-            "REJECT",
-        )
-        self.assertEqual(
-            self.mutate(
-                "failure_compensation_contract",
-                "bootstrap_superseded_658_source",
-                True,
-            ),
-            "REJECT",
-        )
-        self.assertEqual(self.decision(wrong_order_requested=True), "REJECT")
-        self.assertEqual(self.decision(empty_state_restore_requested=True), "REJECT")
-
-    def test_hash_all_users_and_every_side_effect_path_reject(self) -> None:
-        for field in (
-            "hash_drift_detected",
-            "all_users_transaction_requested",
-            "side_effect_requested",
-            "deepseek_requested",
-            "autonomous_execution_requested",
-            "trading_side_effect_requested",
-            "n1_n5_touched",
-            "database_or_release_mutation_requested_by_governance_session",
-        ):
-            with self.subTest(field=field):
-                self.assertEqual(self.decision(**{field: True}), "REJECT")
-        for effect in self.policy["required_zero_side_effect_counts"]:
-            with self.subTest(effect=effect):
-                counts = copy.deepcopy(
-                    self.policy["required_zero_side_effect_counts"]
-                )
-                counts[effect] = 1
-                self.assertEqual(
-                    self.decision(required_zero_side_effect_counts=counts),
-                    "REJECT",
-                )
-
-    def test_every_f464_required_boolean_is_fail_closed(self) -> None:
-        for field in self.policy["required_true_fields"]:
-            with self.subTest(field=field):
-                self.assertEqual(self.decision(**{field: False}), "REJECT")
-        for field in self.policy["required_false_fields"]:
-            with self.subTest(field=field):
-                self.assertEqual(self.decision(**{field: True}), "REJECT")
 
 
 if __name__ == "__main__":

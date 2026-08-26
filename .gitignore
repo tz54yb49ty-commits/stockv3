@@ -47,3 +47,4 @@ docs/replay/
 
 # Patch artifacts are local handoff material, not source.
 *.patch
+/gpcw*.zip

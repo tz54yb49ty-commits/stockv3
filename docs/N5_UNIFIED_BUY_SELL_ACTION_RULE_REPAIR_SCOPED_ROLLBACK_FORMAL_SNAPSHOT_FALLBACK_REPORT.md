@@ -1,9 +1,0 @@
-# Scoped Rollback Report
-
-- result: ROLLBACK_EXECUTED
-- rollback_order: N6_user_projection, N5_action, N3_action_confirmation_metric_trigger_time_aligned, N3_action_confirmation_metric_closeout_1500, N4_trigger_projection_matcher
-- n6 deleted: {'user_notification_queue': 0, 'user_signal_card': 122, 'user_signal_projection': 122, 'user_projection_run': 1}
-- n5 deleted: {'common_event_delivery_attempt': 0, 'common_event_consumer_checkpoint': 1992, 'common_event_inbox': 3892, 'common_event_outbox': 122, 'common_event_ledger': 0, 'common_action_event': 122, 'board_action_fact': 3, 'index_action_fact': 6, 'stock_action_fact': 113, 'common_action_quality_item': 3770, 'common_action_run': 1}
-- n3 deleted: {'action_confirmation_metric_20260608_trigger_time_aligned_until_1500__trigger_projection_matcher_execute_20260608_v13_index_all_until_1500_v4_repair_retry': {'stock_action_confirmation_projection_metric': 113, 'index_action_confirmation_projection_metric': 6, 'board_action_confirmation_projection_metric': 3, 'common_market_data_quality_item': 7, 'common_market_data_run': 1}, 'action_confirmation_metric_20260608_until_1500__trigger_projection_matcher_execute_20260608_v13_index_all_until_1500_v4_repair_retry': {'stock_action_confirmation_projection_metric': 113, 'index_action_confirmation_projection_metric': 6, 'board_action_confirmation_projection_metric': 3, 'common_market_data_quality_item': 7, 'common_market_data_run': 1}}
-- n4 deleted: {'common_event_outbox': 3892, 'common_trigger_match': 122, 'common_trigger_state': 3892, 'common_trigger_quality_item': 10, 'common_event_inbox': 2155, 'common_event_consumer_checkpoint': 2155, 'common_trigger_run': 1}
-- forbidden_scope: {'old_system_touched': False, 'worker_started': False, 'market_data_pulled': False, 'delivery_push_voice_mobile_touched': False, 'sim_order_trade_position_pnl_touched': False, 'real_trade_touched': False}

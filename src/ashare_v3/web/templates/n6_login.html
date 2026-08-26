@@ -130,11 +130,7 @@
         window.location.assign(redirectTarget);
         return;
       }
-      const payload = await response.json().catch(() => ({}));
-      const loginErrorMessages = {
-        authentication_service_unavailable: "数据库正在启动或恢复，请稍后重试"
-      };
-      error.textContent = loginErrorMessages[payload.error] || "登录失败";
+      error.textContent = "登录失败";
     });
   </script>
 </body>

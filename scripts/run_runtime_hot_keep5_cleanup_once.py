@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,13 +26,21 @@ from ashare_v3.ingestion.runtime_hot_cleanup import (
     DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN,
     KEEP5_CONFIRM_TOKEN,
     RuntimeHotCleanupSpec,
+    append_durable_progress_journal,
+    build_runtime_hot_cleanup_plan_v2,
     build_keep2_dirty_hot_cleanup_plan,
+    execute_frozen_inbox_units,
     execute_keep2_dirty_hot_cleanup,
+    execute_runtime_hot_cleanup_database_v2,
 )
 
 
 DEFAULT_REPORT_DIR = "docs/runtime_archive/hot_keep5_cleanup"
 DEFAULT_RETENTION_TRADE_DAYS = 5
+LOCAL_ARCHIVE_MANIFEST_SCHEMA = "LocalArtifactArchiveManifest.v1"
+LOCAL_ARCHIVE_REQUIRED_MODE = "verified-archive-required"
+LOCAL_ARCHIVE_CURRENT_POINTER_SCHEMA = "LocalArtifactArchiveCurrentPointer.v1"
+LOCAL_ARCHIVE_CURRENT_POINTER_NAME = "current_verified_batch.json"
 DEFAULT_SINGLE_FLIGHT_LOCK_NAME = ".keep5_cleanup.lock"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -67,6 +77,9 @@ RUNTIME_WRITER_EXCLUDE_MARKERS = (
     "scripts/run_v3_runtime_archive_keep5_daily_once.py",
     "run_n6_user_app.py",
     "run_n6_ai_research_bridge.py",
+    "run_n6_virtual_executor_once.py",
+    "run_n6_virtual_stop_loss_once.py",
+    "run_n6_virtual_quote_once.py",
 )
 
 
@@ -204,6 +217,424 @@ def cleanup_local_runtime_artifacts(
     return _finish_local_file_cleanup(payload, started_monotonic, result=result)
 
 
+def discover_local_artifact_files(
+    *, project_root: str | Path, current_date: date | None = None
+) -> list[dict[str, Any]]:
+    """Discover the local date domain and exact regular files independently of DB."""
+
+    root = Path(project_root).resolve()
+    today = current_date or datetime.now(ASIA_SHANGHAI).date()
+    targets, skipped = _discover_local_artifact_targets(root, today=today)
+    if skipped:
+        raise ValueError("local_artifact_discovery_not_closed:" + ";".join(skipped))
+    files: list[dict[str, Any]] = []
+    for target in targets:
+        path = Path(target["path"])
+        for candidate in _discover_regular_files_under_target(path, root=root):
+            relative = candidate.relative_to(root)
+            family = (
+                "n3p_trigger_proof_contract"
+                if candidate.name.startswith("N3P_")
+                else "post_close_fastlane"
+                if any("post_close_fastlane" in part for part in relative.parts)
+                else "runtime_date_directory"
+                if relative.parts[:2] == ("docs", "runtime")
+                else "intraday_live_current"
+            )
+            files.append(
+                {
+                    "source_path": str(candidate),
+                    "trade_date": str(target["trade_date"]),
+                    "artifact_family": family,
+                }
+            )
+    return sorted(files, key=lambda item: str(item["source_path"]))
+
+
+def _discover_regular_files_under_target(path: Path, *, root: Path) -> list[Path]:
+    """Return only regular files, rejecting every unsafe path in a declared scope."""
+
+    try:
+        root.lstat()
+        first = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"local_artifact_discovery_stat_failed:{path}:{type(exc).__name__}") from exc
+    if stat.S_ISLNK(first.st_mode):
+        raise ValueError(f"local_artifact_discovery_symlink:{path}")
+    if stat.S_ISREG(first.st_mode):
+        candidates = [path]
+    elif stat.S_ISDIR(first.st_mode):
+        candidates = []
+        stack = [path]
+        while stack:
+            directory = stack.pop()
+            try:
+                children = sorted(Path(item.path) for item in os.scandir(directory))
+            except OSError as exc:
+                raise ValueError(f"local_artifact_discovery_scan_failed:{directory}:{type(exc).__name__}") from exc
+            for child in children:
+                try:
+                    child_stat = child.lstat()
+                except OSError as exc:
+                    raise ValueError(f"local_artifact_discovery_stat_failed:{child}:{type(exc).__name__}") from exc
+                if stat.S_ISLNK(child_stat.st_mode):
+                    raise ValueError(f"local_artifact_discovery_symlink:{child}")
+                if stat.S_ISDIR(child_stat.st_mode):
+                    stack.append(child)
+                elif stat.S_ISREG(child_stat.st_mode):
+                    candidates.append(child)
+                else:
+                    raise ValueError(f"local_artifact_discovery_non_regular:{child}")
+    else:
+        raise ValueError(f"local_artifact_discovery_non_regular:{path}")
+    for candidate in candidates:
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"local_artifact_discovery_path_escape:{candidate}") from exc
+    return sorted(candidates, key=str)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_local_archive_current_pointer(
+    *,
+    pointer_path: str | Path,
+    for_cleanup_date: str,
+    archive_root: str | Path,
+) -> tuple[dict[str, Path], dict[str, Any], list[str]]:
+    """Resolve a current-date pointer to one immutable verified archive batch."""
+
+    pointer = Path(pointer_path)
+    archive_base = Path(archive_root)
+    try:
+        archive_stat = archive_base.lstat()
+        pointer_stat = pointer.lstat()
+        archive_resolved = archive_base.resolve(strict=True)
+        pointer_resolved = pointer.resolve(strict=True)
+    except OSError:
+        return {}, {}, ["local_archive_pointer_missing_or_unsafe"]
+    if (
+        not stat.S_ISDIR(archive_stat.st_mode)
+        or archive_base.is_symlink()
+        or not stat.S_ISREG(pointer_stat.st_mode)
+        or pointer.is_symlink()
+        or pointer.name != LOCAL_ARCHIVE_CURRENT_POINTER_NAME
+        or pointer_resolved.parent != archive_resolved
+    ):
+        return {}, {}, ["local_archive_pointer_missing_or_unsafe"]
+    try:
+        raw = pointer.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}, {}, ["local_archive_pointer_invalid"]
+    if not isinstance(payload, dict):
+        return {}, {}, ["local_archive_pointer_invalid"]
+    blockers: list[str] = []
+    if payload.get("schema_version") != LOCAL_ARCHIVE_CURRENT_POINTER_SCHEMA:
+        blockers.append("local_archive_pointer_schema_mismatch")
+    if str(payload.get("for_cleanup_date") or "") != for_cleanup_date:
+        blockers.append("local_archive_pointer_cleanup_date_mismatch")
+    if payload.get("result") != "ARCHIVED_VERIFIED":
+        blockers.append("local_archive_pointer_result_mismatch")
+    if payload.get("restore_proof_result") != "RESTORE_PROOF_PASS":
+        blockers.append("local_archive_pointer_restore_proof_mismatch")
+    batch_id = str(payload.get("batch_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", batch_id):
+        blockers.append("local_archive_pointer_batch_id_invalid")
+    raw_entry_count = payload.get("entry_count")
+    if type(raw_entry_count) is not int:
+        entry_count = -1
+    else:
+        entry_count = raw_entry_count
+    if entry_count < 0:
+        blockers.append("local_archive_pointer_entry_count_invalid")
+    retained_dates = [str(item) for item in payload.get("retained_trade_dates") or []]
+    if (
+        len(retained_dates) != 6
+        or len(set(retained_dates)) != 6
+        or for_cleanup_date not in retained_dates
+        or any(not re.fullmatch(r"\d{8}", item) for item in retained_dates)
+    ):
+        blockers.append("local_archive_pointer_retained_dates_invalid")
+
+    evidence_paths: dict[str, Path] = {}
+    expected_names = {
+        "manifest": "manifest.jsonl",
+        "summary": "summary.json",
+        "allowlist": "exact_cleanup_allowlist.jsonl",
+        "restore_proof": "restore_proof.json",
+    }
+    batch_root = archive_resolved / f"batch={batch_id}"
+    try:
+        batch_stat = batch_root.lstat()
+        batch_resolved = batch_root.resolve(strict=True)
+    except OSError:
+        batch_stat = None
+        batch_resolved = batch_root
+        blockers.append("local_archive_pointer_batch_root_invalid")
+    if batch_stat is not None and (not stat.S_ISDIR(batch_stat.st_mode) or batch_root.is_symlink()):
+        blockers.append("local_archive_pointer_batch_root_invalid")
+    for field, expected_name in expected_names.items():
+        evidence = payload.get(field)
+        if not isinstance(evidence, dict):
+            blockers.append(f"local_archive_pointer_{field}_invalid")
+            continue
+        evidence_path = Path(str(evidence.get("path") or ""))
+        expected_sha = str(evidence.get("sha256") or "")
+        try:
+            evidence_stat = evidence_path.lstat()
+            evidence_resolved = evidence_path.resolve(strict=True)
+        except OSError:
+            blockers.append(f"local_archive_pointer_{field}_invalid")
+            continue
+        if (
+            not evidence_path.is_absolute()
+            or not stat.S_ISREG(evidence_stat.st_mode)
+            or evidence_path.is_symlink()
+            or evidence_resolved.parent != batch_resolved
+            or evidence_resolved.name != expected_name
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha)
+        ):
+            blockers.append(f"local_archive_pointer_{field}_invalid")
+            continue
+        if _sha256_file(evidence_resolved) != expected_sha:
+            blockers.append(f"local_archive_pointer_{field}_sha256_mismatch")
+            continue
+        evidence_paths[field] = evidence_resolved
+    summary_path = evidence_paths.get("summary")
+    if summary_path is not None:
+        try:
+            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            blockers.append("local_archive_pointer_summary_invalid")
+        else:
+            if not isinstance(summary_payload, dict) or str(summary_payload.get("batch_id") or "") != batch_id:
+                blockers.append("local_archive_pointer_batch_binding_mismatch")
+    metadata = {
+        "schema_version": str(payload.get("schema_version") or ""),
+        "pointer_path": str(pointer_resolved),
+        "pointer_sha256": hashlib.sha256(raw).hexdigest(),
+        "for_cleanup_date": str(payload.get("for_cleanup_date") or ""),
+        "batch_id": batch_id,
+        "retained_trade_dates": retained_dates,
+        "entry_count": entry_count,
+        "result": str(payload.get("result") or ""),
+        "restore_proof_result": str(payload.get("restore_proof_result") or ""),
+    }
+    return evidence_paths, metadata, sorted(set(blockers))
+
+
+def load_verified_local_archive_allowlist(
+    *,
+    manifest_path: str | Path,
+    batch_summary_path: str | Path,
+    allowlist_path: str | Path,
+    restore_proof_path: str | Path,
+    discovered_cleanup_files: Iterable[dict[str, Any]],
+    retained_trade_dates: Iterable[str],
+    archive_root: str | Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate the frozen manifest, summary, allowlist, and restore proof."""
+
+    blockers: list[str] = []
+    manifest = Path(manifest_path)
+    summary_path = Path(batch_summary_path)
+    allowlist = Path(allowlist_path)
+    restore_proof = Path(restore_proof_path)
+    try:
+        raw = manifest.read_bytes()
+        entries = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        allowlist_raw = allowlist.read_bytes()
+        allowlist_entries = [json.loads(line) for line in allowlist_raw.decode("utf-8").splitlines() if line.strip()]
+        restore = json.loads(restore_proof.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [], [f"local_archive_evidence_invalid:{type(exc).__name__}"]
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    allowlist_sha256 = hashlib.sha256(allowlist_raw).hexdigest()
+    if summary.get("schema_version") != "LocalArtifactArchiveSummary.v1":
+        blockers.append("local_archive_summary_schema_mismatch")
+    if summary.get("result") != "ARCHIVED_VERIFIED" or summary.get("ready_for_runtime_exact_reclaim") is not True:
+        blockers.append("local_archive_summary_not_ready_for_exact_reclaim")
+    if summary.get("restore_proof_result") != "RESTORE_PROOF_PASS":
+        blockers.append("local_archive_restore_proof_not_pass")
+    if summary.get("manifest_sha256") != manifest_sha256:
+        blockers.append("local_archive_manifest_sha256_mismatch")
+    if summary.get("allowlist_sha256") != allowlist_sha256:
+        blockers.append("local_archive_allowlist_sha256_mismatch")
+    if summary.get("restore_proof_sha256") != _sha256_file(restore_proof):
+        blockers.append("local_archive_restore_proof_sha256_mismatch")
+    for field, expected_path in (
+        ("manifest_path", manifest),
+        ("allowlist_path", allowlist),
+        ("restore_proof_path", restore_proof),
+    ):
+        if Path(str(summary.get(field) or "")).resolve() != expected_path.resolve():
+            blockers.append(f"local_archive_summary_{field}_mismatch")
+    summary_entry_count = summary.get("entry_count")
+    if type(summary_entry_count) is not int or summary_entry_count != len(entries):
+        blockers.append("local_archive_manifest_entry_count_mismatch")
+    required_batch_fields = {
+        "batch_id", "manifest_sha256", "entry_count", "source_logical_bytes_total",
+        "source_allocated_bytes_total", "archive_logical_bytes_total",
+        "source_archive_hash_equality_count", "retained_trade_dates", "restore_proof_result",
+    }
+    if not required_batch_fields.issubset(summary):
+        blockers.append("local_archive_batch_fields_missing")
+    retained = set(str(item) for item in retained_trade_dates)
+    if restore.get("schema_version") != "LocalArtifactIsolationRestoreProof.v1" or restore.get("result") != "RESTORE_PROOF_PASS":
+        blockers.append("local_archive_restore_proof_schema_or_result_mismatch")
+    if restore.get("batch_id") != summary.get("batch_id"):
+        blockers.append("local_archive_restore_proof_batch_id_mismatch")
+    def scope_key(item: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(item.get("source_path") or ""),
+            str(item.get("trade_date") or ""),
+            str(item.get("artifact_family") or ""),
+        )
+
+    required_rows = [dict(item) for item in discovered_cleanup_files]
+    required = {scope_key(item): item for item in required_rows}
+    manifest_entries = {scope_key(item): item for item in entries}
+    actual = {scope_key(item): item for item in allowlist_entries}
+    if (
+        len(required) != len(required_rows)
+        or len(manifest_entries) != len(entries)
+        or len(actual) != len(allowlist_entries)
+        or set(manifest_entries) != set(required)
+        or set(actual) != set(required)
+        or any(not key[0] or not key[1] or not key[2] for key in actual)
+    ):
+        blockers.append("local_archive_exact_allowlist_mismatch")
+    archive_base = Path(archive_root).resolve()
+    required_fields = {
+        "source_path", "trade_date", "artifact_family", "source_device", "source_inode",
+        "source_mode", "source_mtime_ns", "source_logical_bytes", "source_allocated_bytes",
+        "source_sha256", "archive_path", "archive_sha256", "reference_classification",
+        "restore_proof_id",
+    }
+    restore_families = restore.get("families") if isinstance(restore.get("families"), dict) else {}
+    archive_logical_total = 0
+    for entry in allowlist_entries:
+        if not required_fields.issubset(entry):
+            blockers.append(f"local_archive_entry_fields_missing:{entry.get('source_path', '')}")
+            continue
+        manifest_entry = manifest_entries.get(scope_key(entry))
+        if manifest_entry is None or any(manifest_entry.get(key) != entry.get(key) for key in required_fields):
+            blockers.append(f"local_archive_allowlist_manifest_binding_mismatch:{entry['source_path']}")
+        if entry.get("manifest_sha256") != manifest_sha256:
+            blockers.append(f"local_archive_allowlist_manifest_sha256_mismatch:{entry['source_path']}")
+        family_proof = restore_families.get(str(entry["artifact_family"]))
+        if not isinstance(family_proof, dict) or family_proof.get("restore_proof_id") != entry["restore_proof_id"]:
+            blockers.append(f"local_archive_allowlist_restore_proof_binding_mismatch:{entry['source_path']}")
+        if str(entry["trade_date"]) in retained:
+            blockers.append(f"local_archive_retained_date_overlap:{entry['trade_date']}")
+        if int(entry.get("retained_date_overlap") or 0):
+            blockers.append(f"local_archive_retained_overlap_flag:{entry['source_path']}")
+        if int(entry.get("active_current_lineage_overlap") or 0):
+            blockers.append(f"local_archive_active_lineage_overlap:{entry['source_path']}")
+        if entry.get("archive_fully_verified") is False:
+            blockers.append(f"local_archive_entry_not_fully_verified:{entry['source_path']}")
+        if str(entry["source_sha256"]) != str(entry["archive_sha256"]):
+            blockers.append(f"local_archive_hash_inequality:{entry['source_path']}")
+        archive_path = Path(str(entry["archive_path"]))
+        try:
+            archive_stat = archive_path.lstat()
+            archive_resolved = archive_path.resolve(strict=True)
+        except OSError:
+            blockers.append(f"local_archive_entry_archive_invalid:{entry['archive_path']}")
+            continue
+        if (
+            not stat.S_ISREG(archive_stat.st_mode)
+            or archive_path.is_symlink()
+            or archive_base not in archive_resolved.parents
+        ):
+            blockers.append(f"local_archive_path_outside_root:{entry['archive_path']}")
+            continue
+        archive_logical_total += int(archive_stat.st_size)
+        entry["exact_allowlisted"] = True
+        entry["archive_fully_verified"] = True
+    source_logical_total = sum(int(entry.get("source_logical_bytes") or 0) for entry in allowlist_entries)
+    source_allocated_total = sum(int(entry.get("source_allocated_bytes") or 0) for entry in allowlist_entries)
+    expected_summary_counts = (
+        ("source_logical_bytes_total", source_logical_total, "local_archive_source_logical_bytes_total_mismatch"),
+        ("source_allocated_bytes_total", source_allocated_total, "local_archive_source_allocated_bytes_total_mismatch"),
+        ("archive_logical_bytes_total", archive_logical_total, "local_archive_logical_bytes_total_mismatch"),
+        ("source_archive_hash_equality_count", len(allowlist_entries), "local_archive_hash_equality_count_mismatch"),
+    )
+    for field, expected, blocker in expected_summary_counts:
+        actual = summary.get(field)
+        if type(actual) is not int or actual != expected:
+            blockers.append(blocker)
+    if sorted(str(item) for item in summary.get("retained_trade_dates") or []) != sorted(retained):
+        blockers.append("local_archive_retained_trade_dates_mismatch")
+    return allowlist_entries, sorted(set(blockers))
+
+
+def execute_verified_local_allowlist(
+    *,
+    entries: Iterable[dict[str, Any]],
+    active_paths: Iterable[str | Path] = (),
+) -> dict[str, Any]:
+    """Unlink only revalidated regular files from the frozen archive allowlist."""
+
+    active = {str(Path(item).resolve()) for item in active_paths}
+    removed: list[str] = []
+    for entry in entries:
+        source = Path(str(entry["source_path"]))
+        archive = Path(str(entry["archive_path"]))
+        try:
+            source_stat = source.lstat()
+            if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink():
+                raise OSError("source_not_exact_regular_file")
+            archive_stat = archive.lstat()
+            if not stat.S_ISREG(archive_stat.st_mode) or archive.is_symlink():
+                raise OSError("archive_not_exact_regular_file")
+            if str(source.resolve()) in active:
+                raise OSError("active_lineage_path")
+            expected_mode = int(str(entry["source_mode"]), 8) if isinstance(entry["source_mode"], str) else int(entry["source_mode"])
+            expected = (
+                int(entry["source_device"]), int(entry["source_inode"]), expected_mode,
+                int(entry["source_mtime_ns"]), int(entry["source_logical_bytes"]),
+                int(entry["source_allocated_bytes"]),
+            )
+            actual = (
+                int(source_stat.st_dev), int(source_stat.st_ino), int(stat.S_IMODE(source_stat.st_mode)),
+                int(source_stat.st_mtime_ns), int(source_stat.st_size),
+                int(source_stat.st_blocks * 512),
+            )
+            if actual != expected:
+                raise OSError("source_identity_drift")
+            source_sha = _sha256_file(source)
+            archive_sha = _sha256_file(archive)
+            if source_sha != entry["source_sha256"] or archive_sha != entry["archive_sha256"] or source_sha != archive_sha:
+                raise OSError("source_archive_sha256_drift")
+            source.unlink()
+            removed.append(str(source))
+        except Exception as exc:
+            return {
+                "result": "BLOCKED_LOCAL_ARCHIVE_VERIFIED_RECLAIM",
+                "cleanup_complete": False,
+                "retry_attempts": 0,
+                "removed_paths": removed,
+                "failed_path": str(source),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    return {
+        "result": "LOCAL_ARCHIVE_VERIFIED_RECLAIM_PASS",
+        "cleanup_complete": True,
+        "retry_attempts": 0,
+        "removed_paths": removed,
+    }
+
+
 def blocked_local_file_cleanup(
     *,
     project_root: str | Path,
@@ -294,12 +725,15 @@ def _discover_local_artifact_targets(root: Path, *, today: date) -> tuple[list[d
     tmp_root = root / "tmp"
     if tmp_root.is_dir() and not tmp_root.is_symlink():
         for child in sorted(tmp_root.iterdir(), key=lambda item: item.name):
-            if child.is_symlink() or not child.is_file():
-                continue
             for pattern, layer in TMP_ARTIFACT_RULES:
                 matched = pattern.fullmatch(child.name)
                 if not matched:
                     continue
+                if child.is_symlink():
+                    skipped.append(f"symlink_skipped:{child}")
+                    break
+                if not child.is_file():
+                    break
                 trade_date = _valid_local_artifact_trade_date(matched.group(1), today=today)
                 if trade_date:
                     targets.append({"path": child, "trade_date": trade_date, "layer": layer})
@@ -319,6 +753,7 @@ def _discover_local_artifact_targets(root: Path, *, today: date) -> tuple[list[d
                 skipped.append(f"symlink_skipped:{child}")
                 continue
             targets.append({"path": child, "trade_date": trade_date, "layer": "n5"})
+
     return sorted(targets, key=lambda item: str(item["path"])), skipped
 
 
@@ -694,6 +1129,235 @@ def sync_closeout_with_status(closeout_path: Path, report: dict[str, Any]) -> No
     write_json(closeout_path, closeout)
 
 
+def run_runtime_hot_cleanup_v2(
+    *,
+    dsn: str,
+    report_root: Path,
+    local_project_root: Path,
+    archive_root: str | Path,
+    execute: bool,
+    confirm_token: str,
+    trade_dates: Iterable[str] | None,
+    table_counter: Callable[[RuntimeHotCleanupSpec, str], int] | None,
+    table_deleter: Callable[[RuntimeHotCleanupSpec, str], int] | None,
+    local_artifact_current_date: date | None,
+    local_archive_manifest_path: str | Path | None,
+    local_archive_batch_summary_path: str | Path | None,
+    local_archive_allowlist_path: str | Path | None,
+    local_archive_restore_proof_path: str | Path | None,
+    local_archive_current_pointer_path: str | Path | None,
+    local_archive_root: str | Path,
+    active_local_artifact_paths: Iterable[str | Path],
+    local_only: bool,
+) -> dict[str, Any]:
+    today = local_artifact_current_date or datetime.now(ASIA_SHANGHAI).date()
+    current_trade_date = today.strftime("%Y%m%d")
+    local_files = discover_local_artifact_files(project_root=local_project_root, current_date=today)
+    injected_dates = sorted(set(str(item) for item in trade_dates)) if trade_dates is not None else None
+    injected_retained = injected_dates[-6:] if injected_dates is not None else None
+    effective_current_trade_date = current_trade_date if injected_retained is None else injected_retained[-1]
+    plan = build_runtime_hot_cleanup_plan_v2(
+        current_trade_date=effective_current_trade_date,
+        local_files=local_files,
+        dsn=dsn,
+        retained_trade_dates=injected_retained,
+        database_trade_dates=[] if local_only else injected_dates,
+        inbox_delete_units=[] if local_only or (injected_dates is not None and table_counter is not None) else None,
+        table_counter=table_counter,
+        database_cleanup_enabled=not local_only,
+    )
+    plan_payload = plan.as_dict()
+    cleanup_local_files = [
+        entry for entry in local_files if entry["trade_date"] in set(plan.local_cleanup_trade_dates)
+    ]
+    legacy_archive_paths = (
+        local_archive_manifest_path,
+        local_archive_batch_summary_path,
+        local_archive_allowlist_path,
+        local_archive_restore_proof_path,
+    )
+    pointer_metadata: dict[str, Any] = {}
+    pointer_blockers: list[str] = []
+    if local_archive_current_pointer_path is not None and any(path is not None for path in legacy_archive_paths):
+        pointer_blockers = ["local_archive_input_mode_conflict"]
+    elif local_archive_current_pointer_path is not None:
+        evidence_paths, pointer_metadata, pointer_blockers = load_local_archive_current_pointer(
+            pointer_path=local_archive_current_pointer_path,
+            for_cleanup_date=effective_current_trade_date,
+            archive_root=local_archive_root,
+        )
+        if not pointer_blockers:
+            local_archive_manifest_path = evidence_paths.get("manifest")
+            local_archive_batch_summary_path = evidence_paths.get("summary")
+            local_archive_allowlist_path = evidence_paths.get("allowlist")
+            local_archive_restore_proof_path = evidence_paths.get("restore_proof")
+    elif any(path is not None for path in legacy_archive_paths) and not all(
+        path is not None for path in legacy_archive_paths
+    ):
+        pointer_blockers = ["legacy_local_archive_evidence_incomplete"]
+
+    if pointer_blockers:
+        local_entries: list[dict[str, Any]] = []
+        local_blockers = list(pointer_blockers)
+    elif (
+        local_archive_manifest_path is None
+        or local_archive_batch_summary_path is None
+        or local_archive_allowlist_path is None
+        or local_archive_restore_proof_path is None
+    ):
+        local_entries = []
+        local_blockers = ["verified_local_archive_evidence_required"]
+    else:
+        local_entries, local_blockers = load_verified_local_archive_allowlist(
+            manifest_path=local_archive_manifest_path,
+            batch_summary_path=local_archive_batch_summary_path,
+            allowlist_path=local_archive_allowlist_path,
+            restore_proof_path=local_archive_restore_proof_path,
+            discovered_cleanup_files=cleanup_local_files,
+            retained_trade_dates=plan.retained_trade_dates,
+            archive_root=local_archive_root,
+        )
+        if pointer_metadata and int(pointer_metadata["entry_count"]) != len(local_entries):
+            local_blockers.append("local_archive_pointer_entry_count_mismatch")
+        if pointer_metadata and sorted(pointer_metadata.get("retained_trade_dates") or []) != sorted(
+            plan.retained_trade_dates
+        ):
+            local_blockers.append("local_archive_pointer_retained_dates_mismatch")
+    plan_payload["local_archive_verified"] = not local_blockers
+    plan_payload["local_allowlist"] = [dict(entry) for entry in local_entries]
+    plan_payload["local_archive_pointer"] = dict(pointer_metadata)
+    plan_payload["local_only"] = bool(local_only)
+    plan_payload["blockers"] = sorted(set(list(plan_payload.get("blockers") or []) + local_blockers))
+    write_json(report_root / "keep5_cleanup_plan.json", plan_payload)
+    active_paths = {str(Path(item).resolve()) for item in active_local_artifact_paths}
+    active_entries = [
+        entry for entry in local_entries
+        if str(Path(str(entry["source_path"])).resolve()) in active_paths
+    ]
+    if active_entries:
+        local_blockers.append("local_archive_active_lineage_overlap")
+        local_entries = [entry for entry in local_entries if entry not in active_entries]
+    plan = replace(
+        plan,
+        local_allowlist=tuple(local_entries),
+        local_archive_verified=not local_blockers,
+        blockers=tuple(sorted(set((*plan.blockers, *local_blockers)))),
+    )
+    plan_payload = plan.as_dict()
+    plan_payload["local_archive_pointer"] = dict(pointer_metadata)
+    plan_payload["local_only"] = bool(local_only)
+    write_json(report_root / "keep5_cleanup_plan.json", plan_payload)
+    if not execute:
+        if not local_blockers and plan.database_discovery_blocker:
+            result = "RUNTIME_HOT_CLEANUP_V2_LOCAL_READY_DATABASE_BLOCKED"
+        else:
+            result = "RUNTIME_HOT_CLEANUP_V2_PLAN_PASS" if not plan.blockers else "RUNTIME_HOT_CLEANUP_V2_PLAN_BLOCKED"
+        return {
+            **plan_payload,
+            "result": result,
+            "mode": "plan_only",
+            "execute": False,
+            "archive_mode": LOCAL_ARCHIVE_REQUIRED_MODE,
+            "local_archive_blockers": sorted(set(local_blockers)),
+            "cleanup_executed": False,
+            "timeout": False,
+            "deleted_total_rows": 0,
+            "deleted_active_lineage_count": 0,
+            "database_written": False,
+            "side_effects": {**runtime_archive_side_effects(), "cleanup_local_runtime_files": False},
+        }
+    if local_blockers:
+        return {
+            **plan_payload,
+            "result": "RUNTIME_HOT_CLEANUP_V2_EXECUTE_BLOCKED",
+            "mode": "execute",
+            "execute": True,
+            "archive_mode": LOCAL_ARCHIVE_REQUIRED_MODE,
+            "local_archive_blockers": sorted(set(local_blockers)),
+            "cleanup_executed": False,
+            "cleanup_complete": False,
+            "timeout": False,
+            "deleted_total_rows": 0,
+            "deleted_active_lineage_count": 0,
+            "database_written": False,
+            "side_effects": {**runtime_archive_side_effects(), "cleanup_local_runtime_files": False},
+        }
+    # DB and local are independent units. A DB timeout cannot suppress an already
+    # archive-verified local reclaim; neither side is reported as globally rolled back.
+    local_result = (
+        execute_verified_local_allowlist(entries=local_entries, active_paths=active_local_artifact_paths)
+        if not local_blockers
+        else {
+            "result": "BLOCKED_LOCAL_ARCHIVE_VERIFIED_RECLAIM",
+            "cleanup_complete": False,
+            "retry_attempts": 0,
+            "removed_paths": [],
+            "blockers": local_blockers,
+        }
+    )
+    database_plan_blockers = [
+        blocker for blocker in plan.blockers
+        if blocker.startswith("database_date_discovery_failed:")
+        or blocker.startswith("database_plan_count_failed:")
+    ]
+    if local_only:
+        database_result = {
+            "result": "DATABASE_CLEANUP_NOT_RUN_LOCAL_ONLY",
+            "cleanup_complete": True,
+            "retry_attempts": 0,
+            "committed_units": [],
+            "committed_unit_count": 0,
+            "blockers": [],
+        }
+    elif database_plan_blockers:
+        database_result = {
+            "result": (
+                "BLOCKED_DATABASE_DATE_DISCOVERY"
+                if plan.database_discovery_blocker
+                else "BLOCKED_DATABASE_PLAN_COUNT"
+            ),
+            "cleanup_complete": False,
+            "retry_attempts": 0,
+            "committed_units": [],
+            "committed_unit_count": 0,
+            "blockers": database_plan_blockers,
+        }
+    else:
+        database_result = execute_runtime_hot_cleanup_database_v2(
+            plan=plan,
+            progress_journal_path=report_root / "keep5_cleanup_progress.jsonl",
+            dsn=dsn,
+            table_counter=table_counter,
+            table_deleter=table_deleter,
+        )
+    complete = bool(local_result["cleanup_complete"]) and bool(database_result["cleanup_complete"])
+    deleted_total_rows = sum(
+        int(unit.get("deleted_rows") or 0) for unit in database_result.get("committed_units") or []
+    )
+    timeout = "TIMEOUT" in str(database_result.get("result") or "")
+    return {
+        **plan_payload,
+        "result": "RUNTIME_HOT_CLEANUP_V2_EXECUTE_PASS" if complete else "RUNTIME_HOT_CLEANUP_V2_EXECUTE_PARTIAL",
+        "mode": "execute",
+        "execute": True,
+        "archive_mode": LOCAL_ARCHIVE_REQUIRED_MODE,
+        "cleanup_executed": True,
+        "cleanup_complete": complete,
+        "database_cleanup": database_result,
+        "local_file_cleanup": local_result,
+        "timeout": timeout,
+        "deleted_total_rows": deleted_total_rows,
+        "deleted_active_lineage_count": 0,
+        "database_written": bool(database_result["committed_unit_count"]),
+        "rollback_claimed": False,
+        "side_effects": {
+            **runtime_archive_side_effects(),
+            "writes_database": bool(database_result["committed_unit_count"]),
+            "cleanup_local_runtime_files": bool(local_result.get("removed_paths")),
+        },
+    }
+
+
 def run_runtime_hot_keep5_cleanup_once(
     *,
     dsn: str = DEFAULT_DSN,
@@ -712,6 +1376,14 @@ def run_runtime_hot_keep5_cleanup_once(
     max_delete_units: int | None = None,
     local_artifact_project_root: str | Path | None = None,
     local_artifact_current_date: date | None = None,
+    local_archive_manifest_path: str | Path | None = None,
+    local_archive_batch_summary_path: str | Path | None = None,
+    local_archive_allowlist_path: str | Path | None = None,
+    local_archive_restore_proof_path: str | Path | None = None,
+    local_archive_current_pointer_path: str | Path | None = None,
+    local_archive_root: str | Path = "/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts",
+    active_local_artifact_paths: Iterable[str | Path] = (),
+    local_only: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat()
     started_monotonic = perf_counter()
@@ -721,6 +1393,80 @@ def run_runtime_hot_keep5_cleanup_once(
     )
     plan_path = report_root / "keep5_cleanup_plan.json"
     closeout_path = report_root / "keep5_cleanup_closeout.json"
+    if direct_delete_no_archive:
+        report = {
+            "schema": "RuntimeHotCleanupPlan.v2",
+            "result": "BLOCKED_DIRECT_DELETE_NO_ARCHIVE_REJECTED",
+            "stage": "V3_RUNTIME_HOT_KEEP5_CLEANUP_ONCE",
+            "execute": bool(execute),
+            "archive_mode": LOCAL_ARCHIVE_REQUIRED_MODE,
+            "cleanup_executed": False,
+            "blockers": ["direct_delete_no_archive_rejected"],
+            "blocked_by_layer": [{"scope": "n6_user_projection", "layer_role": "N6_user"}],
+            "side_effects": {**runtime_archive_side_effects(), "cleanup_local_runtime_files": False},
+        }
+        report["docs_report_path"] = str(report_root / "keep5_cleanup_status.json")
+        write_json(report["docs_report_path"], report)
+        return report
+    try:
+        with keep5_cleanup_single_flight_lock(report_root) as lock_path:
+            try:
+                active_runtime_writers = runtime_writer_process_detector()
+            except Exception as exc:
+                report = blocked_process_inspection_report(
+                    report_root=report_root,
+                    execute=execute,
+                    direct_delete_no_archive=False,
+                    required_confirm_token=KEEP5_CONFIRM_TOKEN,
+                    failed_detector="runtime_writer_process",
+                    error=exc,
+                    lock_path=lock_path,
+                )
+            else:
+                if active_runtime_writers:
+                    report = blocked_runtime_writer_active_report(
+                        report_root=report_root,
+                        execute=execute,
+                        active_runtime_writer_processes=active_runtime_writers,
+                        required_confirm_token=KEEP5_CONFIRM_TOKEN,
+                        lock_path=lock_path,
+                    )
+                else:
+                    report = run_runtime_hot_cleanup_v2(
+                        dsn=dsn,
+                        report_root=report_root,
+                        local_project_root=local_project_root,
+                        archive_root=archive_root,
+                        execute=execute,
+                        confirm_token=confirm_token,
+                        trade_dates=trade_dates,
+                        table_counter=table_counter,
+                        table_deleter=table_deleter,
+                        local_artifact_current_date=local_artifact_current_date,
+                        local_archive_manifest_path=local_archive_manifest_path,
+                        local_archive_batch_summary_path=local_archive_batch_summary_path,
+                        local_archive_allowlist_path=local_archive_allowlist_path,
+                        local_archive_restore_proof_path=local_archive_restore_proof_path,
+                        local_archive_current_pointer_path=local_archive_current_pointer_path,
+                        local_archive_root=local_archive_root,
+                        active_local_artifact_paths=active_local_artifact_paths,
+                        local_only=local_only,
+                    )
+    except CleanupAlreadyRunningError as exc:
+        report = blocked_already_running_report(report_root=report_root, execute=execute, error=exc)
+    report = {
+        **report,
+        "stage": "V3_RUNTIME_HOT_KEEP5_CLEANUP_ONCE",
+        "docs_report_path": str(report_root / "keep5_cleanup_status.json"),
+        "started_at": started_at,
+        "finished_at": datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat(),
+        "duration_ms": round((perf_counter() - started_monotonic) * 1000.0, 3),
+    }
+    write_json(report["docs_report_path"], report)
+    return report
+
+    # Legacy keep-2 implementation is retained below for its separate historical
+    # entrypoint; the keep-5 runner never reaches it.
     required_confirm_token = DIRECT_DELETE_NO_ARCHIVE_CONFIRM_TOKEN if direct_delete_no_archive else KEEP5_CONFIRM_TOKEN
     try:
         with keep5_cleanup_single_flight_lock(report_root) as lock_path:
@@ -867,9 +1613,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--archive-root", default=DEFAULT_RUNTIME_ARCHIVE_ROOT)
     parser.add_argument("--report-dir", default=DEFAULT_REPORT_DIR)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--confirm-token", default="")
-    parser.add_argument("--direct-delete-no-archive", action="store_true")
-    parser.add_argument("--skip-row-count-plan", action="store_true")
+    parser.add_argument("--local-archive-manifest-path")
+    parser.add_argument("--local-archive-batch-summary-path")
+    parser.add_argument("--local-archive-allowlist-path")
+    parser.add_argument("--local-archive-restore-proof-path")
+    parser.add_argument("--local-archive-current-pointer-path")
+    parser.add_argument("--local-only", action="store_true")
+    parser.add_argument(
+        "--local-archive-root",
+        default="/Volumes/MacRaid/stock_db_archive/v3_runtime_artifacts",
+    )
     parser.add_argument(
         "--max-delete-units",
         type=int,
@@ -886,10 +1639,14 @@ def main() -> int:
         archive_root=args.archive_root,
         report_dir=args.report_dir,
         execute=args.execute,
-        confirm_token=args.confirm_token,
-        direct_delete_no_archive=args.direct_delete_no_archive,
-        skip_row_count_plan=args.skip_row_count_plan,
         max_delete_units=args.max_delete_units,
+        local_archive_manifest_path=args.local_archive_manifest_path,
+        local_archive_batch_summary_path=args.local_archive_batch_summary_path,
+        local_archive_allowlist_path=args.local_archive_allowlist_path,
+        local_archive_restore_proof_path=args.local_archive_restore_proof_path,
+        local_archive_current_pointer_path=args.local_archive_current_pointer_path,
+        local_archive_root=args.local_archive_root,
+        local_only=args.local_only,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=json_default))
     return 0 if str(report["result"]).endswith("_PASS") else 2

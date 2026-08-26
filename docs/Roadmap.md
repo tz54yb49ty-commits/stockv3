@@ -1,30 +1,14 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-07-22
+更新日期：2026-08-23
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
 
-### 2026-07-22 N6 B 轨 virtual-executor 前向路线
-
-本节只登记 `N6_B_TRACK_VIRTUAL_EXECUTOR_GOVERNANCE_V1` 的后续 gate 顺序，不授权本文件所在会话执行任何 runtime：
-
-```text
-G1 runtime_control 治理规则单一提交
--> G2 N6_user migration + immutable release deployment
--> G3 N6_user bounded explicit proposal smoke
--> G4 confirmed 队列精确治理 + bootout 停用方案冻结
--> G5 N6_user persistent virtual-executor enablement
--> G6 自然周期审计与异常停用验证
-```
-
-每一阶段均要求用户显式授权、版本化合同、preflight、精确 rollback 和精确影响范围。G3 必须 PASS，G4 必须完成，才允许进入 G5。持续 executor 只消费两阶段人工确认的 N6 虚拟申请，并在 claim/apply 两层 fail-closed 校验开放交易日、交易时段、两分钟报价、本人主体/账户/范围、现金、100 股取整和 T+1。真实券商、真实订单、自动申请、跨层写入和 AI autonomous real trading 不在路线内。
-
-此前路线图中的“不授权 N6 execute/worker”均是对应历史 gate 的边界证据，继续保留；本节仅前向 supersede 生效后的 N6 B 轨虚拟执行器权限，不扩大到其他层或其他 worker。
-
 | 阶段 | layer_role | 状态 | 当前判断 |
 |---|---|---|---|
 | Runtime Control | `runtime_control` | v0.2 dashboard smoke passed | pipeline state machine / dashboard v0 / command registry / rollback registry / timeline 已有 schema 草案和只读 CLI；dashboard v0.2 已新增 20260602 action-confirmation timeline detector，9 阶段 all PASS，N5 pending outbox=ActionExecuted 4 / ActionBlocked 1，N6 shadow rows=1/5/5/5；不授权 execute、rollback、worker 或 N1-N6 contract 修改 |
+| Disk Governance Gate 0 | `runtime_control` | policy defined / execution pending | `runtime_hot_cleanup_archive_gated_disk_governance_v1` 已收窄 future restore 为 current pointer + local-only；新增 `n1_local_artifact_archive_daily_bounded_install_v1`。N1 daily archive runner 与 cleanup code-only 修复已完成静态实现，尚未安装或修改 plist、未运行归档/清理、未写数据库；下一步为独立 N1 label install gate。 |
 | N1 入库层 | `N1_ingestion` | done / 20260603-20260604 catch-up passed | schema、每日增量、quality gate、Parquet manifest、20260522 日增和 000001.SH 历史修复均已有报告；20260529 official daily 与 condition source activation 已 POST_REVIEW_PASS；`stock_financial_20260529_v2` canonical metrics 已 POST_REVIEW_PASS，并成为 active stock_financial；20260602 official daily 与 condition source activation 已 POST_REVIEW_PASS，并已被 N2 20260602 condition layer run 消费；`common_trade_calendar(20260603)` fix-forward repair 已 passed，B1 calendar blocker 已解除；20260604/20260605 calendar patch 均 POST_REVIEW_PASS；20260603/20260604 official daily + condition source catch-up 已 passed，单日 rows stock/index/board daily=5511/9/428，stock_daily_basic/financial=5511/5511，index/board membership=12841/56960，quality P0/P1/P2=0/0/0 |
 | N2 条件层 | `N2_condition` | done / 20260603-20260604 catch-up passed | 20260602 -> 20260603 N2 condition layer 已 passed_active：active run `condition_layer_20260602_source_20260602_v1`，canonical policy=8782 console broad policy，P0/P1/P2=0/9/3，row_mismatches={}，rollback_safe=true；20260603 -> 20260604 run `condition_layer_20260603_source_20260603_v1` 已 passed_active，P0/P1/P2=0/6/3，scope stock/index/board=4201/20/892；20260604 -> 20260605 run `condition_layer_20260604_source_20260604_v1` 已 passed_active，P0/P1/P2=0/6/3，scope stock/index/board=4186/20/912；20260529 -> 20260601 N2 level score v6 与 20260528 -> 20260529 target v5 仍 preserved |
 | N3 实时行情层 | `N3_market_data` | in progress / 20260605 B2 realtime projection post-review passed | 20260529 subscription、A1 previous_day_minute preload、B1 pre-open、B1 live1 fact-only、B1 live2 standard outbox snapshot 均已 passed；20260603 subscription control rows、A1 previous-day minute preload、calendar repair 与 B1 realtime snapshot fact-only retry 均已 passed，B1 snapshot_run_id=`realtime_snapshot_20260603_market_data_subscription_20260603_condition_layer_20260602_source_20260602_v1`，rows stock/index/board/total=1963/83/428/2474，P0/P1/P2=0/1/0，writes_outbox=false，rollback_safe=true；新增 catch-up lineage 已完成 N3 subscription/A1：20260604 subscription `market_data_subscription_20260604_condition_layer_20260603_source_20260603_v1` passed，candidate/subscription/pull_plan=5757/3041/9，A1 preload rows=77280；20260605 subscription `market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1` passed，candidate/subscription/pull_plan=5802/3073/9，A1 preload rows=82080；20260605 staged refresh 已完成 B1 live2 fact-only `realtime_snapshot_20260605_live2_market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1` rows=1952/9/428/2389，P0/P1/P2=0/0/0，writes_outbox=false，rollback_safe=true；C1 current-minute `today_minute_bar_1m_20260605_until_1037__market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1` rows=19028/134/3752/22914，latest_closed_minute=2026-06-05T10:37:00+08:00，P0/P1/P2=0/0/0，duplicate minute key groups=0/0/0，rollback_safe=true；C1 later-minute `today_minute_bar_1m_20260605_until_1127__market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1` rows=33228/234/6552/40014，latest_closed_minute=2026-06-05T11:27:00+08:00，objects processed/passed=342/342，P0/P1/P2=0/0/0，duplicate minute key groups=0/0/0，rollback_safe=true；B2 stock/index lineage expansion control-row run `market_data_subscription_20260605_b2_stock_index_lineage_expansion_condition_layer_20260604_source_20260604_v1` passed，candidate/subscription/pull_plan=6696/3350/4，P0/P1/P2=0/2/0，market_data_pulled=false，market_data_fact_written=false，rollback_safe=true；A1 expansion `previous_day_minute_preload_20260604_for_20260605_b2_stock_index_lineage_expansion__market_data_subscription_20260605_b2_stock_index_lineage_expansion_condition_layer_20260604_source_20260604_v1` passed，minute/status totals=402000/1675，P0/P1/P2=0/1/0，rollback_safe=true；C1 expansion `today_minute_bar_1m_20260605_until_1127_b2_stock_index_lineage_expansion__market_data_subscription_20260605_b2_stock_index_lineage_expansion_condition_layer_20260604_source_20260604_v1` passed，minute rows=195975，P0/P1/P2=0/0/0，rollback_safe=true；B2 realtime projection `realtime_projection_metric_20260605_live2_compat__realtime_snapshot_20260605_live2_market_data_subscription_20260605_condition_layer_20260604_source_20260604_v1` passed，rows stock/index/board/total=1952/9/428/2389，ready/not_ready=969/1420，P0/P1/P2=0/4/0，fact-only trace compatible rows=2389，writes_outbox=false，outbox/inbox/checkpoint refs=0/0/0，N4/N5/N6 refs=0/0/0，rollback_safe=true；已由 20260605 N4 matched-only execute post-review 消费；下一步允许 N5 action readiness / dry-run gate，不允许直接 N5 execute 或消费 outbox |
@@ -34,7 +18,7 @@ G1 runtime_control 治理规则单一提交
 
 ## Runtime Control
 
-状态：v0.2 dashboard smoke passed。
+状态：v0.2 dashboard smoke passed；disk governance Gate 0 policy defined，未执行。
 
 已完成：
 
@@ -46,6 +30,9 @@ G1 runtime_control 治理规则单一提交
 - dashboard v0.2 20260602 action-confirmation timeline detector / API / Web smoke passed：
   `action_confirmation_runtime_v0_2`，9 stages all PASS，N5 pending outbox=`ActionExecuted 4 / ActionBlocked 1`，
   N6 shadow rows=`1/5/5/5`，rollback registry N2-N6 complete，routes=`GET/HEAD` only。
+- 磁盘治理 policy 已冻结四个互斥阶段、exact cleanup label/plist、MacRaid archive
+  roots、calendar-authoritative retained set、逐文件 archive manifest、250 GiB 停止
+  条件及 Time Machine-only fallback；本治理定义会话不执行该 policy。
 
 Entry gate：
 
@@ -71,6 +58,8 @@ Blocked / caution：
 - runtime_control 不得消费 N3/N4/N5 outbox。
 - runtime_control 不得启动 worker。
 - 推进某个 stage execute 必须切换到对应 N1-N6 layer_role。
+- `direct-delete-no-archive` 不得用于新 cleanup 或 scheduler restore；归档必须先由
+  独立 `N1_ingestion` gate 完成，数据库 retention 必须切换到事实所属层。
 
 ## N1 入库层
 
@@ -1016,27 +1005,3 @@ N2-Web-3：todo，8782 增加 display_basis 只读展示。
 ```
 
 回滚 gate：`condition_display_basis` 必须与同一 N2 run_id 的 basis/pool/scope 同生命周期回滚；不得单独补写到旧 active run。
-
-## N3N6Q：N6 虚拟账户股票报价窄接口
-
-状态：`contract_registered_design_only`。
-
-边界已冻结：
-
-```text
-N3-A1 / N3-B1 / N3-B2 / N3-C1 / N3P / N3T unchanged
-existing N3 poller / worker / schema / outbox / inbox / checkpoint unchanged
-N3N6Q database writes = 0
-N3N6Q events = 0
-A-track calls = 0
-```
-
-推荐路线：
-
-1. `N3_market_data` 在独立 worktree 仅新增 `src/ashare_v3/n3n6q/` 与 fake-adapter tests。
-2. provider contract/test 通过后，另开 read-only Mootdx live probe；不得在 provider gate 拉行情。
-3. `N6_user` 另开 quote schema/persistence gate，独占调度、trade_date/freshness、N6 snapshot。
-4. portfolio 估值、首日止损冻结、stop proposal、confirm/虚拟卖出分别独立 gate。
-5. runtime 发布与 LaunchAgent 必须最后由 `runtime_control` 另行授权；当前合同不安装、不启动。
-
-仍禁止：修改或调用既有 N3 模块、写 N3/N6 DB、生成 N3 event、启动 poller/worker、真实交易、券商、跨层回写。

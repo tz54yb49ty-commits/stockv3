@@ -81,6 +81,7 @@ def context_row(asset_kind: str = "stock", index: int = 0) -> dict:
                 "previous_amount": "100",
                 "previous_avg_amount": "100",
                 "current_amount_seed": "0",
+                "current_amount_total_seed": "0",
                 "current_trade_days_seed": 1,
             },
             "M": {
@@ -90,6 +91,7 @@ def context_row(asset_kind: str = "stock", index: int = 0) -> dict:
                 "previous_amount": "100",
                 "previous_avg_amount": "100",
                 "current_amount_seed": "0",
+                "current_amount_total_seed": "0",
                 "current_trade_days_seed": 1,
             },
             "Q": {
@@ -99,6 +101,7 @@ def context_row(asset_kind: str = "stock", index: int = 0) -> dict:
                 "previous_amount": "100",
                 "previous_avg_amount": "100",
                 "current_amount_seed": "0",
+                "current_amount_total_seed": "0",
                 "current_trade_days_seed": 1,
             },
             "Y": {
@@ -108,6 +111,7 @@ def context_row(asset_kind: str = "stock", index: int = 0) -> dict:
                 "previous_amount": "100",
                 "previous_avg_amount": "100",
                 "current_amount_seed": "0",
+                "current_amount_total_seed": "0",
                 "current_trade_days_seed": 1,
             },
         }
@@ -159,6 +163,7 @@ def set_period_seed(
             "current_amount_seed": current_amount_seed,
             "current_amount_total_seed": current_amount_total_seed,
             "current_trade_days_seed": current_trade_days_seed,
+            "trigger_previous_amount_baseline": current_amount_seed,
             "previous_amount": "50",
             "previous_avg_amount": "50",
         }
@@ -469,7 +474,9 @@ class FullContextFormalActionConfirmationMetricTest(unittest.TestCase):
         self.assertEqual(proof["current_trade_days_seed"], 0.0)
         self.assertEqual(proof["with_today_units"], 1.0)
         self.assertEqual(metrics["weekly_avg_with_today"], 1000.0)
+        self.assertEqual(metrics["prev_weekly_avg"], 100000.0)
         self.assertEqual(proof["period_source"], "for_trade_date_new_period_today_only")
+        self.assertEqual(proof["previous_avg_rollover_source"], "trigger_previous_amount_baseline")
         self.assertEqual(last["current_w_virtual_amount"], 1000.0)
 
     def test_m_period_seed_is_retained_when_source_and_for_trade_date_are_same_month(self) -> None:
@@ -505,7 +512,15 @@ class FullContextFormalActionConfirmationMetricTest(unittest.TestCase):
         for period, source_key, source_date, for_date, avg_field, expected_for_key in cases:
             with self.subTest(period=period):
                 context = context_row("stock", 90)
-                set_period_seed(context, period=period, period_key_current=source_key)
+                for seeded_period in ("W", "M", "Q", "Y"):
+                    seeded_source_key = plan.period_key_for_trade_date(source_date, seeded_period)
+                    seeded_for_key = plan.period_key_for_trade_date(for_date, seeded_period)
+                    if seeded_source_key != seeded_for_key:
+                        set_period_seed(
+                            context,
+                            period=seeded_period,
+                            period_key_current=str(seeded_source_key),
+                        )
 
                 last = metric_last_row_for_dates(
                     context,
@@ -524,7 +539,37 @@ class FullContextFormalActionConfirmationMetricTest(unittest.TestCase):
                 self.assertEqual(proof["current_trade_days_seed"], 0.0)
                 self.assertEqual(proof["with_today_units"], 1.0)
                 self.assertEqual(metrics[avg_field], 1000.0)
+                self.assertEqual(proof["previous_avg_amount_yuan"], 100000.0)
+                self.assertEqual(proof["previous_avg_rollover_source"], "trigger_previous_amount_baseline")
                 self.assertEqual(proof["period_source"], "for_trade_date_new_period_today_only")
+
+    def test_rollover_seed_or_trigger_baseline_mismatch_fails_closed(self) -> None:
+        context = context_row("stock", 91)
+        set_period_seed(context, period="W", period_key_current="2026W25")
+        context["period_trigger_baseline_json"]["periods"]["W"]["current_amount_total_seed"] = "399"
+        context["raw_json"]["period_trigger_baseline_json"] = context["period_trigger_baseline_json"]
+
+        with self.assertRaisesRegex(plan.FullDayMetricBlocked, "higher_period_rollover_seed_proof_mismatch:W"):
+            metric_last_row_for_dates(
+                context,
+                source_trade_date="20260618",
+                for_trade_date="20260622",
+            )
+
+        context = context_row("stock", 92)
+        set_period_seed(context, period="W", period_key_current="2026W25")
+        context["period_trigger_baseline_json"]["periods"]["W"]["trigger_previous_amount_baseline"] = "99"
+        context["raw_json"]["period_trigger_baseline_json"] = context["period_trigger_baseline_json"]
+
+        with self.assertRaisesRegex(
+            plan.FullDayMetricBlocked,
+            "higher_period_rollover_trigger_baseline_mismatch:W",
+        ):
+            metric_last_row_for_dates(
+                context,
+                source_trade_date="20260618",
+                for_trade_date="20260622",
+            )
 
     def test_index_m_transition_does_not_pass_when_real_today_amount_keeps_monthly_avg_below_previous(self) -> None:
         context = context_row("index", 399006)

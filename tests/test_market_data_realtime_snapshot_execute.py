@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from ashare_v3.market.event_factory import build_n3_market_event
 from ashare_v3.market.realtime_snapshot_execute import (
     ALLOWED_B1_FACT_ONLY_WRITE_TABLES,
     ALLOWED_B1_WRITE_TABLES,
@@ -14,10 +15,13 @@ from ashare_v3.market.realtime_snapshot_execute import (
     BoardMarketDataAdapter,
     FORBIDDEN_B1_WRITE_TABLE_MARKERS,
     IndexMarketDataAdapter,
+    MootdxRealtimeSnapshotAdapter,
     RealtimeSnapshotExecuteError,
     TushareBjIndexSnapshotAdapter,
     build_snapshot_record,
+    build_default_mootdx_endpoint_probe,
     build_snapshot_source_time_evidence,
+    commit_snapshot_attempt_transaction,
     build_post_execute_checks,
     build_post_execute_quality_items,
     ensure_clean_snapshot_target,
@@ -25,12 +29,543 @@ from ashare_v3.market.realtime_snapshot_execute import (
     ensure_execute_authorized,
     execute_one_subscription_snapshot,
     prepare_one_subscription_snapshot,
+    prepare_mootdx_snapshot_batch,
     run_realtime_daily_snapshot_execute,
+    write_failed_snapshot_attempt_transaction,
+    write_prepared_subscription_snapshots,
 )
 from ashare_v3.market.realtime_snapshot_execute_contract import build_source_time_policy
+from ashare_v3.mootdx_client import EndpointConfig, MootdxEndpointManager
 
 
 class RealtimeSnapshotExecuteTest(unittest.TestCase):
+    def test_tdxpy_bj_stock_scope_blocks_before_probe_business_fact_or_event(self) -> None:
+        bj_subscription = {
+            **sample_subscription(),
+            "identity_key": "stock:BJ:830001",
+            "exchange": "BJ",
+            "code": "830001",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            health_path = Path(tmp) / "health.json"
+            manager = fake_endpoint_manager(health_path, mode="active")
+            probe_calls: list[str] = []
+            business_calls: list[str] = []
+
+            with self.assertRaisesRegex(
+                RealtimeSnapshotExecuteError,
+                "BLOCKED_N3_TDXPY_BJ_STOCK_QUOTE_UNSUPPORTED:stock:BJ:830001",
+            ):
+                prepare_mootdx_snapshot_batch(
+                    contract=sample_contract(),
+                    subscriptions=[bj_subscription],
+                    manager=manager,
+                    probe=lambda endpoint, make_client: probe_calls.append(endpoint.endpoint_id)
+                    or passing_endpoint_probe(endpoint, make_client),
+                    client_factory=lambda selection: business_calls.append(selection.endpoint_id),
+                    transport="tdxpy",
+                    snapshot_time=sample_snapshot_time(),
+                )
+
+            self.assertEqual(probe_calls, [])
+            self.assertEqual(business_calls, [])
+            self.assertFalse(health_path.exists())
+
+    def test_snapshot_program_error_does_not_failover_or_open_endpoint_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = fake_endpoint_manager(Path(tmp) / "health.json", mode="active")
+            calls: list[str] = []
+
+            class ProgramBugClient:
+                def quotes(self, **kwargs):  # noqa: ANN003, ANN201
+                    raise KeyError("local snapshot contract bug")
+
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=manager,
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: calls.append(selection.endpoint_id) or ProgramBugClient(),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+            self.assertEqual(
+                manager._health_for("primary", transport="mootdx").state,
+                "healthy",
+            )
+
+        self.assertEqual(calls, ["primary"])
+        self.assertEqual(outcome.attempts[0]["failure_kind"], "unclassified_program_failure")
+        self.assertFalse(outcome.attempts[0]["retry_allowed"])
+        self.assertTrue(all(item["snapshot_record"] is None for item in prepared))
+
+    def test_active_both_endpoints_fail_writes_no_success_fact_or_event_and_closes_all_attempts(self) -> None:
+        class ClosableFailingClient(FailingSnapshotClient):
+            def __init__(self, endpoint_id: str) -> None:
+                self.endpoint_id = endpoint_id
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clients: list[ClosableFailingClient] = []
+
+            def client_factory(selection):  # noqa: ANN001, ANN202
+                client = ClosableFailingClient(selection.endpoint_id)
+                clients.append(client)
+                return client
+
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=client_factory,
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        conn = FakeConnection()
+        results = write_failed_snapshot_attempt_transaction(
+            dsn="unused",
+            contract=sample_contract(),
+            source_run_row={},
+            started_at="2026-05-25T01:00:00+00:00",
+            prepared_snapshots=prepared,
+            outcome=outcome,
+            connection_factory=lambda dsn: conn,
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual([client.endpoint_id for client in clients], ["primary", "secondary"])
+        self.assertEqual([client.close_calls for client in clients], [1, 1])
+        self.assertNotIn("snapshot_fact", conn.sql_kinds())
+        self.assertNotIn("MarketSnapshotUpdated", "\n".join(conn.executed_sql))
+        self.assertTrue(all(result["snapshot_rows_written"] == 0 for result in results))
+        self.assertTrue(all(result["event_type"] == "MarketDataDelayed" for result in results))
+
+    def test_secondary_replay_writes_one_fact_event_and_keeps_source_run_and_dedup_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: (
+                    FailingSnapshotClient()
+                    if selection.endpoint_id == "primary"
+                    else PassingSnapshotClient(sample_raw_snapshot())
+                ),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(len(prepared), 1)
+        record = prepared[0]["snapshot_record"]
+        baseline_record = dict(record)
+        baseline_record["raw_json"] = {}
+
+        def event_for(value):  # noqa: ANN001, ANN202
+            return build_n3_market_event(
+                event_type="MarketSnapshotUpdated",
+                asset_kind=str(value["asset_kind"]),
+                identity_key=str(value["identity_key"]),
+                trade_date=str(value["trade_date"]),
+                snapshot_time=value["snapshot_time"].isoformat(),
+                event_time=value["snapshot_time"],
+                source_run_id=str(value["run_id"]),
+                source_adapter=str(value["source_adapter"]),
+                payload={
+                    "subscription_id": value["subscription_id"],
+                    "pull_plan_id": value["pull_plan_id"],
+                    "run_id": value["run_id"],
+                    "source_adapter": value["source_adapter"],
+                    "data_quality_status": value["data_quality_status"],
+                    "snapshot_id": 101,
+                },
+            )
+
+        baseline_event = event_for(baseline_record)
+        failover_event = event_for(record)
+        self.assertEqual(failover_event.source_run_id, baseline_event.source_run_id)
+        self.assertEqual(failover_event.dedup_key, baseline_event.dedup_key)
+        self.assertEqual(failover_event.event_id, baseline_event.event_id)
+
+        conn = FakeConnection()
+        results = write_prepared_subscription_snapshots(
+            dsn="unused",
+            contract=sample_contract(),
+            prepared_snapshots=prepared,
+            connection_factory=lambda dsn: conn,
+        )
+        self.assertEqual(conn.sql_kinds(), ["snapshot_fact", "outbox"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["snapshot_rows_written"], 1)
+        self.assertEqual(results[0]["outbox_rows_written"], 1)
+
+    def test_realtime_mootdx_adapters_require_manager_pinned_clients(self) -> None:
+        for adapter_type in (MootdxRealtimeSnapshotAdapter, IndexMarketDataAdapter, BoardMarketDataAdapter):
+            with self.subTest(adapter=adapter_type.__name__):
+                with self.assertRaisesRegex(RealtimeSnapshotExecuteError, "manager-selected pinned client"):
+                    adapter_type()
+        with self.assertRaisesRegex(RealtimeSnapshotExecuteError, "requires pinned stock/index/board adapters"):
+            AssetRoutingRealtimeSnapshotAdapter()
+
+    def test_default_endpoint_probe_requires_protocol_data_semantics_and_batch_sentinel(self) -> None:
+        client = ProtocolProbeClient()
+        probe = build_default_mootdx_endpoint_probe([sample_subscription()])
+
+        result = probe(object(), lambda profile: client)
+
+        self.assertEqual(result["checks"], {
+            "stock_quote": True,
+            "stock_daily_bars": True,
+            "index_daily_bars": True,
+            "scope_sentinels": True,
+        })
+        self.assertEqual(
+            [call["kind"] for call in client.calls],
+            ["quotes", "bars", "index_bars", "quotes"],
+        )
+
+    def test_default_endpoint_probe_rejects_constructed_client_with_invalid_market_data(self) -> None:
+        probe = build_default_mootdx_endpoint_probe([sample_subscription()])
+
+        result = probe(object(), lambda profile: InvalidProtocolProbeClient())
+
+        self.assertEqual(result["checks"], {
+            "stock_quote": False,
+            "stock_daily_bars": False,
+            "index_daily_bars": False,
+            "scope_sentinels": False,
+        })
+
+    def test_default_endpoint_probe_rejects_missing_or_wrong_response_identity(self) -> None:
+        subscriptions = [sample_subscription(), sample_index_subscription(), sample_board_subscription()]
+        for client in (MissingIdentityProtocolProbeClient(), WrongIdentityProtocolProbeClient()):
+            with self.subTest(client=type(client).__name__):
+                result = build_default_mootdx_endpoint_probe(subscriptions)(
+                    object(),
+                    lambda profile, value=client: value,
+                )
+                self.assertFalse(all(result["checks"].values()))
+
+    def test_default_endpoint_probe_excludes_bj_route_but_checks_sh_index_sentinel(self) -> None:
+        client = ProtocolProbeClient()
+        probe = build_default_mootdx_endpoint_probe(
+            [sample_bj_index_subscription(), sample_index_subscription()]
+        )
+
+        result = probe(object(), lambda profile: client)
+
+        self.assertTrue(all(result["checks"].values()))
+        self.assertEqual(
+            [call for call in client.calls if call["kind"] == "index"],
+            [{"kind": "index", "symbol": "000001"}],
+        )
+
+    def test_default_endpoint_probe_matches_router_for_bj_and_missing_exchange_stock(self) -> None:
+        client = ProtocolProbeClient()
+        bj_stock = {**sample_subscription(), "identity_key": "stock:BJ:830001", "exchange": "BJ", "code": "830001"}
+        missing_exchange_stock = {
+            **sample_subscription(),
+            "identity_key": "stock:UNKNOWN:600002",
+            "exchange": "",
+            "code": "600002",
+        }
+
+        result = build_default_mootdx_endpoint_probe(
+            [bj_stock, missing_exchange_stock, sample_bj_index_subscription()]
+        )(object(), lambda profile: client)
+
+        self.assertTrue(all(result["checks"].values()))
+        sentinel_quote_calls = [
+            call for call in client.calls
+            if call["kind"] == "quotes" and call["symbol"] != "600000"
+        ]
+        self.assertEqual(sentinel_quote_calls, [{"kind": "quotes", "symbol": "830001"}])
+
+    def test_mootdx_snapshot_batch_active_discards_primary_and_traces_secondary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_manager = fake_endpoint_manager(Path(tmp) / "health.json", mode="active")
+            clients: list[str] = []
+
+            def client_factory(selection):  # noqa: ANN001, ANN202
+                clients.append(selection.endpoint_id)
+                if selection.endpoint_id == "primary":
+                    return FailingSnapshotClient()
+                return PassingSnapshotClient(sample_raw_snapshot())
+
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=batch_manager,
+                probe=passing_endpoint_probe,
+                client_factory=client_factory,
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(clients, ["primary", "secondary"])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(prepared[0]["write_kind"], "snapshot")
+        raw_json_value = prepared[0]["snapshot_record"]["raw_json"]
+        raw_json = getattr(raw_json_value, "obj", raw_json_value)
+        self.assertEqual(raw_json["attempt_id"], f"{sample_contract()['snapshot_run_id']}__attempt_2")
+        self.assertEqual(raw_json["endpoint_id"], "secondary")
+
+    def test_mootdx_snapshot_batch_observe_failure_has_no_secondary_success_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_manager = fake_endpoint_manager(Path(tmp) / "health.json", mode="observe")
+            clients: list[str] = []
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=batch_manager,
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: clients.append(selection.endpoint_id) or FailingSnapshotClient(),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(clients, ["primary"])
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(prepared[0]["write_kind"], "quality")
+        self.assertIsNone(prepared[0]["snapshot_record"])
+        self.assertIsNone(prepared[0]["object_result"]["event_type"])
+        self.assertEqual(prepared[0]["object_result"]["outbox_rows_written"], 0)
+
+    def test_endpoint_failure_transaction_writes_only_failed_run_quality_and_delayed_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: FailingSnapshotClient(),
+                snapshot_time=sample_snapshot_time(),
+            )
+        conn = FakeConnection()
+
+        results = write_failed_snapshot_attempt_transaction(
+            dsn="unused",
+            contract=sample_contract(),
+            source_run_row={},
+            started_at="2026-05-25T01:00:00+00:00",
+            prepared_snapshots=prepared,
+            outcome=outcome,
+            connection_factory=lambda dsn: conn,
+        )
+
+        sql = "\n".join(conn.executed_sql).lower()
+        self.assertEqual(conn.transaction_commits, 1)
+        self.assertEqual(conn.transaction_rollbacks, 0)
+        self.assertIn("common_market_data_quality_item", sql)
+        self.assertIn("common_event_outbox", sql)
+        self.assertNotIn("insert into stock_realtime_daily_snapshot", sql)
+        self.assertEqual(results[0]["event_type"], "MarketDataDelayed")
+        self.assertEqual(results[0]["snapshot_rows_written"], 0)
+        self.assertEqual(results[0]["outbox_rows_written"], 1)
+
+        rollback_conn = FakeConnection(fail_on="UPDATE common_market_data_run")
+        with self.assertRaises(RuntimeError):
+            write_failed_snapshot_attempt_transaction(
+                dsn="unused",
+                contract=sample_contract(),
+                source_run_row={},
+                started_at="2026-05-25T01:00:00+00:00",
+                prepared_snapshots=prepared,
+                outcome=outcome,
+                connection_factory=lambda dsn: rollback_conn,
+            )
+        self.assertEqual(rollback_conn.transaction_commits, 0)
+        self.assertEqual(rollback_conn.transaction_rollbacks, 1)
+
+    def test_multi_object_partial_snapshot_attempt_replays_secondary_from_first(self) -> None:
+        subscriptions = [
+            sample_subscription(),
+            {**sample_subscription(), "subscription_id": 12, "identity_key": "stock:SH:600001", "code": "600001"},
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: PartialSnapshotClient(selection.endpoint_id, calls),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual([row["write_kind"] for row in prepared], ["snapshot", "snapshot"])
+
+    def test_observe_multi_object_snapshot_failure_has_no_secondary_business_fetch(self) -> None:
+        subscriptions = [
+            sample_subscription(),
+            {**sample_subscription(), "subscription_id": 12, "identity_key": "stock:SH:600001", "code": "600001"},
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="observe"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: PartialSnapshotClient(selection.endpoint_id, calls),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "failed")
+        self.assertTrue(all(row["write_kind"] == "quality" for row in prepared))
+        self.assertTrue(all(row["object_result"]["outbox_rows_written"] == 0 for row in prepared))
+
+    def test_one_empty_snapshot_then_nonempty_stays_primary_as_missing_quality(self) -> None:
+        subscriptions = [
+            sample_subscription(),
+            {**sample_subscription(), "subscription_id": 12, "identity_key": "stock:SH:600001", "code": "600001"},
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: EmptyThenSnapshotClient(selection.endpoint_id, calls),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(calls, [("primary", "600000"), ("primary", "600001")])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual([row["write_kind"] for row in prepared], ["quality", "snapshot"])
+        self.assertEqual(prepared[0]["object_result"]["quality_status"], "missing")
+        self.assertEqual(prepared[0]["object_result"]["outbox_rows_written"], 0)
+
+    def test_three_empty_snapshots_replay_secondary_from_first(self) -> None:
+        subscriptions = [
+            {**sample_subscription(), "subscription_id": 11 + index, "identity_key": f"stock:SH:60000{index}", "code": f"60000{index}"}
+            for index in range(3)
+        ]
+        calls: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: EmptyPrimarySnapshotClient(selection.endpoint_id, calls),
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("primary", "600000"),
+                ("primary", "600001"),
+                ("primary", "600002"),
+                ("secondary", "600000"),
+                ("secondary", "600001"),
+                ("secondary", "600002"),
+            ],
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertTrue(all(row["write_kind"] == "snapshot" for row in prepared))
+
+    def test_snapshot_batch_second_write_failure_rolls_back_outer_transaction(self) -> None:
+        subscriptions = [
+            sample_subscription(),
+            {**sample_subscription(), "subscription_id": 12, "identity_key": "stock:SH:600001", "code": "600001"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=subscriptions,
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: PartialSnapshotClient(selection.endpoint_id, []),
+                snapshot_time=sample_snapshot_time(),
+            )
+        self.assertEqual(outcome.status, "passed")
+        conn = AtomicSnapshotConnection()
+
+        with self.assertRaisesRegex(RuntimeError, "second snapshot"):
+            write_prepared_subscription_snapshots(
+                dsn="unused",
+                contract={**sample_contract(), "writes_outbox": True},
+                prepared_snapshots=prepared,
+                connection_factory=lambda dsn: conn,
+            )
+
+        self.assertEqual(conn.outer_commits, 0)
+        self.assertEqual(conn.outer_rollbacks, 1)
+
+    def test_snapshot_finalizer_failure_rolls_back_run_facts_events_and_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=lambda selection: PassingSnapshotClient(sample_raw_snapshot()),
+                snapshot_time=sample_snapshot_time(),
+            )
+        conn = FakeConnection()
+        snapshot = sample_snapshot_backup(
+            sample_contract(),
+            row_counts={"stock": 1, "index": 0, "board": 0},
+            outbox_count=1,
+            outbox_counts_by_type={"MarketSnapshotUpdated": 1},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "finalizer failed"):
+            commit_snapshot_attempt_transaction(
+                dsn="unused",
+                contract=sample_contract(),
+                source_run_row={},
+                started_at="2026-05-25T01:00:00+00:00",
+                prepared_snapshots=prepared,
+                outcome=outcome,
+                connection_factory=lambda dsn: conn,
+                data_snapshot_builder=lambda cur: snapshot,
+                finalizer=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("finalizer failed")),
+            )
+
+        self.assertEqual(conn.transaction_commits, 0)
+        self.assertEqual(conn.transaction_rollbacks, 1)
+
+    def test_source_time_failure_is_attempt_failure_and_active_replays_full_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            clients: list[str] = []
+
+            def client_factory(selection):  # noqa: ANN001, ANN202
+                clients.append(selection.endpoint_id)
+                row = sample_raw_snapshot()
+                if selection.endpoint_id == "primary":
+                    row["snapshot_time"] = "2026-05-26T10:00:00+08:00"
+                return PassingSnapshotClient(row)
+
+            prepared, outcome = prepare_mootdx_snapshot_batch(
+                contract=sample_contract(),
+                subscriptions=[sample_subscription()],
+                manager=fake_endpoint_manager(Path(tmp) / "health.json", mode="active"),
+                probe=passing_endpoint_probe,
+                client_factory=client_factory,
+                snapshot_time=sample_snapshot_time(),
+            )
+
+        self.assertEqual(clients, ["primary", "secondary"])
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(prepared[0]["write_kind"], "snapshot")
+
     def test_requires_execute_and_user_confirmed(self) -> None:
         with self.assertRaisesRegex(RealtimeSnapshotExecuteError, "--execute"):
             ensure_execute_authorized(execute=False, user_confirmed=True)
@@ -1282,6 +1817,7 @@ class RealtimeSnapshotExecuteTest(unittest.TestCase):
         board_adapter = RecordingSnapshotAdapter({"board": sample_raw_snapshot()})
         router = AssetRoutingRealtimeSnapshotAdapter(
             default_adapter=default_adapter,
+            index_adapter=RecordingSnapshotAdapter({}),
             board_adapter=board_adapter,
         )
 
@@ -1295,6 +1831,7 @@ class RealtimeSnapshotExecuteTest(unittest.TestCase):
         board_adapter = RecordingSnapshotAdapter({"board": sample_raw_snapshot()})
         router = AssetRoutingRealtimeSnapshotAdapter(
             default_adapter=default_adapter,
+            index_adapter=RecordingSnapshotAdapter({}),
             board_adapter=board_adapter,
         )
 
@@ -1768,6 +2305,160 @@ class FakeSnapshotAdapter:
         return self.rows.get(str(subscription["identity_key"]))
 
 
+class FailingSnapshotClient:
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        del symbol
+        raise TimeoutError("primary batch failed after partial transport work")
+
+
+class PassingSnapshotClient:
+    def __init__(self, row: dict[str, object]) -> None:
+        self.row = row
+
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        del symbol
+        return [dict(self.row)]
+
+
+class PartialSnapshotClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        if self.endpoint_id == "primary" and symbol == "600001":
+            raise TimeoutError("primary failed after one snapshot")
+        return [sample_raw_snapshot()]
+
+
+class EmptyThenSnapshotClient:
+    def __init__(self, endpoint_id: str, calls: list[tuple[str, str]]) -> None:
+        self.endpoint_id = endpoint_id
+        self.calls = calls
+
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if symbol == "600000" else [sample_raw_snapshot()]
+
+
+class EmptyPrimarySnapshotClient(EmptyThenSnapshotClient):
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        self.calls.append((self.endpoint_id, symbol))
+        return [] if self.endpoint_id == "primary" else [sample_raw_snapshot()]
+
+
+class ProtocolProbeClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        self.calls.append({"kind": "quotes", "symbol": symbol})
+        return [{"code": symbol, "price": 10.1}]
+
+    def bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        self.calls.append({"kind": "bars", "symbol": symbol})
+        return [
+            {"code": symbol, "datetime": "2026-07-16", "close": 10},
+            {"code": symbol, "datetime": "2026-07-17", "close": 10.1},
+            {"code": symbol, "datetime": "2026-07-18", "close": 10.2},
+        ]
+
+    def index_bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        self.calls.append({"kind": "index_bars", "symbol": symbol})
+        return [{"code": symbol, "datetime": "2026-07-18", "close": 3500}]
+
+    def index(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        self.calls.append({"kind": "index", "symbol": symbol})
+        return [{"code": symbol, "datetime": "2026-07-18", "close": 3500}]
+
+
+class InvalidProtocolProbeClient:
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        return [{"code": symbol, "price": 0}]
+
+    def bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"code": "wrong", "datetime": "2026-07-18", "close": 10}]
+
+    def index_bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return []
+
+    def index(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return []
+
+
+class MissingIdentityProtocolProbeClient(ProtocolProbeClient):
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        return [{"price": 10.1}]
+
+    def bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"datetime": f"2026-07-{day}", "close": 10} for day in (16, 17, 18)]
+
+    def index_bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"datetime": "2026-07-18", "close": 3500}]
+
+    def index(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"datetime": "2026-07-18", "close": 3500}]
+
+
+class WrongIdentityProtocolProbeClient(ProtocolProbeClient):
+    def quotes(self, *, symbol: str):  # noqa: ANN201
+        return [{"code": "999999", "price": 10.1}]
+
+    def bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [
+            {"code": "999999", "datetime": f"2026-07-{day}", "close": 10}
+            for day in (16, 17, 18)
+        ]
+
+    def index_bars(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"code": "999999", "datetime": "2026-07-18", "close": 3500}]
+
+    def index(self, *, symbol: str, frequency: int, start: int, offset: int):  # noqa: ANN201
+        return [{"code": "999999", "datetime": "2026-07-18", "close": 3500}]
+
+
+def fake_endpoint_manager(cache_path: Path, *, mode: str) -> MootdxEndpointManager:
+    def endpoint(endpoint_id: str, host: str, priority: int) -> EndpointConfig:
+        return EndpointConfig(
+            endpoint_id=endpoint_id,
+            host=host,
+            port=7709,
+            priority=priority,
+            enabled=True,
+            quarantined=False,
+            provenance_url="https://example.invalid/frozen",
+            provenance_commit="frozen",
+            local_validation_status="protocol_passed",
+        )
+
+    return MootdxEndpointManager(
+        endpoint_pool_version="test-pool-v1",
+        transport="mootdx",
+        endpoints=(
+            endpoint("primary", "115.238.56.198", 10),
+            endpoint("secondary", "180.153.18.170", 20),
+        ),
+        n1_failover_mode="observe",
+        n3_failover_mode=mode,
+        circuit_open_seconds=300,
+        required_empty_object_threshold=3,
+        health_cache_path=cache_path,
+    )
+
+
+def passing_endpoint_probe(row, make_client):  # noqa: ANN001, ANN201
+    del row, make_client
+    return {
+        "checks": {
+            "stock_quote": True,
+            "stock_daily_bars": True,
+            "index_daily_bars": True,
+            "scope_sentinels": True,
+        }
+    }
+
+
 class FakeBoardClient:
     def __init__(self, frame: pd.DataFrame) -> None:
         self.frame = frame
@@ -1822,6 +2513,7 @@ class FakeConnection:
         self.last_sql = ""
         self.transaction_commits = 0
         self.transaction_rollbacks = 0
+        self.depth = 0
 
     def transaction(self) -> "FakeTransaction":
         return FakeTransaction(self)
@@ -1847,18 +2539,78 @@ class FakeConnection:
         return kinds
 
 
+class AtomicSnapshotConnection:
+    def __init__(self) -> None:
+        self.depth = 0
+        self.snapshot_writes = 0
+        self.last_sql = ""
+        self.outer_commits = 0
+        self.outer_rollbacks = 0
+
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return None
+    def transaction(self): return AtomicSnapshotTransaction(self)
+    def cursor(self): return AtomicSnapshotCursor(self)
+
+
+class AtomicSnapshotTransaction:
+    def __init__(self, conn: AtomicSnapshotConnection) -> None:
+        self.conn = conn
+        self.is_outer = False
+
+    def __enter__(self):
+        self.is_outer = self.conn.depth == 0
+        self.conn.depth += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.conn.depth -= 1
+        if self.is_outer:
+            if exc_type is None:
+                self.conn.outer_commits += 1
+            else:
+                self.conn.outer_rollbacks += 1
+        return False
+
+
+class AtomicSnapshotCursor:
+    def __init__(self, conn: AtomicSnapshotConnection) -> None:
+        self.conn = conn
+
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return None
+
+    def execute(self, sql: str, params=None) -> None:  # noqa: ANN001
+        self.conn.last_sql = sql
+        if "realtime_daily_snapshot" in sql:
+            self.conn.snapshot_writes += 1
+            if self.conn.snapshot_writes == 2:
+                raise RuntimeError("second snapshot write failed")
+
+    def fetchone(self):  # noqa: ANN201
+        if "realtime_daily_snapshot" in self.conn.last_sql:
+            return {"snapshot_id": 101}
+        if "common_event_outbox" in self.conn.last_sql:
+            return {"event_id": "event-test"}
+        return {"id": 1}
+
+
 class FakeTransaction:
     def __init__(self, conn: FakeConnection) -> None:
         self.conn = conn
 
     def __enter__(self) -> "FakeTransaction":
+        self.is_outer = self.conn.depth == 0
+        self.conn.depth += 1
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
-        if exc_type is None:
-            self.conn.transaction_commits += 1
-        else:
-            self.conn.transaction_rollbacks += 1
+        self.conn.depth -= 1
+        if self.is_outer:
+            if exc_type is None:
+                self.conn.transaction_commits += 1
+            else:
+                self.conn.transaction_rollbacks += 1
         return False
 
 

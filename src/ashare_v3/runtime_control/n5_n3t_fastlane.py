@@ -62,10 +62,17 @@ FASTLANE_POST_CLOSE_READINESS_CONFIG_ROLLOVER_ARTIFACT_TYPE = (
     "n5_n3t_post_close_readiness_config_rollover_v1"
 )
 POST_CLOSE_FINAL_A_PASS_DONE_ARTIFACT_TYPE = "n5_c1_n3t_post_close_final_a_pass_done_v1"
+POST_CLOSE_FINAL_A_PASS_MARKER_SCHEMA_VERSION = "v2"
+POST_CLOSE_FINAL_A_PASS_MARKER_STATUSES = (
+    "candidate",
+    "done",
+    "superseded",
+)
 POST_CLOSE_FINAL_A_PASS_DONE_COMPLETION_MODES = (
     "empty_a_noop",
     "n5_executed_all_refs_evaluated",
 )
+DEFAULT_N5_FASTLANE_CONSUMER_NAME = "n5_live_tracking_poller_v2_fastlane"
 
 FASTLANE_LABELS = {
     "n5_intake": "com.ashare-v3.n5.action-intake-poller",
@@ -77,6 +84,7 @@ FASTLANE_POLICY_REVIEW_AUTO_REFRESH_INTERVAL_SECONDS = 15
 FASTLANE_POLICY_REVIEW_AUTO_REFRESH_RUNNER = (
     "scripts/run_n5_n3t_policy_review_auto_refresh_once.py"
 )
+FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO = "dbname=ashare_v3 user=ashare_v3_user"
 
 PROTECTED_EXISTING_LABELS = (
     "com.ashare-v3.n3.intraday-proof-poller",
@@ -288,7 +296,7 @@ def _assert_n5_action_intake_contract_aligned(config: Mapping[str, Any]) -> dict
     }
 
 
-def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
+def _load_post_close_final_a_pass_marker_state(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
     marker_path = Path(path)
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -300,7 +308,7 @@ def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date
         raise ValueError("post_close_final_a_pass_done_marker_invalid")
     if str(marker.get("for_trade_date") or "") != str(for_trade_date or ""):
         raise ValueError("post_close_final_a_pass_done_marker_invalid")
-    if marker.get("status") != "done":
+    if str(marker.get("status") or "") not in POST_CLOSE_FINAL_A_PASS_MARKER_STATUSES:
         raise ValueError("post_close_final_a_pass_done_marker_invalid")
     if str(marker.get("completion_mode") or "") not in POST_CLOSE_FINAL_A_PASS_DONE_COMPLETION_MODES:
         raise ValueError("post_close_final_a_pass_done_marker_invalid")
@@ -316,6 +324,70 @@ def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date
     if boundary.get("canonical_minute_bar_1m_written") is not False:
         raise ValueError("post_close_final_a_pass_done_marker_invalid")
     return marker
+
+
+def load_post_close_final_a_pass_marker_state(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
+    return _load_post_close_final_a_pass_marker_state(path, for_trade_date=for_trade_date)
+
+
+def load_post_close_final_a_pass_done_marker(path: str | Path, *, for_trade_date: str) -> dict[str, Any]:
+    marker = _load_post_close_final_a_pass_marker_state(path, for_trade_date=for_trade_date)
+    if (
+        marker.get("status") != "done"
+        or marker.get("marker_schema_version")
+        != POST_CLOSE_FINAL_A_PASS_MARKER_SCHEMA_VERSION
+        or not _post_close_intake_boundary_is_complete(
+        marker.get("n4_intake_boundary"),
+        for_trade_date=for_trade_date,
+        consumer_name=str(marker.get("consumer_name") or ""),
+        )
+    ):
+        raise ValueError("post_close_final_a_pass_done_marker_invalid")
+    return marker
+
+
+def _post_close_intake_boundary_is_complete(
+    boundary: Any,
+    *,
+    for_trade_date: str = "",
+    consumer_name: str = "",
+) -> bool:
+    if not isinstance(boundary, Mapping):
+        return False
+    if "max_n4_canonical_outbox_id" not in boundary:
+        return False
+    try:
+        max_outbox_id = int(boundary["max_n4_canonical_outbox_id"])
+        canonical_count = int(boundary.get("canonical_event_count") or 0)
+        inbox_count = int(boundary.get("inbox_covered_event_count") or 0)
+        unconsumed_count = int(boundary.get("unconsumed_event_count") or 0)
+        partition_count = int(boundary.get("checkpoint_partition_count") or 0)
+        covered_partition_count = int(boundary.get("checkpoint_covered_partition_count") or 0)
+        stable_observation_count = int(boundary.get("stable_observation_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        bool(str(boundary.get("consumer_name") or "").strip())
+        and bool(str(boundary.get("for_trade_date") or "").strip())
+        and (
+            not str(for_trade_date or "")
+            or str(boundary.get("for_trade_date") or "") == str(for_trade_date)
+        )
+        and (
+            not str(consumer_name or "")
+            or str(boundary.get("consumer_name") or "") == str(consumer_name)
+        )
+        and max_outbox_id >= 0
+        and canonical_count >= 0
+        and (canonical_count == 0 or max_outbox_id > 0)
+        and inbox_count == canonical_count
+        and unconsumed_count == 0
+        and partition_count >= 0
+        and covered_partition_count == partition_count
+        and boundary.get("checkpoint_coverage_complete") is True
+        and boundary.get("exact_cover") is True
+        and stable_observation_count >= 2
+    )
 
 
 def build_fastlane_source_run_namespace(
@@ -816,8 +888,12 @@ def build_fastlane_session_phase_policy() -> dict[str, Any]:
             "allows_1300_to_1130_bridge": False,
         },
         "post_close": {
-            "drain_mode": "post_close_final_a_pass_once",
-            "backlog_order": ["event_time ASC", "source_run_id ASC"],
+            "drain_mode": "time_ordered_drain_then_post_close_final_a_pass_once",
+            "backlog_order": [
+                "event_time ASC",
+                "source_run_id ASC",
+                "outbox_id ASC",
+            ],
             "n3_c1_n3t_mode": "one_final_a_pass",
             "post_close_final_a_pass_once": True,
             "requires_for_trade_date_current_date": True,
@@ -883,7 +959,7 @@ def build_fastlane_active_worker_policy() -> dict[str, Any]:
                 "n5_action_executed": "write_enabled_bounded_if_matching_n3t_metric",
             },
             "post_close": {
-                "n5_action_intake": "post_close_final_a_scope_snapshot_once",
+                "n5_action_intake": "time_ordered_bounded_drain_then_post_close_final_a_scope_snapshot",
                 "n3_c1_n3t_action_confirmation": "post_close_final_a_pass_once",
                 "n5_action_executed": "post_close_final_a_execute_once",
             },
@@ -986,16 +1062,45 @@ def _resolve_post_close_final_a_pass_done_marker(
     marker_path = Path(marker_path_text)
     if not marker_path.exists():
         return marker_context
-    marker = load_post_close_final_a_pass_done_marker(marker_path, for_trade_date=for_trade_date)
-    marker_context["post_close_final_a_pass_done"] = True
+    marker = _load_post_close_final_a_pass_marker_state(marker_path, for_trade_date=for_trade_date)
+    runtime_inputs = config.get("runtime_inputs") or {}
+    n5_intake_inputs = (
+        runtime_inputs.get("n5_action_intake")
+        if isinstance(runtime_inputs, Mapping)
+        else {}
+    )
+    expected_consumer_name = str(
+        (
+            n5_intake_inputs.get("consumer_name")
+            if isinstance(n5_intake_inputs, Mapping)
+            else ""
+        )
+        or config.get("n5_consumer_name")
+        or DEFAULT_N5_FASTLANE_CONSUMER_NAME
+    )
+    trusted_done = (
+        marker.get("status") == "done"
+        and marker.get("marker_schema_version")
+        == POST_CLOSE_FINAL_A_PASS_MARKER_SCHEMA_VERSION
+        and _post_close_intake_boundary_is_complete(
+            marker.get("n4_intake_boundary"),
+            for_trade_date=for_trade_date,
+            consumer_name=expected_consumer_name,
+        )
+    )
+    marker_context["post_close_final_a_pass_done"] = bool(trusted_done)
     marker_context["post_close_final_a_pass_done_marker"] = {
         "artifact_type": marker.get("artifact_type"),
         "status": marker.get("status"),
+        "marker_schema_version": marker.get("marker_schema_version"),
+        "trusted_done": bool(trusted_done),
+        "legacy_untrusted": marker.get("status") == "done" and not bool(trusted_done),
         "completion_mode": marker.get("completion_mode"),
         "evaluated_ref_count": int(marker.get("evaluated_ref_count") or 0),
         "action_executed_count": int(marker.get("action_executed_count") or 0),
         "evaluation_only_count": int(marker.get("evaluation_only_count") or 0),
         "unprocessed_ref_count": int(marker.get("unprocessed_ref_count") or 0),
+        "n4_intake_boundary": dict(marker.get("n4_intake_boundary") or {}),
     }
     return marker_context
 
@@ -1122,16 +1227,52 @@ def resolve_fastlane_active_worker_decision(
                 decision["worker_mode"] = "post_close_final_a_pass_noop"
                 decision["blocked_reason"] = "post_close_final_a_pass_not_allowed_for_session"
                 return decision
-            if post_close_final_a_pass_done:
-                decision["worker_mode"] = "post_close_final_a_pass_noop"
-                decision["blocked_reason"] = "post_close_final_a_pass_done"
-                return decision
             decision["post_close_final_a_pass_allowed"] = True
             if lane_key == "n5_action_intake":
+                if (
+                    formal_trigger_matched_available
+                    or inactive_trigger_state_changed_available
+                    or active_trigger_state_changed_available
+                ):
+                    decision["worker_mode"] = "time_ordered_drain"
+                    decision["writes_enabled_allowed"] = True
+                    decision["artifact_writes_enabled_allowed"] = True
+                    decision["scope_snapshot_only"] = False
+                    decision["backlog_order"] = [
+                        "event_time ASC",
+                        "source_run_id ASC",
+                        "outbox_id ASC",
+                    ]
+                    decision["action_eligible_entry_allowed"] = bool(
+                        formal_trigger_matched_available
+                    )
+                    decision["trigger_live_false_cleanup_allowed"] = bool(
+                        inactive_trigger_state_changed_available
+                    )
+                    decision["trigger_live_true_attention_allowed"] = bool(
+                        active_trigger_state_changed_available
+                    )
+                    if formal_trigger_matched_available:
+                        decision["required_proof"] = "formal_TriggerMatched"
+                    elif inactive_trigger_state_changed_available:
+                        decision["required_proof"] = "inactive_TriggerStateChanged_false"
+                    else:
+                        decision["required_proof"] = "active_TriggerStateChanged_true_attention"
+                    if post_close_final_a_pass_done:
+                        decision["supersedes_post_close_final_a_pass_done"] = True
+                    return decision
+                if post_close_final_a_pass_done:
+                    decision["worker_mode"] = "post_close_final_a_pass_noop"
+                    decision["blocked_reason"] = "post_close_final_a_pass_done"
+                    return decision
                 decision["worker_mode"] = "post_close_final_a_scope_snapshot"
                 decision["artifact_writes_enabled_allowed"] = True
                 decision["action_eligible_entry_allowed"] = False
                 decision["scope_snapshot_only"] = True
+                return decision
+            if post_close_final_a_pass_done:
+                decision["worker_mode"] = "post_close_final_a_pass_noop"
+                decision["blocked_reason"] = "post_close_final_a_pass_done"
                 return decision
             if lane_key == "n3_c1_n3t_action_confirmation":
                 decision["worker_mode"] = "post_close_final_a_pass"
@@ -1150,7 +1291,11 @@ def resolve_fastlane_active_worker_decision(
             decision["worker_mode"] = "time_ordered_drain"
             decision["writes_enabled_allowed"] = True
             decision["artifact_writes_enabled_allowed"] = True
-            decision["backlog_order"] = ["event_time ASC", "source_run_id ASC"]
+            decision["backlog_order"] = [
+                "event_time ASC",
+                "source_run_id ASC",
+                "outbox_id ASC",
+            ]
             return decision
         if lane_key == "n3_c1_n3t_action_confirmation":
             decision["worker_mode"] = "time_ordered_scoped_drain"
@@ -1219,7 +1364,11 @@ def classify_fastlane_session_phase(
         },
         "post_close_drain": {
             "enabled": False,
-            "backlog_order": ["event_time ASC", "source_run_id ASC"],
+            "backlog_order": [
+                "event_time ASC",
+                "source_run_id ASC",
+                "outbox_id ASC",
+            ],
         },
         "post_close_final_a_pass": {
             "enabled": False,
@@ -1248,13 +1397,18 @@ def classify_fastlane_session_phase(
         output["n3_c1_n3t"]["metric_generation_allowed"] = True
         output["n3_c1_n3t"]["requires_closed_minute"] = True
     elif phase == "post_close":
-        output["n5_intake"]["action_eligible_write_allowed"] = False
-        output["n5_intake"]["active_tracking_write_allowed"] = False
+        output["n5_intake"]["action_eligible_write_allowed"] = True
+        output["n5_intake"]["active_tracking_write_allowed"] = True
         output["n5_intake"]["active_scope_artifact_allowed"] = True
         output["n3_c1_n3t"]["metric_generation_allowed"] = True
         output["n3_c1_n3t"]["requires_closed_minute"] = True
-        output["post_close_drain"]["enabled"] = False
-        output["post_close_drain"]["superseded_by"] = "post_close_final_a_pass"
+        output["post_close_drain"]["enabled"] = True
+        output["post_close_drain"]["backlog_order"] = [
+            "event_time ASC",
+            "source_run_id ASC",
+            "outbox_id ASC",
+        ]
+        output["post_close_drain"]["precedes_post_close_final_a_pass"] = True
         output["post_close_final_a_pass"]["enabled"] = True
         output["post_close_final_a_pass"]["requires_for_trade_date_current_date"] = True
         output["post_close_final_a_pass"]["requires_trade_calendar_open"] = True
@@ -1980,6 +2134,7 @@ def build_fastlane_policy_review_auto_refresh_launchd_plan(
             "--scheduler-quiet",
         ],
         start_interval=int(start_interval_seconds),
+        include_runtime_database=True,
     )
     _assert_fastlane_policy_review_auto_refresh_plist_safe(plist)
     return {
@@ -2114,6 +2269,7 @@ def build_fastlane_active_launchd_plan(
             working_directory=working_directory,
             program_arguments=n5_intake_args,
             start_interval=intervals["n5_intake"],
+            include_runtime_database=True,
         ),
     }
     report["n3_c1_n3t"] = {
@@ -2124,6 +2280,7 @@ def build_fastlane_active_launchd_plan(
             working_directory=working_directory,
             program_arguments=n3_c1_n3t_args,
             start_interval=intervals["n3_c1_n3t"],
+            include_runtime_database=True,
         ),
     }
     report["n5_executed"] = {
@@ -2134,6 +2291,7 @@ def build_fastlane_active_launchd_plan(
             working_directory=working_directory,
             program_arguments=n5_executed_args,
             start_interval=intervals["n5_executed"],
+            include_runtime_database=True,
         ),
     }
     for key in report["launchd_plist_keys"]:
@@ -3033,15 +3191,22 @@ def _build_plist(
     working_directory: str,
     program_arguments: list[str],
     start_interval: int | None = None,
+    include_runtime_database: bool = False,
 ) -> dict[str, Any]:
+    environment_variables = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "src:scripts:.",
+    }
+    if include_runtime_database:
+        _assert_fastlane_local_runtime_conninfo(FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO)
+        environment_variables["ASHARE_V3_POSTGRES_DSN"] = (
+            FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO
+        )
     plist: dict[str, Any] = {
         "Label": label,
         "ProgramArguments": program_arguments,
         "WorkingDirectory": working_directory,
-        "EnvironmentVariables": {
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": "src:scripts:.",
-        },
+        "EnvironmentVariables": environment_variables,
         "RunAtLoad": False,
         "KeepAlive": False,
         "StandardOutPath": f"{working_directory}/tmp/{label}.out.log",
@@ -3104,6 +3269,7 @@ def _assert_fastlane_active_plist_safe(plist: dict[str, Any]) -> None:
     joined = " ".join(str(value) for value in plist.get("ProgramArguments", []))
     if "--activation-config" not in joined:
         raise ValueError("fastlane active plan must pass activation config")
+    _assert_fastlane_runtime_database_environment(plist)
     _assert_no_unresolved_placeholder_or_secret(json.dumps(plist, ensure_ascii=False, sort_keys=True))
     for forbidden in (
         "--source-trigger-run-id",
@@ -3137,6 +3303,7 @@ def _assert_fastlane_policy_review_auto_refresh_plist_safe(plist: dict[str, Any]
         raise ValueError("policy review auto refresh runner mismatch")
     if "--activation-config" not in joined or "--scheduler-quiet" not in joined:
         raise ValueError("policy review auto refresh arguments incomplete")
+    _assert_fastlane_runtime_database_environment(plist)
     _assert_no_unresolved_placeholder_or_secret(json.dumps(plist, ensure_ascii=False, sort_keys=True))
     for forbidden in (
         "--current-exchange-time",
@@ -3172,6 +3339,22 @@ def _assert_no_unresolved_placeholder_or_secret(text: str) -> None:
         raise ValueError("unresolved placeholder in fastlane activation config or plan")
     if re.search(r"postgres(?:ql)?://", text, flags=re.IGNORECASE):
         raise ValueError("DSN secret must not be embedded in fastlane activation config or plan")
+    if re.search(r"(?:^|[\s\"'])password\s*=", text, flags=re.IGNORECASE):
+        raise ValueError("database password must not be embedded in fastlane activation config or plan")
+
+
+def _assert_fastlane_local_runtime_conninfo(conninfo: str) -> None:
+    if str(conninfo or "").strip() != FASTLANE_LOCAL_RUNTIME_POSTGRES_CONNINFO:
+        raise ValueError("fastlane runtime database conninfo must use the canonical local socket profile")
+
+
+def _assert_fastlane_runtime_database_environment(plist: Mapping[str, Any]) -> None:
+    environment = plist.get("EnvironmentVariables") or {}
+    if not isinstance(environment, Mapping):
+        raise ValueError("fastlane runtime database environment missing")
+    _assert_fastlane_local_runtime_conninfo(
+        str(environment.get("ASHARE_V3_POSTGRES_DSN") or "")
+    )
 
 
 def _sha256_file(path: Path) -> str:

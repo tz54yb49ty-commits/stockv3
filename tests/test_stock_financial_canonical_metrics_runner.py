@@ -4,9 +4,12 @@ from decimal import Decimal
 import io
 import json
 import math
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import ashare_v3.ingestion.stock_financial_canonical_metrics as metrics_module
 from ashare_v3.ingestion.stock_financial_canonical_metrics import (
     ALLOWED_FUTURE_WRITE_TABLES,
     BATCH_ID,
@@ -26,6 +29,8 @@ from ashare_v3.ingestion.stock_financial_canonical_metrics import (
     execute_commit_transaction,
     identity_keys_sha256,
     json_safe,
+    persist_rollback_sql_atomic,
+    render_rollback_sql,
     snapshot_payload_to_metrics_snapshot,
     stock_financial_jsonb_row,
     validate_commit_preconditions,
@@ -39,8 +44,9 @@ from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "plan_stock_financial_canonical_metrics_20260529.py"
-EXECUTE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_stock_financial_canonical_metrics_20260529_once.py"
+EXECUTE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_stock_financial_canonical_metrics_once.py"
 ROLLBACK_PATH = PROJECT_ROOT / "sql" / "N1_stock_financial_canonical_metrics_20260529_rollback.sql"
+ROLLBACK_20260721_PATH = PROJECT_ROOT / "sql" / "N1_stock_financial_canonical_metrics_20260721_rollback.sql"
 
 
 def load_runner_module():
@@ -117,6 +123,16 @@ def one_row_snapshot() -> dict:
     return {
         "source_trade_date": "20260529",
         "active_source_version": "stock_financial_20260529_v1",
+        "active_source_metadata": {
+            "data_domain": "stock",
+            "data_type": "stock_financial",
+            "scope_key": "20260529",
+            "source_version": "stock_financial_20260529_v1",
+            "source_batch_id": "condition_source_activation_20260529_v1",
+            "previous_source_version": None,
+            "row_count": 1,
+            "identity_count": 1,
+        },
         "expected_identity_keys": ["stock:SH:600000"],
         "financial_rows": [quarter_row("20260331", revenue_yoy_pct="1", core_profit_yoy_pct="2")],
         "daily_basic_rows": [{"stock_identity_key": "stock:SH:600000", "total_mv": "1000"}],
@@ -135,6 +151,27 @@ def one_row_snapshot() -> dict:
             },
         },
         "source_probe": {"mock": True, "writes_performed": False},
+    }
+
+
+def rollback_20260721_plan() -> dict:
+    return {
+        "trade_date": "20260721",
+        "rollback_context": {
+            "data_domain": "stock",
+            "data_type": "stock_financial",
+            "scope_key": "20260721",
+            "source_batch_id": "stock_financial_canonical_20260721_v1",
+            "source_version": "stock_financial_20260721_v2",
+            "previous_source_version": "stock_financial_20260721_v1",
+            "previous_source_batch_id": "condition_source_activation_20260721_v1",
+            "previous_previous_source_version": None,
+            "previous_row_count": 5509,
+            "previous_identity_count": 5509,
+            "target_row_count": 5509,
+            "quality_row_count": 9,
+            "activated_by": "rollback.stock_financial_20260721_v2",
+        },
     }
 
 
@@ -198,6 +235,17 @@ class RecordingCursor:
     def __init__(self) -> None:
         self.statements: list[str] = []
         self.executemany_calls: list[tuple[str, int]] = []
+        self.fetchone_rows = [
+            (
+                "stock",
+                "stock_financial",
+                "20260529",
+                "stock_financial_20260529_v1",
+                "condition_source_activation_20260529_v1",
+                None,
+            ),
+            (1, 1),
+        ]
 
     def execute(self, sql: str, params=None) -> None:
         self.statements.append(" ".join(sql.split()))
@@ -206,6 +254,9 @@ class RecordingCursor:
         rows = list(params_seq)
         self.statements.append(" ".join(sql.split()))
         self.executemany_calls.append((" ".join(sql.split()), len(rows)))
+
+    def fetchone(self):
+        return self.fetchone_rows.pop(0) if self.fetchone_rows else None
 
 
 class RecordingConnection:
@@ -232,6 +283,7 @@ class ExecuteHarness:
     def deps(self) -> dict:
         return {
             "build_snapshot_from_cache": self.build_snapshot_from_cache,
+            "load_active_source_metadata": self.load_active_source_metadata,
             "connect": self.connect,
             "write_artifacts": self.write_artifacts,
         }
@@ -243,6 +295,10 @@ class ExecuteHarness:
     def connect(self, dsn: str) -> RecordingConnection:
         self.calls.append("connect")
         return self.conn
+
+    def load_active_source_metadata(self, **kwargs) -> dict:
+        self.calls.append("load_active_source_metadata")
+        return dict(one_row_snapshot()["active_source_metadata"])
 
     def write_artifacts(self, *args, **kwargs) -> None:
         self.calls.append("write_artifacts")
@@ -696,16 +752,20 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
         plan = build_commit_plan(snapshot=snapshot, dry_run=dry_run)
         conn = RecordingConnection()
 
-        result = execute_commit_transaction(
-            conn,
-            commit_plan=plan,
-            execute_requested=True,
-            user_confirmed=True,
-            postgres_commit_enabled=True,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan["rollback_sql_path"] = str(Path(temp_dir) / "rollback.sql")
+            result = execute_commit_transaction(
+                conn,
+                commit_plan=plan,
+                execute_requested=True,
+                user_confirmed=True,
+                postgres_commit_enabled=True,
+            )
 
         self.assertTrue(conn.committed)
         self.assertTrue(result["committed"])
+        self.assertTrue(result["rollback_safe"])
+        self.assertTrue(result["rollback_artifact"]["verified"])
         self.assertEqual(tuple(result["written_tables"]), ALLOWED_FUTURE_WRITE_TABLES)
         joined = "\n".join(conn.cursor_obj.statements).lower()
         for required in (
@@ -727,6 +787,181 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, joined)
 
+    def test_rollback_sql_render_binds_exact_lineage_and_counts(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+
+        sql = render_rollback_sql(plan)
+
+        self.assertIn("stock_financial_canonical_20260529_v1", sql)
+        self.assertIn("condition_source_activation_20260529_v1", sql)
+        self.assertIn("stock_financial_20260529_v2", sql)
+        self.assertIn("stock_financial_20260529_v1", sql)
+        self.assertIn("previous_source_version = NULL", sql)
+        self.assertIn("v_target_row_count <> 1", sql)
+        self.assertIn("v_previous_identity_count <> 1", sql)
+        self.assertIn(
+            f"v_quality_row_count <> {len(one_row_dry_run()['quality']['items'])}",
+            sql,
+        )
+        self.assertIn("GET DIAGNOSTICS v_affected_count = ROW_COUNT", sql)
+        self.assertNotIn("condition_", sql.replace("condition_source_activation_20260529_v1", ""))
+        self.assertNotIn("common_event_outbox", sql)
+
+    def test_atomic_rollback_persistence_creates_and_reuses_exact_bytes(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rollback.sql"
+            plan["rollback_sql_path"] = str(path)
+
+            created = persist_rollback_sql_atomic(plan)
+            reused = persist_rollback_sql_atomic(plan)
+
+            self.assertFalse(created["reused"])
+            self.assertTrue(reused["reused"])
+            self.assertTrue(created["verified"])
+            self.assertEqual(created["sha256"], reused["sha256"])
+            self.assertEqual(created["size_bytes"], reused["size_bytes"])
+            self.assertEqual(path.read_text(encoding="utf-8"), render_rollback_sql(plan))
+            self.assertEqual(list(path.parent.glob(".rollback.sql.*.tmp")), [])
+
+    def test_existing_conflicting_rollback_artifact_is_never_overwritten(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rollback.sql"
+            path.write_text("-- conflicting historical bytes\n", encoding="utf-8")
+            plan["rollback_sql_path"] = str(path)
+
+            with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "rollback_sql_content_conflict"):
+                persist_rollback_sql_atomic(plan)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "-- conflicting historical bytes\n")
+
+    def test_existing_rollback_symlink_is_rejected(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "target.sql"
+            target.write_text(render_rollback_sql(plan), encoding="utf-8")
+            path = Path(temp_dir) / "rollback.sql"
+            path.symlink_to(target)
+            plan["rollback_sql_path"] = str(path)
+
+            with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "rollback_sql_symlink_forbidden"):
+                persist_rollback_sql_atomic(plan)
+
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), render_rollback_sql(plan))
+
+    def test_rollback_persistence_failure_blocks_before_database_dml(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        conn = RecordingConnection()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rollback.sql"
+            plan["rollback_sql_path"] = str(path)
+            with mock.patch.object(metrics_module.os, "link", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "rollback_sql_persistence_failed"):
+                    execute_commit_transaction(
+                        conn,
+                        commit_plan=plan,
+                        execute_requested=True,
+                        user_confirmed=True,
+                        postgres_commit_enabled=True,
+                    )
+
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(".rollback.sql.*.tmp")), [])
+        self.assertFalse(conn.committed)
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.cursor_obj.executemany_calls, [])
+        self.assertEqual(len(conn.cursor_obj.statements), 2)
+        self.assertIn("FOR UPDATE", conn.cursor_obj.statements[0])
+
+    def test_active_metadata_drift_blocks_before_artifact_or_database_dml(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        conn = RecordingConnection()
+        conn.cursor_obj.fetchone_rows[0] = (
+            "stock",
+            "stock_financial",
+            "20260529",
+            "stock_financial_20260529_v1",
+            "unexpected_source_batch",
+            None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rollback.sql"
+            plan["rollback_sql_path"] = str(path)
+
+            with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "metadata_drift_at_commit"):
+                execute_commit_transaction(
+                    conn,
+                    commit_plan=plan,
+                    execute_requested=True,
+                    user_confirmed=True,
+                    postgres_commit_enabled=True,
+                )
+
+            self.assertFalse(path.exists())
+        self.assertFalse(conn.committed)
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.cursor_obj.executemany_calls, [])
+        self.assertEqual(len(conn.cursor_obj.statements), 1)
+
+    def test_previous_fact_drift_blocks_before_artifact_or_database_dml(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        conn = RecordingConnection()
+        conn.cursor_obj.fetchone_rows[1] = (0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rollback.sql"
+            plan["rollback_sql_path"] = str(path)
+
+            with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "fact_drift_at_commit"):
+                execute_commit_transaction(
+                    conn,
+                    commit_plan=plan,
+                    execute_requested=True,
+                    user_confirmed=True,
+                    postgres_commit_enabled=True,
+                )
+
+            self.assertFalse(path.exists())
+        self.assertFalse(conn.committed)
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.cursor_obj.executemany_calls, [])
+        self.assertEqual(len(conn.cursor_obj.statements), 2)
+
+    def test_final_artifact_verification_failure_rolls_back_database_transaction(self) -> None:
+        plan = build_commit_plan(snapshot=one_row_snapshot(), dry_run=one_row_dry_run())
+        conn = RecordingConnection()
+        real_verify = metrics_module.verify_persisted_rollback_sql
+        verify_calls = 0
+
+        def fail_second_verification(commit_plan, *, reused):
+            nonlocal verify_calls
+            verify_calls += 1
+            if verify_calls == 2:
+                raise StockFinancialCanonicalBlocked("rollback_sql_content_mismatch")
+            return real_verify(commit_plan, reused=reused)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan["rollback_sql_path"] = str(Path(temp_dir) / "rollback.sql")
+            with mock.patch.object(
+                metrics_module,
+                "verify_persisted_rollback_sql",
+                side_effect=fail_second_verification,
+            ):
+                with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "rollback_sql_content_mismatch"):
+                    execute_commit_transaction(
+                        conn,
+                        commit_plan=plan,
+                        execute_requested=True,
+                        user_confirmed=True,
+                        postgres_commit_enabled=True,
+                    )
+
+        self.assertEqual(verify_calls, 2)
+        self.assertFalse(conn.committed)
+        self.assertTrue(conn.rolled_back)
+        self.assertGreater(len(conn.cursor_obj.executemany_calls), 0)
+
     def test_commit_preconditions_block_p0_or_conflicts(self) -> None:
         with self.assertRaisesRegex(StockFinancialCanonicalBlocked, "canonical_core_line_items_missing"):
             validate_commit_preconditions(
@@ -745,12 +980,88 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollback_path = Path(temp_dir) / "rollback.sql"
+            execute_report_path = Path(temp_dir) / "execute.json"
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = runner.main(
+                    [
+                        "--source-trade-date",
+                        "20260529",
+                        "--execute",
+                        "--user-confirmed",
+                        "--postgres-commit-enabled",
+                        "--source-bundle-cache-path",
+                        "docs/mock-cache.json",
+                        "--rollback-sql-path",
+                        str(rollback_path),
+                        "--json-report-path",
+                        str(execute_report_path),
+                        "--no-write-report",
+                    ],
+                    dependencies=harness.deps(),
+                )
+            self.assertTrue(rollback_path.is_file())
+            execute_report = json.loads(execute_report_path.read_text(encoding="utf-8"))
+            self.assertTrue(execute_report["commit_result"]["rollback_safe"])
+            self.assertEqual(
+                execute_report["commit_result"]["rollback_sql_path"],
+                str(rollback_path),
+            )
+            self.assertEqual(len(execute_report["commit_result"]["rollback_artifact"]["sha256"]), 64)
+
+        self.assertEqual(exit_code, 0, stderr.getvalue())
+        self.assertTrue(harness.conn.committed)
+        self.assertIn("connect", harness.calls)
+        self.assertIn("load_active_source_metadata", harness.calls)
+
+    def test_execute_cli_persistence_failure_creates_no_execute_report(self) -> None:
+        runner = load_execute_runner_module()
+        harness = ExecuteHarness()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollback_path = Path(temp_dir) / "rollback.sql"
+            execute_report_path = Path(temp_dir) / "execute.json"
+            with mock.patch.object(
+                metrics_module,
+                "persist_rollback_sql_atomic",
+                side_effect=StockFinancialCanonicalBlocked("rollback_sql_persistence_failed: injected"),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    exit_code = runner.main(
+                        [
+                            "--source-trade-date",
+                            "20260529",
+                            "--execute",
+                            "--user-confirmed",
+                            "--postgres-commit-enabled",
+                            "--source-bundle-cache-path",
+                            "docs/mock-cache.json",
+                            "--rollback-sql-path",
+                            str(rollback_path),
+                            "--json-report-path",
+                            str(execute_report_path),
+                            "--no-write-report",
+                        ],
+                        dependencies=harness.deps(),
+                    )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(rollback_path.exists())
+            self.assertFalse(execute_report_path.exists())
+        self.assertFalse(harness.conn.committed)
+        self.assertTrue(harness.conn.rolled_back)
+        self.assertEqual(harness.conn.cursor_obj.executemany_calls, [])
+
+    def test_execute_cli_missing_flag_blocks_before_cache_or_commit(self) -> None:
+        runner = load_execute_runner_module()
+        harness = ExecuteHarness()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             exit_code = runner.main(
                 [
+                    "--source-trade-date",
+                    "20260529",
                     "--execute",
                     "--user-confirmed",
-                    "--postgres-commit-enabled",
                     "--source-bundle-cache-path",
                     "docs/mock-cache.json",
                     "--no-write-report",
@@ -758,22 +1069,33 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
                 dependencies=harness.deps(),
             )
 
-        self.assertEqual(exit_code, 0, stderr.getvalue())
-        self.assertTrue(harness.conn.committed)
-        self.assertIn("connect", harness.calls)
-
-    def test_execute_cli_missing_flag_blocks_before_cache_or_commit(self) -> None:
-        runner = load_execute_runner_module()
-        harness = ExecuteHarness()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            exit_code = runner.main(
-                ["--execute", "--user-confirmed", "--source-bundle-cache-path", "docs/mock-cache.json", "--no-write-report"],
-                dependencies=harness.deps(),
-            )
-
         self.assertNotEqual(exit_code, 0)
         self.assertNotIn("build_snapshot_from_cache", harness.calls)
         self.assertFalse(harness.conn.committed)
+
+    def test_preflight_only_does_not_create_rollback_artifact(self) -> None:
+        runner = load_execute_runner_module()
+        harness = ExecuteHarness()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollback_path = Path(temp_dir) / "rollback.sql"
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                exit_code = runner.main(
+                    [
+                        "--source-trade-date",
+                        "20260529",
+                        "--source-bundle-cache-path",
+                        "docs/mock-cache.json",
+                        "--rollback-sql-path",
+                        str(rollback_path),
+                        "--no-write-report",
+                    ],
+                    dependencies=harness.deps(),
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(rollback_path.exists())
+        self.assertNotIn("load_active_source_metadata", harness.calls)
+        self.assertNotIn("connect", harness.calls)
 
     def test_rollback_sql_is_scoped_to_v2_financial_batch(self) -> None:
         sql = ROLLBACK_PATH.read_text(encoding="utf-8")
@@ -786,6 +1108,15 @@ class StockFinancialCanonicalMetricsRunnerTest(unittest.TestCase):
         self.assertNotIn("data_type = 'stock_financial';", sql)
         self.assertNotRegex(sql.lower(), r"(delete\s+from|update|insert\s+into|truncate\s+table|copy)\s+condition_")
         self.assertNotIn("common_event_outbox", sql)
+
+    def test_rollback_sql_20260721_exactly_matches_verified_renderer(self) -> None:
+        sql = ROLLBACK_20260721_PATH.read_text(encoding="utf-8")
+
+        self.assertEqual(sql, render_rollback_sql(rollback_20260721_plan()))
+        self.assertIn("v_target_row_count <> 5509", sql)
+        self.assertIn("v_previous_identity_count <> 5509", sql)
+        self.assertIn("v_quality_row_count <> 9", sql)
+        self.assertIn("previous_source_version = NULL", sql)
 
 
 if __name__ == "__main__":

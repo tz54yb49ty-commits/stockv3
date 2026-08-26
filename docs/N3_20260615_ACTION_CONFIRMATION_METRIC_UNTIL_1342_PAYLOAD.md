@@ -1,7 +1,0 @@
-# N3 Action Confirmation Metric Payload
-
-- stage: `None`
-- result: `None`
-- projection_run_id: `action_confirmation_projection_metric_20260615_until_1342_from_n4_production_semantic_replay_20260615_market_snapshot_updated_until_1342_v1`
-- snapshot_run_id: `None`
-- writes_outbox: `None`

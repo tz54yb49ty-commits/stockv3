@@ -1,0 +1,14 @@
+# Windows AshareV3 CPython 3.11 resolver input.
+#
+# This is intentionally not the final lock.  Resolve it on native Windows x64,
+# generate hashes, install the resulting lock into a fresh venv, and replay the
+# import/smoke tests before creating windows-rebuild-v1.0.0.
+
+.
+
+# eltdx v1.2.0.  The annotated tag object is
+# 8cc408fa2077cad9b4f241c61da3519141972884 and it peels to this commit.
+eltdx @ git+https://github.com/electkismet/eltdx.git@b2b94b967f478408848d007c83cc7155367c3aa9
+
+# TdxQuant/TQ is supplied by the native TdxW installation and is verified by a
+# separate local capability smoke; it is not resolved through pip.

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any, Mapping
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -24,6 +25,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ashare_v3.ingestion.tushare_env import load_tushare_token
+from ashare_v3.ingestion.mootdx_daily_source import MootdxDailyBarSource
+from ashare_v3.mootdx_client import (
+    EndpointSelection,
+    MootdxEndpointManager,
+    Probe,
+    build_n1_protocol_probe,
+)
+from ashare_v3.quote_transport import create_quote_transport, resolve_quote_transport_name
 from ashare_v3.ingestion.official_daily_20260526_execute import (
     DefaultOfficialDaily20260526SourceAdapter as V1SourceAdapter,
     frame_to_records,
@@ -255,26 +264,217 @@ def validate_execute_request(
 class DefaultOfficialDaily20260526V2SourceAdapter:
     """Lazy real source adapter used only after explicit final execute flags."""
 
-    def __init__(self, *, tushare_token: str | None = None, mootdx_offset: int = 800) -> None:
+    def __init__(
+        self,
+        *,
+        tushare_token: str | None = None,
+        mootdx_offset: int = 800,
+        mootdx_client: Any | None = None,
+        endpoint_manager: MootdxEndpointManager | None = None,
+        endpoint_probe: Probe | None = None,
+        mootdx_client_factory: Any | None = None,
+        transport_factory: Any = create_quote_transport,
+        quote_transport: str | None = None,
+        transport_environ: Mapping[str, str] | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
         self.tushare_token = tushare_token or load_tushare_token()
         self.mootdx_offset = mootdx_offset
         self._v1 = V1SourceAdapter(tushare_token=self.tushare_token, mootdx_offset=mootdx_offset)
-        self._mootdx_client: Any | None = None
+        self._mootdx_client = mootdx_client
+        self._endpoint_manager = endpoint_manager
+        self._endpoint_probe = endpoint_probe
+        self._transport_name = resolve_quote_transport_name(
+            quote_transport,
+            environ=transport_environ,
+        )
+        if mootdx_client_factory is not None:
+            self._quote_client_factory = mootdx_client_factory
+        else:
+            self._quote_client_factory = lambda selection, profile: transport_factory(
+                selection,
+                profile,
+                transport=self._transport_name,
+            )
+        self._mootdx_selection: EndpointSelection | None = None
+        self._attempt_id = attempt_id or f"n1_official_daily_v2_attempt__{uuid4().hex}"
+        self._base_attempt_id = self._attempt_id
+        self._replay_count = 0
+        self._would_retry = False
+        self._retry_reason: str | None = None
+        self._business_client_close_error: str | None = None
+        self._attempts: list[dict[str, Any]] = []
+        self._winning_attempt_id: str | None = None
         self._tushare_client: Any | None = None
+        if self._mootdx_client is None:
+            self._endpoint_manager = self._endpoint_manager or MootdxEndpointManager.from_toml()
 
     def fetch_stock_daily(self, *, trade_date: str, expected_scope: list[dict[str, Any]]) -> list[dict[str, Any]]:
         main_scope = [row for row in expected_scope if str(row.get("identity_key")) not in set(SUPPLEMENTAL_IDENTITIES)]
         rows = self._v1.fetch_stock_daily(trade_date=trade_date, expected_scope=main_scope)
         return [self._retag_stock_row(row, source_type="tushare_daily") for row in rows]
 
+    def prepare_mootdx_bundle(
+        self,
+        *,
+        trade_date: str,
+        expected_scope: Mapping[str, Any],
+    ) -> None:
+        board_scope = list(expected_scope.get("board") or [])
+        board_symbols = [str(row.get("code") or "") for row in board_scope]
+        if not board_symbols:
+            raise OfficialDaily20260526V2ExecuteBlocked(
+                "V2 bundle preflight requires non-empty expected board scope"
+            )
+        self._get_mootdx_client(
+            trade_date=trade_date,
+            symbols=board_symbols,
+            scope_kind="board",
+        )
+        self._pin_v1_mootdx_source()
+
+    @property
+    def endpoint_provenance(self) -> dict[str, Any] | None:
+        if self._mootdx_selection is None:
+            return None
+        return {
+            **self._mootdx_selection.to_provenance(),
+            "would_retry": self._would_retry,
+            "retry_reason": self._retry_reason,
+            "replay_count": self._replay_count,
+            "business_client_close_error": self._business_client_close_error,
+            "attempts": [dict(row) for row in self._attempts],
+            "winning_attempt_id": self._winning_attempt_id,
+        }
+
+    def prepare_mootdx_retry(self, error: Exception) -> bool:
+        pinned_source = getattr(self._v1, "_mootdx_source", None)
+        pinned_provenance = getattr(pinned_source, "endpoint_provenance", None) or {}
+        reason = self._retry_reason or pinned_provenance.get("retry_reason")
+        if not reason:
+            return False
+        self._would_retry = True
+        self._retry_reason = str(reason)
+        self._record_current_attempt(
+            status="failed",
+            failure_kind=str(reason),
+        )
+        if (
+            self._endpoint_manager is None
+            or self._endpoint_manager.n1_failover_mode != "active"
+            or self._replay_count >= 1
+        ):
+            return False
+        previous_endpoint = (
+            self._mootdx_selection.endpoint_id if self._mootdx_selection is not None else None
+        )
+        self._close_mootdx_business_client()
+        self._replay_count += 1
+        self._attempt_id = f"{self._base_attempt_id}__retry_{self._replay_count}"
+        self._mootdx_client = None
+        self._mootdx_selection = None
+        self._v1._mootdx_source = None
+        if previous_endpoint:
+            self._retry_reason = f"{reason}:{previous_endpoint}"
+        return True
+
+    def close_mootdx_bundle_client(self) -> None:
+        self._close_mootdx_business_client()
+
+    def mark_mootdx_bundle_success(self) -> None:
+        if self._mootdx_selection is None:
+            return
+        self._winning_attempt_id = self._mootdx_selection.attempt_id
+        self._record_current_attempt(status="winning", failure_kind=None)
+
+    def _record_current_attempt(
+        self,
+        *,
+        status: str,
+        failure_kind: str | None,
+    ) -> None:
+        if self._mootdx_selection is None:
+            return
+        row = {
+            **self._mootdx_selection.to_provenance(),
+            "status": status,
+            "failure_kind": failure_kind,
+        }
+        self._attempts = [
+            existing
+            for existing in self._attempts
+            if existing.get("attempt_id") != self._mootdx_selection.attempt_id
+        ]
+        self._attempts.append(row)
+
+    def _close_mootdx_business_client(self) -> None:
+        client = self._mootdx_client
+        if client is None:
+            return
+        self._mootdx_client = None
+        pinned_source = getattr(self._v1, "_mootdx_source", None)
+        if pinned_source is not None:
+            pinned_source._client = None
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            self._business_client_close_error = type(exc).__name__
+            self._record_current_attempt(
+                status="close_failed",
+                failure_kind=f"business_client_close:{type(exc).__name__}",
+            )
+            raise OfficialDaily20260526V2ExecuteBlocked(
+                "Mootdx business client close failed; bundle remains fail-closed"
+            ) from exc
+
     def fetch_supplemental_stock_daily(self, *, trade_date: str, expected_scope: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        client = self._get_mootdx_client()
+        supplemental_scope = [
+            row
+            for row in expected_scope
+            if str(row.get("identity_key") or "") in set(SUPPLEMENTAL_IDENTITIES)
+        ]
+        client = self._get_mootdx_client(
+            trade_date=trade_date,
+            symbols=[str(row.get("code") or "") for row in supplemental_scope],
+        )
         rows: list[dict[str, Any]] = []
-        for scope_row in expected_scope:
+        for scope_row in supplemental_scope:
             identity_key = str(scope_row.get("identity_key") or "")
-            if identity_key not in set(SUPPLEMENTAL_IDENTITIES):
-                continue
-            records = frame_to_records(client.bars(symbol=str(scope_row.get("code") or ""), frequency=9, start=0, offset=self.mootdx_offset))
+            try:
+                records = frame_to_records(
+                    client.bars(
+                        symbol=str(scope_row.get("code") or ""),
+                        frequency=9,
+                        start=0,
+                        offset=self.mootdx_offset,
+                    )
+                )
+            except Exception as exc:
+                if self._endpoint_manager is not None and self._mootdx_selection is not None:
+                    self._endpoint_manager.record_transport_failure(
+                        self._mootdx_selection.endpoint_id,
+                        transport=self._mootdx_selection.transport,
+                        failure_kind="source_fetch_transport_exception",
+                        detail=type(exc).__name__,
+                    )
+                self._would_retry = True
+                self._retry_reason = "source_fetch_transport_exception"
+                raise OfficialDaily20260526V2ExecuteBlocked(
+                    "Mootdx supplemental source-fetch transport failure; "
+                    "discard the complete attempt"
+                ) from exc
+            if self._record_required_object_result(
+                empty=not records,
+                object_identity=identity_key,
+            ):
+                self._would_retry = True
+                self._retry_reason = "consecutive_required_objects_empty"
+                raise OfficialDaily20260526V2ExecuteBlocked(
+                    "Mootdx endpoint-wide failure; discard the complete supplemental attempt"
+                )
             matched = [record for record in records if parse_record_trade_date(record) == trade_date]
             if not matched:
                 continue
@@ -284,6 +484,11 @@ class DefaultOfficialDaily20260526V2SourceAdapter:
                 "trade_date": trade_date,
                 "identity_key": identity_key,
                 "raw_payload": json_safe(raw),
+                "mootdx_endpoint_provenance": (
+                    self._mootdx_selection.to_provenance()
+                    if self._mootdx_selection is not None
+                    else None
+                ),
             }
             rows.append(
                 {
@@ -341,10 +546,18 @@ class DefaultOfficialDaily20260526V2SourceAdapter:
         return rows
 
     def fetch_index_daily(self, *, trade_date: str, expected_scope: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        self._ensure_v1_pinned_source(
+            trade_date=trade_date,
+            symbols=[str(row.get("code") or "") for row in expected_scope],
+        )
         rows = self._v1.fetch_index_daily(trade_date=trade_date, expected_scope=expected_scope)
         return [self._retag_asset_row(row, asset="index") for row in rows]
 
     def fetch_board_daily(self, *, trade_date: str, expected_scope: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        self._ensure_v1_pinned_source(
+            trade_date=trade_date,
+            symbols=[str(row.get("code") or "") for row in expected_scope],
+        )
         rows = self._v1.fetch_board_daily(trade_date=trade_date, expected_scope=expected_scope)
         return [self._retag_asset_row(row, asset="board") for row in rows]
 
@@ -361,11 +574,75 @@ class DefaultOfficialDaily20260526V2SourceAdapter:
         retagged["source_version"] = SOURCE_VERSIONS[asset]
         return retagged
 
-    def _get_mootdx_client(self) -> Any:
+    def _get_mootdx_client(
+        self,
+        *,
+        trade_date: str,
+        symbols: list[str],
+        scope_kind: str = "stock",
+    ) -> Any:
         if self._mootdx_client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._mootdx_client = quotes_module.Quotes.factory(market="std")
+            if self._endpoint_manager is None:
+                raise OfficialDaily20260526V2ExecuteBlocked("Mootdx endpoint manager is required")
+            probe = self._endpoint_probe or build_n1_protocol_probe(
+                scope_kind=scope_kind,
+                symbols=symbols,
+                target_trade_date=trade_date,
+                frequency=9,
+                start=0,
+                offset=self.mootdx_offset,
+            )
+            selection = self._endpoint_manager.select_for_run(
+                run_id=self._attempt_id,
+                attempt_id=self._attempt_id,
+                probe=probe,
+                transport=self._transport_name,
+                client_factory=self._quote_client_factory,
+            )
+            self._mootdx_selection = selection
+            if not selection.selectable:
+                self._record_current_attempt(
+                    status="preflight_failed",
+                    failure_kind=selection.failover_reason or selection.selection_reason,
+                )
+                raise OfficialDaily20260526V2ExecuteBlocked(
+                    "Mootdx supplemental endpoint preflight failed closed: "
+                    f"{selection.selection_reason}; would_switch_to={selection.would_switch_to or ''}"
+                )
+            self._mootdx_client = self._quote_client_factory(selection, "std")
+            self._record_current_attempt(status="selected", failure_kind=None)
+            self._pin_v1_mootdx_source()
         return self._mootdx_client
+
+    def _ensure_v1_pinned_source(self, *, trade_date: str, symbols: list[str]) -> None:
+        self._get_mootdx_client(trade_date=trade_date, symbols=symbols)
+        self._pin_v1_mootdx_source()
+
+    def _pin_v1_mootdx_source(self) -> None:
+        if self._mootdx_selection is None or self._endpoint_manager is None:
+            raise OfficialDaily20260526V2ExecuteBlocked(
+                "V2 bundle requires one authoritative Mootdx endpoint selection"
+            )
+        existing = getattr(self._v1, "_mootdx_source", None)
+        if existing is not None:
+            return
+        self._v1._mootdx_source = MootdxDailyBarSource(
+            client=self._mootdx_client,
+            endpoint_manager=self._endpoint_manager,
+            selection=self._mootdx_selection,
+            attempt_id=self._attempt_id,
+            offset=self.mootdx_offset,
+        )
+
+    def _record_required_object_result(self, *, empty: bool, object_identity: str) -> bool:
+        if self._endpoint_manager is None or self._mootdx_selection is None:
+            return False
+        return self._endpoint_manager.record_required_object_result(
+            self._mootdx_selection.endpoint_id,
+            transport=self._mootdx_selection.transport,
+            empty=empty,
+            object_identity=object_identity,
+        )
 
     def _pro(self) -> Any:
         if self._tushare_client is None:
@@ -386,14 +663,42 @@ def fetch_official_daily_sources(
     if not source_fetch_enabled:
         raise OfficialDaily20260526V2ExecuteBlocked("missing --source-fetch-enabled")
     scope = normalize_expected_scope(expected_scope)
-    stock_main = list(adapter.fetch_stock_daily(trade_date=trade_date, expected_scope=scope["stock"]))
-    stock_supplemental = list(adapter.fetch_supplemental_stock_daily(trade_date=trade_date, expected_scope=scope["stock"]))
-    no_trade_manifest = list(adapter.fetch_official_no_trade_manifest(trade_date=trade_date, identities=OFFICIAL_NO_TRADE_IDENTITIES))
-    rows = {
-        "stock": [*stock_main, *stock_supplemental],
-        "index": list(adapter.fetch_index_daily(trade_date=trade_date, expected_scope=scope["index"])),
-        "board": list(adapter.fetch_board_daily(trade_date=trade_date, expected_scope=scope["board"])),
-    }
+    for attempt_number in range(2):
+        try:
+            prepare_bundle = getattr(adapter, "prepare_mootdx_bundle", None)
+            if callable(prepare_bundle):
+                prepare_bundle(trade_date=trade_date, expected_scope=scope)
+            stock_main = list(adapter.fetch_stock_daily(trade_date=trade_date, expected_scope=scope["stock"]))
+            stock_supplemental = list(adapter.fetch_supplemental_stock_daily(trade_date=trade_date, expected_scope=scope["stock"]))
+            no_trade_manifest = list(adapter.fetch_official_no_trade_manifest(trade_date=trade_date, identities=OFFICIAL_NO_TRADE_IDENTITIES))
+            rows = {
+                "stock": [*stock_main, *stock_supplemental],
+                "index": list(adapter.fetch_index_daily(trade_date=trade_date, expected_scope=scope["index"])),
+                "board": list(adapter.fetch_board_daily(trade_date=trade_date, expected_scope=scope["board"])),
+            }
+            break
+        except Exception as exc:
+            prepare_retry = getattr(adapter, "prepare_mootdx_retry", None)
+            if (
+                attempt_number == 0
+                and callable(prepare_retry)
+                and prepare_retry(exc)
+            ):
+                continue
+            close_bundle = getattr(adapter, "close_mootdx_bundle_client", None)
+            if callable(close_bundle):
+                try:
+                    close_bundle()
+                except Exception:
+                    pass
+            raise
+    mark_success = getattr(adapter, "mark_mootdx_bundle_success", None)
+    if callable(mark_success):
+        mark_success()
+    close_bundle = getattr(adapter, "close_mootdx_bundle_client", None)
+    if callable(close_bundle):
+        close_bundle()
+    endpoint_provenance = getattr(adapter, "endpoint_provenance", None)
     return normalize_jsonable(
         {
             "trade_date": trade_date,
@@ -409,6 +714,7 @@ def fetch_official_daily_sources(
             "official_no_trade_manifest": no_trade_manifest,
             "stale_identity_manifest": list(STALE_IDENTITY_MANIFEST),
             "unresolved_source_gap": [],
+            "mootdx_endpoint_provenance": endpoint_provenance,
             **rows,
         }
     )
@@ -758,6 +1064,7 @@ def build_commit_plan(
                 "official_no_trade_manifest": bundle.get("official_no_trade_manifest") or [],
                 "stale_identity_manifest": bundle.get("stale_identity_manifest") or [],
                 "supplemental_identities": list(SUPPLEMENTAL_IDENTITIES),
+                "mootdx_endpoint_provenance": bundle.get("mootdx_endpoint_provenance"),
             },
         }
     )
@@ -789,6 +1096,7 @@ def build_commit_plan(
                 "stale_identity": bundle.get("stale_identity_manifest") or [],
                 "supplemental_identities": list(SUPPLEMENTAL_IDENTITIES),
             },
+            "mootdx_endpoint_provenance": bundle.get("mootdx_endpoint_provenance"),
             "side_effects": {
                 "writes_parquet": False,
                 "writes_outbox": False,
@@ -1371,9 +1679,9 @@ def insert_ingest_batch(cur: Any, commit_plan: Mapping[str, Any]) -> None:
             "batch_id": commit_plan["batch_id"],
             "trade_date": commit_plan["trade_date"],
             "source_version": commit_plan["contract_source_version"],
-            "source_params": Jsonb({"source_versions": commit_plan.get("source_versions"), "postgres_only": True, "v2": True}),
+            "source_params": Jsonb({"source_versions": commit_plan.get("source_versions"), "postgres_only": True, "v2": True, "mootdx_endpoint_provenance": commit_plan.get("mootdx_endpoint_provenance")}),
             "row_count": int((commit_plan.get("row_counts") or {}).get("total", 0)),
-            "quality_gate_summary": Jsonb({"p0_count": 0, "p1_count": 19, "validation": "passed"}),
+            "quality_gate_summary": Jsonb({"p0_count": 0, "p1_count": 19, "validation": "passed", "mootdx_endpoint_provenance": commit_plan.get("mootdx_endpoint_provenance")}),
             "rollback_strategy": str(DEFAULT_PATHS["rollback_sql"]),
         },
     )

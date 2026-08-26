@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Iterable
@@ -36,6 +37,8 @@ DEFAULT_RETENTION_TRADE_DAYS = 2
 COUNT_STATEMENT_TIMEOUT_MS = 30_000
 COUNT_TIMEOUT_RETRIES = 2
 DELETE_STATEMENT_TIMEOUT_MS = 30_000
+DELETE_LOCK_TIMEOUT_MS = 1_000
+INBOX_ID_BATCH_SIZE = 50
 EVENT_ID_BATCH_SIZE = 250
 SUBSCRIPTION_ID_BATCH_SIZE = 250
 ACTION_FACT_ID_BATCH_SIZE = 250
@@ -305,6 +308,61 @@ class RuntimeHotDeleteError(RuntimeError):
                 }
             )
         return payload
+
+
+@dataclass(frozen=True)
+class RuntimeHotCleanupPlan:
+    """Calendar-authoritative, independently discovered keep-5 cleanup plan."""
+
+    current_trade_date: str
+    retained_trade_dates: tuple[str, ...]
+    database_trade_dates: tuple[str, ...]
+    database_protected_future_trade_dates: tuple[str, ...]
+    database_cleanup_trade_dates: tuple[str, ...]
+    local_trade_dates: tuple[str, ...]
+    local_cleanup_trade_dates: tuple[str, ...]
+    database_delete_plan: tuple[dict[str, Any], ...]
+    inbox_delete_units: tuple[dict[str, Any], ...]
+    local_allowlist: tuple[dict[str, Any], ...]
+    blockers: tuple[str, ...] = ()
+    local_archive_verified: bool = False
+    database_discovery_blocker: str = ""
+    database_cleanup_enabled: bool = True
+    direct_delete_no_archive: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": "RuntimeHotCleanupPlan.v2",
+            "retention_policy": "current_trade_date_plus_previous_5_completed_trade_dates_v1",
+            "trade_calendar_authority": "common_trade_calendar",
+            "current_trade_date": self.current_trade_date,
+            "retained_trade_dates": list(self.retained_trade_dates),
+            "database_trade_dates": list(self.database_trade_dates),
+            "database_protected_future_trade_dates": list(self.database_protected_future_trade_dates),
+            "database_cleanup_trade_dates": list(self.database_cleanup_trade_dates),
+            "local_trade_dates": list(self.local_trade_dates),
+            "local_cleanup_trade_dates": list(self.local_cleanup_trade_dates),
+            "database_delete_plan": [dict(row) for row in self.database_delete_plan],
+            "inbox_delete_units": [dict(unit) for unit in self.inbox_delete_units],
+            "local_allowlist": [dict(entry) for entry in self.local_allowlist],
+            "local_cleanup_policy": "verified-archive-required",
+            "local_archive_verified": self.local_archive_verified,
+            "database_discovery_blocker": self.database_discovery_blocker,
+            "database_cleanup_mode": (
+                "enabled" if self.database_cleanup_enabled else "disabled_by_layer_policy"
+            ),
+            "database_failure_blocks_verified_local": False,
+            "direct_delete_no_archive": self.direct_delete_no_archive,
+            "blocked_by_layer": [
+                {"scope": "n6_user_projection", "layer_role": "N6_user"},
+            ],
+            "excluded_scopes": [
+                {"scope": "n3_previous_day_minute_cumulative", "layer_role": "N3_market_data"},
+                {"scope": "n3t_action_confirmation_projection_metric", "layer_role": "N3_market_data"},
+                {"scope": "n6_user_projection", "layer_role": "N6_user"},
+            ],
+            "blockers": list(self.blockers),
+        }
 
 
 def build_keep2_dirty_hot_cleanup_plan(
@@ -1169,6 +1227,502 @@ def discover_hot_trade_dates(*, dsn: str, connection_factory: Callable[[str], An
                 if len(value) == 8 and value.isdigit():
                     trade_dates.add(value)
     return sorted(trade_dates)
+
+
+def discover_calendar_retained_trade_dates(
+    *,
+    current_trade_date: str,
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+) -> list[str]:
+    """Return current date plus the previous five completed open dates."""
+
+    current = require_yyyymmdd(current_trade_date, "current_trade_date")
+    query = (
+        "select trade_date::text from common_trade_calendar "
+        "where is_open = true and trade_date < %s "
+        "order by trade_date desc limit 5"
+    )
+    with connection_factory(dsn) as conn:
+        previous = [require_yyyymmdd(str(row[0]), "completed_trade_date") for row in conn.execute(query, (current,))]
+    if len(previous) != 5:
+        raise ValueError(f"common_trade_calendar_previous_completed_dates_must_equal_5:{len(previous)}")
+    return sorted({current, *previous})
+
+
+def runtime_hot_cleanup_v2_specs() -> tuple[RuntimeHotCleanupSpec, ...]:
+    """Keep existing DB scope except explicitly excluded N3T and N6 facts."""
+
+    return tuple(
+        spec
+        for spec in build_hot_cleanup_specs()
+        if spec.layer != "n6" and "action_confirmation_projection_metric" not in spec.table
+    )
+
+
+def discover_database_trade_dates(
+    *,
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+) -> list[str]:
+    """Discover the actual DB date domain from every in-scope table, not drivers."""
+
+    allowed_tables = {(spec.layer, spec.table) for spec in runtime_hot_cleanup_v2_specs()}
+    table_dates = {
+        (table, date_column)
+        for layer, table, date_column in runtime_table_specs()
+        if (layer, table) in allowed_tables
+    }
+    table_dates.update((table, "trade_date") for table in TRIGGER_REPLAY_AUDIT_TABLES)
+    table_dates.update(
+        (table, "trade_date")
+        for table in ("common_event_outbox", "common_event_ledger")
+    )
+    discovered: set[str] = set()
+    with connection_factory(dsn) as conn:
+        for table, date_column in sorted(table_dates):
+            query = f"select distinct {date_column}::text from {table} where {date_column} is not null"
+            for row in conn.execute(query):
+                value = str(row[0] or "")
+                if len(value) == 8 and value.isdigit():
+                    discovered.add(require_yyyymmdd(value, f"{table}.{date_column}"))
+    return sorted(discovered)
+
+
+def freeze_inbox_delete_units(
+    *,
+    cleanup_trade_dates: Iterable[str],
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+) -> list[dict[str, Any]]:
+    """Freeze exact inbox ids in deterministic 50-row units before mutation."""
+
+    units: list[dict[str, Any]] = []
+    query = (
+        "select i.inbox_id from common_event_inbox i "
+        "join common_event_outbox o on o.event_id = i.event_id "
+        "where o.trade_date = %s and o.source_layer = %s and i.source_layer = %s "
+        "and i.status in ('processed', 'skipped') "
+        "order by i.inbox_id"
+    )
+    with connection_factory(dsn) as conn:
+        for trade_date in sorted({require_yyyymmdd(str(item), "cleanup_trade_date") for item in cleanup_trade_dates}):
+            for layer, source_layer in reversed(tuple(SOURCE_LAYER_BY_RUNTIME_LAYER.items())):
+                inbox_ids = [int(row[0]) for row in conn.execute(query, (trade_date, source_layer, source_layer))]
+                for offset in range(0, len(inbox_ids), INBOX_ID_BATCH_SIZE):
+                    batch = inbox_ids[offset : offset + INBOX_ID_BATCH_SIZE]
+                    units.append(
+                        {
+                            "unit_id": f"inbox:{trade_date}:{layer}:{offset // INBOX_ID_BATCH_SIZE:05d}",
+                            "trade_date": trade_date,
+                            "layer": layer,
+                            "table": "common_event_inbox",
+                            "inbox_ids": batch,
+                            "planned_rows": len(batch),
+                            "active_rows_excluded": True,
+                        }
+                    )
+    return units
+
+
+def build_runtime_hot_cleanup_plan_v2(
+    *,
+    current_trade_date: str,
+    local_files: Iterable[dict[str, Any]],
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+    retained_trade_dates: Iterable[str] | None = None,
+    database_trade_dates: Iterable[str] | None = None,
+    inbox_delete_units: Iterable[dict[str, Any]] | None = None,
+    table_counter: Callable[[RuntimeHotCleanupSpec, str], int] | None = None,
+    local_archive_evidence: dict[str, Any] | None = None,
+    database_cleanup_enabled: bool = True,
+    direct_delete_no_archive: bool = False,
+) -> RuntimeHotCleanupPlan:
+    current = require_yyyymmdd(current_trade_date, "current_trade_date")
+    retained = sorted(
+        {
+            require_yyyymmdd(str(item), "retained_trade_date")
+            for item in (
+                retained_trade_dates
+                if retained_trade_dates is not None
+                else discover_calendar_retained_trade_dates(
+                    current_trade_date=current,
+                    dsn=dsn,
+                    connection_factory=connection_factory,
+                )
+            )
+        }
+    )
+    if current not in retained or len(retained) != 6:
+        raise ValueError("calendar_retained_set_must_be_current_plus_previous_5")
+    database_discovery_blocker = ""
+    try:
+        db_date_values = (
+            []
+            if not database_cleanup_enabled
+            else database_trade_dates
+            if database_trade_dates is not None
+            else discover_database_trade_dates(dsn=dsn, connection_factory=connection_factory)
+        )
+        db_dates = sorted(
+            {require_yyyymmdd(str(item), "database_trade_date") for item in db_date_values}
+        )
+    except Exception as exc:
+        db_dates = []
+        database_discovery_blocker = f"database_date_discovery_failed:{type(exc).__name__}"
+    local_entries = [dict(entry) for entry in local_files]
+    local_dates = sorted(
+        {require_yyyymmdd(str(entry["trade_date"]), "local_trade_date") for entry in local_entries}
+    )
+    retained_set = set(retained)
+    protected_future_db_dates = sorted(date_value for date_value in db_dates if date_value > current)
+    db_cleanup = sorted(
+        date_value
+        for date_value in db_dates
+        if date_value < current and date_value not in retained_set
+    )
+    local_cleanup = sorted(set(local_dates) - retained_set)
+    blockers: list[str] = []
+    archive_evidence = dict(local_archive_evidence or {})
+    local_archive_verified = (
+        local_archive_evidence is not None
+        and
+        archive_evidence.get("local_policy") == "verified-archive-required"
+        and archive_evidence.get("manifest_verified") is True
+        and archive_evidence.get("restore_proof_result") == "RESTORE_PROOF_PASS"
+        and archive_evidence.get("exact_allowlist_verified") is True
+    )
+    if direct_delete_no_archive:
+        blockers.append("direct-delete-no-archive_rejected")
+    if local_archive_evidence is not None and not local_archive_verified:
+        blockers.append("verified_archive_contract_incomplete")
+    if database_discovery_blocker:
+        blockers.append(database_discovery_blocker)
+    if inbox_delete_units is not None:
+        frozen_inbox = list(inbox_delete_units)
+    elif database_discovery_blocker:
+        frozen_inbox = []
+    else:
+        frozen_inbox = freeze_inbox_delete_units(
+            cleanup_trade_dates=db_cleanup,
+            dsn=dsn,
+            connection_factory=connection_factory,
+        )
+    database_delete_plan: list[dict[str, Any]] = []
+    database_plan_failed = False
+    for trade_date in db_cleanup:
+        for template in runtime_hot_cleanup_v2_specs():
+            spec = bind_cleanup_spec(template, trade_date)
+            if spec.table == "common_event_inbox":
+                planned_rows = sum(
+                    int(unit["planned_rows"])
+                    for unit in frozen_inbox
+                    if unit["trade_date"] == trade_date and unit["layer"] == spec.layer
+                )
+            else:
+                try:
+                    planned_rows = count_rows_once_v2(
+                        dsn=dsn,
+                        spec=spec,
+                        connection_factory=connection_factory,
+                        table_counter=table_counter,
+                    )
+                except Exception as exc:
+                    blockers.append(
+                        f"database_plan_count_failed:{trade_date}:{spec.layer}:{spec.table}:{type(exc).__name__}"
+                    )
+                    database_plan_failed = True
+                    break
+            if planned_rows:
+                database_delete_plan.append(
+                    {
+                        "trade_date": trade_date,
+                        "layer": spec.layer,
+                        "table": spec.table,
+                        "planned_rows": int(planned_rows),
+                    }
+                )
+        if database_plan_failed:
+            break
+    verified_local_entries: list[dict[str, Any]] = []
+    for entry in local_entries if local_archive_evidence is not None else []:
+        if str(entry.get("trade_date")) not in set(local_cleanup):
+            continue
+        source_path = str(entry.get("source_path") or "")
+        if int(entry.get("retained_date_overlap") or 0):
+            blockers.append(f"retained_local_entry_excluded:{source_path}")
+            continue
+        if int(entry.get("active_current_lineage_overlap") or 0):
+            blockers.append(f"active_local_entry_excluded:{source_path}")
+            continue
+        if entry.get("archive_fully_verified") is not True or entry.get("exact_allowlisted") is not True:
+            blockers.append(f"unverified_local_entry_excluded:{source_path}")
+            continue
+        verified_local_entries.append(entry)
+    return RuntimeHotCleanupPlan(
+        current_trade_date=current,
+        retained_trade_dates=tuple(retained),
+        database_trade_dates=tuple(db_dates),
+        database_protected_future_trade_dates=tuple(protected_future_db_dates),
+        database_cleanup_trade_dates=tuple(db_cleanup),
+        local_trade_dates=tuple(local_dates),
+        local_cleanup_trade_dates=tuple(local_cleanup),
+        database_delete_plan=tuple(database_delete_plan),
+        inbox_delete_units=tuple(dict(unit) for unit in frozen_inbox),
+        local_allowlist=tuple(verified_local_entries),
+        blockers=tuple(sorted(set(blockers))),
+        local_archive_verified=local_archive_verified,
+        database_discovery_blocker=database_discovery_blocker,
+        database_cleanup_enabled=database_cleanup_enabled,
+        direct_delete_no_archive=direct_delete_no_archive,
+    )
+
+
+def append_durable_progress_journal(path: str | Path, entry: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def execute_frozen_inbox_units(
+    *,
+    units: Iterable[dict[str, Any]],
+    progress_journal_path: str | Path,
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+) -> dict[str, Any]:
+    """Commit each frozen inbox-id unit independently; stop once, never retry."""
+
+    committed: list[dict[str, Any]] = []
+    committed_inbox_ids: list[int] = []
+    seen_inbox_ids: set[int] = set()
+    attempted = 0
+    for unit in units:
+        attempted += 1
+        started = perf_counter()
+        inbox_ids = [int(value) for value in list(unit.get("inbox_ids") or [])]
+        if (
+            unit.get("table") != "common_event_inbox"
+            or unit.get("layer") not in {"n3", "n4", "n5"}
+            or not inbox_ids
+            or len(inbox_ids) > INBOX_ID_BATCH_SIZE
+            or any(value <= 0 or value in seen_inbox_ids for value in inbox_ids)
+        ):
+            return {
+                "result": "BLOCKED_INVALID_FROZEN_INBOX_UNIT",
+                "cleanup_complete": False,
+                "retry_attempts": 0,
+                "attempted_units": attempted,
+                "committed_units": committed,
+                "committed_unit_count": len(committed),
+                "committed_inbox_ids": committed_inbox_ids,
+                "failed_unit": dict(unit),
+                "rollback_claimed": False,
+            }
+        seen_inbox_ids.update(inbox_ids)
+        try:
+            with connection_factory(dsn) as conn:
+                with conn.transaction():
+                    conn.execute(f"set local lock_timeout = '{DELETE_LOCK_TIMEOUT_MS}ms'")
+                    conn.execute(f"set local statement_timeout = '{DELETE_STATEMENT_TIMEOUT_MS}ms'")
+                    cursor = conn.execute(
+                        "delete from common_event_inbox where inbox_id = any(%s)",
+                        (inbox_ids,),
+                    )
+                    deleted = int(cursor.rowcount or 0)
+                    if deleted != int(unit["planned_rows"]):
+                        raise RuntimeError(
+                            f"frozen_inbox_id_count_drift:{unit['unit_id']}:{unit['planned_rows']}:{deleted}"
+                        )
+            journal_entry = {
+                "schema": "RuntimeHotCleanupProgressJournal.v1",
+                "unit_id": str(unit["unit_id"]),
+                "status": "committed",
+                "deleted_rows": deleted,
+                "inbox_ids": inbox_ids,
+                "committed_at": datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat(),
+            }
+            append_durable_progress_journal(progress_journal_path, journal_entry)
+            committed.append(journal_entry)
+            committed_inbox_ids.extend(inbox_ids)
+        except Exception as exc:
+            return {
+                "result": "BLOCKED_DATABASE_DELETE_TIMEOUT" if is_count_timeout_exception(exc) else "BLOCKED_DATABASE_DELETE_FAILED",
+                "cleanup_complete": False,
+                "retry_attempts": 0,
+                "attempted_units": attempted,
+                "committed_units": committed,
+                "committed_unit_count": len(committed),
+                "committed_inbox_ids": committed_inbox_ids,
+                "failed_unit": dict(unit),
+                "error": f"{type(exc).__name__}: {exc}",
+                "duration_ms": elapsed_ms(started),
+                "rollback_claimed": False,
+            }
+    return {
+        "result": "DATABASE_INBOX_MICROTRANSACTIONS_PASS",
+        "cleanup_complete": True,
+        "retry_attempts": 0,
+        "attempted_units": attempted,
+        "committed_units": committed,
+        "committed_unit_count": len(committed),
+        "committed_inbox_ids": committed_inbox_ids,
+        "rollback_claimed": False,
+    }
+
+
+def execute_runtime_hot_cleanup_database_v2(
+    *,
+    plan: RuntimeHotCleanupPlan,
+    progress_journal_path: str | Path,
+    dsn: str = DEFAULT_DSN,
+    connection_factory: Callable[[str], Any] = psycopg.connect,
+    table_counter: Callable[[RuntimeHotCleanupSpec, str], int] | None = None,
+    table_deleter: Callable[[RuntimeHotCleanupSpec, str], int] | None = None,
+) -> dict[str, Any]:
+    """Execute v2 DB units with one transaction and durable journal per unit."""
+
+    expected = {
+        (str(row["trade_date"]), str(row["layer"]), str(row["table"])): int(row["planned_rows"])
+        for row in plan.database_delete_plan
+    }
+    committed: list[dict[str, Any]] = []
+    attempted = 0
+
+    def stop(unit: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        return {
+            "result": "BLOCKED_DATABASE_DELETE_TIMEOUT" if is_count_timeout_exception(exc) else "BLOCKED_DATABASE_DELETE_FAILED",
+            "cleanup_complete": False,
+            "retry_attempts": 0,
+            "attempted_units": attempted,
+            "committed_units": committed,
+            "committed_unit_count": len(committed),
+            "failed_unit": unit,
+            "error": f"{type(exc).__name__}: {exc}",
+            "rollback_claimed": False,
+        }
+
+    for template in runtime_hot_cleanup_v2_specs():
+        for trade_date in plan.database_cleanup_trade_dates:
+            key = (trade_date, template.layer, template.table)
+            if key not in expected:
+                continue
+            spec = bind_cleanup_spec(template, trade_date)
+            if spec.table == "common_event_inbox":
+                result = execute_frozen_inbox_units(
+                    units=(
+                        unit for unit in plan.inbox_delete_units
+                        if unit["trade_date"] == trade_date and unit["layer"] == spec.layer
+                    ),
+                    progress_journal_path=progress_journal_path,
+                    dsn=dsn,
+                    connection_factory=connection_factory,
+                )
+                attempted += int(result["attempted_units"])
+                committed.extend(result["committed_units"])
+                if not result["cleanup_complete"]:
+                    result["attempted_units"] = attempted
+                    result["committed_units"] = committed
+                    result["committed_unit_count"] = len(committed)
+                    return result
+                continue
+            try:
+                current_rows = count_rows_once_v2(
+                    dsn=dsn, spec=spec, connection_factory=connection_factory, table_counter=table_counter
+                )
+                if current_rows != expected[key]:
+                    raise RuntimeError(
+                        f"row_count_drift:{trade_date}:{spec.layer}:{spec.table}:{expected[key]}:{current_rows}"
+                    )
+                if table_deleter is not None:
+                    unit_specs = (spec,)
+                elif is_batched_parent_spec(spec):
+                    with connection_factory(dsn) as discovery_conn:
+                        unit_specs = tuple(iter_delete_batch_specs(conn=discovery_conn, spec=spec))
+                else:
+                    unit_specs = (spec,)
+                for index, unit_spec in enumerate(unit_specs):
+                    attempted += 1
+                    unit = {
+                        "unit_id": f"{trade_date}:{spec.layer}:{spec.table}:{index:05d}",
+                        "trade_date": trade_date,
+                        "layer": spec.layer,
+                        "table": spec.table,
+                    }
+                    if table_deleter is not None:
+                        deleted = int(table_deleter(unit_spec, trade_date))
+                    else:
+                        with connection_factory(dsn) as conn:
+                            with conn.transaction():
+                                conn.execute(f"set local lock_timeout = '{DELETE_LOCK_TIMEOUT_MS}ms'")
+                                conn.execute(f"set local statement_timeout = '{DELETE_STATEMENT_TIMEOUT_MS}ms'")
+                                deleted = int(conn.execute(unit_spec.delete_sql, unit_spec.params).rowcount or 0)
+                    journal_entry = {
+                        "schema": "RuntimeHotCleanupProgressJournal.v1",
+                        **unit,
+                        "status": "committed",
+                        "deleted_rows": deleted,
+                        "committed_at": datetime.now(ASIA_SHANGHAI).replace(microsecond=0).isoformat(),
+                    }
+                    append_durable_progress_journal(progress_journal_path, journal_entry)
+                    committed.append(journal_entry)
+            except Exception as exc:
+                return stop(
+                    {
+                        "trade_date": trade_date,
+                        "layer": spec.layer,
+                        "table": spec.table,
+                    },
+                    exc,
+                )
+    return {
+        "result": "DATABASE_RUNTIME_HOT_CLEANUP_V2_PASS",
+        "cleanup_complete": True,
+        "retry_attempts": 0,
+        "attempted_units": attempted,
+        "committed_units": committed,
+        "committed_unit_count": len(committed),
+        "rollback_claimed": False,
+    }
+
+
+def count_rows_once_v2(
+    *,
+    dsn: str,
+    spec: RuntimeHotCleanupSpec,
+    connection_factory: Callable[[str], Any],
+    table_counter: Callable[[RuntimeHotCleanupSpec, str], int] | None,
+) -> int:
+    """Single-attempt count used by v2; timeout/error is terminal."""
+
+    trade_date = extract_trade_date(spec)
+    if table_counter is not None:
+        return int(table_counter(spec, trade_date))
+    if is_batched_parent_spec(spec) and spec.batch_strategy not in DIRECT_COUNT_BATCH_SKIP_STRATEGIES:
+        batch_specs = iter_count_batch_specs(dsn=dsn, spec=spec, connection_factory=connection_factory)
+        return sum(
+            count_rows_once_v2(
+                dsn=dsn,
+                spec=batch_spec,
+                connection_factory=connection_factory,
+                table_counter=None,
+            )
+            for batch_spec in batch_specs
+        )
+    with connection_factory(dsn) as conn:
+        with conn.transaction():
+            conn.execute("set local transaction read only")
+            conn.execute(f"set local lock_timeout = '{DELETE_LOCK_TIMEOUT_MS}ms'")
+            conn.execute(f"set local statement_timeout = '{COUNT_STATEMENT_TIMEOUT_MS}ms'")
+            row = conn.execute(spec.count_sql, spec.params).fetchone()
+    return int(row[0] if row else 0)
 
 
 def verified_archive_manifest_evidence(

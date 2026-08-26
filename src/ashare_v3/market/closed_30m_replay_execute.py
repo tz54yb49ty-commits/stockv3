@@ -14,7 +14,6 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 import hashlib
-import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -35,6 +34,14 @@ from ashare_v3.market.closed_30m_replay_plan import (
     fetch_minute_subscriptions,
     fetch_target_audit,
 )
+from ashare_v3.market.mootdx_batch_attempt import (
+    MootdxBatchAttemptOutcome,
+    MootdxBatchObjectTracker,
+    MootdxEndpointTransportError,
+    build_mootdx_minute_semantic_probe,
+    is_endpoint_transport_exception,
+    run_mootdx_batch_attempt,
+)
 from ashare_v3.market.preload_plan import MINUTE_FACT_TABLES, normalize_db_row
 from ashare_v3.market.previous_day_preload_execute import (
     json_safe,
@@ -44,6 +51,7 @@ from ashare_v3.market.previous_day_preload_execute import (
     write_text,
 )
 from ashare_v3.market.subscription_plan import ASSET_KINDS
+from ashare_v3.mootdx_client import EndpointSelection, MootdxEndpointManager
 
 
 DEFAULT_C2_DRY_RUN_PLAN_PATH = "docs/N3_C2_closed_30m_dry_run_plan.json"
@@ -125,8 +133,9 @@ class MootdxClosed30mReplayAdapter:
         self.offset = offset
         self._client = client
         if self._client is None:
-            quotes_module = importlib.import_module("mootdx.quotes")
-            self._client = quotes_module.Quotes.factory(market=market)
+            raise Closed30mReplayExecuteError(
+                "MootdxClosed30mReplayAdapter requires a manager-selected pinned client"
+            )
 
     def fetch_full_day_minute_bars(self, subscription: Mapping[str, Any], trade_date: str) -> list[dict[str, Any]]:
         asset_kind = str(subscription.get("asset_kind") or "")
@@ -259,6 +268,9 @@ def run_closed_30m_replay_execute(
     execute: bool = False,
     user_confirmed: bool = False,
     adapter: Any | None = None,
+    endpoint_manager: MootdxEndpointManager | None = None,
+    endpoint_probe: Callable[..., Mapping[str, Any]] | None = None,
+    endpoint_client_factory: Callable[[EndpointSelection], Any] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     progress_every: int = 100,
 ) -> dict[str, Any]:
@@ -288,64 +300,113 @@ def run_closed_30m_replay_execute(
     ensure_clean_c2_target(pre_backup["target_audit"], resolved_run_id)
 
     subscriptions = fetch_c2_subscriptions(dsn, source_subscription_run_id)
-    resolved_adapter = adapter or MootdxClosed30mReplayAdapter()
     all_delta_rows: dict[str, list[dict[str, Any]]] = {asset_kind: [] for asset_kind in ASSET_KINDS}
     all_summary_rows: dict[str, list[dict[str, Any]]] = {asset_kind: [] for asset_kind in ASSET_KINDS}
     object_results: list[dict[str, Any]] = []
     expected_labels = build_full_day_minute_labels()
+    baseline_rows_by_identity: dict[str, list[dict[str, Any]]] = {}
 
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn, conn.cursor() as cur:
-        for index, subscription in enumerate(subscriptions, start=1):
-            if progress_callback and (index == 1 or index % progress_every == 0 or index == len(subscriptions)):
-                progress_callback(f"N3-C2 replaying {index}/{len(subscriptions)} {subscription['identity_key']}")
+        for subscription in subscriptions:
             asset_kind = str(subscription["asset_kind"])
-            baseline_rows = fetch_baseline_minute_rows(
+            baseline_rows_by_identity[str(subscription["identity_key"])] = fetch_baseline_minute_rows(
                 cur,
                 asset_kind=asset_kind,
                 today_minute_run_id=today_minute_run_id,
                 identity_key=str(subscription["identity_key"]),
                 trade_date=resolved_trade_date,
             )
+
+    batch_outcome: MootdxBatchAttemptOutcome[Any] | None = None
+    if adapter is None:
+        replay_batch, batch_outcome = prepare_mootdx_c2_replay_batch(
+            c2_run_id=resolved_run_id,
+            trade_date=resolved_trade_date,
+            subscriptions=subscriptions,
+            manager=endpoint_manager or MootdxEndpointManager.from_toml(),
+            probe=endpoint_probe
+            or build_mootdx_minute_semantic_probe(
+                subscriptions=subscriptions,
+                trade_date=resolved_trade_date,
+                adapter_factory=lambda client: MootdxClosed30mReplayAdapter(client=client),
+                fetch_rows=lambda value, subscription, date: value.fetch_full_day_minute_bars(subscription, date),
+            ),
+            client_factory=endpoint_client_factory,
+        )
+    else:
+        replay_batch = []
+        for subscription in subscriptions:
             try:
-                replay_rows = resolved_adapter.fetch_full_day_minute_bars(subscription, resolved_trade_date)
+                replay_rows = adapter.fetch_full_day_minute_bars(subscription, resolved_trade_date)
                 fetch_error = None
             except Exception as exc:  # pragma: no cover - real adapter branch
                 replay_rows = []
                 fetch_error = str(exc)
-            delta_rows = build_replay_delta_records(
-                c2_run_id=resolved_run_id,
-                source_condition_run_id=source_condition_run_id,
-                for_trade_date=resolved_trade_date,
-                subscription=subscription,
-                baseline_rows=baseline_rows,
-                replay_rows=replay_rows,
-                expected_labels=expected_labels,
-                source_adapter=getattr(resolved_adapter, "source_adapter", "mootdx.std.closed_30m_replay.frequency8"),
-                source_version=getattr(resolved_adapter, "source_version", "mootdx.bars.frequency8.offset800"),
-            )
-            summary_rows = build_closed_30m_summary_records(
-                c2_run_id=resolved_run_id,
-                source_condition_run_id=source_condition_run_id,
-                source_subscription_run_id=source_subscription_run_id,
-                source_today_minute_run_ids=[today_minute_run_id],
-                for_trade_date=resolved_trade_date,
-                subscription=subscription,
-                baseline_rows=baseline_rows,
-                delta_rows=delta_rows,
-                fetch_error=fetch_error,
-            )
-            all_delta_rows[asset_kind].extend(delta_rows)
-            all_summary_rows[asset_kind].extend(summary_rows)
-            object_results.append(
+            replay_batch.append(
                 {
-                    "asset_kind": asset_kind,
-                    "identity_key": subscription["identity_key"],
-                    "replay_rows": len(replay_rows),
-                    "delta_rows": len(delta_rows),
-                    "summary_rows": len(summary_rows),
+                    "subscription": dict(subscription),
+                    "replay_rows": replay_rows,
                     "fetch_error": fetch_error,
+                    "source_adapter": getattr(adapter, "source_adapter", "mootdx.std.closed_30m_replay.frequency8"),
+                    "source_version": getattr(adapter, "source_version", "mootdx.bars.frequency8.offset800"),
                 }
             )
+
+    for index, item in enumerate(replay_batch, start=1):
+        subscription = dict(item["subscription"])
+        if progress_callback and (index == 1 or index % progress_every == 0 or index == len(subscriptions)):
+            progress_callback(f"N3-C2 replaying {index}/{len(subscriptions)} {subscription['identity_key']}")
+        asset_kind = str(subscription["asset_kind"])
+        baseline_rows = baseline_rows_by_identity[str(subscription["identity_key"])]
+        replay_rows = list(item["replay_rows"])
+        fetch_error = item.get("fetch_error")
+        delta_rows = build_replay_delta_records(
+            c2_run_id=resolved_run_id,
+            source_condition_run_id=source_condition_run_id,
+            for_trade_date=resolved_trade_date,
+            subscription=subscription,
+            baseline_rows=baseline_rows,
+            replay_rows=replay_rows,
+            expected_labels=expected_labels,
+            source_adapter=str(item["source_adapter"]),
+            source_version=str(item["source_version"]),
+        )
+        summary_rows = build_closed_30m_summary_records(
+            c2_run_id=resolved_run_id,
+            source_condition_run_id=source_condition_run_id,
+            source_subscription_run_id=source_subscription_run_id,
+            source_today_minute_run_ids=[today_minute_run_id],
+            for_trade_date=resolved_trade_date,
+            subscription=subscription,
+            baseline_rows=baseline_rows,
+            delta_rows=delta_rows,
+            fetch_error=fetch_error,
+        )
+        all_delta_rows[asset_kind].extend(delta_rows)
+        all_summary_rows[asset_kind].extend(summary_rows)
+        object_results.append(
+            {
+                "asset_kind": asset_kind,
+                "identity_key": subscription["identity_key"],
+                "replay_rows": len(replay_rows),
+                "delta_rows": len(delta_rows),
+                "summary_rows": len(summary_rows),
+                "fetch_error": fetch_error,
+            }
+        )
+    if batch_outcome is not None and batch_outcome.status != "passed":
+        object_results = [
+            {
+                "asset_kind": subscription["asset_kind"],
+                "identity_key": subscription["identity_key"],
+                "replay_rows": 0,
+                "delta_rows": 0,
+                "summary_rows": 0,
+                "fetch_error": "atomic Mootdx C2 batch failed; all attempt rows discarded",
+                "mootdx_batch_attempt": batch_outcome.to_provenance(),
+            }
+            for subscription in subscriptions
+        ]
 
     row_summary = summarize_execute_rows(
         c2_run_id=resolved_run_id,
@@ -355,7 +416,8 @@ def run_closed_30m_replay_execute(
         quality_rows=0,
         outbox_rows_for_c2_run=0,
     )
-    validate_generated_summary_rows(row_summary, execute_contract)
+    if batch_outcome is None or batch_outcome.status == "passed":
+        validate_generated_summary_rows(row_summary, execute_contract)
     quality_items = build_c2_quality_items(
         c2_run_id=resolved_run_id,
         source_condition_run_id=source_condition_run_id,
@@ -380,6 +442,7 @@ def run_closed_30m_replay_execute(
         dry_run_plan_path=dry_run_plan_path,
         execute_contract_path=execute_contract_path,
         dry_run_report_path=dry_run_report_path,
+        batch_attempt=batch_outcome.to_provenance() if batch_outcome is not None else None,
     )
 
     post_backup = capture_c2_execute_snapshot(dsn, c2_run_id=resolved_run_id)
@@ -427,6 +490,86 @@ def run_closed_30m_replay_execute(
     write_text(markdown_report_path, render_c2_execute_markdown(report))
     write_text(rollback_sql_path, build_c2_business_rollback_sql(resolved_run_id))
     return report
+
+
+def prepare_mootdx_c2_replay_batch(
+    *,
+    c2_run_id: str,
+    trade_date: str,
+    subscriptions: Sequence[Mapping[str, Any]],
+    manager: MootdxEndpointManager,
+    probe: Callable[..., Mapping[str, Any]],
+    client_factory: Callable[[EndpointSelection], Any] | None = None,
+) -> tuple[list[dict[str, Any]], MootdxBatchAttemptOutcome[Any]]:
+    outcome = run_mootdx_batch_attempt(
+        manager=manager,
+        batch_id=c2_run_id,
+        probe=probe,
+        client_factory=client_factory,
+        required_checks=("minute_scope_sentinels",),
+        fetch_batch=lambda client, selection: _prepare_complete_c2_replay_attempt(
+            trade_date=trade_date,
+            subscriptions=subscriptions,
+            adapter=MootdxClosed30mReplayAdapter(client=client),
+            object_tracker=MootdxBatchObjectTracker(manager, selection),
+        ),
+    )
+    prepared = list(outcome.result or [])
+    if outcome.status == "passed":
+        provenance = outcome.to_provenance()
+        winning = next(
+            (
+                dict(attempt)
+                for attempt in provenance.get("attempts") or []
+                if attempt.get("attempt_id") == provenance.get("winning_attempt_id")
+            ),
+            {},
+        )
+        for item in prepared:
+            item["subscription"] = {
+                **dict(item["subscription"]),
+                "mootdx_batch_attempt": provenance,
+            }
+            item["source_adapter"] = str(item["source_adapter"])
+            item["source_version"] = str(item["source_version"])
+            for row in item["replay_rows"]:
+                row["attempt_id"] = winning.get("attempt_id")
+                row["endpoint_id"] = winning.get("endpoint_id")
+                row["endpoint_host"] = winning.get("endpoint_host")
+                row["endpoint_port"] = winning.get("endpoint_port")
+    return prepared, outcome
+
+
+def _prepare_complete_c2_replay_attempt(
+    *,
+    trade_date: str,
+    subscriptions: Sequence[Mapping[str, Any]],
+    adapter: MootdxClosed30mReplayAdapter,
+    object_tracker: MootdxBatchObjectTracker,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for subscription in subscriptions:
+        try:
+            rows = adapter.fetch_full_day_minute_bars(subscription, trade_date)
+        except Exception as exc:  # noqa: BLE001 - preserve local program and contract errors.
+            if is_endpoint_transport_exception(exc):
+                raise MootdxEndpointTransportError(str(exc)) from exc
+            raise
+        object_result = object_tracker.record(
+            identity_key=str(subscription.get("identity_key") or ""),
+            value=rows,
+            empty=not rows,
+        )
+        prepared.append(
+            {
+                "subscription": dict(subscription),
+                "replay_rows": rows,
+                "fetch_error": None if object_result.status == "passed" else "empty_required_object",
+                "source_adapter": adapter.source_adapter,
+                "source_version": adapter.source_version,
+            }
+        )
+    return prepared
 
 
 def build_replay_delta_records(
@@ -545,6 +688,7 @@ def build_minute_delta_record(
             "replay_source_adapter": source_adapter,
             "replay_diff_json": replay_diff,
             "writes_outbox": False,
+            "mootdx_batch_attempt": subscription.get("mootdx_batch_attempt"),
         },
     }
 
@@ -647,6 +791,7 @@ def build_closed_30m_summary_records(
                     "source_minute_trace_policy": "source_minute_bar_ids stores C1 persisted bar_ids; C2 delta minutes are represented by deterministic c2_delta_key until bar_id is assigned after insert.",
                     "writes_outbox": False,
                     "minute_bar_closed_event_deferred_to": "N3-C3",
+                    "mootdx_batch_attempt": subscription.get("mootdx_batch_attempt"),
                 },
             }
         )
@@ -921,6 +1066,7 @@ def write_c2_execute_transaction(
     dry_run_plan_path: str,
     execute_contract_path: str,
     dry_run_report_path: str,
+    batch_attempt: Mapping[str, Any] | None = None,
 ) -> None:
     with audited_n3_market_execute_connect(dsn, connect_timeout=10, row_factory=dict_row) as conn:
         with conn.transaction():
@@ -943,18 +1089,29 @@ def write_c2_execute_transaction(
                         "dry_run_plan_path": dry_run_plan_path,
                         "execute_contract_path": execute_contract_path,
                         "dry_run_report_path": dry_run_report_path,
+                        "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
                     },
                 )
                 for asset_kind, rows in delta_rows_by_asset.items():
                     insert_minute_delta_rows(cur, asset_kind=asset_kind, rows=rows)
                 for asset_kind, rows in summary_rows_by_asset.items():
                     insert_closed_summary_rows(cur, asset_kind=asset_kind, rows=rows)
+                traced_quality_items = [
+                    {
+                        **dict(item),
+                        "details": {
+                            **dict(item.get("details") or {}),
+                            "mootdx_batch_attempt": dict(batch_attempt) if batch_attempt else None,
+                        },
+                    }
+                    for item in quality_items
+                ]
                 insert_c2_quality_items(
                     cur,
                     c2_run_id=c2_run_id,
                     source_condition_run_id=source_condition_run_id,
                     for_trade_date=for_trade_date,
-                    quality_items=quality_items,
+                    quality_items=traced_quality_items,
                 )
                 cur.execute(
                     """
@@ -964,7 +1121,7 @@ def write_c2_execute_transaction(
                         p1_count = %s,
                         p2_count = %s,
                         market_data_pulled = true,
-                        market_data_fact_written = true,
+                        market_data_fact_written = %s,
                         downstream_layers_touched = false,
                         worker_started = false,
                         finished_at = now(),
@@ -976,6 +1133,7 @@ def write_c2_execute_transaction(
                         int(quality_counts.get("P0") or 0),
                         int(quality_counts.get("P1") or 0),
                         int(quality_counts.get("P2") or 0),
+                        any(delta_rows_by_asset.values()) or any(summary_rows_by_asset.values()),
                         c2_run_id,
                     ),
                 )

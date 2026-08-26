@@ -43,6 +43,21 @@ TriggerMatched = actionable N4 outcome; N5 may start minute-boundary action conf
 TriggerStateChanged = current trigger-state broadcast; not written to common_trigger_match
 ```
 
+N5 distinguishes three references:
+
+```text
+episode_entry = immutable TriggerMatched that creates ActionEligible
+current_active_source = TriggerMatched or the latest same-episode TriggerStateChanged(trigger_live=true)
+final_market_proof = matching N3T_C1_CLOSED
+```
+
+`TriggerStateChanged(trigger_live=true)` cannot independently create an
+action-confirmation episode or `ActionEligible`. When an episode already has
+its `TriggerMatched` entry, a material period/state upgrade refreshes the
+current active source and may be the top-level source of a later
+`ActionExecuted`. The original entry remains in
+`action_entry_trigger_matched_ref`.
+
 `TriggerPendingMarketData` is legacy-only. New runtime no-match / missing /
 insufficient-proof candidates are dropped and must not write
 `common_trigger_state`, `common_trigger_match`, or `common_event_outbox`.
@@ -75,6 +90,11 @@ inactive -> inactive: drop
 Activation does not also emit `TriggerStateChanged`; `TriggerMatched` is the
 activation event. If the state has not materially changed, N4 must not repeat
 `TriggerStateChanged`.
+
+For an existing live episode, `matched -> matched` material changes such as a
+period upgrade do not invalidate the episode. N5 continues confirmation from
+the refreshed TSC(true) boundary. `matched -> inactive` with
+`trigger_live=false` terminates further confirmation.
 
 ## 2. Trigger State
 

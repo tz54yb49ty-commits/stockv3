@@ -47,6 +47,8 @@ class N2WebPolicyTest(unittest.TestCase):
         self.assertEqual(policy["board"]["board_types"], ["tdx_industry"])
         self.assertEqual(policy["stock"]["min_total_mv_yi"], 100)
         self.assertTrue(policy["stock"]["exclude_bj"])
+        self.assertEqual(policy["stock"]["allowed_monitor_types"], ["source_universe_preview"])
+        self.assertFalse(policy["stock"]["allow_financial_key_fields_missing"])
         self.assertEqual(policy["stock"]["condition_family"], ["ordinary", "full", "hint"])
         self.assertEqual(policy["index"]["condition_family"], ["ordinary", "full", "hint"])
         self.assertEqual(policy["board"]["condition_family"], ["ordinary", "full", "hint"])
@@ -369,6 +371,31 @@ class N2WebPolicyTest(unittest.TestCase):
         self.assertEqual(scope_policy["stock"]["recommendation_levels"], ["A", "B"])
         self.assertEqual(scope_policy["stock"]["min_score"], 75)
         self.assertEqual(scope_policy["stock"]["limit"], 10)
+        self.assertEqual(scope_policy["stock"]["allowed_monitor_types"], ["source_universe_preview"])
+        self.assertTrue(scope_policy["stock"]["require_financial_key_field"])
+
+    def test_stock_financial_key_scope_flag_is_inverse_of_web_allow_flag(self) -> None:
+        strict = web_policy_to_scope_policy(
+            {"stock": {"allow_financial_key_fields_missing": False}}
+        )
+        permissive = web_policy_to_scope_policy(
+            {"stock": {"allow_financial_key_fields_missing": True}}
+        )
+
+        self.assertTrue(strict["stock"]["require_financial_key_field"])
+        self.assertFalse(permissive["stock"]["require_financial_key_field"])
+
+    def test_stock_scope_explicit_require_financial_key_field_takes_precedence(self) -> None:
+        scope_policy = web_policy_to_scope_policy(
+            {
+                "stock": {
+                    "allow_financial_key_fields_missing": True,
+                    "require_financial_key_field": True,
+                }
+            }
+        )
+
+        self.assertTrue(scope_policy["stock"]["require_financial_key_field"])
 
     def test_index_all_selection_removes_fixed_index_whitelist(self) -> None:
         scope_policy = web_policy_to_scope_policy(
@@ -584,6 +611,15 @@ class N2WebPolicyTest(unittest.TestCase):
             ["tdx_industry", "tdx_concept", "tdx_region"],
         )
         self.assertTrue(artifact["condition_pool_policy"]["index"]["include_all_identities"])
+        self.assertEqual(
+            artifact["scope_policy"]["stock"]["allowed_monitor_types"],
+            artifact["web_policy"]["stock"]["allowed_monitor_types"],
+        )
+        self.assertTrue(artifact["scope_policy"]["stock"]["require_financial_key_field"])
+        self.assertEqual(
+            artifact["condition_pool_policy"]["stock"],
+            artifact["scope_policy"]["stock"],
+        )
 
     def test_save_default_policy_draft_adds_version_metadata_and_policy_diff(self) -> None:
         policy = default_web_policy()

@@ -14,7 +14,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 import psycopg
@@ -78,6 +80,13 @@ DEFAULT_PATHS = {
 
 DEFAULT_SOURCE_BUNDLE_CACHE_PATH = Path("docs/N1_stock_financial_canonical_source_bundle_20260529_full_fetch_cache.json")
 FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION = "financial_canonical_snapshot_v1"
+FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2 = "financial_canonical_snapshot_v2"
+SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS = frozenset(
+    {
+        FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION,
+        FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2,
+    }
+)
 
 
 def canonical_ids_for(source_trade_date: str) -> dict[str, str]:
@@ -1276,7 +1285,7 @@ def build_snapshot_from_cache(
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         payload = None
-    if isinstance(payload, Mapping) and payload.get("schema_version") == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION:
+    if isinstance(payload, Mapping) and payload.get("schema_version") in SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS:
         snapshot = snapshot_payload_to_metrics_snapshot(payload)
         if snapshot["source_trade_date"] != source_trade_date:
             raise StockFinancialCanonicalBlocked(
@@ -1347,8 +1356,18 @@ def build_snapshot_from_cache(
 
 
 def snapshot_payload_to_metrics_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
-    if payload.get("schema_version") != FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION:
-        raise StockFinancialCanonicalBlocked("source bundle cache is not financial_canonical_snapshot_v1")
+    schema_version = payload.get("schema_version")
+    if schema_version not in SUPPORTED_FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSIONS:
+        raise StockFinancialCanonicalBlocked("source bundle cache is not a supported financial canonical snapshot")
+    from ashare_v3.ingestion.stock_financial_canonical_source_bundle import (
+        validate_financial_canonical_snapshot,
+    )
+
+    if (
+        schema_version == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2
+        and validate_financial_canonical_snapshot(payload) is None
+    ):
+        raise StockFinancialCanonicalBlocked("financial canonical snapshot integrity validation failed")
     source_trade_date = require_yyyymmdd(str(payload.get("source_trade_date") or ""), "source_trade_date")
     expected_identity_keys = [str(key) for key in list(payload.get("expected_identity_keys") or []) if key]
     financial_rows = [dict(row) for row in list(payload.get("financial_rows") or []) if isinstance(row, Mapping)]
@@ -1362,7 +1381,8 @@ def snapshot_payload_to_metrics_snapshot(payload: Mapping[str, Any]) -> dict[str
         "baseline": payload.get("baseline") or {"conflicts": {}, "event_counts": {}, "active_rows": len(expected_identity_keys)},
         "source_probe": {
             **dict(payload.get("source_probe") or {}),
-            "uses_financial_canonical_snapshot_v1": True,
+            "uses_financial_canonical_snapshot_v1": schema_version == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION,
+            "uses_financial_canonical_snapshot_v2": schema_version == FINANCIAL_CANONICAL_SNAPSHOT_SCHEMA_VERSION_V2,
             "source_bundle_cache_rows": len(financial_rows),
             "writes_performed": False,
         },
@@ -1641,13 +1661,42 @@ def build_commit_plan(*, snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]
         }
         for item in quality_items
     ]
+    active_metadata = snapshot.get("active_source_metadata")
+    if not isinstance(active_metadata, Mapping):
+        raise StockFinancialCanonicalBlocked("active_stock_financial_metadata_missing")
+    previous_source_version = str(snapshot.get("active_source_version") or PREVIOUS_SOURCE_VERSION)
+    expected_active_metadata = {
+        "data_domain": "stock",
+        "data_type": "stock_financial",
+        "scope_key": TRADE_DATE,
+        "source_version": previous_source_version,
+    }
+    mismatched_active_metadata = [
+        key
+        for key, expected in expected_active_metadata.items()
+        if str(active_metadata.get(key) or "") != expected
+    ]
+    if mismatched_active_metadata:
+        raise StockFinancialCanonicalBlocked(
+            "active_stock_financial_metadata_mismatch: " + ",".join(mismatched_active_metadata)
+        )
+    previous_source_batch_id = str(active_metadata.get("source_batch_id") or "").strip()
+    if not previous_source_batch_id:
+        raise StockFinancialCanonicalBlocked("active_stock_financial_source_batch_id_missing")
+    previous_row_count = int(active_metadata.get("row_count") or 0)
+    previous_identity_count = int(active_metadata.get("identity_count") or 0)
+    if previous_row_count != expected_rows or previous_identity_count != expected_rows:
+        raise StockFinancialCanonicalBlocked(
+            "active_stock_financial_metadata_count_mismatch: "
+            f"expected={expected_rows}, rows={previous_row_count}, identities={previous_identity_count}"
+        )
     active_row = {
         "data_domain": "stock",
         "data_type": "stock_financial",
         "scope_key": TRADE_DATE,
         "source_version": SOURCE_VERSION,
         "source_batch_id": BATCH_ID,
-        "previous_source_version": snapshot.get("active_source_version") or PREVIOUS_SOURCE_VERSION,
+        "previous_source_version": previous_source_version,
         "activated_by": canonical_ids_for(TRADE_DATE)["activated_by"],
     }
     return json_safe(
@@ -1655,7 +1704,7 @@ def build_commit_plan(*, snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]
             "batch_id": BATCH_ID,
             "trade_date": TRADE_DATE,
             "source_version": SOURCE_VERSION,
-            "previous_source_version": snapshot.get("active_source_version") or PREVIOUS_SOURCE_VERSION,
+            "previous_source_version": previous_source_version,
             "allowed_tables": list(ALLOWED_FUTURE_WRITE_TABLES),
             "stock_financial_rows": rows,
             "quality_rows": quality_rows,
@@ -1664,8 +1713,444 @@ def build_commit_plan(*, snapshot: Mapping[str, Any], dry_run: Mapping[str, Any]
             "quality_summary": dry_run.get("quality"),
             "source_probe": snapshot.get("source_probe") or {},
             "rollback_sql_path": str(DEFAULT_PATHS["rollback_sql"]),
+            "rollback_context": {
+                "data_domain": "stock",
+                "data_type": "stock_financial",
+                "scope_key": TRADE_DATE,
+                "source_batch_id": BATCH_ID,
+                "source_version": SOURCE_VERSION,
+                "previous_source_version": previous_source_version,
+                "previous_source_batch_id": previous_source_batch_id,
+                "previous_previous_source_version": active_metadata.get("previous_source_version"),
+                "previous_row_count": previous_row_count,
+                "previous_identity_count": previous_identity_count,
+                "target_row_count": len(rows),
+                "quality_row_count": len(quality_rows),
+                "activated_by": f"rollback.{SOURCE_VERSION}",
+            },
         }
     )
+
+
+def load_active_source_metadata(*, dsn: str, source_trade_date: str) -> dict[str, Any]:
+    source_trade_date = require_yyyymmdd(source_trade_date, "source_trade_date")
+    with psycopg.connect(
+        dsn,
+        options="-c default_transaction_read_only=on",
+        row_factory=dict_row,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT data_domain, data_type, scope_key, source_version,
+                       source_batch_id, previous_source_version
+                FROM common_active_source_version
+                WHERE data_domain='stock'
+                  AND data_type='stock_financial'
+                  AND scope_key=%s
+                """,
+                (source_trade_date,),
+            )
+            active = dict(cur.fetchone() or {})
+            if not active:
+                raise StockFinancialCanonicalBlocked("active_stock_financial_metadata_missing")
+            cur.execute(
+                """
+                SELECT count(*)::bigint AS row_count,
+                       count(DISTINCT stock_identity_key)::bigint AS identity_count
+                FROM stock_financial_metrics_fact
+                WHERE source_trade_date=%s
+                  AND source_version=%s
+                  AND source_batch_id=%s
+                """,
+                (
+                    source_trade_date,
+                    active.get("source_version"),
+                    active.get("source_batch_id"),
+                ),
+            )
+            counts = dict(cur.fetchone() or {})
+    return json_safe({**active, **counts})
+
+
+def _rollback_context(commit_plan: Mapping[str, Any]) -> dict[str, Any]:
+    context = commit_plan.get("rollback_context")
+    if not isinstance(context, Mapping):
+        raise StockFinancialCanonicalBlocked("rollback_context_missing")
+    trade_date = require_yyyymmdd(str(commit_plan.get("trade_date") or ""), "trade_date")
+    canonical = canonical_ids_for(trade_date)
+    expected = {
+        "data_domain": "stock",
+        "data_type": "stock_financial",
+        "scope_key": trade_date,
+        "source_batch_id": canonical["batch_id"],
+        "source_version": canonical["source_version"],
+        "previous_source_version": canonical["previous_source_version"],
+        "activated_by": f"rollback.{canonical['source_version']}",
+    }
+    mismatched = [
+        key for key, value in expected.items() if str(context.get(key) or "") != value
+    ]
+    if mismatched:
+        raise StockFinancialCanonicalBlocked("rollback_context_mismatch: " + ",".join(mismatched))
+    previous_source_batch_id = str(context.get("previous_source_batch_id") or "").strip()
+    if not previous_source_batch_id:
+        raise StockFinancialCanonicalBlocked("rollback_previous_source_batch_id_missing")
+    target_row_count = int(context.get("target_row_count") or 0)
+    previous_row_count = int(context.get("previous_row_count") or 0)
+    previous_identity_count = int(context.get("previous_identity_count") or 0)
+    quality_row_count = int(context.get("quality_row_count") or 0)
+    if target_row_count <= 0:
+        raise StockFinancialCanonicalBlocked("rollback_target_row_count_invalid")
+    if previous_row_count != target_row_count or previous_identity_count != target_row_count:
+        raise StockFinancialCanonicalBlocked(
+            "rollback_previous_count_mismatch: "
+            f"target={target_row_count}, rows={previous_row_count}, identities={previous_identity_count}"
+        )
+    if quality_row_count <= 0:
+        raise StockFinancialCanonicalBlocked("rollback_quality_row_count_invalid")
+    return {
+        **dict(context),
+        "trade_date": trade_date,
+        "previous_source_batch_id": previous_source_batch_id,
+        "target_row_count": target_row_count,
+        "previous_row_count": previous_row_count,
+        "previous_identity_count": previous_identity_count,
+        "quality_row_count": quality_row_count,
+    }
+
+
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def render_rollback_sql(commit_plan: Mapping[str, Any]) -> str:
+    context = _rollback_context(commit_plan)
+    trade_date = _sql_literal(context["trade_date"])
+    batch_id = _sql_literal(context["source_batch_id"])
+    source_version = _sql_literal(context["source_version"])
+    previous_version = _sql_literal(context["previous_source_version"])
+    previous_batch_id = _sql_literal(context["previous_source_batch_id"])
+    previous_previous_version = _sql_literal(context.get("previous_previous_source_version"))
+    activated_by = _sql_literal(context["activated_by"])
+    target_row_count = context["target_row_count"]
+    previous_row_count = context["previous_row_count"]
+    previous_identity_count = context["previous_identity_count"]
+    quality_row_count = context["quality_row_count"]
+    return f"""-- Rollback for stock_financial canonical metrics {context['trade_date']} v2 execute.
+-- Generated and verified before database commit. Execute only under a separate authorized rollback gate.
+-- Scope: only {context['source_batch_id']} / {context['source_version']}.
+
+BEGIN;
+
+DO $$
+DECLARE
+  v_active_count bigint;
+  v_target_row_count bigint;
+  v_target_identity_count bigint;
+  v_previous_row_count bigint;
+  v_previous_identity_count bigint;
+  v_quality_row_count bigint;
+  v_batch_count bigint;
+  v_affected_count bigint;
+BEGIN
+  SELECT count(*) INTO v_active_count
+  FROM common_active_source_version
+  WHERE data_domain = 'stock'
+    AND data_type = 'stock_financial'
+    AND scope_key = {trade_date}
+    AND source_version = {source_version}
+    AND source_batch_id = {batch_id};
+
+  SELECT count(*), count(DISTINCT stock_identity_key)
+  INTO v_target_row_count, v_target_identity_count
+  FROM stock_financial_metrics_fact
+  WHERE source_trade_date = {trade_date}
+    AND source_batch_id = {batch_id}
+    AND source_version = {source_version};
+
+  SELECT count(*), count(DISTINCT stock_identity_key)
+  INTO v_previous_row_count, v_previous_identity_count
+  FROM stock_financial_metrics_fact
+  WHERE source_trade_date = {trade_date}
+    AND source_batch_id = {previous_batch_id}
+    AND source_version = {previous_version};
+
+  SELECT count(*) INTO v_quality_row_count
+  FROM common_quality_gate_result
+  WHERE source_batch_id = {batch_id}
+    AND source_version = {source_version}
+    AND data_domain = 'stock'
+    AND data_type = 'stock_financial_canonical_metrics';
+
+  SELECT count(*) INTO v_batch_count
+  FROM common_ingest_batch
+  WHERE batch_id = {batch_id}
+    AND trade_date = {trade_date}
+    AND source_version = {source_version}
+    AND data_domain = 'stock'
+    AND data_type = 'stock_financial_canonical_metrics'
+    AND status = 'passed'
+    AND row_count = {target_row_count};
+
+  IF v_active_count <> 1
+     OR v_target_row_count <> {target_row_count}
+     OR v_target_identity_count <> {target_row_count}
+     OR v_previous_row_count <> {previous_row_count}
+     OR v_previous_identity_count <> {previous_identity_count}
+     OR v_quality_row_count <> {quality_row_count}
+     OR v_batch_count <> 1 THEN
+    RAISE EXCEPTION
+      'Refusing stock_financial canonical rollback: active %, target rows %, target identities %, previous rows %, previous identities %, quality %, batch %',
+      v_active_count, v_target_row_count, v_target_identity_count,
+      v_previous_row_count, v_previous_identity_count, v_quality_row_count, v_batch_count;
+  END IF;
+
+  DELETE FROM stock_financial_metrics_fact
+  WHERE source_trade_date = {trade_date}
+    AND source_batch_id = {batch_id}
+    AND source_version = {source_version};
+  GET DIAGNOSTICS v_affected_count = ROW_COUNT;
+  IF v_affected_count <> {target_row_count} THEN
+    RAISE EXCEPTION 'Rollback fact delete count mismatch: %', v_affected_count;
+  END IF;
+
+  DELETE FROM common_quality_gate_result
+  WHERE source_batch_id = {batch_id}
+    AND source_version = {source_version}
+    AND data_domain = 'stock'
+    AND data_type = 'stock_financial_canonical_metrics';
+  GET DIAGNOSTICS v_affected_count = ROW_COUNT;
+  IF v_affected_count <> {quality_row_count} THEN
+    RAISE EXCEPTION 'Rollback quality delete count mismatch: %', v_affected_count;
+  END IF;
+
+  UPDATE common_active_source_version
+  SET source_version = {previous_version},
+      previous_source_version = {previous_previous_version},
+      source_batch_id = {previous_batch_id},
+      activated_at = now(),
+      activated_by = {activated_by}
+  WHERE data_domain = 'stock'
+    AND data_type = 'stock_financial'
+    AND scope_key = {trade_date}
+    AND source_version = {source_version}
+    AND source_batch_id = {batch_id};
+  GET DIAGNOSTICS v_affected_count = ROW_COUNT;
+  IF v_affected_count <> 1 THEN
+    RAISE EXCEPTION 'Rollback active update count mismatch: %', v_affected_count;
+  END IF;
+
+  DELETE FROM common_ingest_batch
+  WHERE batch_id = {batch_id}
+    AND trade_date = {trade_date}
+    AND source_version = {source_version}
+    AND data_domain = 'stock'
+    AND data_type = 'stock_financial_canonical_metrics'
+    AND status = 'passed'
+    AND row_count = {target_row_count};
+  GET DIAGNOSTICS v_affected_count = ROW_COUNT;
+  IF v_affected_count <> 1 THEN
+    RAISE EXCEPTION 'Rollback batch delete count mismatch: %', v_affected_count;
+  END IF;
+END $$;
+
+COMMIT;
+"""
+
+
+def validate_rollback_sql_text(commit_plan: Mapping[str, Any], sql_text: str) -> None:
+    expected = render_rollback_sql(commit_plan)
+    if sql_text != expected:
+        raise StockFinancialCanonicalBlocked("rollback_sql_content_mismatch")
+
+
+def verify_persisted_rollback_sql(
+    commit_plan: Mapping[str, Any],
+    *,
+    reused: bool,
+) -> dict[str, Any]:
+    raw_path = str(commit_plan.get("rollback_sql_path") or "").strip()
+    if not raw_path:
+        raise StockFinancialCanonicalBlocked("rollback_sql_path_missing")
+    path = Path(raw_path)
+    if path.is_symlink():
+        raise StockFinancialCanonicalBlocked(f"rollback_sql_symlink_forbidden: {path}")
+    if not path.is_file():
+        raise StockFinancialCanonicalBlocked(f"rollback_sql_missing: {path}")
+    try:
+        sql_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise StockFinancialCanonicalBlocked(
+            f"rollback_sql_read_failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    validate_rollback_sql_text(commit_plan, sql_text)
+    encoded = sql_text.encode("utf-8")
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "size_bytes": len(encoded),
+        "reused": reused,
+        "verified": True,
+    }
+
+
+def persist_rollback_sql_atomic(commit_plan: Mapping[str, Any]) -> dict[str, Any]:
+    raw_path = str(commit_plan.get("rollback_sql_path") or "").strip()
+    if not raw_path:
+        raise StockFinancialCanonicalBlocked("rollback_sql_path_missing")
+    path = Path(raw_path)
+    expected = render_rollback_sql(commit_plan)
+    if path.exists():
+        if path.is_symlink():
+            raise StockFinancialCanonicalBlocked(f"rollback_sql_symlink_forbidden: {path}")
+        if not path.is_file():
+            raise StockFinancialCanonicalBlocked(f"rollback_sql_not_regular_file: {path}")
+        try:
+            actual = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise StockFinancialCanonicalBlocked(
+                f"rollback_sql_read_failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        if actual != expected:
+            raise StockFinancialCanonicalBlocked(f"rollback_sql_content_conflict: {path}")
+        return verify_persisted_rollback_sql(commit_plan, reused=True)
+
+    temp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(expected)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_path, path)
+        except FileExistsError:
+            if path.is_symlink():
+                raise StockFinancialCanonicalBlocked(f"rollback_sql_symlink_forbidden: {path}")
+            if not path.is_file():
+                raise StockFinancialCanonicalBlocked(f"rollback_sql_not_regular_file: {path}")
+            actual = path.read_text(encoding="utf-8")
+            if actual != expected:
+                raise StockFinancialCanonicalBlocked(f"rollback_sql_content_conflict: {path}")
+            temp_path.unlink()
+            temp_path = None
+            return verify_persisted_rollback_sql(commit_plan, reused=True)
+        temp_path.unlink()
+        temp_path = None
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except StockFinancialCanonicalBlocked:
+        raise
+    except OSError as exc:
+        raise StockFinancialCanonicalBlocked(
+            f"rollback_sql_persistence_failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+    return verify_persisted_rollback_sql(commit_plan, reused=False)
+
+
+def validate_current_active_metadata_for_commit(cur: Any, commit_plan: Mapping[str, Any]) -> None:
+    context = _rollback_context(commit_plan)
+    cur.execute(
+        """
+        SELECT data_domain, data_type, scope_key, source_version,
+               source_batch_id, previous_source_version
+        FROM common_active_source_version
+        WHERE data_domain='stock'
+          AND data_type='stock_financial'
+          AND scope_key=%s
+        FOR UPDATE
+        """,
+        (context["scope_key"],),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise StockFinancialCanonicalBlocked("active_stock_financial_metadata_missing_at_commit")
+    if isinstance(row, Mapping):
+        actual = dict(row)
+    else:
+        actual = dict(
+            zip(
+                (
+                    "data_domain",
+                    "data_type",
+                    "scope_key",
+                    "source_version",
+                    "source_batch_id",
+                    "previous_source_version",
+                ),
+                row,
+            )
+        )
+    expected = {
+        "data_domain": context["data_domain"],
+        "data_type": context["data_type"],
+        "scope_key": context["scope_key"],
+        "source_version": context["previous_source_version"],
+        "source_batch_id": context["previous_source_batch_id"],
+        "previous_source_version": context.get("previous_previous_source_version"),
+    }
+    mismatched = [key for key, value in expected.items() if actual.get(key) != value]
+    if mismatched:
+        raise StockFinancialCanonicalBlocked(
+            "active_stock_financial_metadata_drift_at_commit: " + ",".join(mismatched)
+        )
+
+
+def validate_previous_fact_metadata_for_commit(cur: Any, commit_plan: Mapping[str, Any]) -> None:
+    context = _rollback_context(commit_plan)
+    cur.execute(
+        """
+        SELECT count(*)::bigint AS row_count,
+               count(DISTINCT stock_identity_key)::bigint AS identity_count
+        FROM stock_financial_metrics_fact
+        WHERE source_trade_date=%s
+          AND source_version=%s
+          AND source_batch_id=%s
+        """,
+        (
+            context["scope_key"],
+            context["previous_source_version"],
+            context["previous_source_batch_id"],
+        ),
+    )
+    row = cur.fetchone()
+    if isinstance(row, Mapping):
+        actual_row_count = int(row.get("row_count") or 0)
+        actual_identity_count = int(row.get("identity_count") or 0)
+    elif row:
+        actual_row_count = int(row[0] or 0)
+        actual_identity_count = int(row[1] or 0)
+    else:
+        actual_row_count = 0
+        actual_identity_count = 0
+    if (
+        actual_row_count != context["previous_row_count"]
+        or actual_identity_count != context["previous_identity_count"]
+    ):
+        raise StockFinancialCanonicalBlocked(
+            "active_stock_financial_fact_drift_at_commit: "
+            f"expected_rows={context['previous_row_count']}, actual_rows={actual_row_count}, "
+            f"expected_identities={context['previous_identity_count']}, "
+            f"actual_identities={actual_identity_count}"
+        )
 
 
 def execute_commit_transaction(
@@ -1684,13 +2169,20 @@ def execute_commit_transaction(
     unexpected = sorted(set(commit_plan.get("allowed_tables") or []) - set(ALLOWED_FUTURE_WRITE_TABLES))
     if unexpected:
         raise StockFinancialCanonicalBlocked(f"unexpected write tables: {unexpected}")
-    cur = conn.cursor()
     try:
+        cur = conn.cursor()
+        validate_current_active_metadata_for_commit(cur, commit_plan)
+        validate_previous_fact_metadata_for_commit(cur, commit_plan)
+        rollback_artifact = persist_rollback_sql_atomic(commit_plan)
         insert_ingest_batch(cur, commit_plan)
         insert_stock_financial_rows(cur, list(commit_plan.get("stock_financial_rows") or []))
         insert_quality_rows(cur, list(commit_plan.get("quality_rows") or []))
         upsert_active_source_version(cur, dict(commit_plan.get("active_source_version_row") or {}))
         update_ingest_batch_passed(cur)
+        rollback_artifact = verify_persisted_rollback_sql(
+            commit_plan,
+            reused=bool(rollback_artifact.get("reused")),
+        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1702,8 +2194,9 @@ def execute_commit_transaction(
             "source_version": SOURCE_VERSION,
             "written_tables": list(ALLOWED_FUTURE_WRITE_TABLES),
             "row_counts": commit_plan.get("row_counts") or {},
-            "rollback_safe": True,
-            "rollback_sql_path": str(DEFAULT_PATHS["rollback_sql"]),
+            "rollback_safe": bool(rollback_artifact.get("verified")),
+            "rollback_sql_path": rollback_artifact.get("path"),
+            "rollback_artifact": rollback_artifact,
         }
     )
 
