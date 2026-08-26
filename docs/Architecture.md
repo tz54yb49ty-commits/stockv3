@@ -1,6 +1,6 @@
 # A股监控系统 v3 总控架构
 
-更新日期：2026-08-23
+更新日期：2026-08-27
 范围：总控视角，只整理当前架构、数据流、事件流和权威 lineage。本文档不替代 `AGENTS.md`、各层设计文档、执行报告或 JSON 证据。
 
 ## 1. 一句话架构
@@ -29,6 +29,12 @@ runtime_control 不跨层归档或删除业务事实。热保留集合统一为
 `LocalArtifactArchiveCurrentPointer.v1`；自然 01:00 cleanup 将收窄为 pointer 驱动
 的 local-only 模式。当前治理定义、N1 runner 与 cleanup code-only 修复已完成；
 两个独立 LaunchAgent gate 和自然验收均未执行。
+
+Windows 空库首次 N1 bootstrap 已登记一次性 Runtime Gate policy
+`windows_n1_empty_database_bootstrap_once_v1`。本次仅定义控制合同，未执行命令、
+未写 PostgreSQL/N1-N6、未操作 Scheduler/process，也未触碰 Mac 项目；该 policy
+只能由后续独立 `N1_ingestion` 请求在冻结 empty-setup、schema-only、exact
+commit/tree/clean/GitHub、native `ashare-ops` 与 `5432/17709` 证据后使用一次。
 
 ## 2. 分层职责
 

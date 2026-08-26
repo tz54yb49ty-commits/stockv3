@@ -1,6 +1,6 @@
 # A股监控系统 v3 Roadmap
 
-更新日期：2026-08-23
+更新日期：2026-08-27
 范围：总控阶段路线图。本文档只描述状态和 gate，不授权任何 execute、数据库写入、worker 或真实交易。
 
 ## 状态总览
@@ -8,6 +8,7 @@
 | 阶段 | layer_role | 状态 | 当前判断 |
 |---|---|---|---|
 | Runtime Control | `runtime_control` | v0.2 dashboard smoke passed | pipeline state machine / dashboard v0 / command registry / rollback registry / timeline 已有 schema 草案和只读 CLI；dashboard v0.2 已新增 20260602 action-confirmation timeline detector，9 阶段 all PASS，N5 pending outbox=ActionExecuted 4 / ActionBlocked 1，N6 shadow rows=1/5/5/5；不授权 execute、rollback、worker 或 N1-N6 contract 修改 |
+| Windows N1 Empty Bootstrap Gate | `runtime_control` | policy defined / execution pending | 已登记 `windows_n1_empty_database_bootstrap_once_v1`；本治理会话不执行。仅后续独立 `N1_ingestion` 请求可在 exact empty/schema/commit/tree/clean/GitHub/native `ashare-ops`/5432/17709 前置全部 PASS 后前台单进程执行唯一命令一次；禁止 retry、Scheduler、Mac mutation、calendar/N2-N6 写入及进入 N2。 |
 | Disk Governance Gate 0 | `runtime_control` | policy defined / execution pending | `runtime_hot_cleanup_archive_gated_disk_governance_v1` 已收窄 future restore 为 current pointer + local-only；新增 `n1_local_artifact_archive_daily_bounded_install_v1`。N1 daily archive runner 与 cleanup code-only 修复已完成静态实现，尚未安装或修改 plist、未运行归档/清理、未写数据库；下一步为独立 N1 label install gate。 |
 | N1 入库层 | `N1_ingestion` | done / 20260603-20260604 catch-up passed | schema、每日增量、quality gate、Parquet manifest、20260522 日增和 000001.SH 历史修复均已有报告；20260529 official daily 与 condition source activation 已 POST_REVIEW_PASS；`stock_financial_20260529_v2` canonical metrics 已 POST_REVIEW_PASS，并成为 active stock_financial；20260602 official daily 与 condition source activation 已 POST_REVIEW_PASS，并已被 N2 20260602 condition layer run 消费；`common_trade_calendar(20260603)` fix-forward repair 已 passed，B1 calendar blocker 已解除；20260604/20260605 calendar patch 均 POST_REVIEW_PASS；20260603/20260604 official daily + condition source catch-up 已 passed，单日 rows stock/index/board daily=5511/9/428，stock_daily_basic/financial=5511/5511，index/board membership=12841/56960，quality P0/P1/P2=0/0/0 |
 | N2 条件层 | `N2_condition` | done / 20260603-20260604 catch-up passed | 20260602 -> 20260603 N2 condition layer 已 passed_active：active run `condition_layer_20260602_source_20260602_v1`，canonical policy=8782 console broad policy，P0/P1/P2=0/9/3，row_mismatches={}，rollback_safe=true；20260603 -> 20260604 run `condition_layer_20260603_source_20260603_v1` 已 passed_active，P0/P1/P2=0/6/3，scope stock/index/board=4201/20/892；20260604 -> 20260605 run `condition_layer_20260604_source_20260604_v1` 已 passed_active，P0/P1/P2=0/6/3，scope stock/index/board=4186/20/912；20260529 -> 20260601 N2 level score v6 与 20260528 -> 20260529 target v5 仍 preserved |

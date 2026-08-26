@@ -76,6 +76,7 @@ Final safety enforcement:
   - `n6_immutable_release_privileged_materialize_and_install_f67_v1`
   - `runtime_hot_cleanup_archive_gated_disk_governance_v1`
   - `n1_local_artifact_archive_daily_bounded_install_v1`
+  - `windows_n1_empty_database_bootstrap_once_v1`
 - Missing kernel decision → REJECT
 
 If not ACCEPT → STOP
@@ -764,6 +765,34 @@ RunAtLoad、KeepAlive、手工 archive execute、source delete/move、数据库�
 worker、cleanup label、其他 LaunchAgent、自动 retry 或失败后自动 cleanup。定义或
 修改本 policy 的治理会话不得安装、bootstrap 或运行它；N1 runner 实现、安装和
 首次自然 23:00 验收必须分别由后续独立 gate 完成。
+
+`windows_n1_empty_database_bootstrap_once_v1` 是 Windows PostgreSQL 空库首次 N1
+bootstrap 的唯一一次性 Runtime Gate 例外。它只能由后续独立、用户明确授权的
+`N1_ingestion` 会话使用；定义或修改该 policy 的 `runtime_control` 会话不得使用
+它执行。执行前必须绑定 PostgreSQL empty setup recovery 与原生 `ashare-ops`
+external postflight 均为 PASS、schema-only `SCHEMA_READY`、exact 14 张 N1 表全为
+0 行、`common_trade_calendar=0`、Mac import=0、N2-N6 writes=0、passwordless app
+DSN 与最小权限 PASS、TQ/eltdx capability 与代码测试 PASS，并现场冻结 Windows
+项目 `C:\AshareV3\app` 的 commit
+`c6b113d26b8de5c9ffad4501a09e456c7a504640`、tree
+`8179a0a72a8821529e42adac4de193895462d707`、tracked/index clean、GitHub 一致、
+native `ashare-ops` 以及 PostgreSQL/TQ exact ports `5432/17709`；任一证据缺失或
+漂移必须 `REJECT`。
+
+唯一允许命令为：
+
+```text
+C:\AshareV3\.venv\Scripts\python.exe C:\AshareV3\app\scripts\run_windows_n1_bootstrap.py --execute
+```
+
+该命令只允许一次前台、受控、单进程执行；禁止并行、Scheduler、后台服务、自动
+重试或失败后自动重跑。写入范围只限 N1 scope/identity/membership、stock/index/
+board 日 K、eltdx 财务、daily-basic 以及 N1 activation/readiness；
+`common_trade_calendar` 必须保持 0，Mac import 必须保持 0，N2-N6 writes 必须保持
+0，并且禁止 Tushare/Mootdx。单证券失败必须保留为 artifact，不得回滚其他已成功
+证券。完成后必须只读验收 `N1_DATA_READY`、覆盖率、重复键、source、
+`common_trade_calendar=0`、N2-N6 writes=0 和 Git clean。任一执行或验收失败必须
+立即停止并保留证据，不得自动重跑，不得进入 N2。
 runtime_control 只允许登记 pipeline_run / pipeline_stage / execute command registry / rollback registry / pipeline timeline / dashboard v0 的文档、schema 草案和只读输出。
 runtime_control 不得执行 registry command，不得执行 rollback SQL，不得执行 nightly run，不得连接数据库写 runtime 表，除非用户另行明确授权 runtime_control schema migration 且已有 preflight / rollback。
 runtime_control 默认不得修改 N1-N6 execute contract；只有用户在当前请求明确授权的控制合同治理 gate，才可修改 Kernel/Compiler 合同与静态测试。该治理 gate 不得在同一会话执行新增例外，不得消费 outbox，不得启动 worker，不得写 trigger/action/user/sim/voice/mobile/real trade。
