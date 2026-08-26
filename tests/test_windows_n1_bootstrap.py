@@ -31,7 +31,7 @@ class WindowsN1BootstrapTest(unittest.TestCase):
             result = execute_bootstrap(config=WindowsN1BootstrapConfig.for_today(artifact_root=Path(root), today=date(2026, 8, 26)), stage_handlers=handlers)
         self.assertTrue(result.n1_data_ready)
 
-    def test_single_security_failure_writes_one_artifact_and_continues(self):
+    def test_single_security_failure_is_collected_for_one_run_artifact(self):
         seen = []
         def worker(symbol):
             seen.append(symbol)
@@ -41,7 +41,7 @@ class WindowsN1BootstrapTest(unittest.TestCase):
             run_security_items(items=["good1", "bad", "good2"], stage="daily", run_id="run1", artifact_root=Path(root), worker=worker, result=result)
             self.assertEqual(seen, ["good1", "bad", "good2"])
             self.assertEqual(len(result.security_failures), 1)
-            self.assertTrue(Path(result.security_failures[0]["artifact"]).exists())
+            self.assertNotIn("artifact", result.security_failures[0])
 
 
 if __name__ == "__main__": unittest.main()

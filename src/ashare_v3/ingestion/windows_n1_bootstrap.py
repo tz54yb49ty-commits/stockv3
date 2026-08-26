@@ -43,23 +43,22 @@ class BootstrapResult:
     security_failures: list[dict[str, Any]] = field(default_factory=list)
     finance_gate_passed: bool = False
     n1_data_ready: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
-def write_security_failure(
-    *, artifact_root: Path, run_id: str, symbol: str, stage: str, error: BaseException
-) -> Path:
-    safe_symbol = "".join(char if char.isalnum() or char in "._-" else "_" for char in symbol)
-    run_dir = artifact_root / run_id
+def write_run_artifact(*, artifact_root: Path, result: BootstrapResult) -> Path:
+    """Write the only per-run artifact, including every isolated failure."""
+    run_dir = artifact_root / result.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / f"{stage}__{safe_symbol}.json"
+    path = run_dir / "windows_n1_run.json"
     path.write_text(json.dumps({
-        "schema_version": "WindowsN1SecurityFailure.v1",
-        "run_id": run_id,
-        "stage": stage,
-        "symbol": symbol,
-        "error_type": type(error).__name__,
-        "error": str(error),
-        "other_security_rows_rolled_back": False,
+        "schema_version": "WindowsN1Run.v1",
+        "run_id": result.run_id,
+        "completed_stages": result.completed_stages,
+        "security_failures": result.security_failures,
+        "finance_gate_passed": result.finance_gate_passed,
+        "n1_data_ready": result.n1_data_ready,
+        "evidence": result.evidence,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -72,10 +71,11 @@ def run_security_items(
         try:
             worker(symbol)
         except Exception as error:  # single-security isolation is intentional
-            artifact = write_security_failure(
-                artifact_root=artifact_root, run_id=run_id, symbol=symbol, stage=stage, error=error,
-            )
-            result.security_failures.append({"symbol": symbol, "stage": stage, "artifact": str(artifact)})
+            result.security_failures.append({
+                "symbol": symbol, "stage": stage,
+                "error_type": type(error).__name__, "error": str(error),
+                "other_security_rows_rolled_back": False,
+            })
 
 
 def execute_bootstrap(
@@ -85,15 +85,18 @@ def execute_bootstrap(
     unknown = set(stage_handlers) - set(N1_BOOTSTRAP_STAGES)
     if unknown:
         raise RuntimeError(f"non-N1 or unknown bootstrap stages rejected: {sorted(unknown)}")
-    run_id = "windows_n1_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = "windows_n1_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     result = BootstrapResult(run_id=run_id)
-    for stage in N1_BOOTSTRAP_STAGES:
-        handler = stage_handlers.get(stage)
-        if handler is None:
-            raise RuntimeError(f"missing fail-closed stage handler: {stage}")
-        handler(result)
-        result.completed_stages.append(stage)
-        if stage == "eltdx_finance" and not result.finance_gate_passed:
-            raise RuntimeError("eltdx finance gate failed; no fallback source allowed")
-    result.n1_data_ready = result.completed_stages == list(N1_BOOTSTRAP_STAGES)
-    return result
+    try:
+        for stage in N1_BOOTSTRAP_STAGES:
+            handler = stage_handlers.get(stage)
+            if handler is None:
+                raise RuntimeError(f"missing fail-closed stage handler: {stage}")
+            handler(result)
+            result.completed_stages.append(stage)
+            if stage == "eltdx_finance" and not result.finance_gate_passed:
+                raise RuntimeError("eltdx finance gate failed; no fallback source allowed")
+        result.n1_data_ready = result.completed_stages == list(N1_BOOTSTRAP_STAGES)
+        return result
+    finally:
+        write_run_artifact(artifact_root=config.artifact_root, result=result)

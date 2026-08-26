@@ -9,6 +9,7 @@
 # eltdx v1.2.0.  The annotated tag object is
 # 8cc408fa2077cad9b4f241c61da3519141972884 and it peels to this commit.
 eltdx @ https://github.com/electkismet/eltdx/archive/b2b94b967f478408848d007c83cc7155367c3aa9.zip
+psycopg[binary]==3.3.4
 
 # Windows N1 is intentionally fail-closed: do not add tushare or mootdx here.
 

@@ -10,6 +10,7 @@ from ashare_v3.ingestion.windows_n1_sources import (
     TQWindowsSource,
     calculate_market_values,
     load_vendor_module,
+    normalize_tq_daily_rows,
     three_year_start,
     validate_ohlc_rows,
 )
@@ -45,14 +46,15 @@ class WindowsN1SourcesTest(unittest.TestCase):
     def test_http_client_uses_native_tdxw_json_rpc_contract(self):
         client = TQHttpClient()
         calls = []
-        client.call = lambda method, params: calls.append((method, params)) or {"Time": ["20260102"], "Close": [10]}
+        client.call = lambda method, params: calls.append((method, params)) or {"600000.SH": {"Time": ["20260102"], "Close": [10]}}
         rows = client.get_daily_bars("600000.SH", start_date="20230101", end_date="20260102", adjust="qfq", fill_data=False)
         self.assertEqual(calls[0][0], "get_market_data")
         self.assertEqual(calls[0][1]["dividend_type"], "front")
+        self.assertEqual(calls[0][1]["stock_list"], ["600000.SH"])
         self.assertFalse(calls[0][1]["fill_data"])
         self.assertEqual(rows, [{"Time": "20260102", "Close": 10}])
         client.get_stock_list_in_sector("5")
-        self.assertEqual(calls[-1], ("get_stock_list_in_sector", {"block_code": "5"}))
+        self.assertEqual(calls[-1], ("get_stock_list_in_sector", {"block_code": "5", "list_type": 1}))
         client.get_stock_list("5")
         self.assertEqual(calls[-1], ("get_stock_list", {"market": "5", "list_type": 1}))
 
@@ -73,6 +75,17 @@ class WindowsN1SourcesTest(unittest.TestCase):
         self.assertEqual(calculate_market_values(close=10, total_share=None, float_share=None), (None, None))
         rows = [{"trade_date": "20260102", "open": 1, "high": 2, "low": 1, "close": 2}, {"trade_date": "20260103", "open": 1, "high": 0, "low": 1, "close": 2}]
         self.assertEqual(len(validate_ohlc_rows(rows)), 1)
+        normalized = normalize_tq_daily_rows([{"Date": "20260102.0", "Open": "1", "High": "2", "Low": "1", "Close": "2", "Volume": "3", "Amount": "4"}])
+        self.assertEqual(normalized[0]["trade_date"], "20260102")
+
+    def test_eltdx_model_containers_are_normalized(self):
+        class Row:
+            def __init__(self): self.code = "000001"
+        class Batch:
+            records = [Row()]
+        client = FakeEltdx()
+        client.finance_batch = lambda codes: Batch()
+        self.assertEqual(EltdxWindowsSource(client).fetch_finance_batch(["sz000001"]), [{"code": "000001"}])
 
 
 if __name__ == "__main__": unittest.main()

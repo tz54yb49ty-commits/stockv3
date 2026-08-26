@@ -7,6 +7,7 @@ modules are imported lazily so unit tests and WSL static checks remain usable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import asdict, is_dataclass
 from datetime import date
 import importlib
 import json
@@ -26,10 +27,29 @@ def _records(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if hasattr(value, "to_dict"):
-        value = value.to_dict("records")
+        try:
+            value = value.to_dict("records")
+        except TypeError:
+            value = value.to_dict()
+    elif hasattr(value, "records"):
+        value = value.records
+    elif hasattr(value, "rows"):
+        value = value.rows
     if isinstance(value, Mapping):
         value = [value]
-    return [dict(row) for row in value]
+    rows = []
+    for row in value:
+        if isinstance(row, Mapping):
+            rows.append(dict(row))
+        elif is_dataclass(row):
+            rows.append(asdict(row))
+        elif hasattr(row, "to_dict"):
+            rows.append(dict(row.to_dict()))
+        elif hasattr(row, "__dict__"):
+            rows.append({key: item for key, item in vars(row).items() if not key.startswith("_")})
+        else:
+            raise TypeError(f"unsupported vendor record type: {type(row).__name__}")
+    return rows
 
 
 def load_vendor_module(module_name: str) -> Any:
@@ -73,7 +93,7 @@ class TQHttpClient:
         return result.get("Value", result) if isinstance(result, Mapping) else result
 
     def get_stock_list_in_sector(self, market: str) -> Any:
-        return self.call("get_stock_list_in_sector", {"block_code": market})
+        return self.call("get_stock_list_in_sector", {"block_code": market, "list_type": 1})
 
     def get_stock_list(self, market: str) -> Any:
         return self.call("get_stock_list", {"market": market, "list_type": 1})
@@ -86,7 +106,7 @@ class TQHttpClient:
             "get_market_data",
             {
                 "period": "1d",
-                "stock_code": symbol,
+                "stock_list": [symbol],
                 "start_time": start_date,
                 "end_time": end_date,
                 "dividend_type": "front" if adjust == "qfq" else "none",
@@ -95,6 +115,8 @@ class TQHttpClient:
         )
         if not isinstance(result, Mapping):
             return result
+        if symbol in result and isinstance(result[symbol], Mapping):
+            result = result[symbol]
         columns = {key: value for key, value in result.items() if isinstance(value, list)}
         row_count = max((len(value) for value in columns.values()), default=0)
         return [
@@ -179,3 +201,23 @@ def validate_ohlc_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
             continue
         valid.append(dict(row))
     return valid
+
+
+def normalize_tq_daily_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for raw in rows:
+        row = {str(key).lower(): value for key, value in raw.items()}
+        trade_date = str(row.get("date") or "").split(".", 1)[0]
+        candidate = {
+            "trade_date": trade_date,
+            "open": row.get("open"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "close": row.get("close"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount"),
+            "adj_factor": row.get("forwardfactor"),
+            "raw_payload": dict(raw),
+        }
+        normalized.extend(validate_ohlc_rows([candidate]))
+    return normalized
