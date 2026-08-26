@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import secrets
@@ -22,6 +23,24 @@ ADMIN_DATABASE = "postgres"
 PASSWORDLESS_APP_DSN = (
     "host=127.0.0.1 port=5432 dbname=ashare_v3 user=ashare_v3_user"
 )
+OPERATOR_DIRECT = "ashare-ops"
+OPERATOR_ELEVATED = "elevated-47894"
+OPERATOR_MODES = (OPERATOR_DIRECT, OPERATOR_ELEVATED)
+OPERATOR_NAME = r"TDX-STOCK\47894"
+RUNTIME_NAME = r"TDX-STOCK\ashare-ops"
+OPERATOR_RID = "1002"
+RUNTIME_RID = "1006"
+ELEVATED_RUNTIME_PGPASS = Path(
+    r"C:\Users\ashare-ops.tdx-stock\AppData\Roaming\postgresql\pgpass.conf"
+)
+
+
+@dataclass(frozen=True)
+class WindowsIdentityEvidence:
+    name: str
+    sid: str
+    is_administrator: bool
+    runtime_sid: str
 
 
 @dataclass(frozen=True)
@@ -57,26 +76,117 @@ def merge_pgpass(existing: str, *, password: str) -> str:
     return "\n".join(retained) + "\n"
 
 
-def write_user_pgpass(
-    *, password: str, environ: dict[str, str] | None = None,
+def read_windows_identity(
     run_command: Callable[..., Any] = subprocess.run,
+) -> WindowsIdentityEvidence:
+    script = (
+        "$identity=[Security.Principal.WindowsIdentity]::GetCurrent();"
+        "$principal=[Security.Principal.WindowsPrincipal]::new($identity);"
+        "$runtime=[Security.Principal.NTAccount]::new('TDX-STOCK\\ashare-ops').Translate([Security.Principal.SecurityIdentifier]);"
+        "[pscustomobject]@{name=$identity.Name;sid=$identity.User.Value;"
+        "is_administrator=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);"
+        "runtime_sid=$runtime.Value}|ConvertTo-Json -Compress"
+    )
+    completed = run_command(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(completed.stdout)
+    return WindowsIdentityEvidence(
+        name=str(payload["name"]), sid=str(payload["sid"]),
+        is_administrator=bool(payload["is_administrator"]),
+        runtime_sid=str(payload["runtime_sid"]),
+    )
+
+
+def validate_operator_identity(mode: str, identity: WindowsIdentityEvidence) -> None:
+    if mode not in OPERATOR_MODES:
+        raise RuntimeError(f"unsupported operator mode: {mode}")
+    operator_prefix, separator, operator_rid = identity.sid.rpartition("-")
+    runtime_prefix, runtime_separator, runtime_rid = identity.runtime_sid.rpartition("-")
+    if not separator or not runtime_separator or operator_prefix != runtime_prefix:
+        raise RuntimeError("Windows operator/runtime SID authority mismatch")
+    if identity.runtime_sid != f"{operator_prefix}-{RUNTIME_RID}":
+        raise RuntimeError("runtime ashare-ops SID mismatch")
+    if mode == OPERATOR_DIRECT:
+        if identity.name.lower() != RUNTIME_NAME.lower() or operator_rid != RUNTIME_RID:
+            raise RuntimeError("direct setup requires exact TDX-STOCK\\ashare-ops identity")
+    elif (
+        identity.name.lower() != OPERATOR_NAME.lower()
+        or operator_rid != OPERATOR_RID
+        or not identity.is_administrator
+    ):
+        raise RuntimeError("elevated setup requires exact administrator TDX-STOCK\\47894 identity")
+
+
+def pgpass_path_for_mode(
+    mode: str, *, environment: dict[str, str], identity: WindowsIdentityEvidence,
 ) -> Path:
-    environment = os.environ if environ is None else environ
-    if environment.get("USERNAME", "").lower() != "ashare-ops":
-        raise RuntimeError("Windows setup must run as ashare-ops")
+    validate_operator_identity(mode, identity)
+    if mode == OPERATOR_ELEVATED:
+        return ELEVATED_RUNTIME_PGPASS
     appdata = environment.get("APPDATA")
     if not appdata:
         raise RuntimeError("APPDATA is unavailable")
-    path = Path(appdata) / "postgresql" / "pgpass.conf"
+    return Path(appdata) / "postgresql" / "pgpass.conf"
+
+
+def verify_pgpass_acl(
+    path: Path, *, runtime_sid: str,
+    run_command: Callable[..., Any] = subprocess.run,
+) -> None:
+    script = (
+        "$acl=Get-Acl -LiteralPath $args[0];"
+        "$rules=@($acl.Access|ForEach-Object{[pscustomobject]@{"
+        "sid=$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "deny=($_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny);"
+        "rights=[int]$_.FileSystemRights}});"
+        "[pscustomobject]@{owner=$acl.Owner.Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "protected=$acl.AreAccessRulesProtected;rules=$rules}|ConvertTo-Json -Compress -Depth 4"
+    )
+    completed = run_command(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(completed.stdout)
+    rules = payload.get("rules") or []
+    if isinstance(rules, dict):
+        rules = [rules]
+    rule_sids = {str(rule["sid"]) for rule in rules if not bool(rule["deny"])}
+    if payload.get("owner") != runtime_sid or not payload.get("protected"):
+        raise RuntimeError("pgpass owner/inheritance ACL mismatch")
+    if rule_sids != {runtime_sid, "S-1-5-18"} or any(bool(rule["deny"]) for rule in rules):
+        raise RuntimeError("pgpass ACL contains non-runtime principal")
+    rights_by_sid = {
+        sid: 0 for sid in rule_sids
+    }
+    for rule in rules:
+        if not bool(rule["deny"]):
+            rights_by_sid[str(rule["sid"])] |= int(rule["rights"])
+    if rights_by_sid[runtime_sid] & 0x3 != 0x3 or rights_by_sid["S-1-5-18"] != 2032127:
+        raise RuntimeError("pgpass ACL rights are insufficient")
+
+
+def write_user_pgpass(
+    *, password: str, operator_mode: str = OPERATOR_DIRECT,
+    identity: WindowsIdentityEvidence | None = None,
+    environ: dict[str, str] | None = None,
+    run_command: Callable[..., Any] = subprocess.run,
+    acl_verifier: Callable[..., None] = verify_pgpass_acl,
+) -> Path:
+    environment = os.environ if environ is None else environ
+    evidence = identity or read_windows_identity(run_command)
+    path = pgpass_path_for_mode(operator_mode, environment=environment, identity=evidence)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     temporary = path.with_name("pgpass.conf.windows_n1_tmp")
     temporary.write_text(merge_pgpass(existing, password=password), encoding="utf-8")
     try:
         run_command(
-            ["icacls.exe", str(temporary), "/inheritance:r", "/grant:r", "ashare-ops:(R,W)", "SYSTEM:(F)"],
+            ["icacls.exe", str(temporary), "/inheritance:r", "/grant:r", f"{RUNTIME_NAME}:(R,W)", "SYSTEM:(F)", "/setowner", RUNTIME_NAME],
             check=True, capture_output=True, text=True,
         )
+        acl_verifier(temporary, runtime_sid=evidence.runtime_sid, run_command=run_command)
         os.replace(temporary, path)
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -148,10 +258,16 @@ def verify_app_authority(app_connection: Any) -> None:
                 raise RuntimeError(f"forbidden app table privilege detected: {table}")
 
 
-def setup_database(*, admin_password: str, schema_path: Path) -> SetupResult:
+def setup_database(
+    *, admin_password: str, schema_path: Path,
+    operator_mode: str = OPERATOR_DIRECT,
+    operator_identity: WindowsIdentityEvidence | None = None,
+) -> SetupResult:
     """Create only the authorized empty N1 database/role on the existing service."""
     import psycopg
     from psycopg import sql
+    identity = operator_identity or read_windows_identity()
+    validate_operator_identity(operator_mode, identity)
     app_password = secrets.token_urlsafe(48)
     admin_kwargs = {
         "host": HOST, "port": PORT, "dbname": ADMIN_DATABASE,
@@ -170,9 +286,18 @@ def setup_database(*, admin_password: str, schema_path: Path) -> SetupResult:
         if any(counts.values()):
             raise RuntimeError("new N1 schema is not empty")
         grant_minimum_n1_privileges(database_connection)
-    pgpass_path = write_user_pgpass(password=app_password)
-    # Password is intentionally omitted: this proves standard libpq pgpass discovery.
-    with psycopg.connect(PASSWORDLESS_APP_DSN, connect_timeout=8) as app_connection:
+    pgpass_path = write_user_pgpass(
+        password=app_password, operator_mode=operator_mode, identity=identity,
+    )
+    app_connect = (
+        {"host": HOST, "port": PORT, "dbname": DATABASE, "user": APP_ROLE,
+         "password": app_password, "connect_timeout": 8}
+        if operator_mode == OPERATOR_ELEVATED
+        else {"conninfo": PASSWORDLESS_APP_DSN, "connect_timeout": 8}
+    )
+    # Elevated mode verifies with the generated password only in memory; it never
+    # writes the administrator's own pgpass. Direct mode proves libpq discovery.
+    with psycopg.connect(**app_connect) as app_connection:
         repository = WindowsN1PostgresRepository(app_connection)
         repository.verify_authority()
         verify_app_authority(app_connection)

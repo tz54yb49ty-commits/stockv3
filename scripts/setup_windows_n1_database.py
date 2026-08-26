@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import getpass
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -12,16 +13,25 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from ashare_v3.ingestion.windows_n1_db_setup import setup_database
+from ashare_v3.ingestion.windows_n1_db_setup import (
+    OPERATOR_MODES, read_windows_identity, setup_database, validate_operator_identity,
+)
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--operator-mode", choices=OPERATOR_MODES, default="ashare-ops")
+    args = parser.parse_args()
+    identity = read_windows_identity()
+    validate_operator_identity(args.operator_mode, identity)
     password = getpass.getpass("Local PostgreSQL postgres password: ")
     if not password:
         raise SystemExit("setup cancelled: empty password")
     try:
         result = setup_database(
             admin_password=password,
+            operator_mode=args.operator_mode,
+            operator_identity=identity,
             schema_path=Path(__file__).resolve().parents[1] / "sql" / "001_raw_ingestion_schema.sql",
         )
     except Exception as error:
