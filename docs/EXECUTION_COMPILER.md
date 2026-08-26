@@ -1189,3 +1189,17 @@ The two DAGs are independent and cannot be combined. Physical deletion after
 30 days and canary-heartbeat suspension/removal require separate future
 authorization and do not compile under either policy. The governance session
 that defines these DAGs has `runtime_execution_requested=false`.
+
+### Windows W0 PostgreSQL 1639 recovery compilation
+
+`w0_postgresql_virtual_identity_1639_recovery` is a mutually exclusive,
+one-attempt phase bound to commit `3160c7bee824a5cadcd7f63c78235a8b5c24c038`,
+tree `08959a4190ca4d2dafe67cf7062625541657f171`, and failed `sc.exe config` exit
+1639. Its DAG validates Stopped/NetworkService/UNRESTRICTED, existing virtual
+ACL, NetworkService full-tree ACL count zero, loopback config and no listener;
+modifies only once through `Invoke-CimMethod Win32_Service.Change` to
+`NT SERVICE\postgresql-x64-16` with empty/null StartPassword and ReturnValue 0;
+verifies StartName; starts once; then verifies Running, UNRESTRICTED,
+`127.0.0.1:5432`, pg_isready and ACL count zero. Config/ACL/install mutation,
+`sc.exe`, retry or NetworkService restoration compile to REJECT. Failure ends
+Stopped with evidence and no N1. Compilation is not execution.

@@ -166,3 +166,17 @@ additive and not an N6 startup prerequisite.
   change ACLs, or take ownership there.
 - Test NAS outage, WAL accumulation, checksum mismatch, TQ logout, port 17709
   loss, eltdx endpoint failover, and the 16:30-to-18:00 bounded readiness window.
+
+## W0 PostgreSQL virtual-identity 1639 recovery
+
+Run only as `w0_postgresql_virtual_identity_1639_recovery`, bound to commit
+`3160c7bee824a5cadcd7f63c78235a8b5c24c038`, tree
+`08959a4190ca4d2dafe67cf7062625541657f171` and failed `sc.exe config` exit 1639.
+Preflight proves Stopped, NetworkService StartName, SID UNRESTRICTED, existing
+virtual ACL, NetworkService full-tree ACL count zero, loopback config and no
+listener. Permit one `Invoke-CimMethod Win32_Service.Change` to
+`NT SERVICE\postgresql-x64-16` with empty/null StartPassword and ReturnValue 0.
+Verify StartName before one start; then require Running, UNRESTRICTED, only
+`127.0.0.1:5432`, pg_isready and ACL count zero. Never modify config/ACL,
+reinstall, use `sc.exe` for mutation, retry or restore NetworkService. Failure
+leaves the service Stopped with evidence preserved and N1 blocked.

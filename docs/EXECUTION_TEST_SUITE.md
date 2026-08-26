@@ -1597,3 +1597,13 @@ enabled=false`, `appendWindowsPath=false`, and `ashare-codex` access to `/mnt/c`
 They require native operations through ashare-ops SSH and UAC installs through
 the independent 47894 channel. Interop enabled, appended Windows PATH, D mount,
 missing C access or channel substitution must reject.
+
+Full-chain tests register `w0_postgresql_virtual_identity_1639_recovery` across
+all nine governance files. Positive coverage binds commit
+`3160c7bee824a5cadcd7f63c78235a8b5c24c038`, tree
+`08959a4190ca4d2dafe67cf7062625541657f171`, exit 1639, exact stopped pre-state,
+one `Invoke-CimMethod Win32_Service.Change`, empty/null StartPassword,
+ReturnValue 0, verified StartName, one start and final state. Negative fixtures
+reject wrong authority/failure/pre-state, `sc.exe`, config/ACL/install mutation,
+nonzero return, early/repeated start, retry, NetworkService restoration,
+incomplete evidence and N1 handoff.

@@ -328,6 +328,30 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
     return policy["accept_decision"]
 
 
+def evaluate_1639_recovery(policy: dict[str, Any], request: dict[str, Any]) -> str:
+    contract = policy["postgresql_virtual_identity_1639_recovery"]
+    expected = {
+        "prior_policy_commit": contract["prior_policy_commit"],
+        "prior_policy_tree": contract["prior_policy_tree"],
+        "prior_failed_program": "sc.exe config",
+        "prior_exit_code": 1639,
+        "phase_mode": contract["phase_mode"],
+        "attempts": 1,
+        "required_pre_state": contract["required_pre_state"],
+        "only_mutation_method": "Invoke-CimMethod Win32_Service.Change",
+        "StartName": r"NT SERVICE\postgresql-x64-16",
+        "StartPassword": "empty_string",
+        "return_value": 0,
+        "configuration_acl_install_mutation_attempts": 0,
+        "service_start_attempts_after_verified_change": 1,
+        "required_post_state": contract["required_post_state"],
+        "automatic_retry_attempts": 0,
+        "networkservice_restore_attempts": 0,
+        "n1_handoff_allowed": False,
+    }
+    return policy["accept_decision"] if request == expected else "REJECT"
+
+
 class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -390,7 +414,10 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             elevated["sid"], "S-1-5-21-2072264739-3883739137-88032818-1002"
         )
         self.assertTrue(elevated["administrators_member"])
-        self.assertEqual(elevated["allowed_phase_modes"], ["w0_prepare_and_mutate"])
+        self.assertEqual(
+            elevated["allowed_phase_modes"],
+            ["w0_prepare_and_mutate", "w0_postgresql_virtual_identity_1639_recovery"],
+        )
         self.assertEqual(acl["routine_d_denial_scope"], r"D:\PostgreSQL\16")
         wsl = self.policy["wsl_isolation_contract"]
         self.assertFalse(wsl["after_restart_automount_d"])
@@ -464,7 +491,7 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
     def test_exact_edb_postgresql_installer_and_dedicated_identity_accepts(self) -> None:
         allowlist = self.policy["exact_allowlist"]
         pg = self.policy["postgresql16_installer_contract"]
-        self.assertEqual(self.policy["policy_version"], 5)
+        self.assertEqual(self.policy["policy_version"], 6)
         self.assertEqual(allowlist["postgresql_installer_version"], "16.15-1")
         self.assertEqual(
             allowlist["postgresql_installer_sha256"],
@@ -513,6 +540,54 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         ):
             with self.subTest(overrides=overrides):
                 self.assertEqual(self.decision(**overrides), "REJECT")
+
+    def test_postgresql_1639_recovery_exact_once_contract(self) -> None:
+        recovery = self.policy["postgresql_virtual_identity_1639_recovery"]
+        request = {
+            "prior_policy_commit": recovery["prior_policy_commit"],
+            "prior_policy_tree": recovery["prior_policy_tree"],
+            "prior_failed_program": "sc.exe config",
+            "prior_exit_code": 1639,
+            "phase_mode": recovery["phase_mode"],
+            "attempts": 1,
+            "required_pre_state": recovery["required_pre_state"],
+            "only_mutation_method": "Invoke-CimMethod Win32_Service.Change",
+            "StartName": r"NT SERVICE\postgresql-x64-16",
+            "StartPassword": "empty_string",
+            "return_value": 0,
+            "configuration_acl_install_mutation_attempts": 0,
+            "service_start_attempts_after_verified_change": 1,
+            "required_post_state": recovery["required_post_state"],
+            "automatic_retry_attempts": 0,
+            "networkservice_restore_attempts": 0,
+            "n1_handoff_allowed": False,
+        }
+        self.assertEqual(evaluate_1639_recovery(self.policy, request), "ACCEPT")
+        negative = {
+            "prior_policy_commit": "0" * 40,
+            "prior_policy_tree": "0" * 40,
+            "prior_exit_code": 0,
+            "attempts": 2,
+            "only_mutation_method": "sc.exe config",
+            "StartName": r"NT AUTHORITY\NetworkService",
+            "StartPassword": "secret",
+            "return_value": 1639,
+            "configuration_acl_install_mutation_attempts": 1,
+            "service_start_attempts_after_verified_change": 2,
+            "automatic_retry_attempts": 1,
+            "networkservice_restore_attempts": 1,
+            "n1_handoff_allowed": True,
+        }
+        for field, value in negative.items():
+            with self.subTest(field=field):
+                bad = copy.deepcopy(request)
+                bad[field] = value
+                self.assertEqual(evaluate_1639_recovery(self.policy, bad), "REJECT")
+        for field, value in recovery["required_pre_state"].items():
+            with self.subTest(pre_state=field):
+                bad = copy.deepcopy(request)
+                bad["required_pre_state"][field] = not value if isinstance(value, bool) else "wrong"
+                self.assertEqual(evaluate_1639_recovery(self.policy, bad), "REJECT")
 
     def test_python311_missing_or_damaged_allows_one_exact_repair(self) -> None:
         contract = self.policy["python311_contract"]
@@ -727,6 +802,25 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
                 self.assertRegex(document, r"(?i)GUI")
                 self.assertRegex(document, r"(?i)secret|password")
                 self.assertRegex(document, r"(?i)log|evidence")
+
+    def test_postgresql_v6_recovery_semantics_are_present_across_full_chain(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(encoding="utf-8")
+        for name, document in {
+            "Compiler": self.compiler, "RuntimeGate": self.runtime_gate,
+            "Sandbox": self.sandbox, "Trace": self.trace,
+            "TestSuite": self.test_suite, "W0Plan": plan,
+        }.items():
+            with self.subTest(document=name):
+                for value in (
+                    "w0_postgresql_virtual_identity_1639_recovery",
+                    "3160c7bee824a5cadcd7f63c78235a8b5c24c038",
+                    "08959a4190ca4d2dafe67cf7062625541657f171",
+                    "1639", "Invoke-CimMethod", "Win32_Service.Change",
+                    r"NT SERVICE\postgresql-x64-16", "ReturnValue",
+                    "NetworkService", "UNRESTRICTED", "N1",
+                ):
+                    self.assertIn(value, document)
+                self.assertRegex(document, r"(?i)stopped")
 
     def test_sandbox_matches_policy_and_simulation_never_executes(self) -> None:
         sandbox = self.sandbox

@@ -717,3 +717,16 @@ It does not authorize W0
 host preparation, N1, database business objects/data or any other mutation.
 Only complete W0 post-evidence can produce W0 PASS; N1 remains a separate
 later `N1_ingestion` task.
+
+The one-time `w0_postgresql_virtual_identity_1639_recovery` gate binds commit
+`3160c7bee824a5cadcd7f63c78235a8b5c24c038`, tree
+`08959a4190ca4d2dafe67cf7062625541657f171` and prior `sc.exe config` exit 1639.
+It requires Stopped, StartName `NT AUTHORITY\NetworkService`, SID UNRESTRICTED,
+existing virtual ACL, NetworkService full-tree ACL count zero, loopback config
+and no 5432 listener. It allows one `Invoke-CimMethod Win32_Service.Change`
+only, to `NT SERVICE\postgresql-x64-16`, with empty/null StartPassword and
+ReturnValue 0. Only after read-only StartName verification may it start once.
+Final acceptance requires Running, virtual StartName, SID UNRESTRICTED, only
+`127.0.0.1:5432`, pg_isready accepting and ACL count zero. No configuration,
+ACL, install, retry or NetworkService restoration is allowed. Failure leaves
+the service Stopped, preserves evidence and rejects N1.

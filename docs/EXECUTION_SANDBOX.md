@@ -636,3 +636,13 @@ Restart simulation requires explicit C only, absent `/mnt/d`, `[interop]
 enabled=false`, `appendWindowsPath=false`, and Linux `ashare-codex` access to
 `/mnt/c`. It routes native operations through ashare-ops SSH and UAC only
 through the independent 47894 channel; any other route predicts `REJECT`.
+
+The Sandbox Simulation for `w0_postgresql_virtual_identity_1639_recovery`
+binds commit `3160c7bee824a5cadcd7f63c78235a8b5c24c038`, tree
+`08959a4190ca4d2dafe67cf7062625541657f171` and exit 1639. With mutation count
+zero it requires the exact Stopped/NetworkService/UNRESTRICTED/ACL-zero/
+loopback/no-listener pre-state. It models one `Invoke-CimMethod
+Win32_Service.Change`, empty/null password, ReturnValue 0, read-only StartName
+verification, then one start and final checks. `sc.exe`, config/ACL/install
+mutation, retry, early start or NetworkService restoration predicts fail-closed
+Stopped and no N1. A simulation PASS is not execution.

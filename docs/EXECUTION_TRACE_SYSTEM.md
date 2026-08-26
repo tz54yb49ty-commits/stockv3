@@ -548,3 +548,13 @@ Restart trace records `/mnt/c` explicit visibility, `/mnt/d` absence,
 code access, ashare-ops native SSH channel and independent 47894 UAC channel.
 Missing or combined identity/channel/isolation evidence is incomplete and
 fail-closed.
+
+The append-only `w0_postgresql_virtual_identity_1639_recovery` trace binds
+commit `3160c7bee824a5cadcd7f63c78235a8b5c24c038`, tree
+`08959a4190ca4d2dafe67cf7062625541657f171`, failed `sc.exe config`, exit 1639
+and unchanged NetworkService StartName. It records before/after hashes, the
+single attempt, exact pre-state, sole `Invoke-CimMethod Win32_Service.Change`
+arguments without a secret, ReturnValue, StartName check, one start and final
+state. Config/ACL/install, grant/remove/deny, `sc.exe` mutation, retry,
+NetworkService restoration and N1 counts stay zero. Failure ends Stopped,
+`BLOCKED_EVIDENCE_PRESERVED`, with N1 forbidden.

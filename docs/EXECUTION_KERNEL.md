@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 5,
+  "policy_version": 6,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5394,6 +5394,7 @@ phase combination, retry or excess attempt returns `REJECT`.
   "phase_contract": {
     "allowed_phase_modes": [
       "w0_prepare_and_mutate",
+      "w0_postgresql_virtual_identity_1639_recovery",
       "wsl_shutdown_native_control"
     ],
     "attempts_per_phase": 1,
@@ -5401,6 +5402,7 @@ phase combination, retry or excess attempt returns `REJECT`.
     "phase_combination_allowed": false,
     "phase_order": [
       "w0_prepare_and_mutate",
+      "w0_postgresql_virtual_identity_1639_recovery",
       "wsl_shutdown_native_control"
     ],
     "shutdown_phase_requires_prior_result": "RESTART_REQUIRED",
@@ -5544,6 +5546,45 @@ phase combination, retry or excess attempt returns `REJECT`.
     "automatic_retry_attempts": 0,
     "failed_install_preserved_as_evidence": true
   },
+  "postgresql_virtual_identity_1639_recovery": {
+    "prior_policy_commit": "3160c7bee824a5cadcd7f63c78235a8b5c24c038",
+    "prior_policy_tree": "08959a4190ca4d2dafe67cf7062625541657f171",
+    "prior_failed_program": "sc.exe config",
+    "prior_exit_code": 1639,
+    "prior_startname_unchanged": "NT AUTHORITY\\NetworkService",
+    "phase_mode": "w0_postgresql_virtual_identity_1639_recovery",
+    "attempts": 1,
+    "required_pre_state": {
+      "service_state": "Stopped",
+      "start_name": "NT AUTHORITY\\NetworkService",
+      "service_sid_type": "UNRESTRICTED",
+      "virtual_account_acl_present": true,
+      "networkservice_acl_count_full_tree": 0,
+      "listen_addresses": "127.0.0.1",
+      "port": 5432,
+      "listener_5432_present": false
+    },
+    "only_mutation_method": "Invoke-CimMethod Win32_Service.Change",
+    "change_arguments": {
+      "StartName": "NT SERVICE\\postgresql-x64-16",
+      "StartPassword": "empty_string"
+    },
+    "required_return_value": 0,
+    "configuration_acl_install_mutation_attempts": 0,
+    "service_start_attempts_after_verified_change": 1,
+    "required_post_state": {
+      "service_state": "Running",
+      "start_name": "NT SERVICE\\postgresql-x64-16",
+      "service_sid_type": "UNRESTRICTED",
+      "listen_endpoint": "127.0.0.1:5432",
+      "pg_isready": "accepting",
+      "networkservice_acl_count_full_tree": 0
+    },
+    "failure_service_state": "Stopped",
+    "automatic_retry_attempts": 0,
+    "networkservice_restore_attempts": 0,
+    "n1_handoff_allowed": false
+  },
   "empty_cluster_contract": {
     "initdb_new_empty_cluster_only": true,
     "mac_dump_import_attempts": 0,
@@ -5571,7 +5612,8 @@ phase combination, retry or excess attempt returns `REJECT`.
       "sid": "S-1-5-21-2072264739-3883739137-88032818-1002",
       "administrators_member": true,
       "allowed_phase_modes": [
-        "w0_prepare_and_mutate"
+        "w0_prepare_and_mutate",
+        "w0_postgresql_virtual_identity_1639_recovery"
       ],
       "allowed_admin_operations": [
         "exact_frozen_installer_once",
@@ -5581,7 +5623,8 @@ phase combination, retry or excess attempt returns `REJECT`.
       "apply_exact_c_and_d_acl",
       "create_or_configure_exact_postgresql_16_service",
       "restrict_exact_postgres_service_account_logon",
-      "stage_exact_wsl_configuration"
+      "stage_exact_wsl_configuration",
+      "invoke_exact_postgresql_1639_cim_change_and_verified_start"
       ]
     },
     "routine_and_elevated_identities_must_be_distinct": true,
@@ -5707,7 +5750,11 @@ phase combination, retry or excess attempt returns `REJECT`.
     "identity_group_membership_change_attempts",
     "identity_privilege_change_attempts",
     "elevated_operator_outside_prepare_attempts",
-    "current_wsl_native_interop_attempts"
+    "current_wsl_native_interop_attempts",
+    "postgresql_1639_recovery_second_attempts",
+    "postgresql_1639_recovery_sc_exe_attempts",
+    "postgresql_1639_recovery_acl_or_config_attempts",
+    "postgresql_1639_recovery_networkservice_restore_attempts"
   ],
   "forbidden": [
     "Tushare",
