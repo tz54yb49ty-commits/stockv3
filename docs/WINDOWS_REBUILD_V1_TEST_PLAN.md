@@ -39,6 +39,13 @@ release pass.
   `runtime_control` request that exactly satisfies
   `windows_rebuild_w0_bounded_v1`; the policy-definition request must not use
   the exception it defines.
+- Freeze routine `TDX-STOCK\ashare-ops` SID
+  `S-1-5-21-2072264739-3883739137-88032818-1006` as Medium/non-admin/native SSH
+  and elevated `TDX-STOCK\47894` SID
+  `S-1-5-21-2072264739-3883739137-88032818-1002` as the distinct Administrators
+  operator. Use 47894 only for the exact prepare admin allowlist; evaluate
+  routine D denial only as ashare-ops. Do not create accounts or change
+  passwords, groups or privileges.
 - Read-only preflight native CPython 3.11 x64. If valid, perform zero Python
   mutation. If missing or damaged, allow exactly one official winget
   `Python.Python.3.11` machine-wide x64 install/repair at
@@ -63,6 +70,10 @@ release pass.
 - Preserve the stopped legacy PostgreSQL 18 program and data unchanged; do not
   uninstall or delete it.  WSL shutdown is a separate native-control phase
   after sealed evidence and `RESTART_REQUIRED`.
+- After native restart require only explicit `/mnt/c`, absent `/mnt/d`, and
+  `/etc/wsl.conf` `[interop] enabled=false` plus `appendWindowsPath=false`.
+  Verify Linux `ashare-codex` can read `/mnt/c` code. Native operations must use
+  ashare-ops SSH; UAC installation must use the independent 47894 channel.
 
 ## Gate N1
 

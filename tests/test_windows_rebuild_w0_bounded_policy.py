@@ -83,6 +83,39 @@ def canonical_request(policy: dict[str, Any]) -> dict[str, Any]:
         "pre_evidence_complete": True,
         "identity_acl_effective_access_proven": True,
         "existing_target_path_conflict": False,
+        "routine_native_account": policy["identity_acl_contract"][
+            "routine_codex_native_identity"
+        ]["account"],
+        "routine_native_sid": policy["identity_acl_contract"][
+            "routine_codex_native_identity"
+        ]["sid"],
+        "routine_integrity": "Medium",
+        "routine_administrators_member": False,
+        "routine_native_ssh_login": True,
+        "routine_group_memberships": ["Users", "Authenticated Users"],
+        "elevated_operator_account": policy["identity_acl_contract"][
+            "elevated_operator_identity"
+        ]["account"],
+        "elevated_operator_sid": policy["identity_acl_contract"][
+            "elevated_operator_identity"
+        ]["sid"],
+        "elevated_operator_administrators_member": True,
+        "identities_distinct": True,
+        "elevated_admin_mutation_requested": True,
+        "elevated_admin_operations": policy["identity_acl_contract"][
+            "elevated_operator_identity"
+        ]["allowed_admin_operations"],
+        "operator_d_access_used_as_routine_acl_failure": False,
+        "routine_d_denials_complete": True,
+        "routine_normal_access_loopback_db_and_c_only": True,
+        "wsl_after_restart_only_explicit_c": True,
+        "wsl_after_restart_automount_d": False,
+        "wsl_after_restart_mnt_d_exists": False,
+        "wsl_interop_enabled_after_restart": False,
+        "wsl_append_windows_path_after_restart": False,
+        "wsl_ashare_codex_mnt_c_code_access": True,
+        "native_operations_via_ashare_ops_ssh": True,
+        "uac_install_via_independent_47894_channel": True,
         "scheduler_dynamic_inventory_frozen": True,
         "scheduler_fixed_count_used_as_authority": False,
         "scheduler_prior_count_delta_quality_evidence_complete": True,
@@ -124,6 +157,53 @@ def evaluate(policy: dict[str, Any], request: dict[str, Any]) -> str:
             return reject
     if request.get("existing_target_path_conflict") is not False:
         return reject
+    identity = policy["identity_acl_contract"]
+    routine = identity["routine_codex_native_identity"]
+    elevated = identity["elevated_operator_identity"]
+    exact_identity_values = {
+        "routine_native_account": routine["account"],
+        "routine_native_sid": routine["sid"],
+        "routine_integrity": routine["integrity"],
+        "routine_administrators_member": routine["administrators_member"],
+        "routine_native_ssh_login": routine["native_ssh_login_required"],
+        "routine_group_memberships": routine["required_group_memberships"],
+        "elevated_operator_account": elevated["account"],
+        "elevated_operator_sid": elevated["sid"],
+        "elevated_operator_administrators_member": elevated[
+            "administrators_member"
+        ],
+    }
+    if any(request.get(k) != v for k, v in exact_identity_values.items()):
+        return reject
+    if request.get("routine_native_sid") == request.get("elevated_operator_sid"):
+        return reject
+    for field in (
+        "identities_distinct",
+        "routine_d_denials_complete",
+        "routine_normal_access_loopback_db_and_c_only",
+        "wsl_after_restart_only_explicit_c",
+        "wsl_ashare_codex_mnt_c_code_access",
+        "native_operations_via_ashare_ops_ssh",
+        "uac_install_via_independent_47894_channel",
+    ):
+        if request.get(field) is not True:
+            return reject
+    for field in (
+        "operator_d_access_used_as_routine_acl_failure",
+        "wsl_after_restart_automount_d",
+        "wsl_after_restart_mnt_d_exists",
+        "wsl_interop_enabled_after_restart",
+        "wsl_append_windows_path_after_restart",
+    ):
+        if request.get(field) is not False:
+            return reject
+    if request.get("elevated_admin_mutation_requested") is True:
+        if request.get("phase_mode") not in elevated["allowed_phase_modes"]:
+            return reject
+        if request.get("elevated_admin_operations") != elevated[
+            "allowed_admin_operations"
+        ]:
+            return reject
     for field in (
         "scheduler_dynamic_inventory_frozen",
         "scheduler_prior_count_delta_quality_evidence_complete",
@@ -221,6 +301,55 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
         self.assertTrue(acl["application_identity_must_be_non_admin"])
         self.assertTrue(acl["codex_identity_must_be_non_admin"])
         self.assertIn("take_ownership", acl["application_and_codex_denied_rights"])
+
+    def test_exact_dual_identity_prepare_contract_accepts(self) -> None:
+        acl = self.policy["identity_acl_contract"]
+        routine = acl["routine_codex_native_identity"]
+        elevated = acl["elevated_operator_identity"]
+        self.assertEqual(routine["account"], r"TDX-STOCK\ashare-ops")
+        self.assertEqual(
+            routine["sid"], "S-1-5-21-2072264739-3883739137-88032818-1006"
+        )
+        self.assertEqual(routine["integrity"], "Medium")
+        self.assertFalse(routine["administrators_member"])
+        self.assertEqual(elevated["account"], r"TDX-STOCK\47894")
+        self.assertEqual(
+            elevated["sid"], "S-1-5-21-2072264739-3883739137-88032818-1002"
+        )
+        self.assertTrue(elevated["administrators_member"])
+        self.assertEqual(elevated["allowed_phase_modes"], ["w0_prepare_and_mutate"])
+        self.assertEqual(acl["routine_d_denial_scope"], r"D:\PostgreSQL\16")
+        wsl = self.policy["wsl_isolation_contract"]
+        self.assertFalse(wsl["after_restart_automount_d"])
+        self.assertFalse(wsl["after_restart_mnt_d_exists"])
+        self.assertEqual(wsl["after_restart_only_explicit_drive"], "C")
+        self.assertFalse(wsl["wsl_conf_interop_enabled"])
+        self.assertFalse(wsl["wsl_conf_append_windows_path"])
+        self.assertTrue(wsl["linux_identity_must_access_mnt_c_code"])
+        self.assertEqual(self.decision(), "ACCEPT")
+
+    def test_swapped_equal_admin_or_interop_identity_boundaries_reject(self) -> None:
+        routine_sid = self.request["routine_native_sid"]
+        elevated_sid = self.request["elevated_operator_sid"]
+        for overrides in (
+            {
+                "routine_native_sid": elevated_sid,
+                "elevated_operator_sid": routine_sid,
+            },
+            {"elevated_operator_sid": routine_sid},
+            {"routine_administrators_member": True},
+            {"routine_integrity": "High"},
+            {"routine_native_ssh_login": False},
+            {"wsl_interop_enabled_after_restart": True},
+            {"wsl_append_windows_path_after_restart": True},
+            {"wsl_after_restart_automount_d": True},
+            {"wsl_after_restart_mnt_d_exists": True},
+            {"operator_d_access_used_as_routine_acl_failure": True},
+            {"elevated_admin_operations": ["arbitrary_admin_action"]},
+            {"phase_mode": "wsl_shutdown_native_control"},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.decision(**overrides), "REJECT")
 
     def test_empty_cluster_and_windows_only_n1_sources_are_frozen(self) -> None:
         empty = self.policy["empty_cluster_contract"]
@@ -349,6 +478,29 @@ class WindowsRebuildW0BoundedPolicyTest(unittest.TestCase):
             kwargs = {field: missing}
             with self.subTest(field=field), self.assertRaises(FileNotFoundError):
                 load_control_contracts(**kwargs)
+
+    def test_full_chain_freezes_dual_sids_and_wsl_interop_isolation(self) -> None:
+        plan = (ROOT / "docs" / "WINDOWS_REBUILD_V1_TEST_PLAN.md").read_text(
+            encoding="utf-8"
+        )
+        for name, document in (
+            ("Compiler", self.compiler),
+            ("RuntimeGate", self.runtime_gate),
+            ("Sandbox", self.sandbox),
+            ("Trace", self.trace),
+            ("TestSuite", self.test_suite),
+            ("W0Plan", plan),
+        ):
+            with self.subTest(document=name):
+                self.assertIn(
+                    "S-1-5-21-2072264739-3883739137-88032818-1006", document
+                )
+                self.assertIn(
+                    "S-1-5-21-2072264739-3883739137-88032818-1002", document
+                )
+                self.assertIn("enabled=false", document)
+                self.assertIn("appendWindowsPath=false", document)
+                self.assertIn("/mnt/d", document)
 
     def test_runtime_gate_matches_policy_and_general_runtime_rejects(self) -> None:
         gate = self.runtime_gate

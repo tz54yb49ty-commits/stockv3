@@ -511,3 +511,19 @@ mutations and zero self-disconnect attempt from the current WSL/SSH session.
 Missing native handoff, reconnect, drive-visibility proof, forbidden=0 proof,
 or any second/combined phase attempt is incomplete evidence and therefore
 fail-closed `REJECT/BLOCKED_EVIDENCE_PRESERVED`.
+
+Identity trace fields separately record account, SID, token groups, integrity,
+SSH login and role for routine `TDX-STOCK\ashare-ops` /
+`S-1-5-21-2072264739-3883739137-88032818-1006` and elevated
+`TDX-STOCK\47894` / `S-1-5-21-2072264739-3883739137-88032818-1002`. Every
+admin mutation records the elevated actor SID and exact allowlisted operation;
+every routine ACL postflight records the ashare-ops SID and D-denial results.
+Operator D access is recorded separately and never counts as routine failure.
+Trace counts account/password/group/privilege mutations, unknown/swapped/equal
+SIDs, elevated-outside-prepare and current-WSL interop attempts at zero.
+
+Restart trace records `/mnt/c` explicit visibility, `/mnt/d` absence,
+`[interop] enabled=false`, `appendWindowsPath=false`, Linux `ashare-codex`
+code access, ashare-ops native SSH channel and independent 47894 UAC channel.
+Missing or combined identity/channel/isolation evidence is incomplete and
+fail-closed.

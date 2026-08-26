@@ -646,6 +646,18 @@ authority, missing fields, unknown fields/resources, drift, path conflict,
 unproven identity/ACL effective access, combined phases, excess attempts or
 any forbidden operation returns `REJECT`.
 
+Gate binds routine native Codex/application acceptance to
+`TDX-STOCK\ashare-ops` SID
+`S-1-5-21-2072264739-3883739137-88032818-1006`, Medium integrity, non-admin and
+working native SSH. It separately binds elevated operator `TDX-STOCK\47894`
+SID `S-1-5-21-2072264739-3883739137-88032818-1002` to Administrators. The
+identities must differ. Only the elevated SID, only in an independent
+`w0_prepare_and_mutate`, may perform the exact installer/Scheduler-disable/
+PG18-disable/D-directory/ACL/service/WSL-config admin allowlist. Its D access
+must not be evaluated as routine ACL failure. Unknown/swapped/equal SID,
+routine admin/non-Medium/SSH failure, identity mutation, or elevated use from
+current WSL interop returns `REJECT`.
+
 For `w0_prepare_and_mutate`, Runtime Gate rechecks the dynamically frozen
 current exact Scheduler inventory, `postgresql-x64-18`, `Git.Git`,
 `PostgreSQL.PostgreSQL.16`, conditional `Python.Python.3.11`, C/D path, service
@@ -675,7 +687,11 @@ preserved.
 For `wsl_shutdown_native_control`, Runtime Gate additionally requires the
 prior sealed `RESTART_REQUIRED` result and complete pre-shutdown evidence. It
 allows one native Windows `wsl --shutdown` attempt only, followed by reconnect
-proof that WSL explicitly sees C and cannot see D. It does not authorize W0
+proof that WSL explicitly sees C, `/mnt/d` does not exist, `/etc/wsl.conf`
+has `[interop] enabled=false` and `appendWindowsPath=false`, and Linux
+`ashare-codex` can still access `/mnt/c` code. Native operations use
+`ashare-ops` SSH; UAC installation uses only the independent `47894` channel.
+It does not authorize W0
 host preparation, N1, database business objects/data or any other mutation.
 Only complete W0 post-evidence can produce W0 PASS; N1 remains a separate
 later `N1_ingestion` task.

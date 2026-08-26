@@ -951,13 +951,16 @@ The prepare DAG is strictly one-way:
 
 ```text
 PLAN exact phase, identities, versions, paths, resources and attempt budget
-  -> VALIDATE baseline commit/tree/policy hash, pre-evidence, exact existing
+  -> VALIDATE exact routine ashare-ops SID/Medium/non-admin/SSH and elevated
+              47894 SID/Administrators/distinct-role evidence; baseline
+              commit/tree/policy hash, pre-evidence, exact existing
               path inventory, installer package/version/SHA/signature,
               dynamically frozen current Scheduler inventory and prior-count
               quality delta, service state, ACL effective access, native
               CPython 3.11 valid/missing/damaged state,
               TdxW/17709, mounts and forbidden-attempt counters
-  -> MODIFY export and disable every exact AshareV3 task without deletion;
+  -> MODIFY only through the independent elevated 47894 prepare channel:
+            export and disable every exact AshareV3 task without deletion;
             stop/disable exact postgresql-x64-18 without uninstall/delete;
             install Git.Git and PostgreSQL.PostgreSQL.16 only; only when
             preflight proves native 3.11 missing/damaged, install/repair
@@ -965,12 +968,15 @@ PLAN exact phase, identities, versions, paths, resources and attempt budget
             C:\Program Files\Python311; create the exact
             C/D directories and bounded ACLs; initialize only the new empty
             D:\PostgreSQL\16\data cluster; bind PostgreSQL only to 127.0.0.1;
-            stage the WSL C-only/D-hidden configuration without shutdown
+            stage WSL C-only/D-hidden plus [interop] enabled=false and
+            appendWindowsPath=false configuration without shutdown
   -> VERIFY every required post-evidence item, zero Mac imports, zero business
             objects/data, zero forbidden attempts, exact versions/paths/ACLs,
             all dynamically frozen AshareV3 tasks disabled, Python311
             python.exe PE x64/version 3.11.x/pip/venv verified without venv or
-            package creation, legacy files untouched and TdxW/17709
+            package creation, routine ashare-ops Medium/non-admin SSH and exact
+            D denial, operator access excluded from routine ACL verdict,
+            legacy files untouched and TdxW/17709
   -> FINALIZE PASS or RESTART_REQUIRED/BLOCKED_EVIDENCE_PRESERVED
 ```
 
@@ -980,8 +986,10 @@ The native-control shutdown DAG is strictly one-way:
 PLAN exact wsl_shutdown_native_control phase and one-attempt budget
   -> VALIDATE prior RESTART_REQUIRED, sealed pre-shutdown evidence and zero
               prepare-phase shutdown attempts
-  -> MODIFY invoke wsl --shutdown exactly once from native Windows control
-  -> VERIFY reconnect, C explicitly visible and D absent from WSL
+  -> MODIFY invoke wsl --shutdown exactly once through the native ashare-ops
+            operations channel, never through current WSL interop
+  -> VERIFY reconnect, C explicitly visible, /mnt/d absent, interop disabled,
+            appendWindowsPath=false and ashare-codex able to read /mnt/c code
   -> FINALIZE W0 PASS or BLOCKED_EVIDENCE_PRESERVED
 ```
 
@@ -992,7 +1000,9 @@ Scheduler definitions, service `postgresql-x64-18`, packages `Git.Git` and
 `C:\Program Files\Python311`, `D:\PostgreSQL\16`,
 `D:\PostgreSQL\backup-staging`, the exact `C:\AshareV3` directory allowlist,
 service identity `NT SERVICE\AshareV3-PostgreSQL-16`, `/etc/wsl.conf`, the WSL
-instance in the separate shutdown phase, and CPython/TdxW/17709 capability
+instance in the separate shutdown phase, exact routine SID
+`S-1-5-21-2072264739-3883739137-88032818-1006`, exact elevated SID
+`S-1-5-21-2072264739-3883739137-88032818-1002`, and CPython/TdxW/17709 capability
 checks. Scheduler resources are the complete dynamic current TaskName/TaskPath
 membership frozen at preflight; a historical fixed count is quality evidence
 only. Any inferred path, existing-path overwrite, additional
@@ -1009,7 +1019,13 @@ Python install/repair without missing/damaged proof, a second attempt, a path
 other than `C:\Program Files\Python311`, a non-3.11.x version, Microsoft Store
 alias, 3.12/3.14 substitution, source build, third-party distribution, unknown
 Python uninstall, failed-directory cleanup, business venv creation or project
-package installation also compile to `FINALIZE(REJECT)`.
+package installation also compile to `FINALIZE(REJECT)`. Account creation,
+password/group/privilege change, unknown/swapped/equal SIDs, routine
+Administrators membership, non-Medium/unavailable routine SSH, elevated
+operation outside the independent prepare phase, operator D access as a
+routine ACL failure, current-WSL native interop, or a restart configuration
+with interop/Windows PATH enabled or `/mnt/d` present also compile to
+`FINALIZE(REJECT)`.
 the Runtime Gate remains `REJECT` unless the exact Kernel policy independently
 returns `ACCEPT`.
 

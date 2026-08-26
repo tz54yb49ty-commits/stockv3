@@ -603,3 +603,18 @@ absent. A current WSL/SSH session attempting to disconnect itself, missing
 native handoff, missing reconnect proof, phase combination or any additional
 mutation predicts fail-closed `REJECT`. Even when either simulation passes,
 Sandbox performs no host action and grants no permission to execute W0.
+
+The identity simulation binds routine `TDX-STOCK\ashare-ops` SID
+`S-1-5-21-2072264739-3883739137-88032818-1006` as Medium/non-admin/native-SSH
+and elevated `TDX-STOCK\47894` SID
+`S-1-5-21-2072264739-3883739137-88032818-1002` as the distinct Administrators
+operator. It predicts elevated admin mutation only for the exact prepare-phase
+allowlist and evaluates D-denial acceptance only as routine ashare-ops. Equal,
+swapped or unknown SID, identity/group/password mutation, routine admin/SSH or
+integrity failure, elevated use outside prepare, or current-WSL interop predicts
+`REJECT`.
+
+Restart simulation requires explicit C only, absent `/mnt/d`, `[interop]
+enabled=false`, `appendWindowsPath=false`, and Linux `ashare-codex` access to
+`/mnt/c`. It routes native operations through ashare-ops SSH and UAC only
+through the independent 47894 channel; any other route predicts `REJECT`.

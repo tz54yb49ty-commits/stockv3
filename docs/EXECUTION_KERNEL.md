@@ -5377,7 +5377,7 @@ phase combination, retry or excess attempt returns `REJECT`.
 ```json
 {
   "policy_id": "windows_rebuild_w0_bounded_v1",
-  "policy_version": 2,
+  "policy_version": 3,
   "policy_state": "POLICY_READY_NOT_EXECUTED",
   "layer_role": "runtime_control",
   "scope_mode": "windows_w0_bounded_once",
@@ -5507,6 +5507,39 @@ phase combination, retry or excess attempt returns `REJECT`.
     "n1_n6_data_write_attempts": 0
   },
   "identity_acl_contract": {
+    "routine_codex_native_identity": {
+      "account": "TDX-STOCK\\ashare-ops",
+      "sid": "S-1-5-21-2072264739-3883739137-88032818-1006",
+      "integrity": "Medium",
+      "administrators_member": false,
+      "required_group_memberships": [
+        "Users",
+        "Authenticated Users"
+      ],
+      "native_ssh_login_required": true
+    },
+    "elevated_operator_identity": {
+      "account": "TDX-STOCK\\47894",
+      "sid": "S-1-5-21-2072264739-3883739137-88032818-1002",
+      "administrators_member": true,
+      "allowed_phase_modes": [
+        "w0_prepare_and_mutate"
+      ],
+      "allowed_admin_operations": [
+        "exact_frozen_installer_once",
+        "disable_dynamically_frozen_scheduler_inventory",
+        "stop_and_disable_postgresql_x64_18",
+        "create_exact_d_postgresql_directories",
+        "apply_exact_c_and_d_acl",
+        "create_or_configure_exact_postgresql_16_service",
+        "stage_exact_wsl_configuration"
+      ]
+    },
+    "routine_and_elevated_identities_must_be_distinct": true,
+    "elevated_operator_is_not_routine_codex_or_application": true,
+    "operator_d_access_must_not_be_used_as_routine_acl_failure": true,
+    "unknown_sid_rejected": true,
+    "account_create_password_group_or_privilege_change_forbidden": true,
     "postgresql_identity_non_interactive": true,
     "postgresql_identity_access_scope": [
       "D:\\PostgreSQL\\16",
@@ -5525,10 +5558,28 @@ phase combination, retry or excess attempt returns `REJECT`.
       "change_permissions",
       "take_ownership"
     ],
+    "routine_d_denial_scope": "D:\\PostgreSQL\\16",
+    "routine_normal_access_channels": [
+      "loopback_database_connection",
+      "C_drive_application_paths"
+    ],
     "fail_if_identity_or_effective_access_is_unproven": true
+  },
+  "wsl_isolation_contract": {
+    "after_restart_automount_d": false,
+    "after_restart_mnt_d_exists": false,
+    "after_restart_only_explicit_drive": "C",
+    "wsl_conf_interop_enabled": false,
+    "wsl_conf_append_windows_path": false,
+    "linux_identity": "ashare-codex",
+    "linux_identity_must_access_mnt_c_code": true,
+    "native_operations_channel": "TDX-STOCK\\ashare-ops SSH",
+    "uac_install_channel": "TDX-STOCK\\47894 independent native channel",
+    "current_wsl_native_interop_operator_inheritance_forbidden": true
   },
   "required_pre_evidence": [
     "native_and_wsl_identity",
+    "routine_and_elevated_account_sid_integrity_group_and_channel_evidence",
     "windows_build_and_architecture",
     "c_and_d_directory_inventory_without_recursive_delete",
     "c_and_d_owner_acl_sddl_and_effective_access",
@@ -5559,6 +5610,8 @@ phase combination, retry or excess attempt returns `REJECT`.
     "mac_import_attempt_counts_all_zero",
     "n1_n6_nas_and_business_write_attempt_counts_all_zero",
     "wsl_c_visible_and_d_absent_after_native_restart",
+    "wsl_interop_disabled_append_windows_path_false_and_mnt_d_absent",
+    "routine_ashare_ops_medium_non_admin_ssh_and_d_denials",
     "phase_attempt_counts_and_final_verdict"
   ],
   "required_zero_attempts": [
@@ -5586,7 +5639,13 @@ phase combination, retry or excess attempt returns `REJECT`.
     "python311_source_build_attempts",
     "python311_third_party_distribution_attempts",
     "business_venv_create_attempts",
-    "project_package_install_attempts"
+    "project_package_install_attempts",
+    "identity_account_create_attempts",
+    "identity_password_change_attempts",
+    "identity_group_membership_change_attempts",
+    "identity_privilege_change_attempts",
+    "elevated_operator_outside_prepare_attempts",
+    "current_wsl_native_interop_attempts"
   ],
   "forbidden": [
     "Tushare",
@@ -5602,6 +5661,10 @@ phase combination, retry or excess attempt returns `REJECT`.
     "Python 3.12 or 3.14 substitution",
     "Python source build or third-party distribution",
     "W0 business venv or project package install",
+    "new Windows account or password/group/privilege mutation",
+    "unknown or swapped routine/elevated SID",
+    "routine identity in Administrators",
+    "WSL interop enabled or appendWindowsPath true after restart",
     "business schema or business data",
     "recursive delete",
     "overwrite existing paths",

@@ -1560,3 +1560,20 @@ when every current TaskName or TaskPath belonging to AshareV3 is dynamically
 frozen, exported and Disabled. Prior count and a 10-to-9 or any other drift are
 quality evidence only. Fixed-count authority, omitted current membership, or
 any frozen task not Disabled must reject.
+
+Dual-identity fixtures must accept only routine `TDX-STOCK\ashare-ops` SID
+`S-1-5-21-2072264739-3883739137-88032818-1006` as Medium, non-admin and SSH
+capable, paired with distinct elevated `TDX-STOCK\47894` SID
+`S-1-5-21-2072264739-3883739137-88032818-1002` in Administrators. Elevated
+admin actions are accepted only in the independent prepare phase and only for
+the exact installer/Scheduler-disable/PG18-disable/D-directory/ACL/service/WSL
+configuration allowlist. Tests must keep operator D access separate from
+routine D-denial acceptance and reject swapped/equal/unknown SID, routine
+admin/non-Medium/login failure, account/password/group/privilege mutation,
+elevated use outside prepare or current-WSL interop.
+
+Restart fixtures require C-only explicit mount, missing `/mnt/d`, `[interop]
+enabled=false`, `appendWindowsPath=false`, and `ashare-codex` access to `/mnt/c`.
+They require native operations through ashare-ops SSH and UAC installs through
+the independent 47894 channel. Interop enabled, appended Windows PATH, D mount,
+missing C access or channel substitution must reject.
