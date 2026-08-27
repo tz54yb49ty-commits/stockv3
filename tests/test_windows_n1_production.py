@@ -46,13 +46,16 @@ class FakeRepository:
     def __init__(self):
         self.tables = []
         self.activations = []
+        self.activation_batch_ids = []
         self.business = {"common_trade_calendar": 0}
 
     def verify_authority(self): pass
     def business_row_counts(self): return dict(self.business)
     def downstream_row_counts(self): return {}
     def persist_batch(self, **kwargs): self.tables.append((kwargs["table"], kwargs["rows"]))
-    def activate_source(self, **kwargs): self.activations.append(kwargs["data_type"])
+    def activate_source(self, **kwargs):
+        self.activations.append(kwargs["data_type"])
+        self.activation_batch_ids.append(kwargs["batch_id"])
     def assert_n1_data_ready(self, scope_key): return {name: 1 for name in self.activations}
 
 
@@ -90,6 +93,15 @@ class WindowsN1ProductionTest(unittest.TestCase):
             self.assertEqual((daily_basic["total_mv"], daily_basic["circ_mv"]), (1000.0, 600.0))
             self.assertIn("_v2_", financial["source_batch_id"])
             self.assertIn("_v2_", daily_basic["source_batch_id"])
+            self.assertTrue(all(
+                row["source_batch_id"].startswith("test_")
+                for _table, rows in repository.tables
+                for row in rows
+            ))
+            self.assertTrue(all(
+                batch_id.startswith("test_activate_")
+                for batch_id in repository.activation_batch_ids
+            ))
 
 
 if __name__ == "__main__": unittest.main()

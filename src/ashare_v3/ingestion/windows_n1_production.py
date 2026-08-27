@@ -103,9 +103,9 @@ class WindowsN1ProductionHandlers:
                 rows.append({"board_identity_key": f"board:TDX:{code}", "board_code": code, "board_name": name, "board_type": MARKET_BOARD_TYPES[market], "source_namespace": "TDX", "source_file": None, "status": "active", "source": "TQ_HTTP", "source_batch_id": batch_id, "source_version": self.version, "raw_payload": raw})
         return table, rows
 
-    def identity_membership(self, _result: BootstrapResult) -> None:
+    def identity_membership(self, result: BootstrapResult) -> None:
         for market in ("5", "9", "11", "12", "14"):
-            batch_id = f"windows_n1_identity_{market}_{self.config.end_date}"
+            batch_id = f"{result.run_id}_identity_{market}"
             table, rows = self._identity_rows(market, batch_id)
             conflicts = {"stock_identity": ("stock_identity_key",), "index_identity": ("index_identity_key",), "board_identity": ("board_identity_key",)}[table]
             self.repository.persist_batch(table=table, rows=rows, conflict_columns=conflicts, batch_id=batch_id, trade_date=self.config.end_date, data_domain="stock" if market == "5" else "index" if market == "9" else "board", data_type=table, source_version=self.version)
@@ -127,7 +127,7 @@ class WindowsN1ProductionHandlers:
                         rows.append({**common, "index_identity_key": f"index:{parent_exchange}:{parent_code}", "index_code": parent_code, "index_name": parent_name})
                     else:
                         rows.append({**common, "board_identity_key": f"board:TDX:{parent_code}", "board_code": parent_code, "board_name": parent_name, "board_type": MARKET_BOARD_TYPES[market]})
-            batch_id = f"windows_n1_membership_{market}_{self.config.end_date}"
+            batch_id = f"{result.run_id}_membership_{market}"
             for row in rows: row["source_batch_id"] = batch_id
             conflicts = ("trade_date", "index_identity_key", "stock_identity_key", "source_version") if market == "9" else ("trade_date", "board_identity_key", "stock_identity_key", "source_version")
             self.repository.persist_batch(table=table, rows=rows, conflict_columns=conflicts, batch_id=batch_id, trade_date=self.config.end_date, data_domain="index" if market == "9" else "board", data_type=table, source_version=self.version)
@@ -140,7 +140,7 @@ class WindowsN1ProductionHandlers:
                 code, exchange = split_symbol(symbol); name = str(_value(raw_scope, "Name", "name") or symbol)
                 bars = normalize_tq_daily_rows(self.tq.fetch_daily(symbol, asset_kind=asset_kind, start_date=self.config.start_date, end_date=self.config.end_date))
                 if not bars: raise RuntimeError("no valid daily bars")
-                batch_id = f"windows_n1_daily_{market}_{code}_{self.config.end_date}"
+                batch_id = f"{result.run_id}_daily_{market}_{code}"
                 rows = []
                 for bar in bars:
                     common = {**bar, "source": "TQ_HTTP", "source_batch_id": batch_id, "source_version": self.version}
@@ -170,7 +170,7 @@ class WindowsN1ProductionHandlers:
             if base is None: raise RuntimeError("finance_batch row missing")
             reports = self.eltdx.fetch_three_reports(code)
             if any(not rows for rows in reports.values()): raise RuntimeError("one or more finance reports empty")
-            batch_id = f"windows_n1_finance_v2_{code}_{self.config.end_date}"
+            batch_id = f"{result.run_id}_finance_v2_{code}"
             total_share = _value(
                 base, "total_shares", "zong_gu_ben", "zongguben", "zong_gu_ben_raw_float"
             )
@@ -200,7 +200,7 @@ class WindowsN1ProductionHandlers:
             )
             if total_share is None or float_share is None:
                 raise RuntimeError("finance shares missing")
-            batch_id = f"windows_n1_daily_basic_v2_{code}_{self.config.end_date}"; rows = []
+            batch_id = f"{result.run_id}_daily_basic_v2_{code}"; rows = []
             for bar in self.daily_by_stock.get(symbol, []):
                 total_mv, circ_mv = calculate_market_values(close=bar["close"], total_share=total_share, float_share=float_share)
                 rows.append({"stock_identity_key": f"stock:{exchange}:{code}", "trade_date": bar["trade_date"], "ts_code": symbol, "code": code, "exchange": exchange, "close": bar["close"], "turnover_rate": None, "turnover_rate_f": None, "volume_ratio": None, "pe": None, "pe_ttm": None, "pb": None, "ps": None, "ps_ttm": None, "dv_ratio": None, "dv_ttm": None, "total_share": total_share, "float_share": float_share, "free_share": None, "total_mv": total_mv, "circ_mv": circ_mv, "source": "TQ_ELTDX_WINDOWS", "source_batch_id": batch_id, "source_version": self.version, "raw_payload": {"close_source": "TQ_HTTP", "share_source": "ELTDX_1_2_0"}})
@@ -216,13 +216,13 @@ class WindowsN1ProductionHandlers:
                 f"daily-basic market-value coverage below gate: {coverage:.6f}"
             )
 
-    def activate_n1_sources(self, _result: BootstrapResult) -> None:
+    def activate_n1_sources(self, result: BootstrapResult) -> None:
         domains = {"stock_identity": "stock", "index_identity": "index", "board_identity": "board", "index_membership_fact": "index", "board_membership_fact": "board", "stock_daily_bar_fact": "stock", "index_daily_bar_fact": "index", "board_daily_bar_fact": "board", "stock_financial_metrics_fact": "stock", "stock_daily_basic": "stock"}
         for data_type, domain in domains.items():
             count = self.row_counts.get(data_type, 0)
             if count <= 0: raise RuntimeError(f"cannot activate empty source: {data_type}")
             revision = "_v2" if data_type in {"stock_financial_metrics_fact", "stock_daily_basic"} else ""
-            self.repository.activate_source(data_domain=domain, data_type=data_type, scope_key=self.config.end_date, source_version=self.version, batch_id=f"windows_n1_activate_{data_type}{revision}_{self.config.end_date}", row_count=count)
+            self.repository.activate_source(data_domain=domain, data_type=data_type, scope_key=self.config.end_date, source_version=self.version, batch_id=f"{result.run_id}_activate_{data_type}{revision}", row_count=count)
 
     def n1_data_ready(self, result: BootstrapResult) -> None:
         ready_counts = self.repository.assert_n1_data_ready(self.config.end_date)
