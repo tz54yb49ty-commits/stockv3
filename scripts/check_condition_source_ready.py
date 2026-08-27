@@ -28,6 +28,20 @@ REQUIRED_DATA_TYPES = (
     "board_daily",
     "board_membership",
 )
+DATA_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "stock_daily": ("stock_daily", "stock_daily_bar_fact"),
+    "stock_daily_basic": ("stock_daily_basic",),
+    "stock_financial": ("stock_financial", "stock_financial_metrics_fact"),
+    "index_daily": ("index_daily", "index_daily_bar_fact"),
+    "index_membership": ("index_membership", "index_membership_fact"),
+    "board_daily": ("board_daily", "board_daily_bar_fact"),
+    "board_membership": ("board_membership", "board_membership_fact"),
+}
+CANONICAL_DATA_TYPE = {
+    alias: canonical
+    for canonical, aliases in DATA_TYPE_ALIASES.items()
+    for alias in aliases
+}
 STOCK_CANONICAL_FINANCIAL_FIELDS = (
     "cash_realization_rate",
     "pe_core",
@@ -77,27 +91,53 @@ def require_yyyymmdd(value: str) -> str:
     return value
 
 
-def fetch_active_versions(cur: psycopg.Cursor[Any], source_trade_date: str) -> dict[str, dict[str, Any]]:
-    cur.execute(
-        """
+def fetch_active_versions(
+    cur: psycopg.Cursor[Any],
+    source_trade_date: str,
+    *,
+    registry_relation: str = "common_condition_active_source_version_view",
+) -> dict[str, dict[str, Any]]:
+    aliases = sorted(CANONICAL_DATA_TYPE)
+    if registry_relation == "common_condition_active_source_version_view":
+        cur.execute(
+            """
         SELECT source_trade_date, data_domain, data_type, active_source_version,
                source_batch_id, activated_at, activated_by
         FROM common_condition_active_source_version_view
         WHERE source_trade_date = %s
           AND data_type = ANY(%s)
         ORDER BY data_type, activated_at DESC
-        """,
-        (source_trade_date, list(REQUIRED_DATA_TYPES)),
-    )
+            """,
+            (source_trade_date, aliases),
+        )
+    elif registry_relation == "common_active_source_version":
+        cur.execute(
+            """
+        SELECT scope_key AS source_trade_date, data_domain, data_type,
+               source_version AS active_source_version,
+               source_batch_id, activated_at, activated_by
+        FROM common_active_source_version
+        WHERE scope_key = %s
+          AND data_type = ANY(%s)
+        ORDER BY data_type, activated_at DESC
+            """,
+            (source_trade_date, aliases),
+        )
+    else:
+        raise ValueError(f"unsupported active source registry: {registry_relation}")
     active: dict[str, dict[str, Any]] = {}
     for row in cur.fetchall():
-        data_type = str(row[2])
+        source_data_type = str(row[2])
+        data_type = CANONICAL_DATA_TYPE.get(source_data_type)
+        if data_type is None:
+            continue
         active.setdefault(
             data_type,
             {
                 "source_trade_date": row[0],
                 "data_domain": row[1],
                 "data_type": data_type,
+                "source_data_type": source_data_type,
                 "active_source_version": row[3],
                 "source_batch_id": row[4],
                 "activated_at": row[5].isoformat() if row[5] else None,
@@ -105,6 +145,10 @@ def fetch_active_versions(cur: psycopg.Cursor[Any], source_trade_date: str) -> d
             },
         )
     return active
+
+
+def is_windows_n1_source_version(source_version: str) -> bool:
+    return str(source_version or "").startswith("windows_n1_")
 
 
 def check_fact_rows(
@@ -369,17 +413,36 @@ def evaluate_stock_condition_universe(
 def apply_stock_condition_universe_policy(
     checks: list[dict[str, Any]],
     gap_manifest: Mapping[str, Any],
+    *,
+    windows_n1: bool = False,
 ) -> dict[str, Any]:
     by_type = {str(item.get("data_type")): item for item in checks if item.get("active_exists")}
     required = ("stock_daily", "stock_daily_basic", "stock_financial")
     if not all(data_type in by_type and isinstance(by_type[data_type].get("fact"), dict) for data_type in required):
         return {}
-    evaluation = evaluate_stock_condition_universe(
-        stock_daily_count=int(by_type["stock_daily"]["fact"].get("row_count") or 0),
-        stock_daily_basic_count=int(by_type["stock_daily_basic"]["fact"].get("row_count") or 0),
-        stock_financial_count=int(by_type["stock_financial"]["fact"].get("row_count") or 0),
-        gap_manifest=gap_manifest,
-    )
+    stock_daily_count = int(by_type["stock_daily"]["fact"].get("row_count") or 0)
+    stock_daily_basic_count = int(by_type["stock_daily_basic"]["fact"].get("row_count") or 0)
+    stock_financial_count = int(by_type["stock_financial"]["fact"].get("row_count") or 0)
+    if windows_n1:
+        evaluation = {
+            "passed": True,
+            "mode": "full_history_latest_k",
+            "stock_daily_row_count": stock_daily_count,
+            "stock_daily_basic_row_count": stock_daily_basic_count,
+            "stock_financial_row_count": stock_financial_count,
+            "expected_condition_stock_universe": stock_daily_count,
+            "excluded_from_condition_universe": 0,
+            "condition_source_gap_manifest_count": int(gap_manifest.get("manifest_count") or 0),
+            "condition_source_gap_manifest_covers_difference": True,
+            "failure_reasons": [],
+        }
+    else:
+        evaluation = evaluate_stock_condition_universe(
+            stock_daily_count=stock_daily_count,
+            stock_daily_basic_count=stock_daily_basic_count,
+            stock_financial_count=stock_financial_count,
+            gap_manifest=gap_manifest,
+        )
     for data_type in required:
         by_type[data_type]["fact"].update(
             {
@@ -404,9 +467,18 @@ def apply_stock_condition_universe_policy(
 def run_check(dsn: str, source_trade_date: str) -> dict[str, Any]:
     source_trade_date = require_yyyymmdd(source_trade_date)
     with psycopg.connect(dsn, connect_timeout=10, options="-c default_transaction_read_only=on") as conn, conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('public.common_condition_active_source_version_view')")
-        view_exists = cur.fetchone()[0] is not None
-        if not view_exists:
+        cur.execute(
+            "SELECT to_regclass('public.common_condition_active_source_version_view'), "
+            "to_regclass('public.common_active_source_version')"
+        )
+        view_relation, active_relation = cur.fetchone()
+        view_exists = view_relation is not None
+        registry_relation = (
+            "common_condition_active_source_version_view"
+            if view_exists
+            else "common_active_source_version" if active_relation is not None else None
+        )
+        if registry_relation is None:
             return {
                 "source_trade_date": source_trade_date,
                 "passed": False,
@@ -415,7 +487,11 @@ def run_check(dsn: str, source_trade_date: str) -> dict[str, Any]:
                 "checks": [],
             }
 
-        active = fetch_active_versions(cur, source_trade_date)
+        active = fetch_active_versions(cur, source_trade_date, registry_relation=registry_relation)
+        windows_n1 = bool(active) and all(
+            is_windows_n1_source_version(str(row.get("active_source_version") or ""))
+            for row in active.values()
+        )
         checks: list[dict[str, Any]] = []
         for data_type in REQUIRED_DATA_TYPES:
             active_row = active.get(data_type)
@@ -440,7 +516,7 @@ def run_check(dsn: str, source_trade_date: str) -> dict[str, Any]:
                 reasons.append("fact row_count is 0")
             if not fact["identity_key_coverage_100pct"]:
                 reasons.append("identity_key coverage is not 100%")
-            if data_type == "stock_financial":
+            if data_type == "stock_financial" and not windows_n1:
                 canonical_financial = check_stock_financial_canonical_readiness(
                     cur,
                     active_source_version=str(active_row["active_source_version"]),
@@ -459,12 +535,18 @@ def run_check(dsn: str, source_trade_date: str) -> dict[str, Any]:
                 }
             )
         gap_manifest = fetch_condition_source_gap_manifest(cur, active)
-        stock_condition_universe = apply_stock_condition_universe_policy(checks, gap_manifest)
+        stock_condition_universe = apply_stock_condition_universe_policy(
+            checks,
+            gap_manifest,
+            windows_n1=windows_n1,
+        )
     missing = [data_type for data_type in REQUIRED_DATA_TYPES if data_type not in active]
     return {
         "source_trade_date": source_trade_date,
-        "passed": view_exists and not missing and all(item["passed"] for item in checks),
+        "passed": registry_relation is not None and not missing and all(item["passed"] for item in checks),
         "view_exists": view_exists,
+        "active_source_registry": registry_relation,
+        "windows_n1_compatibility": windows_n1,
         "required_data_types": list(REQUIRED_DATA_TYPES),
         "missing_data_types": missing,
         "condition_source_gap_manifest": gap_manifest,

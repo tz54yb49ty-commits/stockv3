@@ -699,7 +699,7 @@
             <div class="form-grid three" style="margin-top: 12px;">
               <div class="field">
                 <label>min_total_mv_yi</label>
-                <input type="number" step="1" min="100" name="stock.min_total_mv_yi" value="{{ policy.min_total_mv_yi }}">
+                <input type="number" step="1" min="0" name="stock.min_total_mv_yi" value="{{ policy.min_total_mv_yi if policy.min_total_mv_yi is not none else '' }}">
               </div>
               <div class="field">
                 <label>max_total_mv_yi</label>
@@ -1086,7 +1086,7 @@
       })[segment]).filter(Boolean);
       policy.board.board_code_prefixes = [];
       policy.board.board_code_prefix = "";
-      policy.stock.min_total_mv_yi = numericValue("stock.min_total_mv_yi") ?? 100;
+      policy.stock.min_total_mv_yi = numericValue("stock.min_total_mv_yi");
       policy.stock.max_total_mv_yi = numericValue("stock.max_total_mv_yi");
       policy.stock.exclude_st = document.querySelector('[name="stock.exclude_st"]')?.checked || false;
       policy.stock.exclude_bj = document.querySelector('[name="stock.exclude_bj"]')?.checked || false;
@@ -1126,8 +1126,8 @@
       });
       setFieldValue("index.selected_identity_key", policy.index?.selected_identity_key || "");
       setCheckedValues("index.enabled_identities", policy.index?.enabled_identities || []);
-      setCheckedValues("board.board_segments", policy.board?.board_segments || ["industry"]);
-      setFieldValue("stock.min_total_mv_yi", policy.stock?.min_total_mv_yi ?? 100);
+      setCheckedValues("board.board_segments", policy.board?.board_segments || ["industry", "concept", "region"]);
+      setFieldValue("stock.min_total_mv_yi", policy.stock?.min_total_mv_yi ?? "");
       setFieldValue("stock.max_total_mv_yi", policy.stock?.max_total_mv_yi ?? "");
       setFieldValue("stock.min_score", policy.stock?.min_score ?? "");
       setFieldValue("stock.recommendation_levels", (policy.stock?.recommendation_levels || []).join(","));

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-DEFAULT_MIN_TOTAL_MV_WAN = Decimal("1000000")
+DEFAULT_MIN_TOTAL_MV_WAN = Decimal("0")
 DEFAULT_INDEX_CODES = ("000905", "399303", "000001", "000852", "399001", "399006", "000300", "000016", "000688")
 POLICY_DOMAINS = ("index", "board", "stock")
 
@@ -20,13 +20,13 @@ def default_scope_policy() -> dict[str, Any]:
         "index": {
             "enabled": True,
             "source": "condition_pool",
-            "include_codes": list(DEFAULT_INDEX_CODES),
+            "include_codes": [],
             "directions": ["buy", "sell"],
         },
         "board": {
             "enabled": True,
             "source": "condition_pool",
-            "board_types": ["tdx_industry"],
+            "board_types": ["tdx_industry", "tdx_concept", "tdx_region"],
             "board_code_prefix": "",
             "board_code_prefixes": [],
             "directions": ["buy", "sell"],
@@ -37,7 +37,7 @@ def default_scope_policy() -> dict[str, Any]:
             "directions": ["buy", "sell"],
             "include_condition_families": ["ordinary", "full", "hint"],
             "include_condition_keys": [],
-            "min_total_mv_wan": str(DEFAULT_MIN_TOTAL_MV_WAN),
+            "min_total_mv_wan": None,
             "market_value_compare": ">=",
             "require_buy_target_price": False,
             "require_sell_target_price": False,
@@ -78,8 +78,8 @@ def validate_scope_policy(policy: Mapping[str, Any]) -> None:
             raise ValueError(f"scope policy missing section: {domain}")
     stock_policy = policy["stock"]
     min_total_mv = decimal_or_none(stock_policy.get("min_total_mv_wan"))
-    if min_total_mv is not None and min_total_mv < DEFAULT_MIN_TOTAL_MV_WAN:
-        raise ValueError("stock.min_total_mv_wan cannot be below 1000000")
+    if min_total_mv is not None and min_total_mv < 0:
+        raise ValueError("stock.min_total_mv_wan cannot be negative")
     if stock_policy.get("market_value_compare", ">=") not in {">=", ">"}:
         raise ValueError("stock.market_value_compare must be >= or >")
     limit = stock_policy.get("limit")

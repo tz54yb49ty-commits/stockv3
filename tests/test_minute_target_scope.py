@@ -95,14 +95,14 @@ class MinuteTargetScopeTest(unittest.TestCase):
         for signal_type in ("BUY", "SELL", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"):
             self.assertEqual(market_data_consumer_for_signal_types([signal_type]), "both", signal_type)
 
-    def test_stock_scope_requires_total_mv_at_least_100_yi(self) -> None:
-        self.assertEqual(str(STOCK_SCOPE_MIN_TOTAL_MV_WAN), "1000000")
+    def test_stock_scope_does_not_add_market_value_filter(self) -> None:
+        self.assertEqual(str(STOCK_SCOPE_MIN_TOTAL_MV_WAN), "0")
         self.assertTrue(stock_total_mv_is_scope_eligible("1000000"))
-        self.assertFalse(stock_total_mv_is_scope_eligible("999999.99"))
+        self.assertTrue(stock_total_mv_is_scope_eligible("999999.99"))
         self.assertTrue(stock_total_mv_is_scope_eligible("1000000.01"))
-        self.assertFalse(stock_total_mv_is_scope_eligible(None))
+        self.assertTrue(stock_total_mv_is_scope_eligible(None))
 
-    def test_stock_scope_uses_condition_pool_dry_run_and_market_value_filter(self) -> None:
+    def test_stock_scope_uses_condition_pool_dry_run_without_object_filter(self) -> None:
         dates = DateContext(
             source_trade_date="20260522",
             source_prev_trade_date="20260521",
@@ -161,8 +161,8 @@ class MinuteTargetScopeTest(unittest.TestCase):
 
         self.assertEqual(scope["condition_pool_source"], "condition_pool_dry_run")
         self.assertEqual(scope["condition_pool_row_count"], 3)
-        self.assertEqual(scope["object_count"], 2)
-        self.assertEqual(scope["scope_row_count"], 2)
+        self.assertEqual(scope["object_count"], 3)
+        self.assertEqual(scope["scope_row_count"], 3)
         self.assertEqual(scope["excluded_below_min_total_mv_count"], 0)
         self.assertEqual(scope["missing_total_mv_count"], 1)
         row = scope["scope_rows"][0]

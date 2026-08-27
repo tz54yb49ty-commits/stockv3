@@ -13,6 +13,8 @@ from ashare_v3.condition.basis import (
     active_versions_from_ready_check,
     attach_period_escalation_contexts,
     attach_period_escalation_context_to_row,
+    basis_calculation_dates,
+    basis_date_trace,
     build_condition_projection_context,
     build_period_escalation_context,
     build_quality_items,
@@ -26,6 +28,7 @@ from ashare_v3.condition.basis import (
     fetch_period_escalation_previous_context_rows,
     fetch_period_contexts,
     index_period_escalation_previous_context_rows,
+    make_stock_sample_basis,
     period_grade,
     period_trigger_baseline_has_required_shape,
     period_trigger_baseline_not_ready_periods,
@@ -50,6 +53,11 @@ class RecordingCursor:
 
     def fetchall(self) -> list[dict[str, object]]:
         return list(self.rows)
+
+    def fetchone(self) -> dict[str, object] | None:
+        if self.sql_calls and "to_regclass('public.common_condition_run')" in self.sql_calls[-1]:
+            return {"relation": "common_condition_run"}
+        return self.rows[0] if self.rows else None
 
 
 def condition_projection_basis_row(asset_kind: str) -> dict[str, object]:
@@ -87,6 +95,80 @@ def condition_projection_basis_row(asset_kind: str) -> dict[str, object]:
 
 
 class ConditionBasisTest(unittest.TestCase):
+    def test_stale_object_uses_its_last_k_date_but_keeps_global_for_trade_date(self) -> None:
+        dates = DateContext(
+            source_trade_date="20260827",
+            source_prev_trade_date="20260826",
+            for_trade_date="20260828",
+            prev_trade_date="20260827",
+            for_trade_calendar_row_exists=True,
+        )
+        row = {
+            "basis_trade_date": "20260227",
+            "basis_prev_trade_date": "20260226",
+            "source_version": "windows_n1_20260227_20260227_v1",
+        }
+
+        anchor = basis_calculation_dates(row, dates)
+        trace = basis_date_trace(row, dates)
+
+        self.assertEqual(anchor.source_trade_date, "20260227")
+        self.assertEqual(anchor.source_prev_trade_date, "20260226")
+        self.assertEqual(anchor.for_trade_date, "20260828")
+        self.assertTrue(trace["is_stale_basis"])
+        self.assertEqual(trace["basis_source_version"], row["source_version"])
+        self.assertEqual(trace["stale_calendar_days"], 181)
+
+    def test_half_year_stale_stock_uses_anchor_history_for_current_for_trade_date(self) -> None:
+        dates = DateContext(
+            source_trade_date="20260827",
+            source_prev_trade_date="20260826",
+            for_trade_date="20260828",
+            prev_trade_date="20260827",
+            for_trade_calendar_row_exists=True,
+        )
+        row = {
+            "stock_identity_key": "stock:SH:600000",
+            "basis_trade_date": "20260227",
+            "basis_prev_trade_date": "20260226",
+            "source_version": "windows_n1_20260227_20260227_v1",
+            "code": "600000",
+            "exchange": "SH",
+            "name": "停牌样本",
+        }
+        context = {
+            period: {
+                "current": {
+                    "open": "9.5",
+                    "high": "11",
+                    "low": "9",
+                    "close": "11",
+                    "amount": "200",
+                    "day_count": 1,
+                },
+                "previous": {
+                    "open": "9",
+                    "high": "10",
+                    "low": "8.5",
+                    "close": "10",
+                    "amount": "100",
+                    "day_count": 1,
+                },
+                "grade": "volume_up",
+                "transition": "volume_up",
+            }
+            for period in ("Y", "Q", "M", "W", "D")
+        }
+
+        basis = make_stock_sample_basis(row, dates, context)
+
+        self.assertEqual(basis["source_trade_date"], "20260827")
+        self.assertEqual(basis["for_trade_date"], "20260828")
+        self.assertEqual(basis["raw_json"]["basis_trade_date"], "20260227")
+        self.assertTrue(basis["raw_json"]["is_stale_basis"])
+        self.assertTrue(basis["buy_full_necessary_base"])
+        self.assertEqual(basis["buy_full_necessary_key"], "BUY:FULL")
+
     def test_fetch_period_contexts_uses_fast_fact_scan_without_distinct_sort(self) -> None:
         cursor = RecordingCursor()
 
@@ -125,6 +207,8 @@ class ConditionBasisTest(unittest.TestCase):
         self.assertIn("raw_close", joined_sql)
         self.assertIn("f.open * f.adj_factor / NULLIF(ca.current_adj_factor, 0)", joined_sql)
         self.assertIn("f.close * f.adj_factor / NULLIF(ca.current_adj_factor, 0)", joined_sql)
+        self.assertIn("f.adj_factor = 0", joined_sql)
+        self.assertIn("RAW_PRICE_ADJ_FACTOR_UNAVAILABLE", joined_sql)
 
     def test_fetch_period_contexts_index_does_not_apply_stock_adjustment_factor(self) -> None:
         cursor = RecordingCursor()
@@ -1266,9 +1350,9 @@ class ConditionBasisTest(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "period_escalation_previous_run_ambiguous"):
             fetch_period_escalation_previous_context_run(duplicate_cursor, dates)
-        self.assertEqual(duplicate_cursor.params_calls[0], ("20260713", "20260714"))
-        self.assertIn("status = 'passed_active'", duplicate_cursor.sql_calls[0])
-        self.assertIn("for_trade_date = %s", duplicate_cursor.sql_calls[0])
+        self.assertEqual(duplicate_cursor.params_calls[1], ("20260713", "20260714"))
+        self.assertIn("status = 'passed_active'", duplicate_cursor.sql_calls[1])
+        self.assertIn("for_trade_date = %s", duplicate_cursor.sql_calls[1])
 
         single_cursor = RecordingCursor(rows=[{"run_id": "condition_layer_20260713_v1", "updated_at": "stamp"}])
         self.assertEqual(

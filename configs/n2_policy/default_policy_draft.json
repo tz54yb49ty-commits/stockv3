@@ -1,51 +1,56 @@
 {
   "artifact_type": "n2_web_policy_default_draft",
-  "generated_at": "2026-07-14T08:56:05.543398+00:00",
+  "generated_at": "2026-08-27T14:47:35.956057+00:00",
   "source": "8782_console",
-  "created_by": "8782_console",
-  "created_at": "2026-07-14T08:56:05.543398+00:00",
+  "created_by": "windows_n2_runtime_v1",
+  "created_at": "2026-08-27T14:47:35.956057+00:00",
   "policy_id": "n2_default_policy",
-  "policy_version": "v18",
-  "policy_hash": "248db10bb3e2cc6e0118af89910152c38db4017c53ce49cc609ad866cf18bb41",
+  "policy_version": "v19",
+  "policy_hash": "9c8f9e4839f624d238421b6d8d610f1cd3b25192aa1009b7202aefb24212c7a9",
   "previous_policy_hash": "248db10bb3e2cc6e0118af89910152c38db4017c53ce49cc609ad866cf18bb41",
   "policy_diff_summary": {
     "index": {
-      "changed": false,
-      "changed_keys": [],
+      "changed": true,
+      "changed_keys": [
+        "enabled_identities",
+        "selected_identity_key"
+      ],
       "before_key_count": 16,
       "after_key_count": 16,
-      "summary": "unchanged"
+      "summary": "changed"
     },
     "board": {
-      "changed": false,
-      "changed_keys": [],
+      "changed": true,
+      "changed_keys": [
+        "board_segments",
+        "board_types"
+      ],
       "before_key_count": 18,
       "after_key_count": 18,
-      "summary": "unchanged"
+      "summary": "changed"
     },
     "stock": {
-      "changed": false,
-      "changed_keys": [],
+      "changed": true,
+      "changed_keys": [
+        "allow_financial_key_fields_missing",
+        "allowed_monitor_types",
+        "exclude_bj",
+        "exclude_st",
+        "main_index_code",
+        "min_total_mv_yi",
+        "preferred_board_code",
+        "require_official_daily_proof"
+      ],
       "before_key_count": 27,
-      "after_key_count": 27,
-      "summary": "unchanged"
+      "after_key_count": 24,
+      "summary": "changed"
     }
   },
   "web_policy": {
     "policy_name": "default_adjusted_by_user",
     "index": {
-      "selected_identity_key": "",
-      "enabled_identities": [
-        "index:SH:000905",
-        "index:SZ:399303",
-        "index:SH:000001",
-        "index:SH:000852",
-        "index:SZ:399001",
-        "index:SZ:399006",
-        "index:SH:000300",
-        "index:SH:000016",
-        "index:SH:000688"
-      ],
+      "selected_identity_key": "__all__",
+      "enabled_identities": [],
       "directions": [
         "buy",
         "sell"
@@ -72,10 +77,14 @@
     },
     "board": {
       "board_segments": [
-        "industry"
+        "industry",
+        "concept",
+        "region"
       ],
       "board_types": [
-        "tdx_industry"
+        "tdx_industry",
+        "tdx_concept",
+        "tdx_region"
       ],
       "board_code_prefixes": [],
       "board_code_prefix": "",
@@ -104,15 +113,13 @@
       "require_clear_sell_ref_period": false
     },
     "stock": {
-      "min_total_mv_yi": 100,
-      "exclude_st": true,
-      "exclude_bj": true,
-      "require_official_daily_proof": true,
+      "min_total_mv_yi": null,
+      "exclude_st": false,
+      "exclude_bj": false,
+      "require_official_daily_proof": false,
       "require_financial_quality_passed": false,
-      "allowed_monitor_types": [
-        "source_universe_preview"
-      ],
-      "allow_financial_key_fields_missing": false,
+      "allowed_monitor_types": [],
+      "allow_financial_key_fields_missing": true,
       "directions": [
         "buy",
         "sell"
@@ -138,10 +145,7 @@
       "recommendation_levels": [],
       "include_codes": [],
       "exclude_codes": [],
-      "limit": null,
-      "max_total_mv_yi": null,
-      "main_index_code": "",
-      "preferred_board_code": ""
+      "limit": null
     }
   },
   "scope_policy": {
@@ -149,32 +153,12 @@
     "index": {
       "enabled": true,
       "source": "condition_pool",
-      "include_codes": [
-        "000905",
-        "399303",
-        "000001",
-        "000852",
-        "399001",
-        "399006",
-        "000300",
-        "000016",
-        "000688"
-      ],
+      "include_codes": [],
       "directions": [
         "buy",
         "sell"
       ],
-      "include_identity_keys": [
-        "index:SH:000905",
-        "index:SZ:399303",
-        "index:SH:000001",
-        "index:SH:000852",
-        "index:SZ:399001",
-        "index:SZ:399006",
-        "index:SH:000300",
-        "index:SH:000016",
-        "index:SH:000688"
-      ],
+      "include_identity_keys": [],
       "exclude_identity_keys": [],
       "exclude_codes": [],
       "require_buy_target_price": false,
@@ -192,7 +176,9 @@
       "enabled": true,
       "source": "condition_pool",
       "board_types": [
-        "tdx_industry"
+        "tdx_industry",
+        "tdx_concept",
+        "tdx_region"
       ],
       "board_code_prefix": "",
       "board_code_prefixes": [],
@@ -226,22 +212,20 @@
         "hint"
       ],
       "include_condition_keys": [],
-      "min_total_mv_wan": "1000000",
+      "min_total_mv_wan": null,
       "market_value_compare": ">=",
       "require_buy_target_price": false,
       "require_sell_target_price": false,
       "require_up_sell_reference_period": false,
       "require_down_buy_reference_period": false,
       "require_clear_sell_ref_period": false,
-      "exclude_bj": true,
+      "exclude_bj": false,
       "limit": null,
       "include_codes": [],
       "exclude_codes": [],
       "max_total_mv_wan": null,
-      "allowed_monitor_types": [
-        "source_universe_preview"
-      ],
-      "require_financial_key_field": true,
+      "allowed_monitor_types": [],
+      "require_financial_key_field": false,
       "min_score": null,
       "recommendation_levels": []
     }
@@ -249,34 +233,23 @@
   "condition_pool_policy": {
     "policy_name": "default_adjusted_by_user",
     "index": {
-      "enabled": true,
+      "policy_name": "default_condition_pool_policy",
+      "policy_version": "N2-E5",
       "source": "condition_pool",
-      "include_codes": [
-        "000905",
-        "399303",
-        "000001",
-        "000852",
-        "399001",
-        "399006",
-        "000300",
-        "000016",
-        "000688"
-      ],
+      "include_all_identities": true,
+      "include_codes": [],
+      "include_identity_keys": [],
       "directions": [
         "buy",
         "sell"
       ],
-      "include_identity_keys": [
-        "index:SH:000905",
-        "index:SZ:399303",
-        "index:SH:000001",
-        "index:SH:000852",
-        "index:SZ:399001",
-        "index:SZ:399006",
-        "index:SH:000300",
-        "index:SH:000016",
-        "index:SH:000688"
+      "allowed_lanes": [
+        "market_alert"
       ],
+      "allowed_monitor_types": [
+        "source_universe_preview"
+      ],
+      "enabled": true,
       "exclude_identity_keys": [],
       "exclude_codes": [],
       "require_buy_target_price": false,
@@ -291,17 +264,27 @@
       ]
     },
     "board": {
-      "enabled": true,
+      "policy_name": "default_condition_pool_policy",
+      "policy_version": "N2-E5",
       "source": "condition_pool",
       "board_types": [
-        "tdx_industry"
+        "tdx_industry",
+        "tdx_concept",
+        "tdx_region"
       ],
       "board_code_prefix": "",
-      "board_code_prefixes": [],
       "directions": [
         "buy",
         "sell"
       ],
+      "allowed_lanes": [
+        "market_alert"
+      ],
+      "allowed_monitor_types": [
+        "source_universe_preview"
+      ],
+      "enabled": true,
+      "board_code_prefixes": [],
       "include_board_codes": [],
       "exclude_board_codes": [],
       "require_buy_target_price": false,
@@ -316,7 +299,8 @@
       ]
     },
     "stock": {
-      "enabled": true,
+      "policy_name": "default_condition_pool_policy",
+      "policy_version": "N2-E5",
       "source": "condition_pool",
       "directions": [
         "buy",
@@ -327,23 +311,31 @@
         "full",
         "hint"
       ],
-      "include_condition_keys": [],
-      "min_total_mv_wan": "1000000",
+      "min_total_mv_wan": null,
       "market_value_compare": ">=",
+      "exclude_st_or_risk_name": false,
+      "allowed_stock_statuses": [],
+      "require_official_daily_proof": false,
+      "require_financial_snapshot": false,
+      "require_financial_key_field": false,
+      "blocked_financial_quality_statuses": [],
+      "allowed_lanes": [
+        "stock_alert",
+        "stock_trade"
+      ],
+      "allowed_monitor_types": [],
+      "enabled": true,
+      "include_condition_keys": [],
       "require_buy_target_price": false,
       "require_sell_target_price": false,
       "require_up_sell_reference_period": false,
       "require_down_buy_reference_period": false,
       "require_clear_sell_ref_period": false,
-      "exclude_bj": true,
+      "exclude_bj": false,
       "limit": null,
       "include_codes": [],
       "exclude_codes": [],
       "max_total_mv_wan": null,
-      "allowed_monitor_types": [
-        "source_universe_preview"
-      ],
-      "require_financial_key_field": true,
       "min_score": null,
       "recommendation_levels": []
     }

@@ -36,7 +36,7 @@ FULL_CONDITION_KEYS = ("BUY:FULL", "SELL:FULL")
 HINT_CONDITION_KEYS = ("BUY_HINT", "SELL_HINT")
 SUPPORTED_CONDITION_GROUPS = ORDINARY_CONDITION_GROUPS + FULL_CONDITION_KEYS + HINT_CONDITION_KEYS
 DEFAULT_INDEX_POOL_CODES = ("000905", "399303", "000001", "000852", "399001", "399006", "000300", "000016", "000688")
-DEFAULT_STOCK_MIN_TOTAL_MV_WAN = Decimal("1000000")
+DEFAULT_STOCK_MIN_TOTAL_MV_WAN = Decimal("0")
 
 
 def build_condition_pool_dry_run(
@@ -175,8 +175,9 @@ def default_condition_pool_policy(domain: str) -> dict[str, Any]:
             "policy_name": "default_condition_pool_policy",
             "policy_version": "N2-E5",
             "source": "condition_pool_candidate",
-            "include_codes": list(DEFAULT_INDEX_POOL_CODES),
-            "include_identity_keys": list(DEFAULT_INDEX_POOL_IDENTITIES),
+            "include_all_identities": True,
+            "include_codes": [],
+            "include_identity_keys": [],
             "directions": ["buy", "sell"],
             "allowed_lanes": ["market_alert"],
             "allowed_monitor_types": ["source_universe_preview"],
@@ -186,7 +187,7 @@ def default_condition_pool_policy(domain: str) -> dict[str, Any]:
             "policy_name": "default_condition_pool_policy",
             "policy_version": "N2-E5",
             "source": "condition_pool_candidate",
-            "board_types": ["tdx_industry"],
+            "board_types": ["tdx_industry", "tdx_concept", "tdx_region"],
             "board_code_prefix": "",
             "directions": ["buy", "sell"],
             "allowed_lanes": ["market_alert"],
@@ -199,14 +200,14 @@ def default_condition_pool_policy(domain: str) -> dict[str, Any]:
             "source": "condition_pool_candidate",
             "directions": ["buy", "sell"],
             "include_condition_families": ["ordinary", "full", "hint"],
-            "min_total_mv_wan": str(DEFAULT_STOCK_MIN_TOTAL_MV_WAN),
+            "min_total_mv_wan": None,
             "market_value_compare": ">=",
-            "exclude_st_or_risk_name": True,
-            "allowed_stock_statuses": ["active"],
-            "require_official_daily_proof": True,
-            "require_financial_snapshot": True,
-            "require_financial_key_field": True,
-            "blocked_financial_quality_statuses": ["failed"],
+            "exclude_st_or_risk_name": False,
+            "allowed_stock_statuses": [],
+            "require_official_daily_proof": False,
+            "require_financial_snapshot": False,
+            "require_financial_key_field": False,
+            "blocked_financial_quality_statuses": [],
             "allowed_lanes": ["stock_alert", "stock_trade"],
             "allowed_monitor_types": ["source_universe_preview"],
         }
@@ -236,7 +237,11 @@ def allowed_index_identity_keys_from_policy(policy: Mapping[str, Any]) -> set[st
 
 
 def allowed_board_types_from_policy(policy: Mapping[str, Any]) -> set[str]:
-    return {str(item) for item in policy.get("board_types") or []} or {"tdx_industry"}
+    return {str(item) for item in policy.get("board_types") or []} or {
+        "tdx_industry",
+        "tdx_concept",
+        "tdx_region",
+    }
 
 
 def apply_default_condition_pool_policy(
@@ -327,11 +332,12 @@ def default_condition_pool_exclusion_reasons(
         if condition_group_for_key(str(row.get("condition_key") or "")) not in {"ordinary_buy", "ordinary_sell", "full", "hint"}:
             reasons.append("condition_family")
         total_mv = decimal_or_none(row.get("total_mv"))
-        min_total_mv = decimal_or_none(policy.get("min_total_mv_wan")) or DEFAULT_STOCK_MIN_TOTAL_MV_WAN
-        if total_mv is None:
-            reasons.append("missing_total_mv")
-        elif total_mv < min_total_mv:
-            reasons.append("min_total_mv_wan")
+        min_total_mv = decimal_or_none(policy.get("min_total_mv_wan"))
+        if min_total_mv is not None:
+            if total_mv is None:
+                reasons.append("missing_total_mv")
+            elif total_mv < min_total_mv:
+                reasons.append("min_total_mv_wan")
         if bool(policy.get("exclude_st_or_risk_name")) and is_st_or_risk_stock(row):
             reasons.append("st_or_risk_stock")
         if not field_in_allowlist(row.get("stock_status"), policy.get("allowed_stock_statuses")):
@@ -369,7 +375,10 @@ def default_condition_pool_selected_reasons(
         board_type = str(row.get("board_type") or "")
         reasons.append(f"board_type_{board_type}" if board_type else "board_type_matched")
     elif domain == "stock":
-        reasons.append("market_value_passed")
+        if decimal_or_none(policy.get("min_total_mv_wan")) is not None:
+            reasons.append("market_value_passed")
+        else:
+            reasons.append("all_stock_universe")
         if bool(policy.get("exclude_st_or_risk_name")):
             reasons.append("non_st_risk")
         if bool(policy.get("require_official_daily_proof")):
@@ -802,6 +811,7 @@ def pool_period_trigger_baseline_quality_items(pool_rows: list[Mapping[str, Any]
 def default_condition_pool_policy_quality_items(pool_preview: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     index_policy = pool_preview["index"].get("condition_pool_selection_policy") or default_condition_pool_policy("index")
     board_policy = pool_preview["board"].get("condition_pool_selection_policy") or default_condition_pool_policy("board")
+    stock_policy = pool_preview["stock"].get("condition_pool_selection_policy") or default_condition_pool_policy("stock")
     allowed_index_identities = allowed_index_identity_keys_from_policy(index_policy)
     allowed_board_types = allowed_board_types_from_policy(board_policy)
     index_outside = [
@@ -815,27 +825,30 @@ def default_condition_pool_policy_quality_items(pool_preview: Mapping[str, Mappi
         for row in pool_preview["board"].get("pool_rows") or []
         if str(row.get("board_type") or "") not in allowed_board_types
     ]
+    min_total_mv = decimal_or_none(stock_policy.get("min_total_mv_wan"))
     stock_below = [
         str(row.get("code"))
         for row in pool_preview["stock"].get("pool_rows") or []
-        if (decimal_or_none(row.get("total_mv")) is None or decimal_or_none(row.get("total_mv")) < DEFAULT_STOCK_MIN_TOTAL_MV_WAN)
+        if min_total_mv is not None
+        and (decimal_or_none(row.get("total_mv")) is None or decimal_or_none(row.get("total_mv")) < min_total_mv)
     ]
     stock_risk = [
         str(row.get("code"))
         for row in pool_preview["stock"].get("pool_rows") or []
-        if is_st_or_risk_stock(row) or str(row.get("stock_status") or "") != "active"
+        if (bool(stock_policy.get("exclude_st_or_risk_name")) and is_st_or_risk_stock(row))
+        or (stock_policy.get("allowed_stock_statuses") and not field_in_allowlist(row.get("stock_status"), stock_policy.get("allowed_stock_statuses")))
     ]
     stock_official_missing = [
         str(row.get("code"))
         for row in pool_preview["stock"].get("pool_rows") or []
-        if not normalize_bool(row.get("official_daily_proof"))
+        if bool(stock_policy.get("require_official_daily_proof")) and not normalize_bool(row.get("official_daily_proof"))
     ]
     stock_financial_missing = [
         str(row.get("code"))
         for row in pool_preview["stock"].get("pool_rows") or []
-        if row.get("financial_asof_date") in (None, "")
-        or str(row.get("financial_quality_status") or "") == "failed"
-        or (row.get("pe_core") in (None, "") and row.get("score") in (None, ""))
+        if (bool(stock_policy.get("require_financial_snapshot")) and row.get("financial_asof_date") in (None, ""))
+        or (str(row.get("financial_quality_status") or "") in set(str(item) for item in stock_policy.get("blocked_financial_quality_statuses") or []))
+        or (bool(stock_policy.get("require_financial_key_field")) and row.get("pe_core") in (None, "") and row.get("score") in (None, ""))
     ]
     stock_policy_lane_monitor = [
         str(row.get("code"))
@@ -863,32 +876,32 @@ def default_condition_pool_policy_quality_items(pool_preview: Mapping[str, Mappi
             "P0",
             "passed" if not stock_below else "failed",
             "stock_condition_pool_default_market_value",
-            "stock_condition_pool 默认只保留 total_mv >= 100 亿的合格条件",
-            expected=f"total_mv >= {DEFAULT_STOCK_MIN_TOTAL_MV_WAN}",
+            "stock_condition_pool 不得违反当前 policy 的可选市值下限",
+            expected="no_market_value_filter" if min_total_mv is None else f"total_mv >= {min_total_mv}",
             actual="passed" if not stock_below else ",".join(stock_below[:20]),
         ),
         quality_item(
             "P0",
             "passed" if not stock_risk else "failed",
             "stock_condition_pool_default_risk_filter",
-            "stock_condition_pool 默认剔除 ST/风险票和非 active 股票",
-            expected="non_st_and_active",
+            "stock_condition_pool 不得违反当前 policy 的风险和状态过滤设置",
+            expected="no_risk_or_status_filter" if not stock_policy.get("exclude_st_or_risk_name") and not stock_policy.get("allowed_stock_statuses") else "policy_matched",
             actual="passed" if not stock_risk else ",".join(stock_risk[:20]),
         ),
         quality_item(
             "P0",
             "passed" if not stock_official_missing else "failed",
             "stock_condition_pool_official_daily_required",
-            "stock_condition_pool 默认要求 official daily 证明存在",
-            expected="official_daily_proof=true",
+            "stock_condition_pool 不得违反当前 policy 的 official daily 要求",
+            expected="not_required" if not stock_policy.get("require_official_daily_proof") else "official_daily_proof=true",
             actual="passed" if not stock_official_missing else ",".join(stock_official_missing[:20]),
         ),
         quality_item(
             "P0",
             "passed" if not stock_financial_missing else "failed",
             "stock_condition_pool_financial_snapshot_required",
-            "stock_condition_pool 默认要求财务快照基础字段可用",
-            expected="financial_snapshot_and_key_fields",
+            "stock_condition_pool 不得违反当前 policy 的财务字段要求",
+            expected="not_required" if not stock_policy.get("require_financial_snapshot") and not stock_policy.get("require_financial_key_field") else "policy_matched",
             actual="passed" if not stock_financial_missing else ",".join(stock_financial_missing[:20]),
         ),
         quality_item(

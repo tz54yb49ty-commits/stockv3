@@ -170,6 +170,11 @@ def fetch_condition_run(cur: psycopg.Cursor[dict[str, Any]], run_id: str) -> dic
 def fetch_display_table_counts(cur: psycopg.Cursor[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for config in DOMAIN_CONFIGS.values():
+        cur.execute("SELECT to_regclass(%s) AS table_name", (f"public.{config.display_table}",))
+        table_row = cur.fetchone()
+        if table_row is None or table_row["table_name"] is None:
+            counts[config.display_table] = 0
+            continue
         cur.execute(f"SELECT count(*)::bigint AS count FROM {config.display_table}")
         counts[config.display_table] = int(cur.fetchone()["count"])
     return counts

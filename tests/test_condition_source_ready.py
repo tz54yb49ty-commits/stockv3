@@ -126,9 +126,12 @@ class FakeCursor:
 
     def execute(self, sql: str, params=None) -> None:
         if "to_regclass" in sql:
-            self.result = [("common_condition_active_source_version_view" if self.view_exists else None,)]
+            self.result = [(
+                "common_condition_active_source_version_view" if self.view_exists else None,
+                "common_active_source_version",
+            )]
             return
-        if "FROM common_condition_active_source_version_view" in sql:
+        if "FROM common_condition_active_source_version_view" in sql or "FROM common_active_source_version" in sql:
             self.result = self.active_rows
             return
         if "FROM common_quality_gate_result" in sql:
@@ -201,6 +204,31 @@ def active_rows_without(*missing: str) -> list[tuple]:
     return rows
 
 
+def windows_active_rows() -> list[tuple]:
+    now = datetime(2026, 8, 27, 16, 40)
+    source_data_types = {
+        "stock_daily": "stock_daily_bar_fact",
+        "stock_daily_basic": "stock_daily_basic",
+        "stock_financial": "stock_financial_metrics_fact",
+        "index_daily": "index_daily_bar_fact",
+        "index_membership": "index_membership_fact",
+        "board_daily": "board_daily_bar_fact",
+        "board_membership": "board_membership_fact",
+    }
+    return [
+        (
+            "20260526",
+            "stock" if data_type.startswith("stock") else "index" if data_type.startswith("index") else "board",
+            source_data_types[data_type],
+            "windows_n1_20260526_20260526_v1",
+            "batch",
+            now,
+            "windows_n1",
+        )
+        for data_type in REQUIRED_DATA_TYPES
+    ]
+
+
 def fact_counts(**overrides: tuple[int, int]) -> dict[str, tuple[int, int]]:
     counts = {
         "stock_daily_bar_fact": (5520, 0),
@@ -262,6 +290,23 @@ class ConditionSourceReadyRunCheckTests(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertIn("fact row_count is 0", json_failure_reasons(result))
+
+    def test_windows_n1_registry_aliases_allow_full_history_latest_k_mode(self) -> None:
+        result = self.run_with_fake_db(
+            FakeCursor(
+                active_rows=windows_active_rows(),
+                fact_counts=fact_counts(),
+                manifest_count=0,
+                view_exists=False,
+                canonical_columns_missing=["financial_metric_version"],
+            )
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["active_source_registry"], "common_active_source_version")
+        self.assertTrue(result["windows_n1_compatibility"])
+        self.assertEqual(result["stock_condition_universe"]["mode"], "full_history_latest_k")
+        self.assertEqual(result["excluded_from_condition_universe"], 0)
 
 
 def json_failure_reasons(result: dict) -> list[str]:

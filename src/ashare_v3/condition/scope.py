@@ -57,7 +57,7 @@ ORDINARY_PERIODS = frozenset({"Y", "Q", "M", "W", "D"})
 REQUIRED_SCOPE_DATA_TYPES = ("stock_daily", "index_daily", "board_daily")
 MINUTE_SIGNAL_TYPES = frozenset({"BUY", "SELL", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"})
 RUNTIME_MONITOR_MINUTE_SCOPE_POLICY = "condition_pool_runtime_monitor_requires_minute"
-STOCK_SCOPE_MIN_TOTAL_MV_WAN = Decimal("1000000")
+STOCK_SCOPE_MIN_TOTAL_MV_WAN = Decimal("0")
 
 
 def build_minute_target_scope_dry_run(
@@ -340,7 +340,7 @@ def fetch_stock_condition_scope(
             "object_count": 0,
             "scope_row_count": 0,
             **scope_row_diagnostics([], dates.prev_trade_date),
-            "min_total_mv_wan": str(STOCK_SCOPE_MIN_TOTAL_MV_WAN),
+            "min_total_mv_wan": None,
             "excluded_below_min_total_mv_count": 0,
             "missing_total_mv_count": 0,
             "eligible_condition_keys": ["BUY:*", "SELL:*", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"],
@@ -391,11 +391,7 @@ def fetch_stock_condition_scope(
         for row in cur.fetchall()
         if is_stock_condition_key_scope_eligible(str(row.get("condition_key") or ""))
     ]
-    pool_rows = [
-        row
-        for row in eligible_condition_rows
-        if stock_total_mv_is_scope_eligible(row.get("total_mv"))
-    ]
+    pool_rows = eligible_condition_rows
     scope_rows = [make_stock_scope_row(row, dates) for row in pool_rows]
     object_keys = {row["stock_identity_key"] for row in pool_rows}
     diagnostics = scope_row_diagnostics(scope_rows, dates.prev_trade_date)
@@ -407,12 +403,8 @@ def fetch_stock_condition_scope(
         "object_count": len(object_keys),
         "scope_row_count": len(scope_rows),
         **diagnostics,
-        "min_total_mv_wan": str(STOCK_SCOPE_MIN_TOTAL_MV_WAN),
-        "excluded_below_min_total_mv_count": sum(
-            1
-            for row in eligible_condition_rows
-            if row.get("total_mv") not in (None, "") and not stock_total_mv_is_scope_eligible(row.get("total_mv"))
-        ),
+        "min_total_mv_wan": None,
+        "excluded_below_min_total_mv_count": 0,
         "missing_total_mv_count": sum(1 for row in eligible_condition_rows if row.get("total_mv") in (None, "")),
         "eligible_condition_keys": ["BUY:*", "SELL:*", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"],
         "scope_rows": scope_rows,
@@ -518,7 +510,6 @@ def build_stock_condition_scope_from_pool_report(
     pool_rows = [
         {**row, "run_id": condition_pool_report.get("run_id")}
         for row in eligible_condition_rows
-        if stock_total_mv_is_scope_eligible(row.get("total_mv"))
     ]
     scope_rows = [make_stock_scope_row(row, dates) for row in pool_rows]
     object_keys = {
@@ -542,12 +533,8 @@ def build_stock_condition_scope_from_pool_report(
         "object_count": len(object_keys),
         "scope_row_count": len(scope_rows),
         **diagnostics,
-        "min_total_mv_wan": str(STOCK_SCOPE_MIN_TOTAL_MV_WAN),
-        "excluded_below_min_total_mv_count": sum(
-            1
-            for row in eligible_condition_rows
-            if row.get("total_mv") not in (None, "") and not stock_total_mv_is_scope_eligible(row.get("total_mv"))
-        ),
+        "min_total_mv_wan": None,
+        "excluded_below_min_total_mv_count": 0,
         "missing_total_mv_count": sum(1 for row in eligible_condition_rows if row.get("total_mv") in (None, "")),
         "eligible_condition_keys": ["BUY:*", "SELL:*", "BUY:FULL", "SELL:FULL", "BUY_HINT", "SELL_HINT"],
         "scope_rows": scope_rows,
@@ -822,12 +809,7 @@ def is_stock_condition_key_scope_eligible(condition_key: str) -> bool:
 
 
 def stock_total_mv_is_scope_eligible(total_mv: Any) -> bool:
-    if total_mv in (None, ""):
-        return False
-    try:
-        return Decimal(str(total_mv)) >= STOCK_SCOPE_MIN_TOTAL_MV_WAN
-    except (InvalidOperation, ValueError):
-        return False
+    return True
 
 
 def ordinary_period_key_is_valid(period_key: str) -> bool:
@@ -1061,7 +1043,7 @@ def build_scope_quality_items(
                 "P1",
                 "warning",
                 "stock_condition_pool_missing",
-                "stock_minute_target_scope 个股范围必须来自 stock_condition_pool，并过滤 total_mv >= 100 亿；当前 schema 未迁移或表不存在",
+                "stock_minute_target_scope 个股范围必须来自 stock_condition_pool；当前 schema 未迁移或表不存在",
                 expected="stock_condition_pool",
                 actual="missing",
             )
@@ -1077,19 +1059,14 @@ def build_scope_quality_items(
                 actual="0",
             )
         )
-    invalid_stock_market_value_rows = [
-        str(row.get("identity_key"))
-        for row in stock_scope.get("scope_rows") or []
-        if not stock_total_mv_is_scope_eligible(row.get("total_mv"))
-    ]
     items.append(
         quality_item(
             "P0",
-            "passed" if not invalid_stock_market_value_rows else "failed",
-            "stock_scope_total_mv_threshold",
-            "stock_minute_target_scope 个股必须满足 total_mv >= 100 亿",
-            expected=f">={STOCK_SCOPE_MIN_TOTAL_MV_WAN}",
-            actual="passed" if not invalid_stock_market_value_rows else ",".join(invalid_stock_market_value_rows[:20]),
+            "passed",
+            "stock_scope_full_universe_policy",
+            "stock_minute_target_scope 继承 condition_pool，不增加市值或对象过滤",
+            expected="no_additional_object_filter",
+            actual="passed",
         )
     )
     if stock_scope.get("condition_pool_exists") and int(stock_scope.get("missing_total_mv_count") or 0) > 0:
@@ -1098,8 +1075,8 @@ def build_scope_quality_items(
                 "P1",
                 "warning",
                 "stock_scope_total_mv_missing",
-                "部分具备条件池资格的个股缺少 total_mv，已排除出 stock_minute_target_scope",
-                expected="total_mv >= 100亿",
+                "部分具备条件池资格的个股缺少 total_mv；全对象策略仍保留其可计算条件",
+                expected="informational_only",
                 actual=str(stock_scope.get("missing_total_mv_count")),
             )
         )

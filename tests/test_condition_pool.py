@@ -298,9 +298,9 @@ class ConditionPoolTest(unittest.TestCase):
         self.assertEqual(preview["stock"]["policy_selected_count"], 6)
         self.assertIn("condition_pool_selection_policy_hash", preview["stock"])
         self.assertEqual(preview["stock"]["pool_rows"][0]["policy_name"], "default_condition_pool_policy")
-        self.assertIn("market_value_passed", preview["stock"]["pool_rows"][0]["selected_reason"])
+        self.assertIn("all_stock_universe", preview["stock"]["pool_rows"][0]["selected_reason"])
 
-    def test_default_pool_policy_filters_index_board_and_stock_universe(self) -> None:
+    def test_default_pool_policy_keeps_all_index_board_and_stock_objects(self) -> None:
         low_mv_stock = {**stock_basis_row(), "stock_identity_key": "stock:SH:600001", "code": "600001", "total_mv": "999999.99"}
         basis_report = {
             "basis_preview": {
@@ -317,18 +317,18 @@ class ConditionPoolTest(unittest.TestCase):
 
         preview = build_condition_pool_preview_from_basis_report(basis_report)
 
-        self.assertEqual(str(DEFAULT_STOCK_MIN_TOTAL_MV_WAN), "1000000")
+        self.assertEqual(str(DEFAULT_STOCK_MIN_TOTAL_MV_WAN), "0")
         self.assertIn("000905", DEFAULT_INDEX_POOL_CODES)
         self.assertIn("index:SH:000905", DEFAULT_INDEX_POOL_IDENTITIES)
         self.assertEqual(preview["stock"]["candidate_pool_row_count"], 12)
-        self.assertEqual(preview["stock"]["pool_row_count"], 6)
-        self.assertEqual(preview["stock"]["policy_excluded_reason_counts"], {"min_total_mv_wan": 6})
+        self.assertEqual(preview["stock"]["pool_row_count"], 12)
+        self.assertEqual(preview["stock"]["policy_excluded_reason_counts"], {})
         self.assertEqual(preview["index"]["candidate_pool_row_count"], 12)
-        self.assertEqual(preview["index"]["pool_row_count"], 6)
-        self.assertEqual(preview["index"]["policy_excluded_reason_counts"], {"index_identity_not_in_default_universe": 6})
+        self.assertEqual(preview["index"]["pool_row_count"], 12)
+        self.assertEqual(preview["index"]["policy_excluded_reason_counts"], {})
         self.assertEqual(preview["board"]["candidate_pool_row_count"], 12)
-        self.assertEqual(preview["board"]["pool_row_count"], 6)
-        self.assertEqual(preview["board"]["policy_excluded_reason_counts"], {"board_type": 6})
+        self.assertEqual(preview["board"]["pool_row_count"], 12)
+        self.assertEqual(preview["board"]["policy_excluded_reason_counts"], {})
 
     def test_custom_pool_policy_can_include_concept_and_region_board_types(self) -> None:
         basis_report = {
@@ -360,7 +360,7 @@ class ConditionPoolTest(unittest.TestCase):
         self.assertEqual(by_code["board_condition_pool_default_universe"]["status"], "passed")
         self.assertIn("tdx_concept", by_code["board_condition_pool_default_universe"]["expected_value"])
 
-    def test_default_pool_policy_filters_stock_risk_and_data_completeness(self) -> None:
+    def test_default_pool_policy_keeps_stock_risk_and_incomplete_optional_data(self) -> None:
         st_stock = {**stock_basis_row(), "stock_identity_key": "stock:SH:600010", "code": "600010", "is_st": True}
         no_daily = {**stock_basis_row(), "stock_identity_key": "stock:SH:600011", "code": "600011", "official_daily_proof": False}
         no_financial = {
@@ -380,11 +380,7 @@ class ConditionPoolTest(unittest.TestCase):
 
         result = apply_default_condition_pool_policy("stock", rows)
 
-        self.assertEqual(result["selected_count"], 0)
-        self.assertEqual(result["excluded_reason_counts"]["st_or_risk_stock"], 6)
-        self.assertEqual(result["excluded_reason_counts"]["official_daily_missing"], 6)
-        self.assertEqual(result["excluded_reason_counts"]["financial_snapshot_missing"], 6)
-        self.assertEqual(result["excluded_reason_counts"]["financial_key_fields_missing"], 6)
+        self.assertEqual(result["selected_count"], 18)
         self.assertEqual(result["excluded_reason_counts"]["lane"], 6)
         self.assertEqual(result["excluded_samples"][0]["policy_name"], "default_condition_pool_policy")
         self.assertIn("policy_hash", result["excluded_samples"][0])
@@ -395,13 +391,13 @@ class ConditionPoolTest(unittest.TestCase):
 
         self.assertEqual(condition_pool_policy_hash(left), condition_pool_policy_hash(right))
 
-    def test_apply_default_condition_pool_policy_reports_missing_total_mv(self) -> None:
+    def test_apply_default_condition_pool_policy_keeps_missing_total_mv(self) -> None:
         rows = build_pool_rows_for_basis("stock", {**stock_basis_row(), "total_mv": None})
 
         result = apply_default_condition_pool_policy("stock", rows)
 
-        self.assertEqual(result["selected_count"], 0)
-        self.assertEqual(result["excluded_reason_counts"], {"missing_total_mv": 6})
+        self.assertEqual(result["selected_count"], 6)
+        self.assertEqual(result["excluded_reason_counts"], {})
 
     def test_calendar_detail_reports_ingestion_layer_repair_owner(self) -> None:
         detail = calendar_detail_from_basis_report(

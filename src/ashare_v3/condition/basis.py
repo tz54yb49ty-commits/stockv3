@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -471,40 +472,9 @@ def fetch_stock_basis_preview(
     stock_financial_version = str(active_versions["stock_financial"]["active_source_version"])
     cur.execute(
         """
-        SELECT count(*)::bigint AS row_count,
-               count(*) FILTER (WHERE d.stock_identity_key IS NULL OR d.stock_identity_key = '')::bigint AS missing_identity_key_count,
-               count(*) FILTER (WHERE d.code ~ '^88[0-9]{4}$')::bigint AS board_code_violation_count,
-               count(b.stock_identity_key)::bigint AS daily_basic_join_count,
-               count(f.stock_identity_key)::bigint AS financial_join_count,
-               count(*) FILTER (WHERE b.total_mv IS NULL)::bigint AS missing_total_mv_count,
-               count(*) FILTER (WHERE b.total_mv > %s)::bigint AS total_mv_over_100yi_count,
-               count(*) FILTER (WHERE d.official_daily_proof = false)::bigint AS official_daily_unproved_count
-        FROM stock_daily_bar_fact d
-        JOIN stock_daily_basic b
-          ON b.stock_identity_key = d.stock_identity_key
-         AND b.trade_date = d.trade_date
-         AND b.source_version = %s
-        JOIN stock_financial_metrics_fact f
-          ON f.stock_identity_key = d.stock_identity_key
-         AND f.source_trade_date = d.trade_date
-         AND f.source_version = %s
-        WHERE d.trade_date = %s
-          AND d.source_version = %s
-        """,
-        (STOCK_SCOPE_MIN_TOTAL_MV_WAN, stock_basic_version, stock_financial_version, dates.source_trade_date, stock_daily_version),
-    )
-    metrics = normalize_mapping(cur.fetchone())
-    period_contexts = fetch_period_contexts(
-        cur,
-        table_name="stock_daily_bar_fact",
-        identity_column="stock_identity_key",
-        source_trade_date=dates.source_trade_date,
-        source_prev_trade_date=dates.source_prev_trade_date,
-        current_source_version=stock_daily_version,
-    )
-    cur.execute(
-        """
         SELECT d.stock_identity_key,
+               d.trade_date AS basis_trade_date,
+               COALESCE(cal.prev_trade_date, d.trade_date) AS basis_prev_trade_date,
                d.code,
                d.exchange,
                d.ts_code,
@@ -518,6 +488,7 @@ def fetch_stock_basis_preview(
                d.close,
                d.volume,
                d.amount,
+               b.source_version AS daily_basic_source_version,
                b.turnover_rate,
                b.pe_ttm,
                b.pb,
@@ -525,49 +496,108 @@ def fetch_stock_basis_preview(
                b.circ_mv,
                f.pe_core,
                f.score,
-               f.cash_realization_rate,
-               f.revenue_yoy_pct,
-               f.core_profit_yoy_pct,
-               f.report_core_revenue,
-               f.report_core_profit,
-               f.core_profit_ttm,
-               f.core_gt_revenue_yoy,
-               f.revenue_growth_streak_q,
-               f.core_growth_streak_q,
-               f.core_gt_revenue_streak_q,
-               f.forecast_type,
-               f.forecast_score,
-               f.score_breakdown_json,
-               f.financial_warning_json,
-               f.financial_metric_version,
+               to_jsonb(f)->>'cash_realization_rate' AS cash_realization_rate,
+               COALESCE(to_jsonb(f)->>'revenue_yoy_pct', to_jsonb(f)->>'revenue_yoy') AS revenue_yoy_pct,
+               COALESCE(to_jsonb(f)->>'core_profit_yoy_pct', to_jsonb(f)->>'profit_yoy') AS core_profit_yoy_pct,
+               COALESCE(to_jsonb(f)->>'report_core_revenue', to_jsonb(f)->>'total_revenue') AS report_core_revenue,
+               COALESCE(to_jsonb(f)->>'report_core_profit', to_jsonb(f)->>'net_profit') AS report_core_profit,
+               to_jsonb(f)->>'core_profit_ttm' AS core_profit_ttm,
+               to_jsonb(f)->>'core_gt_revenue_yoy' AS core_gt_revenue_yoy,
+               to_jsonb(f)->>'revenue_growth_streak_q' AS revenue_growth_streak_q,
+               to_jsonb(f)->>'core_growth_streak_q' AS core_growth_streak_q,
+               to_jsonb(f)->>'core_gt_revenue_streak_q' AS core_gt_revenue_streak_q,
+               to_jsonb(f)->>'forecast_type' AS forecast_type,
+               to_jsonb(f)->>'forecast_score' AS forecast_score,
+               to_jsonb(f)->'score_breakdown_json' AS score_breakdown_json,
+               to_jsonb(f)->'financial_warning_json' AS financial_warning_json,
+               to_jsonb(f)->>'financial_metric_version' AS financial_metric_version,
                f.asof_date AS financial_asof_date,
                f.quality_status AS financial_quality_status,
                f.source_version AS financial_source_version,
                d.source_version
-        FROM stock_daily_bar_fact d
-        LEFT JOIN stock_identity si
-          ON si.stock_identity_key = d.stock_identity_key
-        JOIN stock_daily_basic b
-          ON b.stock_identity_key = d.stock_identity_key
-         AND b.trade_date = d.trade_date
-         AND b.source_version = %s
-        JOIN stock_financial_metrics_fact f
-          ON f.stock_identity_key = d.stock_identity_key
-         AND f.source_trade_date = d.trade_date
-         AND f.source_version = %s
-        WHERE d.trade_date = %s
-          AND d.source_version = %s
+        FROM stock_identity si
+        JOIN LATERAL (
+          SELECT candidate.*
+          FROM stock_daily_bar_fact candidate
+          WHERE candidate.stock_identity_key = si.stock_identity_key
+            AND candidate.trade_date <= %s
+          ORDER BY candidate.trade_date DESC,
+                   (candidate.source_version = %s) DESC,
+                   candidate.updated_at DESC NULLS LAST,
+                   candidate.created_at DESC NULLS LAST,
+                   candidate.source_version DESC
+          LIMIT 1
+        ) d ON true
+        LEFT JOIN common_trade_calendar cal
+          ON cal.trade_date = d.trade_date
+         AND cal.is_open = true
+        LEFT JOIN LATERAL (
+          SELECT candidate.*
+          FROM stock_daily_basic candidate
+          WHERE candidate.stock_identity_key = d.stock_identity_key
+            AND candidate.trade_date <= d.trade_date
+          ORDER BY candidate.trade_date DESC,
+                   (candidate.source_version = %s) DESC,
+                   candidate.updated_at DESC NULLS LAST,
+                   candidate.created_at DESC NULLS LAST,
+                   candidate.source_version DESC
+          LIMIT 1
+        ) b ON true
+        LEFT JOIN LATERAL (
+          SELECT candidate.*
+          FROM stock_financial_metrics_fact candidate
+          WHERE candidate.stock_identity_key = d.stock_identity_key
+            AND candidate.source_trade_date <= %s
+          ORDER BY candidate.source_trade_date DESC,
+                   candidate.asof_date DESC NULLS LAST,
+                   (candidate.source_version = %s) DESC,
+                   candidate.updated_at DESC NULLS LAST,
+                   candidate.created_at DESC NULLS LAST,
+                   candidate.source_version DESC
+          LIMIT 1
+        ) f ON true
         ORDER BY d.stock_identity_key
         """,
-        (stock_basic_version, stock_financial_version, dates.source_trade_date, stock_daily_version),
+        (
+            dates.source_trade_date,
+            stock_daily_version,
+            stock_basic_version,
+            dates.source_trade_date,
+            stock_financial_version,
+        ),
+    )
+    rows = [normalize_mapping(row) for row in cur.fetchall()]
+    period_contexts = fetch_grouped_period_contexts(
+        cur,
+        table_name="stock_daily_bar_fact",
+        identity_column="stock_identity_key",
+        rows=rows,
     )
     samples = [
         make_stock_sample_basis(row, dates, period_contexts.get(str(row.get("stock_identity_key") or ""), {}))
-        for row in cur.fetchall()
+        for row in rows
     ]
+    metrics = latest_basis_metrics(rows, identity_column="stock_identity_key")
+    metrics.update(
+        {
+            "board_code_violation_count": sum(1 for row in rows if str(row.get("code") or "").startswith("88")),
+            "daily_basic_join_count": sum(1 for row in rows if row.get("daily_basic_source_version")),
+            "financial_join_count": sum(1 for row in rows if row.get("financial_source_version")),
+            "missing_total_mv_count": sum(1 for row in rows if row.get("total_mv") in (None, "")),
+            "total_mv_over_100yi_count": sum(
+                1
+                for row in rows
+                if decimal_or_none(row.get("total_mv")) is not None
+                and decimal_or_none(row.get("total_mv")) > STOCK_SCOPE_MIN_TOTAL_MV_WAN
+            ),
+            "official_daily_unproved_count": sum(1 for row in rows if row.get("official_daily_proof") is False),
+        }
+    )
     summary = summarize_basis_rows(samples)
     return {
         **metrics,
+        "basis_selection_policy": "latest_daily_on_or_before_source_trade_date",
+        "stale_basis_count": sum(1 for row in rows if row.get("basis_trade_date") != dates.source_trade_date),
         "source_version": stock_daily_version,
         "daily_basic_source_version": stock_basic_version,
         "financial_source_version": stock_financial_version,
@@ -585,36 +615,42 @@ def fetch_index_basis_preview(
     source_version = str(active_versions["index_daily"]["active_source_version"])
     cur.execute(
         """
-        SELECT count(*)::bigint AS row_count,
-               count(*) FILTER (WHERE index_identity_key IS NULL OR index_identity_key = '')::bigint AS missing_identity_key_count
-        FROM index_daily_bar_fact
-        WHERE trade_date = %s
-          AND source_version = %s
+        SELECT d.index_identity_key,
+               d.trade_date AS basis_trade_date,
+               COALESCE(cal.prev_trade_date, d.trade_date) AS basis_prev_trade_date,
+               d.code, d.exchange, d.name,
+               d.open, d.high, d.low, d.close, d.volume, d.amount, d.source_version
+        FROM index_identity i
+        JOIN LATERAL (
+          SELECT candidate.*
+          FROM index_daily_bar_fact candidate
+          WHERE candidate.index_identity_key = i.index_identity_key
+            AND candidate.trade_date <= %s
+          ORDER BY candidate.trade_date DESC,
+                   (candidate.source_version = %s) DESC,
+                   candidate.updated_at DESC NULLS LAST,
+                   candidate.created_at DESC NULLS LAST,
+                   candidate.source_version DESC
+          LIMIT 1
+        ) d ON true
+        LEFT JOIN common_trade_calendar cal
+          ON cal.trade_date = d.trade_date
+         AND cal.is_open = true
+        ORDER BY d.index_identity_key
         """,
         (dates.source_trade_date, source_version),
     )
-    metrics = normalize_mapping(cur.fetchone())
-    period_contexts = fetch_period_contexts(
+    rows = [normalize_mapping(row) for row in cur.fetchall()]
+    metrics = latest_basis_metrics(rows, identity_column="index_identity_key")
+    period_contexts = fetch_grouped_period_contexts(
         cur,
         table_name="index_daily_bar_fact",
         identity_column="index_identity_key",
-        source_trade_date=dates.source_trade_date,
-        source_prev_trade_date=dates.source_prev_trade_date,
-        current_source_version=source_version,
-    )
-    cur.execute(
-        """
-        SELECT index_identity_key, code, exchange, name, open, high, low, close, volume, amount, source_version
-        FROM index_daily_bar_fact
-        WHERE trade_date = %s
-          AND source_version = %s
-        ORDER BY index_identity_key
-        """,
-        (dates.source_trade_date, source_version),
+        rows=rows,
     )
     samples = [
         make_index_sample_basis(row, dates, period_contexts.get(str(row.get("index_identity_key") or ""), {}))
-        for row in cur.fetchall()
+        for row in rows
     ]
     summary = summarize_basis_rows(samples)
     fixed_index_identity_keys = {str(row.get("index_identity_key") or "") for row in samples}
@@ -636,6 +672,8 @@ def fetch_index_basis_preview(
     ]
     return {
         **metrics,
+        "basis_selection_policy": "latest_daily_on_or_before_source_trade_date",
+        "stale_basis_count": sum(1 for row in rows if row.get("basis_trade_date") != dates.source_trade_date),
         "source_version": source_version,
         "fixed_default_index_identity_keys": list(DEFAULT_INDEX_POOL_IDENTITIES),
         "fixed_default_index_present_basis": [
@@ -661,45 +699,142 @@ def fetch_board_basis_preview(
     source_version = str(active_versions["board_daily"]["active_source_version"])
     cur.execute(
         """
-        SELECT count(*)::bigint AS row_count,
-               count(*) FILTER (WHERE board_identity_key IS NULL OR board_identity_key = '')::bigint AS missing_identity_key_count,
-               count(*) FILTER (WHERE board_code !~ '^88[0-9]{4}$')::bigint AS non_board_code_count
-        FROM board_daily_bar_fact
-        WHERE trade_date = %s
-          AND source_version = %s
+        SELECT d.board_identity_key,
+               d.trade_date AS basis_trade_date,
+               COALESCE(cal.prev_trade_date, d.trade_date) AS basis_prev_trade_date,
+               d.board_code,
+               d.board_name,
+               d.board_type,
+               d.open, d.high, d.low, d.close, d.volume, d.amount, d.source_version
+        FROM board_identity i
+        JOIN LATERAL (
+          SELECT candidate.*
+          FROM board_daily_bar_fact candidate
+          WHERE candidate.board_identity_key = i.board_identity_key
+            AND candidate.trade_date <= %s
+          ORDER BY candidate.trade_date DESC,
+                   (candidate.source_version = %s) DESC,
+                   candidate.updated_at DESC NULLS LAST,
+                   candidate.created_at DESC NULLS LAST,
+                   candidate.source_version DESC
+          LIMIT 1
+        ) d ON true
+        LEFT JOIN common_trade_calendar cal
+          ON cal.trade_date = d.trade_date
+         AND cal.is_open = true
+        ORDER BY d.board_identity_key
         """,
         (dates.source_trade_date, source_version),
     )
-    metrics = normalize_mapping(cur.fetchone())
-    period_contexts = fetch_period_contexts(
+    rows = [normalize_mapping(row) for row in cur.fetchall()]
+    metrics = latest_basis_metrics(rows, identity_column="board_identity_key")
+    metrics["non_board_code_count"] = sum(
+        1
+        for row in rows
+        if not (
+            len(str(row.get("board_code") or "")) == 6
+            and str(row.get("board_code") or "").startswith("88")
+            and str(row.get("board_code") or "").isdigit()
+        )
+    )
+    period_contexts = fetch_grouped_period_contexts(
         cur,
         table_name="board_daily_bar_fact",
         identity_column="board_identity_key",
-        source_trade_date=dates.source_trade_date,
-        source_prev_trade_date=dates.source_prev_trade_date,
-        current_source_version=source_version,
-    )
-    cur.execute(
-        """
-        SELECT board_identity_key, board_code, board_name, board_type, open, high, low, close, volume, amount, source_version
-        FROM board_daily_bar_fact
-        WHERE trade_date = %s
-          AND source_version = %s
-        ORDER BY board_identity_key
-        """,
-        (dates.source_trade_date, source_version),
+        rows=rows,
     )
     samples = [
         make_board_sample_basis(row, dates, period_contexts.get(str(row.get("board_identity_key") or ""), {}))
-        for row in cur.fetchall()
+        for row in rows
     ]
     summary = summarize_basis_rows(samples)
     return {
         **metrics,
+        "basis_selection_policy": "latest_daily_on_or_before_source_trade_date",
+        "stale_basis_count": sum(1 for row in rows if row.get("basis_trade_date") != dates.source_trade_date),
         "source_version": source_version,
         **summary,
         "basis_rows": samples,
         "sample_basis_rows": samples[:3],
+    }
+
+
+def latest_basis_metrics(
+    rows: list[Mapping[str, Any]],
+    *,
+    identity_column: str,
+) -> dict[str, Any]:
+    return {
+        "row_count": len(rows),
+        "missing_identity_key_count": sum(
+            1 for row in rows if row.get(identity_column) in (None, "")
+        ),
+    }
+
+
+def fetch_grouped_period_contexts(
+    cur: psycopg.Cursor[dict[str, Any]],
+    *,
+    table_name: str,
+    identity_column: str,
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for row in rows:
+        identity_key = str(row.get(identity_column) or "")
+        basis_trade_date = str(row.get("basis_trade_date") or "")
+        basis_prev_trade_date = str(row.get("basis_prev_trade_date") or basis_trade_date)
+        source_version = str(row.get("source_version") or "")
+        if identity_key and basis_trade_date and basis_prev_trade_date and source_version:
+            grouped[(basis_trade_date, basis_prev_trade_date, source_version)].append(identity_key)
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for (basis_trade_date, basis_prev_trade_date, source_version), identity_keys in sorted(grouped.items()):
+        contexts.update(
+            fetch_period_contexts(
+                cur,
+                table_name=table_name,
+                identity_column=identity_column,
+                source_trade_date=basis_trade_date,
+                source_prev_trade_date=basis_prev_trade_date,
+                current_source_version=source_version,
+                identity_keys=identity_keys,
+            )
+        )
+    return contexts
+
+
+def basis_calculation_dates(row: Mapping[str, Any], dates: DateContext) -> DateContext:
+    basis_trade_date = require_yyyymmdd(
+        str(row.get("basis_trade_date") or dates.source_trade_date),
+        "basis_trade_date",
+    )
+    basis_prev_trade_date = require_yyyymmdd(
+        str(row.get("basis_prev_trade_date") or basis_trade_date),
+        "basis_prev_trade_date",
+    )
+    return DateContext(
+        source_trade_date=basis_trade_date,
+        source_prev_trade_date=basis_prev_trade_date,
+        for_trade_date=dates.for_trade_date,
+        prev_trade_date=dates.prev_trade_date,
+        for_trade_calendar_row_exists=dates.for_trade_calendar_row_exists,
+    )
+
+
+def basis_date_trace(row: Mapping[str, Any], dates: DateContext) -> dict[str, Any]:
+    basis_trade_date = str(row.get("basis_trade_date") or dates.source_trade_date)
+    try:
+        stale_calendar_days = (
+            parse_yyyymmdd(dates.source_trade_date) - parse_yyyymmdd(basis_trade_date)
+        ).days
+    except (TypeError, ValueError):
+        stale_calendar_days = None
+    return {
+        "basis_trade_date": basis_trade_date,
+        "basis_source_version": row.get("source_version"),
+        "stale_calendar_days": stale_calendar_days,
+        "is_stale_basis": basis_trade_date != dates.source_trade_date,
     }
 
 
@@ -708,6 +843,11 @@ def fetch_period_escalation_previous_context_run(
     dates: DateContext,
 ) -> dict[str, Any] | None:
     """Resolve exactly zero or one eligible immediate predecessor run."""
+
+    cur.execute("SELECT to_regclass('public.common_condition_run') AS relation")
+    relation = cur.fetchone()
+    if not relation or relation.get("relation") is None:
+        return None
 
     cur.execute(
         """
@@ -1428,7 +1568,8 @@ def fetch_membership_summary(
 
 
 def make_stock_sample_basis(row: Mapping[str, Any], dates: DateContext, period_context: Mapping[str, Any]) -> dict[str, Any]:
-    condition_fields = computed_condition_fields(period_context, dates)
+    calculation_dates = basis_calculation_dates(row, dates)
+    condition_fields = computed_condition_fields(period_context, calculation_dates)
     amount_baseline_complete = bool(condition_fields.pop("amount_baseline_complete"))
     condition_calculation_version = str(condition_fields.pop("condition_calculation_version"))
     static_complete = static_structure_complete(condition_fields)
@@ -1478,6 +1619,7 @@ def make_stock_sample_basis(row: Mapping[str, Any], dates: DateContext, period_c
             **normalize_mapping(row),
             "source_prev_trade_date": dates.source_prev_trade_date,
             "condition_calculation_version": condition_calculation_version,
+            **basis_date_trace(row, dates),
         },
     }
     basis.update(stock_financial_pass_through_fields(row))
@@ -1490,7 +1632,8 @@ def stock_financial_pass_through_fields(row: Mapping[str, Any]) -> dict[str, Any
 
 
 def make_index_sample_basis(row: Mapping[str, Any], dates: DateContext, period_context: Mapping[str, Any]) -> dict[str, Any]:
-    condition_fields = computed_condition_fields(period_context, dates)
+    calculation_dates = basis_calculation_dates(row, dates)
+    condition_fields = computed_condition_fields(period_context, calculation_dates)
     amount_baseline_complete = bool(condition_fields.pop("amount_baseline_complete"))
     condition_calculation_version = str(condition_fields.pop("condition_calculation_version"))
     static_complete = static_structure_complete(condition_fields)
@@ -1524,6 +1667,7 @@ def make_index_sample_basis(row: Mapping[str, Any], dates: DateContext, period_c
             **normalize_mapping(row),
             "source_prev_trade_date": dates.source_prev_trade_date,
             "condition_calculation_version": condition_calculation_version,
+            **basis_date_trace(row, dates),
         },
     }
     basis.update(condition_fields)
@@ -1531,7 +1675,8 @@ def make_index_sample_basis(row: Mapping[str, Any], dates: DateContext, period_c
 
 
 def make_board_sample_basis(row: Mapping[str, Any], dates: DateContext, period_context: Mapping[str, Any]) -> dict[str, Any]:
-    condition_fields = computed_condition_fields(period_context, dates)
+    calculation_dates = basis_calculation_dates(row, dates)
+    condition_fields = computed_condition_fields(period_context, calculation_dates)
     amount_baseline_complete = bool(condition_fields.pop("amount_baseline_complete"))
     condition_calculation_version = str(condition_fields.pop("condition_calculation_version"))
     static_complete = static_structure_complete(condition_fields)
@@ -1564,6 +1709,7 @@ def make_board_sample_basis(row: Mapping[str, Any], dates: DateContext, period_c
             **normalize_mapping(row),
             "source_prev_trade_date": dates.source_prev_trade_date,
             "condition_calculation_version": condition_calculation_version,
+            **basis_date_trace(row, dates),
         },
     }
     basis.update(condition_fields)
@@ -1578,12 +1724,18 @@ def fetch_period_contexts(
     source_trade_date: str,
     source_prev_trade_date: str,
     current_source_version: str,
+    identity_keys: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if table_name not in {"stock_daily_bar_fact", "index_daily_bar_fact", "board_daily_bar_fact"}:
         raise ValueError(f"unsupported period fact table: {table_name}")
     if identity_column not in {"stock_identity_key", "index_identity_key", "board_identity_key"}:
         raise ValueError(f"unsupported period identity column: {identity_column}")
 
+    selected_identity_keys = sorted({str(item) for item in identity_keys or [] if str(item)})
+    identity_filter = bool(selected_identity_keys)
+    current_adj_identity_sql = f" AND {identity_column} = ANY(%s)" if identity_filter else ""
+    fact_identity_sql = f" AND f.{identity_column} = ANY(%s)" if identity_filter else ""
+    plain_identity_sql = f" AND {identity_column} = ANY(%s)" if identity_filter else ""
     ranges = period_ranges(source_trade_date, source_prev_trade_date)
     min_start = min(item["start_date"] for item in ranges)
     values_sql = ", ".join(["(%s, %s, %s, %s)"] * len(ranges))
@@ -1592,7 +1744,12 @@ def fetch_period_contexts(
     for item in ranges:
         params.extend([item["period"], item["slot"], item["start_date"], item["end_date"]])
     if is_stock:
-        params.extend([source_trade_date, current_source_version, min_start, source_trade_date, source_trade_date, current_source_version])
+        params.extend([source_trade_date, current_source_version])
+        if identity_filter:
+            params.append(selected_identity_keys)
+        params.extend([min_start, source_trade_date, source_trade_date, current_source_version])
+        if identity_filter:
+            params.append(selected_identity_keys)
         cur.execute(
             f"""
             WITH period_ranges(period, slot, start_date, end_date) AS (
@@ -1604,6 +1761,7 @@ def fetch_period_contexts(
               FROM {table_name}
               WHERE trade_date = %s
                 AND source_version = %s
+                {current_adj_identity_sql}
             ),
             facts AS (
               SELECT f.{identity_column} AS identity_key,
@@ -1612,20 +1770,41 @@ def fetch_period_contexts(
                      f.high AS raw_high,
                      f.low AS raw_low,
                      f.close AS raw_close,
-                     f.open * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS open,
-                     f.high * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS high,
-                     f.low * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS low,
-                     f.close * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS close,
+                     CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                    OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                          THEN f.open
+                          ELSE f.open * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                     END AS open,
+                     CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                    OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                          THEN f.high
+                          ELSE f.high * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                     END AS high,
+                     CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                    OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                          THEN f.low
+                          ELSE f.low * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                     END AS low,
+                     CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                    OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                          THEN f.close
+                          ELSE f.close * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                     END AS close,
                      f.amount,
                      f.adj_factor,
                      ca.current_adj_factor,
-                     'ROW_ADJ_FACTOR_TO_CURRENT_ADJ_FACTOR'::text AS adjustment_policy,
+                     CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                    OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                          THEN 'RAW_PRICE_ADJ_FACTOR_UNAVAILABLE'
+                          ELSE 'ROW_ADJ_FACTOR_TO_CURRENT_ADJ_FACTOR'
+                     END::text AS adjustment_policy,
                      f.source_version
               FROM {table_name} f
               LEFT JOIN current_adj ca
                 ON ca.identity_key = f.{identity_column}
               WHERE f.trade_date BETWEEN %s AND %s
                 AND (f.trade_date <> %s OR f.source_version = %s)
+                {fact_identity_sql}
             )
             SELECT f.identity_key,
                    p.period,
@@ -1650,6 +1829,7 @@ def fetch_period_contexts(
                    max(f.adjustment_policy) AS adjustment_policy,
                    count(*) FILTER (
                      WHERE f.adj_factor IS NULL
+                        OR f.adj_factor = 0
                         OR f.current_adj_factor IS NULL
                         OR f.current_adj_factor = 0
                    )::bigint AS adj_factor_missing_count
@@ -1663,6 +1843,8 @@ def fetch_period_contexts(
         )
     else:
         params.extend([min_start, source_trade_date, source_trade_date, current_source_version])
+        if identity_filter:
+            params.append(selected_identity_keys)
         cur.execute(
             f"""
             WITH period_ranges(period, slot, start_date, end_date) AS (
@@ -1680,6 +1862,7 @@ def fetch_period_contexts(
               FROM {table_name}
               WHERE trade_date BETWEEN %s AND %s
                 AND (trade_date <> %s OR source_version = %s)
+                {plain_identity_sql}
             )
             SELECT f.identity_key,
                    p.period,
@@ -1713,6 +1896,12 @@ def fetch_period_contexts(
     for context in contexts.values():
         enrich_period_context(context, source_trade_date, source_prev_trade_date)
     if is_stock:
+        daily_params: list[Any] = [source_trade_date, current_source_version]
+        if identity_filter:
+            daily_params.append(selected_identity_keys)
+        daily_params.extend([min_start, source_trade_date, source_trade_date, current_source_version])
+        if identity_filter:
+            daily_params.append(selected_identity_keys)
         cur.execute(
             f"""
             WITH current_adj AS (
@@ -1721,6 +1910,7 @@ def fetch_period_contexts(
               FROM {table_name}
               WHERE trade_date = %s
                 AND source_version = %s
+                {current_adj_identity_sql}
             )
             SELECT f.{identity_column} AS identity_key,
                    f.trade_date,
@@ -1728,25 +1918,49 @@ def fetch_period_contexts(
                    f.high AS raw_high,
                    f.low AS raw_low,
                    f.close AS raw_close,
-                   f.open * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS open,
-                   f.high * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS high,
-                   f.low * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS low,
-                   f.close * f.adj_factor / NULLIF(ca.current_adj_factor, 0) AS close,
+                   CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                  OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                        THEN f.open
+                        ELSE f.open * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                   END AS open,
+                   CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                  OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                        THEN f.high
+                        ELSE f.high * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                   END AS high,
+                   CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                  OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                        THEN f.low
+                        ELSE f.low * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                   END AS low,
+                   CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                  OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                        THEN f.close
+                        ELSE f.close * f.adj_factor / NULLIF(ca.current_adj_factor, 0)
+                   END AS close,
                    f.amount,
                    f.adj_factor,
                    ca.current_adj_factor,
-                   'ROW_ADJ_FACTOR_TO_CURRENT_ADJ_FACTOR'::text AS adjustment_policy,
+                   CASE WHEN f.adj_factor IS NULL OR f.adj_factor = 0
+                                  OR ca.current_adj_factor IS NULL OR ca.current_adj_factor = 0
+                        THEN 'RAW_PRICE_ADJ_FACTOR_UNAVAILABLE'
+                        ELSE 'ROW_ADJ_FACTOR_TO_CURRENT_ADJ_FACTOR'
+                   END::text AS adjustment_policy,
                    f.source_version
             FROM {table_name} f
             LEFT JOIN current_adj ca
               ON ca.identity_key = f.{identity_column}
             WHERE f.trade_date BETWEEN %s AND %s
               AND (f.trade_date <> %s OR f.source_version = %s)
+              {fact_identity_sql}
             ORDER BY f.{identity_column}, f.trade_date
             """,
-            (source_trade_date, current_source_version, min_start, source_trade_date, source_trade_date, current_source_version),
+            daily_params,
         )
     else:
+        daily_params = [min_start, source_trade_date, source_trade_date, current_source_version]
+        if identity_filter:
+            daily_params.append(selected_identity_keys)
         cur.execute(
             f"""
             SELECT {identity_column} AS identity_key,
@@ -1760,9 +1974,10 @@ def fetch_period_contexts(
             FROM {table_name}
             WHERE trade_date BETWEEN %s AND %s
               AND (trade_date <> %s OR source_version = %s)
+              {plain_identity_sql}
             ORDER BY {identity_column}, trade_date
             """,
-            (min_start, source_trade_date, source_trade_date, current_source_version),
+            daily_params,
         )
     for row in cur.fetchall():
         identity_key = str(row["identity_key"])
@@ -3477,8 +3692,8 @@ def build_quality_items(
     fixed_index_missing = list(index_summary.get("fixed_default_index_missing_basis") or [])
     items.append(
         quality_item(
-            "P0",
-            "passed" if not fixed_index_missing else "failed",
+            "P1",
+            "passed" if not fixed_index_missing else "warning",
             "fixed_9_index_basis_coverage",
             "固定 9 指数必须存在 exchange-qualified index_condition_basis 来源",
             expected=",".join(DEFAULT_INDEX_POOL_IDENTITIES),
@@ -3489,8 +3704,8 @@ def build_quality_items(
     fixed_index_amount_warnings = list(index_summary.get("fixed_default_index_amount_baseline_warnings") or [])
     items.append(
         quality_item(
-            "P0",
-            "passed" if not fixed_index_amount_warnings else "failed",
+            "P1",
+            "passed" if not fixed_index_amount_warnings else "warning",
             "fixed_9_index_amount_baseline_coverage",
             "固定 9 指数必须具备完整周期金额基准，才能生成可信 condition_basis",
             expected="amount_quality_status=passed for all fixed 9 index basis rows",
@@ -3500,14 +3715,15 @@ def build_quality_items(
     )
     items.append(quality_item("P0", "passed" if int(stock_summary.get("board_code_violation_count") or 0) == 0 else "failed", "stock_88xxxx_violation", "88xxxx 不得进入 stock basis"))
     items.append(quality_item("P0", "passed" if int(board_summary.get("non_board_code_count") or 0) == 0 else "failed", "board_code_namespace", "board basis 只允许 88xxxx"))
-    items.append(quality_item("P0", "passed" if int(stock_summary.get("official_daily_unproved_count") or 0) == 0 else "failed", "stock_official_daily_proof", "stock official daily proof 完整"))
+    items.append(quality_item("P1", "passed" if int(stock_summary.get("official_daily_unproved_count") or 0) == 0 else "warning", "stock_official_daily_proof", "stock official daily proof 仅作诊断，不过滤对象"))
     stock_rows = int(stock_summary.get("row_count") or 0)
     daily_basic_join_count = int(stock_summary.get("daily_basic_join_count") or 0)
     financial_join_count = int(stock_summary.get("financial_join_count") or 0)
     expected_stock_universe = int(stock_summary.get("expected_condition_stock_universe") or 0)
     excluded_from_condition_universe = int(stock_summary.get("excluded_from_condition_universe") or 0)
     stock_daily_fact_row_count = int(stock_summary.get("stock_daily_fact_row_count") or stock_rows)
-    if expected_stock_universe:
+    latest_basis_mode = stock_summary.get("basis_selection_policy") == "latest_daily_on_or_before_source_trade_date"
+    if expected_stock_universe and not latest_basis_mode:
         items.append(
             quality_item(
                 "P0",
@@ -3524,7 +3740,7 @@ def build_quality_items(
                 },
             )
         )
-    if excluded_from_condition_universe:
+    if excluded_from_condition_universe and not latest_basis_mode:
         actual_excluded = stock_daily_fact_row_count - stock_rows
         items.append(
             quality_item(
@@ -3543,20 +3759,20 @@ def build_quality_items(
         )
     items.append(
         quality_item(
-            "P0",
-            "passed" if stock_rows == daily_basic_join_count else "failed",
+            "P1",
+            "passed" if stock_rows == daily_basic_join_count else "warning",
             "stock_daily_basic_join_coverage",
-            "stock condition_basis 必须能关联 stock_daily_basic 市值/估值",
+            "缺少 stock_daily_basic 不删除对象，仅缺失依赖字段的条件不生成",
             expected=str(stock_rows),
             actual=str(daily_basic_join_count),
         )
     )
     items.append(
         quality_item(
-            "P0",
-            "passed" if stock_rows == financial_join_count else "failed",
+            "P1",
+            "passed" if stock_rows == financial_join_count else "warning",
             "stock_financial_join_coverage",
-            "stock condition_basis 必须能关联 stock_financial 财务快照",
+            "缺少 stock_financial 不删除对象，仅缺失依赖字段的条件不生成",
             expected=str(stock_rows),
             actual=str(financial_join_count),
         )
@@ -3568,7 +3784,7 @@ def build_quality_items(
                 "P1",
                 "warning",
                 "stock_total_mv_missing",
-                "部分 stock basis 缺少 total_mv；后续 stock_minute_target_scope 会排除这些个股",
+                "部分 stock basis 缺少 total_mv；全对象策略不据此排除个股",
                 expected="0",
                 actual=str(missing_total_mv),
             )

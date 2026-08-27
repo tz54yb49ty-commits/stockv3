@@ -38,17 +38,17 @@ DETAIL_TEMPLATE = PROJECT_ROOT / "src" / "ashare_v3" / "web" / "templates" / "n2
 
 
 class N2WebPolicyTest(unittest.TestCase):
-    def test_default_policy_uses_exchange_qualified_fixed_indexes(self) -> None:
+    def test_default_policy_uses_full_object_universe(self) -> None:
         policy = default_web_policy()
 
-        self.assertEqual(tuple(policy["index"]["enabled_identities"]), DEFAULT_INDEX_IDENTITIES)
-        self.assertEqual(policy["index"]["selected_identity_key"], "")
-        self.assertEqual(policy["board"]["board_segments"], ["industry"])
-        self.assertEqual(policy["board"]["board_types"], ["tdx_industry"])
-        self.assertEqual(policy["stock"]["min_total_mv_yi"], 100)
-        self.assertTrue(policy["stock"]["exclude_bj"])
-        self.assertEqual(policy["stock"]["allowed_monitor_types"], ["source_universe_preview"])
-        self.assertFalse(policy["stock"]["allow_financial_key_fields_missing"])
+        self.assertEqual(policy["index"]["enabled_identities"], [])
+        self.assertEqual(policy["index"]["selected_identity_key"], "__all__")
+        self.assertEqual(policy["board"]["board_segments"], ["industry", "concept", "region"])
+        self.assertEqual(policy["board"]["board_types"], ["tdx_industry", "tdx_concept", "tdx_region"])
+        self.assertIsNone(policy["stock"]["min_total_mv_yi"])
+        self.assertFalse(policy["stock"]["exclude_bj"])
+        self.assertEqual(policy["stock"]["allowed_monitor_types"], [])
+        self.assertTrue(policy["stock"]["allow_financial_key_fields_missing"])
         self.assertEqual(policy["stock"]["condition_family"], ["ordinary", "full", "hint"])
         self.assertEqual(policy["index"]["condition_family"], ["ordinary", "full", "hint"])
         self.assertEqual(policy["board"]["condition_family"], ["ordinary", "full", "hint"])
@@ -371,8 +371,8 @@ class N2WebPolicyTest(unittest.TestCase):
         self.assertEqual(scope_policy["stock"]["recommendation_levels"], ["A", "B"])
         self.assertEqual(scope_policy["stock"]["min_score"], 75)
         self.assertEqual(scope_policy["stock"]["limit"], 10)
-        self.assertEqual(scope_policy["stock"]["allowed_monitor_types"], ["source_universe_preview"])
-        self.assertTrue(scope_policy["stock"]["require_financial_key_field"])
+        self.assertEqual(scope_policy["stock"]["allowed_monitor_types"], [])
+        self.assertFalse(scope_policy["stock"]["require_financial_key_field"])
 
     def test_stock_financial_key_scope_flag_is_inverse_of_web_allow_flag(self) -> None:
         strict = web_policy_to_scope_policy(
@@ -615,11 +615,15 @@ class N2WebPolicyTest(unittest.TestCase):
             artifact["scope_policy"]["stock"]["allowed_monitor_types"],
             artifact["web_policy"]["stock"]["allowed_monitor_types"],
         )
-        self.assertTrue(artifact["scope_policy"]["stock"]["require_financial_key_field"])
-        self.assertEqual(
-            artifact["condition_pool_policy"]["stock"],
-            artifact["scope_policy"]["stock"],
-        )
+        self.assertFalse(artifact["scope_policy"]["stock"]["require_financial_key_field"])
+        pool_stock = artifact["condition_pool_policy"]["stock"]
+        self.assertIsNone(pool_stock["min_total_mv_wan"])
+        self.assertFalse(pool_stock["exclude_st_or_risk_name"])
+        self.assertEqual(pool_stock["allowed_stock_statuses"], [])
+        self.assertFalse(pool_stock["require_official_daily_proof"])
+        self.assertFalse(pool_stock["require_financial_snapshot"])
+        self.assertFalse(pool_stock["require_financial_key_field"])
+        self.assertEqual(pool_stock["blocked_financial_quality_statuses"], [])
 
     def test_save_default_policy_draft_adds_version_metadata_and_policy_diff(self) -> None:
         policy = default_web_policy()

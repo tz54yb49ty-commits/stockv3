@@ -29,7 +29,7 @@ from ashare_v3.condition.basis import (
     period_trigger_baseline_has_required_shape,
     period_trigger_baseline_not_ready_periods,
 )
-from ashare_v3.condition.pool import required_periods_for_condition_key
+from ashare_v3.condition.pool import default_condition_pool_policy, required_periods_for_condition_key
 from ashare_v3.condition.scope import build_minute_target_scope_dry_run
 from ashare_v3.condition.scope_policy import normalize_scope_policy
 
@@ -234,8 +234,8 @@ def default_web_policy() -> dict[str, Any]:
     return {
         "policy_name": "default_adjusted_by_user",
         "index": {
-            "selected_identity_key": "",
-            "enabled_identities": list(DEFAULT_INDEX_IDENTITIES),
+            "selected_identity_key": INDEX_ALL_SELECTION,
+            "enabled_identities": [],
             "directions": ["buy", "sell"],
             "condition_family": ["ordinary", "full", "hint"],
             "condition_keys": ["*"],
@@ -252,8 +252,8 @@ def default_web_policy() -> dict[str, Any]:
             "require_clear_sell_ref_period": False,
         },
         "board": {
-            "board_segments": ["industry"],
-            "board_types": ["tdx_industry"],
+            "board_segments": ["industry", "concept", "region"],
+            "board_types": ["tdx_industry", "tdx_concept", "tdx_region"],
             "board_code_prefixes": [],
             "board_code_prefix": "",
             "include_codes": [],
@@ -272,13 +272,13 @@ def default_web_policy() -> dict[str, Any]:
             "require_clear_sell_ref_period": False,
         },
         "stock": {
-            "min_total_mv_yi": 100,
-            "exclude_st": True,
-            "exclude_bj": True,
-            "require_official_daily_proof": True,
+            "min_total_mv_yi": None,
+            "exclude_st": False,
+            "exclude_bj": False,
+            "require_official_daily_proof": False,
             "require_financial_quality_passed": False,
-            "allowed_monitor_types": ["source_universe_preview"],
-            "allow_financial_key_fields_missing": False,
+            "allowed_monitor_types": [],
+            "allow_financial_key_fields_missing": True,
             "directions": ["buy", "sell"],
             "condition_keys": ["*"],
             "condition_family": ["ordinary", "full", "hint"],
@@ -376,15 +376,17 @@ def policy_from_control_payload(values: Mapping[str, Any]) -> dict[str, Any]:
     elif selected_index_identity:
         policy["index"]["enabled_identities"] = [selected_index_identity]
     else:
-        policy["index"]["enabled_identities"] = _list_values(values, "index.enabled_identities") or list(DEFAULT_INDEX_IDENTITIES)
-    board_segments = _list_values(values, "board.board_segments") or ["industry"]
+        enabled_identities = _list_values(values, "index.enabled_identities")
+        policy["index"]["selected_identity_key"] = INDEX_ALL_SELECTION if not enabled_identities else ""
+        policy["index"]["enabled_identities"] = enabled_identities
+    board_segments = _list_values(values, "board.board_segments") or ["industry", "concept", "region"]
     policy["board"]["board_segments"] = board_segments
     policy["board"]["board_types"] = board_types_for_segments(board_segments)
     policy["board"]["board_code_prefixes"] = []
     policy["board"]["board_code_prefix"] = _first(values, "board.board_code_prefix")
 
     stock = policy["stock"]
-    stock["min_total_mv_yi"] = _number_or_none(_first(values, "stock.min_total_mv_yi")) or 100
+    stock["min_total_mv_yi"] = _number_or_none(_first(values, "stock.min_total_mv_yi"))
     stock["max_total_mv_yi"] = _number_or_none(_first(values, "stock.max_total_mv_yi"))
     stock["exclude_st"] = _bool_present(values, "stock.exclude_st")
     stock["exclude_bj"] = _bool_present(values, "stock.exclude_bj")
@@ -533,7 +535,13 @@ def web_policy_to_condition_pool_policy(policy: Mapping[str, Any]) -> dict[str, 
     minute_target_scope applies its final narrowing pass.
     """
     merged = merge_web_policy(policy)
-    pool_policy = web_policy_to_scope_policy(merged)
+    scope_policy = web_policy_to_scope_policy(merged)
+    pool_policy: dict[str, Any] = {"policy_name": scope_policy["policy_name"]}
+    for domain in POLICY_DOMAINS:
+        pool_policy[domain] = {
+            **default_condition_pool_policy(domain),
+            **scope_policy[domain],
+        }
     selected_index_identity = str(merged.get("index", {}).get("selected_identity_key") or "").strip()
     if selected_index_identity == INDEX_ALL_SELECTION:
         pool_policy["index"]["include_all_identities"] = True
@@ -1462,7 +1470,7 @@ class N2PolicyConsoleService:
             "ok": True,
             "artifact_type": payload["artifact_type"],
             "policy_path": str(path),
-            "policy_relative_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+            "policy_relative_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
             "policy_id": payload["policy_id"],
             "policy_version": payload["policy_version"],
             "policy_hash": payload["policy_hash"],
@@ -1586,7 +1594,7 @@ class N2PolicyConsoleService:
                 "ok": False,
                 "gate_result": "BLOCKED",
                 "blocked_reasons": ["default_policy_draft_missing"],
-                "policy_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+                "policy_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
                 "writes_performed": False,
                 "database_written": False,
                 "execute_authorized": False,
@@ -1647,9 +1655,9 @@ class N2PolicyConsoleService:
             "previous_policy_hash": policy_artifact.get("previous_policy_hash"),
             "policy_source": POLICY_SOURCE_8782,
             "policy_diff_summary": policy_artifact.get("policy_diff_summary") or {},
-            "policy_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+            "policy_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
             "policy_artifact_path": str(self.config.project_root / DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
-            "policy_relative_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+            "policy_relative_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
             "source_trade_date": source_trade_date,
             "for_trade_date": dry_run.get("for_trade_date"),
             "prev_trade_date": dry_run.get("prev_trade_date"),
@@ -1766,7 +1774,7 @@ class N2PolicyConsoleService:
             "writes_performed": False,
             "database_written": False,
             "latest_gate_path": str(self.config.project_root / EXECUTE_GATE_DRAFT_JSON_RELATIVE_PATH),
-            "policy_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+            "policy_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
             "message": (
                 "latest gate is ready for manual copy command confirmation"
                 if confirmation_enabled
@@ -3016,7 +3024,7 @@ def daily_runner_policy_audit(project_root: Path | str | None = None) -> dict[st
     default_policy_artifact = load_policy_artifact(default_policy_path) or {}
     default_policy_exists = default_policy_path.exists()
     if not default_policy_exists:
-        blocked_reasons.append(f"default_policy_draft_missing:{DEFAULT_POLICY_DRAFT_RELATIVE_PATH}")
+        blocked_reasons.append(f"default_policy_draft_missing:{DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix()}")
 
     override_hits = _scan_scheduler_policy_overrides(root)
     for hit in override_hits:
@@ -3030,7 +3038,7 @@ def daily_runner_policy_audit(project_root: Path | str | None = None) -> dict[st
         "runner_path": str(runner_relative_path),
         "daily_runner_uses_run_condition_layer_execute": runner_path.exists(),
         "runner_uses_default_policy_draft_when_policy_missing": uses_default_policy,
-        "default_policy_path": str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH),
+        "default_policy_path": DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix(),
         "default_policy_exists": default_policy_exists,
         "default_policy_hash": default_policy_artifact.get("policy_hash"),
         "default_policy_version": default_policy_artifact.get("policy_version"),
@@ -3049,7 +3057,7 @@ def _scan_scheduler_policy_overrides(root: Path) -> list[dict[str, str]]:
         root / "configs" / "runtime",
         root / "configs" / "scheduler",
     ]
-    allowed = str(DEFAULT_POLICY_DRAFT_RELATIVE_PATH)
+    allowed = DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix()
     hits: list[dict[str, str]] = []
     pattern = re.compile(r"run_condition_layer_execute\.py[\s\S]{0,800}")
     policy_pattern = re.compile(r"--policy\s+([^\s\\]+)")
@@ -3198,7 +3206,7 @@ def n2_execute_command(source_trade_date: str, *, run_id: str | None = None, ove
     lines = [
         "PYTHONPATH=src python3 scripts/run_condition_layer_execute.py \\",
         f"  --source-trade-date {source_trade_date} \\",
-        f"  --policy {DEFAULT_POLICY_DRAFT_RELATIVE_PATH} \\",
+        f"  --policy {DEFAULT_POLICY_DRAFT_RELATIVE_PATH.as_posix()} \\",
     ]
     if run_id:
         lines.append(f"  --run-id {run_id} \\")

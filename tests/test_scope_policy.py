@@ -17,13 +17,13 @@ class ScopePolicyTest(unittest.TestCase):
         policy = default_scope_policy()
 
         self.assertEqual(policy["stock"]["market_value_compare"], ">=")
-        self.assertEqual(str(policy["stock"]["min_total_mv_wan"]), "1000000")
+        self.assertIsNone(policy["stock"]["min_total_mv_wan"])
         self.assertEqual(policy["index"]["source"], "condition_pool")
         self.assertEqual(policy["board"]["source"], "condition_pool")
-        self.assertIn("000905", policy["index"]["include_codes"])
+        self.assertEqual(policy["index"]["include_codes"], [])
         self.assertEqual(policy["board"]["board_code_prefix"], "")
         self.assertEqual(policy["board"]["board_code_prefixes"], [])
-        self.assertEqual(policy["board"]["board_types"], ["tdx_industry"])
+        self.assertEqual(policy["board"]["board_types"], ["tdx_industry", "tdx_concept", "tdx_region"])
 
     def test_condition_family_classifies_ordinary_full_and_hint(self) -> None:
         self.assertEqual(condition_family("BUY:Y,Q,M,W,D"), "ordinary")
@@ -229,9 +229,11 @@ class ScopePolicyTest(unittest.TestCase):
         self.assertEqual([row["code"] for row in result["selected_rows"]], ["600000"])
         self.assertEqual(result["excluded_reason_counts"], {"bj_stock": 2})
 
-    def test_policy_rejects_stock_market_value_below_hard_floor(self) -> None:
+    def test_policy_allows_optional_market_value_floor_but_rejects_negative_value(self) -> None:
+        policy = normalize_scope_policy({"stock": {"min_total_mv_wan": 999999}})
+        self.assertEqual(policy["stock"]["min_total_mv_wan"], 999999)
         with self.assertRaises(ValueError):
-            normalize_scope_policy({"stock": {"min_total_mv_wan": 999999}})
+            normalize_scope_policy({"stock": {"min_total_mv_wan": -1}})
 
     def test_policy_warns_when_condition_keys_override_families(self) -> None:
         policy = normalize_scope_policy(

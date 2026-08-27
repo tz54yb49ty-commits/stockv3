@@ -5,6 +5,7 @@ from ashare_v3.condition.display_basis import (
     DOMAIN_CONFIGS,
     build_display_quality,
     build_display_rows_for_domain,
+    fetch_display_table_counts,
     validate_display_rows,
 )
 
@@ -14,6 +15,28 @@ ROLLBACK_PATH = Path("sql/N2_N6_buy_expected_return_display_basis_rollback.sql")
 
 
 class ConditionDisplayBasisTests(unittest.TestCase):
+    def test_missing_display_tables_are_counted_as_zero(self) -> None:
+        class MissingTableCursor:
+            def __init__(self) -> None:
+                self.execute_count = 0
+
+            def execute(self, query, params=None) -> None:
+                self.execute_count += 1
+
+            def fetchone(self):
+                return {"table_name": None}
+
+        cur = MissingTableCursor()
+        self.assertEqual(
+            fetch_display_table_counts(cur),
+            {
+                "stock_condition_display_basis": 0,
+                "index_condition_display_basis": 0,
+                "board_condition_display_basis": 0,
+            },
+        )
+        self.assertEqual(cur.execute_count, 3)
+
     def test_stock_display_row_aggregates_pool_and_scope(self) -> None:
         config = DOMAIN_CONFIGS["stock"]
         basis_rows = [
