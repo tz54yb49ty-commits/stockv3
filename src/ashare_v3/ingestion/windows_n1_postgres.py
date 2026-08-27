@@ -30,6 +30,10 @@ def stable_rows_hash(rows: Sequence[Mapping[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def jsonb_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
 def validate_write_target(table: str) -> None:
     if table in FORBIDDEN_WRITE_TABLES or table not in N1_WRITABLE_TABLES:
         raise RuntimeError(f"Windows N1 write target rejected: {table}")
@@ -137,7 +141,10 @@ class WindowsN1PostgresRepository:
         )
         values = []
         for row in rows:
-            values.append(tuple(Jsonb(value) if column == "raw_payload" else value for column, value in row.items()))
+            values.append(tuple(
+                Jsonb(value, dumps=jsonb_dumps) if column == "raw_payload" else value
+                for column, value in row.items()
+            ))
         raw_hash = stable_rows_hash(rows)
         with self.connection.transaction():
             with self.connection.cursor() as cur:

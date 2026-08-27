@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
+import json
 from pathlib import Path
 import unittest
 
 from ashare_v3.ingestion.windows_n1_postgres import (
     N1_WRITABLE_TABLES, REQUIRED_READY_DATA_TYPES, WindowsN1PostgresRepository,
-    stable_rows_hash, validate_schema_sql, validate_write_target,
+    jsonb_dumps, stable_rows_hash, validate_schema_sql, validate_write_target,
 )
 
 
@@ -24,6 +26,13 @@ class WindowsN1PostgresTest(unittest.TestCase):
         first = stable_rows_hash([{"code": "1", "value": 2}])
         self.assertEqual(first, stable_rows_hash([{"value": 2, "code": "1"}]))
         self.assertNotEqual(first, stable_rows_hash([{"code": "1", "value": 3}]))
+
+    def test_jsonb_dumps_accepts_eltdx_bytes_and_dates(self):
+        raw_bytes = b"\x00\xff"
+        self.assertEqual(
+            json.loads(jsonb_dumps({"raw": raw_bytes, "asof": date(2026, 8, 27)})),
+            {"raw": str(raw_bytes), "asof": "2026-08-27"},
+        )
 
     def test_frozen_schema_has_exact_n1_table_allowlist(self):
         schema = Path("sql/001_raw_ingestion_schema.sql").read_text(encoding="utf-8")
