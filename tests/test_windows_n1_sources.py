@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 import unittest
+from unittest.mock import patch
 
 from ashare_v3.ingestion.windows_n1_sources import (
     ELTDX_FINANCE_BATCH_SIZE,
     EltdxWindowsSource,
+    LocalTradeCalendarProvider,
     TQ_MARKETS,
     TQHttpClient,
     TQWindowsSource,
@@ -37,6 +39,52 @@ class FakeEltdx:
 
 
 class WindowsN1SourcesTest(unittest.TestCase):
+    def test_local_trade_calendar_provider_uses_get_only_and_validates_contract(self):
+        payloads = [
+            {"status": "ok", "database": "up"},
+            {"exchange": "SSE", "min": "20260101", "max": "20260103"},
+            {
+                "total": 3,
+                "items": [
+                    {"exchange": "SSE", "cal_date": "20260101", "is_open": "0", "pretrade_date": "20251231"},
+                    {"exchange": "SSE", "cal_date": "20260102", "is_open": "1", "pretrade_date": "20251231"},
+                    {"exchange": "SSE", "cal_date": "20260103", "is_open": "0", "pretrade_date": "20260102"},
+                ],
+            },
+        ]
+        requests = []
+
+        class Response:
+            def __init__(self, payload): self.payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def read(self):
+                import json
+                return json.dumps(self.payload).encode()
+
+        def open_request(request, timeout):
+            requests.append((request.get_method(), request.full_url, timeout))
+            return Response(payloads.pop(0))
+
+        provider = LocalTradeCalendarProvider(timeout_seconds=3)
+        with patch("ashare_v3.ingestion.windows_n1_sources.urlopen", side_effect=open_request):
+            self.assertEqual(provider.health()["status"], "ok")
+            available = provider.range()
+            rows = provider.fetch(available["min"], available["max"])
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(method == "GET" for method, _url, _timeout in requests))
+        self.assertTrue(all(url.startswith("http://127.0.0.1:8000/") for _method, url, _timeout in requests))
+
+    def test_local_trade_calendar_rejects_partial_response(self):
+        provider = LocalTradeCalendarProvider()
+        payload = {
+            "total": 2,
+            "items": [{"exchange": "SSE", "cal_date": "20260101", "is_open": "0"}],
+        }
+        with patch.object(LocalTradeCalendarProvider, "_get", return_value=payload):
+            with self.assertRaisesRegex(RuntimeError, "total/items mismatch"):
+                provider.fetch("20260101", "20260102")
+
     def test_tq_uses_exact_markets_and_adjustment_authority(self):
         client = FakeTQ(); source = TQWindowsSource(client)
         self.assertEqual([row["market"] for row in source.fetch_market_members()], list(TQ_MARKETS))

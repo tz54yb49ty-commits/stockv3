@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .windows_n1_sources import LOCAL_TRADE_CALENDAR_SOURCE
+
 
 N1_WRITABLE_TABLES = frozenset({
     "common_ingest_batch", "common_quality_gate_result", "common_active_source_version",
@@ -188,6 +190,117 @@ class WindowsN1PostgresRepository:
                     "INSERT INTO common_active_source_version (data_domain,data_type,scope_key,source_version,source_batch_id,activated_by) VALUES (%s,%s,%s,%s,%s,'windows_n1_bootstrap') ON CONFLICT (data_domain,data_type,scope_key) DO UPDATE SET previous_source_version=common_active_source_version.source_version,source_version=EXCLUDED.source_version,source_batch_id=EXCLUDED.source_batch_id,activated_at=now(),activated_by=EXCLUDED.activated_by",
                     (data_domain, data_type, scope_key, source_version, batch_id),
                 )
+
+    def persist_local_trade_calendar(
+        self, *, rows: Sequence[Mapping[str, Any]], batch_id: str,
+        start_date: str, end_date: str, exchange: str,
+    ) -> None:
+        """Persist one fully validated REST snapshot in a single transaction."""
+        if not rows:
+            raise RuntimeError("empty local trade-calendar snapshot rejected")
+        if exchange != "SSE":
+            raise RuntimeError(f"unsupported local trade-calendar exchange: {exchange}")
+        if any(
+            row.get("source") != LOCAL_TRADE_CALENDAR_SOURCE
+            or row.get("source_version") != LOCAL_TRADE_CALENDAR_SOURCE
+            or row.get("source_batch_id") != batch_id
+            for row in rows
+        ):
+            raise RuntimeError("local trade-calendar source authority mismatch")
+        raw_hash = stable_rows_hash(rows)
+        from psycopg.types.json import Jsonb
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                existing = self._passed_batch_is_identical(
+                    cur, batch_id=batch_id, raw_hash=raw_hash, row_count=len(rows)
+                )
+                if not existing:
+                    cur.execute(
+                        "INSERT INTO common_ingest_batch (batch_id,trade_date,data_domain,data_type,source,source_version,raw_hash,row_count,status,started_at) VALUES (%s,%s,'common','trade_calendar',%s,%s,%s,%s,'running',now())",
+                        (batch_id, end_date, LOCAL_TRADE_CALENDAR_SOURCE, LOCAL_TRADE_CALENDAR_SOURCE, raw_hash, len(rows)),
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO common_trade_calendar (
+                      trade_date,exchange,is_open,prev_trade_date,next_trade_date,
+                      source,source_batch_id,source_version,raw_payload
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (trade_date) DO UPDATE SET
+                      exchange=EXCLUDED.exchange,is_open=EXCLUDED.is_open,
+                      prev_trade_date=EXCLUDED.prev_trade_date,next_trade_date=EXCLUDED.next_trade_date,
+                      source=EXCLUDED.source,source_batch_id=EXCLUDED.source_batch_id,
+                      source_version=EXCLUDED.source_version,raw_payload=EXCLUDED.raw_payload,
+                      updated_at=now()
+                    """,
+                    [
+                        (
+                            row["trade_date"], row["exchange"], row["is_open"],
+                            row.get("prev_trade_date"), row.get("next_trade_date"),
+                            row["source"], row["source_batch_id"], row["source_version"],
+                            Jsonb(row.get("raw_payload") or {}, dumps=jsonb_dumps),
+                        )
+                        for row in rows
+                    ],
+                )
+                if not existing:
+                    cur.execute(
+                        "INSERT INTO common_quality_gate_result (source_batch_id,source_version,data_domain,data_type,gate_name,severity,status,expected_value,actual_value,details) VALUES (%s,%s,'common','trade_calendar','local_rest_snapshot_contract','P0','passed',%s,%s,%s)",
+                        (
+                            batch_id, LOCAL_TRADE_CALENDAR_SOURCE,
+                            f"{start_date}_{end_date}", f"{rows[0]['trade_date']}_{rows[-1]['trade_date']}",
+                            Jsonb({"exchange": exchange, "row_count": len(rows)}),
+                        ),
+                    )
+                    cur.execute(
+                        "UPDATE common_ingest_batch SET status='passed',finished_at=now(),quality_gate_summary=%s WHERE batch_id=%s",
+                        (Jsonb({"P0": 0, "row_count": len(rows)}), batch_id),
+                    )
+                cur.execute(
+                    "INSERT INTO common_active_source_version (data_domain,data_type,scope_key,source_version,source_batch_id,activated_by) VALUES ('common','trade_calendar',%s,%s,%s,'windows_n1_calendar_sync') ON CONFLICT (data_domain,data_type,scope_key) DO UPDATE SET previous_source_version=common_active_source_version.source_version,source_version=EXCLUDED.source_version,source_batch_id=EXCLUDED.source_batch_id,activated_at=now(),activated_by=EXCLUDED.activated_by",
+                    (exchange, LOCAL_TRADE_CALENDAR_SOURCE, batch_id),
+                )
+
+    def assert_n1_final_ready_for_n2(
+        self, *, start_date: str, end_date: str, expected_calendar_rows: int,
+        exchange: str = "SSE",
+    ) -> dict[str, Any]:
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute("SELECT data_type FROM common_active_source_version")
+                active = {row[0] for row in cur.fetchall()}
+                missing = REQUIRED_READY_DATA_TYPES - active
+                if missing:
+                    raise RuntimeError(f"missing active N1 sources: {sorted(missing)}")
+                cur.execute(
+                    "SELECT source_version,source_batch_id FROM common_active_source_version WHERE data_domain='common' AND data_type='trade_calendar' AND scope_key=%s",
+                    (exchange,),
+                )
+                calendar_active = cur.fetchone()
+                if calendar_active is None or calendar_active[0] != LOCAL_TRADE_CALENDAR_SOURCE:
+                    raise RuntimeError("local trade-calendar active source is missing")
+                cur.execute(
+                    "SELECT count(*),min(trade_date),max(trade_date),count(*) FILTER (WHERE is_open),count(*) FILTER (WHERE source=%s AND source_version=%s) FROM common_trade_calendar",
+                    (LOCAL_TRADE_CALENDAR_SOURCE, LOCAL_TRADE_CALENDAR_SOURCE),
+                )
+                total, minimum, maximum, open_rows, authoritative_rows = cur.fetchone()
+                if (int(total), minimum, maximum, int(authoritative_rows)) != (
+                    expected_calendar_rows, start_date, end_date, expected_calendar_rows,
+                ):
+                    raise RuntimeError(
+                        "local trade-calendar database snapshot does not match REST range"
+                    )
+                for table in sorted(REQUIRED_READY_DATA_TYPES):
+                    cur.execute(f'SELECT count(*) FROM "{table}"')
+                    if int(cur.fetchone()[0]) == 0:
+                        raise RuntimeError(f"empty N1 fact: {table}")
+        return {
+            "calendar_rows": int(total),
+            "calendar_open_rows": int(open_rows),
+            "calendar_start": minimum,
+            "calendar_end": maximum,
+            "calendar_source": LOCAL_TRADE_CALENDAR_SOURCE,
+            "calendar_source_batch_id": calendar_active[1],
+        }
 
     def assert_n1_data_ready(self, scope_key: str) -> dict[str, int]:
         counts: dict[str, int] = {}

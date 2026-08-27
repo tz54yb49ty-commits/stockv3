@@ -12,12 +12,15 @@ from datetime import date
 import importlib
 import json
 from typing import Any, Iterable, Mapping, Protocol, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
 TQ_MARKETS = ("5", "9", "11", "12", "14")
 FORBIDDEN_SOURCE_MODULES = ("tushare", "mootdx")
 ELTDX_FINANCE_BATCH_SIZE = 100
+LOCAL_TRADE_CALENDAR_SOURCE = "local_trade_calendar.rest.v1"
 
 
 def three_year_start(today: date) -> str:
@@ -67,6 +70,62 @@ class TQClient(Protocol):
         self, symbol: str, *, start_date: str, end_date: str,
         adjust: str | None, fill_data: bool,
     ) -> Any: ...
+
+
+@dataclass(frozen=True)
+class LocalTradeCalendarProvider:
+    """GET-only client for the local trade-calendar REST service."""
+
+    base_url: str = "http://127.0.0.1:8000"
+    timeout_seconds: float = 5.0
+
+    def _get(self, path: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        query = "" if not params else "?" + urlencode(params)
+        request = Request(self.base_url.rstrip("/") + path + query, method="GET")
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"local trade-calendar request failed: {path}: {error}") from error
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"local trade-calendar returned non-object JSON: {path}")
+        return dict(payload)
+
+    def health(self) -> dict[str, Any]:
+        payload = self._get("/health")
+        if payload.get("status") != "ok" or payload.get("database") != "up":
+            raise RuntimeError(f"local trade-calendar is not healthy: {payload}")
+        return payload
+
+    def range(self, exchange: str = "SSE") -> dict[str, str]:
+        payload = self._get("/api/range", {"exchange": exchange})
+        if payload.get("exchange") != exchange:
+            raise RuntimeError(f"local trade-calendar exchange mismatch: {payload}")
+        minimum = str(payload.get("min") or "")
+        maximum = str(payload.get("max") or "")
+        if len(minimum) != 8 or len(maximum) != 8 or not minimum.isdigit() or not maximum.isdigit():
+            raise RuntimeError(f"local trade-calendar invalid range: {payload}")
+        if minimum > maximum:
+            raise RuntimeError(f"local trade-calendar reversed range: {payload}")
+        return {"exchange": exchange, "min": minimum, "max": maximum}
+
+    def fetch(self, start_date: str, end_date: str, exchange: str = "SSE") -> list[dict[str, Any]]:
+        payload = self._get(
+            "/api/trade_cal",
+            {"exchange": exchange, "start_date": start_date, "end_date": end_date},
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or int(payload.get("total", -1)) != len(items):
+            raise RuntimeError(f"local trade-calendar total/items mismatch: {payload.get('total')}")
+        rows = _records(items)
+        dates = [str(row.get("cal_date") or "") for row in rows]
+        if not rows or dates[0] != start_date or dates[-1] != end_date:
+            raise RuntimeError("local trade-calendar response does not cover the requested range")
+        if len(dates) != len(set(dates)) or dates != sorted(dates):
+            raise RuntimeError("local trade-calendar returned duplicate or unsorted dates")
+        if any(row.get("exchange") != exchange for row in rows):
+            raise RuntimeError("local trade-calendar returned an unexpected exchange")
+        return rows
 
 
 @dataclass
