@@ -25,6 +25,7 @@ REQUIRED_READY_DATA_TYPES = frozenset({
     "stock_daily_bar_fact", "index_daily_bar_fact", "board_daily_bar_fact",
     "stock_financial_metrics_fact", "stock_daily_basic",
 })
+FASTLANE_COMPLETE_DATA_TYPE = "fastlane_complete"
 
 
 def stable_rows_hash(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -117,6 +118,136 @@ class WindowsN1PostgresRepository:
                     cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
                     counts[f"{schema}.{table}"] = int(cur.fetchone()[0])
         return counts
+
+    def latest_fastlane_complete_date(self, before_date: str) -> str | None:
+        """Return the latest explicitly completed Fastlane date before a new run."""
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_date
+                    FROM common_ingest_batch
+                    WHERE data_domain='common'
+                      AND data_type=%s
+                      AND status='passed'
+                      AND trade_date ~ '^[0-9]{8}$'
+                      AND trade_date < %s
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                    """,
+                    (FASTLANE_COMPLETE_DATA_TYPE, before_date),
+                )
+                row = cur.fetchone()
+                return None if row is None else str(row[0])
+
+    def daily_bar_counts(self, trade_date: str) -> dict[str, dict[str, int]]:
+        tables = {
+            "stock": ("stock_daily_bar_fact", "stock_identity_key"),
+            "index": ("index_daily_bar_fact", "index_identity_key"),
+            "board": ("board_daily_bar_fact", "board_identity_key"),
+        }
+        counts: dict[str, dict[str, int]] = {}
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                for asset_kind, (table, identity_column) in tables.items():
+                    cur.execute(
+                        f'SELECT count(*),count(DISTINCT "{identity_column}") '
+                        f'FROM "{table}" WHERE trade_date=%s',
+                        (trade_date,),
+                    )
+                    rows, entities = map(int, cur.fetchone())
+                    counts[asset_kind] = {"rows": rows, "entities": entities}
+        return counts
+
+    def daily_bar_source_counts(
+        self, trade_date: str, source_version: str,
+    ) -> dict[str, dict[str, int]]:
+        tables = {
+            "stock": ("stock_daily_bar_fact", "stock_identity_key"),
+            "index": ("index_daily_bar_fact", "index_identity_key"),
+            "board": ("board_daily_bar_fact", "board_identity_key"),
+        }
+        counts: dict[str, dict[str, int]] = {}
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                for asset_kind, (table, identity_column) in tables.items():
+                    cur.execute(
+                        f'SELECT count(*),count(DISTINCT "{identity_column}") '
+                        f'FROM "{table}" WHERE trade_date=%s AND source_version=%s',
+                        (trade_date, source_version),
+                    )
+                    rows, entities = map(int, cur.fetchone())
+                    counts[asset_kind] = {"rows": rows, "entities": entities}
+        return counts
+
+    def latest_stock_finance_payloads(self) -> dict[str, dict[str, Any]]:
+        payloads: dict[str, dict[str, Any]] = {}
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (code) code,raw_payload
+                    FROM stock_financial_metrics_fact
+                    WHERE code IS NOT NULL
+                      AND raw_payload ? 'finance_batch'
+                    ORDER BY code,asof_date DESC,created_at DESC
+                    """
+                )
+                for code, raw_payload in cur.fetchall():
+                    if isinstance(raw_payload, Mapping):
+                        payloads[str(code)] = dict(raw_payload)
+        return payloads
+
+    def mark_fastlane_complete(
+        self, *, trade_date: str, run_id: str,
+        row_count: int, details: Mapping[str, Any],
+    ) -> None:
+        batch_id = f"windows_n1_fastlane_complete_{trade_date}_v1"
+        source_version = f"windows_n1_fastlane_{trade_date}_v1"
+        marker = {
+            "trade_date": trade_date,
+            "run_id": run_id,
+            "row_count": int(row_count),
+            "details": dict(details),
+        }
+        raw_hash = stable_rows_hash([marker])
+        from psycopg.types.json import Jsonb
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status,trade_date,data_domain,data_type
+                    FROM common_ingest_batch
+                    WHERE batch_id=%s
+                    """,
+                    (batch_id,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    if (
+                        str(existing[0]) == "passed"
+                        and str(existing[1]) == trade_date
+                        and str(existing[2]) == "common"
+                        and str(existing[3]) == FASTLANE_COMPLETE_DATA_TYPE
+                    ):
+                        return
+                    raise RuntimeError(f"Fastlane completion marker collision: {batch_id}")
+                cur.execute(
+                    """
+                    INSERT INTO common_ingest_batch (
+                      batch_id,trade_date,data_domain,data_type,source,source_version,
+                      raw_hash,row_count,status,started_at,finished_at,quality_gate_summary
+                    ) VALUES (
+                      %s,%s,'common',%s,'TQ_ELTDX_WINDOWS',%s,
+                      %s,%s,'passed',now(),now(),%s
+                    )
+                    """,
+                    (
+                        batch_id, trade_date, FASTLANE_COMPLETE_DATA_TYPE,
+                        source_version, raw_hash, int(row_count),
+                        Jsonb(marker, dumps=jsonb_dumps),
+                    ),
+                )
 
     def persist_batch(
         self, *, table: str, rows: Sequence[Mapping[str, Any]], conflict_columns: Sequence[str],
@@ -317,9 +448,6 @@ class WindowsN1PostgresRepository:
                     counts[table] = int(cur.fetchone()[0])
                     if counts[table] == 0:
                         raise RuntimeError(f"empty N1 fact: {table}")
-                cur.execute("SELECT count(*) FROM common_trade_calendar")
-                if int(cur.fetchone()[0]) != 0:
-                    raise RuntimeError("common_trade_calendar must remain empty in Windows N1")
                 cur.execute(
                     "SELECT count(*),count(*) FILTER (WHERE total_mv IS NOT NULL AND circ_mv IS NOT NULL) "
                     "FROM stock_daily_basic"

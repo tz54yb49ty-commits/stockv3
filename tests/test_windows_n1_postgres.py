@@ -21,6 +21,10 @@ class WindowsN1PostgresTest(unittest.TestCase):
     def test_ready_set_is_exactly_n1_non_calendar_sources(self):
         self.assertEqual(len(REQUIRED_READY_DATA_TYPES), 10)
         self.assertNotIn("common_trade_calendar", REQUIRED_READY_DATA_TYPES)
+        self.assertNotIn(
+            "common_trade_calendar must remain empty in Windows N1",
+            WindowsN1PostgresRepository.assert_n1_data_ready.__code__.co_consts,
+        )
 
     def test_hash_is_deterministic_and_sensitive(self):
         first = stable_rows_hash([{"code": "1", "value": 2}])
@@ -53,6 +57,33 @@ class WindowsN1PostgresTest(unittest.TestCase):
             repository._passed_batch_is_identical(
                 Cursor(("passed", "different", 2)), batch_id="batch", raw_hash="abc", row_count=2
             )
+
+    def test_fastlane_completion_marker_is_idempotent_across_run_ids(self):
+        class Context:
+            def __init__(self, value): self.value = value
+            def __enter__(self): return self.value
+            def __exit__(self, exc_type, exc, traceback): return False
+
+        class Cursor:
+            def __init__(self): self.execute_count = 0
+            def execute(self, sql, params): self.execute_count += 1
+            def fetchone(self):
+                return ("passed", "20260827", "common", "fastlane_complete")
+
+        class Connection:
+            def __init__(self): self.cursor_value = Cursor()
+            def transaction(self): return Context(None)
+            def cursor(self): return Context(self.cursor_value)
+
+        connection = Connection()
+        repository = WindowsN1PostgresRepository(connection=connection)
+        repository.mark_fastlane_complete(
+            trade_date="20260827",
+            run_id="second_run",
+            row_count=6080,
+            details={"stock": 5551, "index": 100, "board": 429},
+        )
+        self.assertEqual(connection.cursor_value.execute_count, 1)
 
 
 if __name__ == "__main__": unittest.main()

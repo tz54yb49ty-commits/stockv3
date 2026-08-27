@@ -27,6 +27,9 @@ class FakeTQ:
         self.calls.append(("market", market)); return [{"code": market + "00001"}]
     def get_daily_bars(self, symbol, **kwargs):
         self.calls.append(("daily", symbol, kwargs)); return [{"trade_date": "20260102", "open": 1, "high": 2, "low": 1, "close": 2}]
+    def get_daily_bars_batch(self, symbols, **kwargs):
+        self.calls.append(("daily_batch", tuple(symbols), kwargs))
+        return {symbol: self.get_daily_bars(symbol, **kwargs) for symbol in symbols}
 
 
 class FakeEltdx:
@@ -108,6 +111,33 @@ class WindowsN1SourcesTest(unittest.TestCase):
         self.assertEqual(calls[-1], ("get_stock_list_in_sector", {"block_code": "5", "list_type": 1}))
         client.get_stock_list("5")
         self.assertEqual(calls[-1], ("get_stock_list", {"market": "5", "list_type": 1}))
+
+    def test_http_client_batches_daily_symbols_and_enforces_100_limit(self):
+        client = TQHttpClient()
+        calls = []
+        client.call = lambda method, params: calls.append((method, params)) or {
+            symbol: {"Time": ["20260827"], "Close": [10]}
+            for symbol in params["stock_list"]
+        }
+        symbols = tuple(f"{value:06d}.SZ" for value in range(100))
+        rows = client.get_daily_bars_batch(
+            symbols,
+            start_date="20260827",
+            end_date="20260827",
+            adjust="qfq",
+            fill_data=False,
+        )
+        self.assertEqual(calls[0][1]["stock_list"], list(symbols))
+        self.assertEqual(len(rows), 100)
+        self.assertEqual(rows[symbols[0]], [{"Time": "20260827", "Close": 10}])
+        with self.assertRaisesRegex(ValueError, "exceeds 100"):
+            client.get_daily_bars_batch(
+                symbols + ("999999.SZ",),
+                start_date="20260827",
+                end_date="20260827",
+                adjust="qfq",
+                fill_data=False,
+            )
 
     def test_no_forbidden_source_fallback(self):
         with self.assertRaisesRegex(RuntimeError, "forbidden"):

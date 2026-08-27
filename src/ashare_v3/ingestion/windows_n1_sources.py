@@ -70,6 +70,10 @@ class TQClient(Protocol):
         self, symbol: str, *, start_date: str, end_date: str,
         adjust: str | None, fill_data: bool,
     ) -> Any: ...
+    def get_daily_bars_batch(
+        self, symbols: Sequence[str], *, start_date: str, end_date: str,
+        adjust: str | None, fill_data: bool,
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -158,15 +162,29 @@ class TQHttpClient:
     def get_stock_list(self, market: str) -> Any:
         return self.call("get_stock_list", {"market": market, "list_type": 1})
 
-    def get_daily_bars(
-        self, symbol: str, *, start_date: str, end_date: str,
+    @staticmethod
+    def _columnar_rows(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+        columns = {key: value for key, value in result.items() if isinstance(value, list)}
+        row_count = max((len(value) for value in columns.values()), default=0)
+        return [
+            {key: values[index] if index < len(values) else None for key, values in columns.items()}
+            for index in range(row_count)
+        ]
+
+    def get_daily_bars_batch(
+        self, symbols: Sequence[str], *, start_date: str, end_date: str,
         adjust: str | None, fill_data: bool,
-    ) -> Any:
+    ) -> dict[str, list[dict[str, Any]]]:
+        requested = tuple(symbols)
+        if not requested:
+            return {}
+        if len(requested) > 100:
+            raise ValueError("TQ daily batch exceeds 100 symbols")
         result = self.call(
             "get_market_data",
             {
                 "period": "1d",
-                "stock_list": [symbol],
+                "stock_list": list(requested),
                 "start_time": start_date,
                 "end_time": end_date,
                 "dividend_type": "front" if adjust == "qfq" else "none",
@@ -174,15 +192,24 @@ class TQHttpClient:
             },
         )
         if not isinstance(result, Mapping):
-            return result
-        if symbol in result and isinstance(result[symbol], Mapping):
-            result = result[symbol]
-        columns = {key: value for key, value in result.items() if isinstance(value, list)}
-        row_count = max((len(value) for value in columns.values()), default=0)
-        return [
-            {key: values[index] if index < len(values) else None for key, values in columns.items()}
-            for index in range(row_count)
-        ]
+            raise RuntimeError("TQ daily batch returned a non-object result")
+        if len(requested) == 1 and requested[0] not in result:
+            return {requested[0]: self._columnar_rows(result)}
+        return {
+            symbol: self._columnar_rows(payload)
+            if isinstance((payload := result.get(symbol)), Mapping)
+            else []
+            for symbol in requested
+        }
+
+    def get_daily_bars(
+        self, symbol: str, *, start_date: str, end_date: str,
+        adjust: str | None, fill_data: bool,
+    ) -> Any:
+        return self.get_daily_bars_batch(
+            (symbol,), start_date=start_date, end_date=end_date,
+            adjust=adjust, fill_data=fill_data,
+        )[symbol]
 
 
 @dataclass(frozen=True)
@@ -219,6 +246,31 @@ class TQWindowsSource:
                 fill_data=False,
             )
         )
+
+    def fetch_daily_batch(
+        self,
+        symbols: Sequence[str],
+        *,
+        asset_kind: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if asset_kind not in {"stock", "index", "board"}:
+            raise ValueError(f"unsupported asset_kind: {asset_kind}")
+        requested = tuple(symbols)
+        if len(requested) > 100:
+            raise ValueError("TQ daily batch exceeds 100 symbols")
+        adjust = "qfq" if asset_kind == "stock" else None
+        return {
+            symbol: _records(rows)
+            for symbol, rows in self.client.get_daily_bars_batch(
+                requested,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                fill_data=False,
+            ).items()
+        }
 
 
 @dataclass(frozen=True)
