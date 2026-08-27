@@ -11,6 +11,7 @@ from .windows_n1_sources import EltdxWindowsSource, TQWindowsSource, calculate_m
 
 
 MARKET_BOARD_TYPES = {"11": "tdx_industry", "12": "tdx_concept", "14": "tdx_region"}
+MIN_DAILY_BASIC_MARKET_VALUE_COVERAGE = 0.90
 
 
 def split_symbol(symbol: str) -> tuple[str, str]:
@@ -169,12 +170,17 @@ class WindowsN1ProductionHandlers:
             if base is None: raise RuntimeError("finance_batch row missing")
             reports = self.eltdx.fetch_three_reports(code)
             if any(not rows for rows in reports.values()): raise RuntimeError("one or more finance reports empty")
-            batch_id = f"windows_n1_finance_{code}_{self.config.end_date}"
-            total_share = _value(base, "total_shares", "zong_gu_ben", "zongguben")
-            float_share = _value(base, "circulating_shares", "liu_tong_gu_ben", "liutongguben")
+            batch_id = f"windows_n1_finance_v2_{code}_{self.config.end_date}"
+            total_share = _value(
+                base, "total_shares", "zong_gu_ben", "zongguben", "zong_gu_ben_raw_float"
+            )
+            float_share = _value(
+                base, "circulating_shares", "liu_tong_gu_ben", "liutongguben",
+                "liu_tong_gu_ben_raw_float",
+            )
             close = self.daily_by_stock.get(symbol, [{}])[-1].get("close")
             total_mv, circ_mv = calculate_market_values(close=close, total_share=total_share, float_share=float_share)
-            row = {"stock_identity_key": f"stock:{exchange}:{code}", "asof_date": self.config.end_date, "source_trade_date": self.config.end_date, "announcement_date": None, "report_period": None, "ts_code": symbol, "code": code, "exchange": exchange, "roe": None, "revenue_yoy": None, "profit_yoy": None, "total_revenue": _value(base, "operating_revenue_yuan", "zhu_ying_shou_ru"), "net_profit": _value(base, "net_profit_yuan", "jing_li_run"), "net_assets": _value(base, "net_assets_yuan", "jing_zi_chan"), "eps": _value(base, "eps", "eps_raw"), "bps": _value(base, "book_value_per_share"), "pe_core": None, "total_mv": total_mv, "circ_mv": circ_mv, "score": None, "warning": None, "quality_status": "passed", "source": "ELTDX_1_2_0", "source_batch_id": batch_id, "source_version": self.version, "raw_payload": {"finance_batch": base, "reports": reports, "total_share": total_share, "float_share": float_share}}
+            row = {"stock_identity_key": f"stock:{exchange}:{code}", "asof_date": self.config.end_date, "source_trade_date": self.config.end_date, "announcement_date": None, "report_period": None, "ts_code": symbol, "code": code, "exchange": exchange, "roe": None, "revenue_yoy": None, "profit_yoy": None, "total_revenue": _value(base, "operating_revenue_yuan", "zhu_ying_shou_ru", "zhu_ying_shou_ru_raw_float"), "net_profit": _value(base, "net_profit_yuan", "jing_li_run", "jing_li_run_raw_float"), "net_assets": _value(base, "net_assets_yuan", "jing_zi_chan", "jing_zi_chan_raw_float"), "eps": _value(base, "eps", "eps_raw"), "bps": _value(base, "book_value_per_share", "mei_gu_jing_zi_chan_raw_float"), "pe_core": None, "total_mv": total_mv, "circ_mv": circ_mv, "score": None, "warning": None, "quality_status": "passed", "source": "ELTDX_1_2_0", "source_batch_id": batch_id, "source_version": self.version, "raw_payload": {"finance_batch": base, "reports": reports, "total_share": total_share, "float_share": float_share}}
             self.repository.persist_batch(table="stock_financial_metrics_fact", rows=[row], conflict_columns=("stock_identity_key", "asof_date", "source_version"), batch_id=batch_id, trade_date=self.config.end_date, data_domain="stock", data_type="stock_financial_metrics_fact", source_version=self.version)
             self.row_counts["stock_financial_metrics_fact"] = self.row_counts.get("stock_financial_metrics_fact", 0) + 1
         run_security_items(items=symbols, stage="eltdx_finance", run_id=result.run_id, artifact_root=self.config.artifact_root, worker=worker, result=result)
@@ -185,9 +191,16 @@ class WindowsN1ProductionHandlers:
         def worker(symbol: str) -> None:
             code, exchange = split_symbol(symbol); finance = self.finance_by_stock.get(code)
             if finance is None: raise RuntimeError("finance shares missing")
-            total_share = _value(finance, "total_shares", "zong_gu_ben", "zongguben")
-            float_share = _value(finance, "circulating_shares", "liu_tong_gu_ben", "liutongguben")
-            batch_id = f"windows_n1_daily_basic_{code}_{self.config.end_date}"; rows = []
+            total_share = _value(
+                finance, "total_shares", "zong_gu_ben", "zongguben", "zong_gu_ben_raw_float"
+            )
+            float_share = _value(
+                finance, "circulating_shares", "liu_tong_gu_ben", "liutongguben",
+                "liu_tong_gu_ben_raw_float",
+            )
+            if total_share is None or float_share is None:
+                raise RuntimeError("finance shares missing")
+            batch_id = f"windows_n1_daily_basic_v2_{code}_{self.config.end_date}"; rows = []
             for bar in self.daily_by_stock.get(symbol, []):
                 total_mv, circ_mv = calculate_market_values(close=bar["close"], total_share=total_share, float_share=float_share)
                 rows.append({"stock_identity_key": f"stock:{exchange}:{code}", "trade_date": bar["trade_date"], "ts_code": symbol, "code": code, "exchange": exchange, "close": bar["close"], "turnover_rate": None, "turnover_rate_f": None, "volume_ratio": None, "pe": None, "pe_ttm": None, "pb": None, "ps": None, "ps_ttm": None, "dv_ratio": None, "dv_ttm": None, "total_share": total_share, "float_share": float_share, "free_share": None, "total_mv": total_mv, "circ_mv": circ_mv, "source": "TQ_ELTDX_WINDOWS", "source_batch_id": batch_id, "source_version": self.version, "raw_payload": {"close_source": "TQ_HTTP", "share_source": "ELTDX_1_2_0"}})
@@ -195,13 +208,21 @@ class WindowsN1ProductionHandlers:
             self.repository.persist_batch(table="stock_daily_basic", rows=rows, conflict_columns=("stock_identity_key", "trade_date", "source_version"), batch_id=batch_id, trade_date=self.config.end_date, data_domain="stock", data_type="stock_daily_basic", source_version=self.version)
             self.row_counts["stock_daily_basic"] = self.row_counts.get("stock_daily_basic", 0) + len(rows)
         run_security_items(items=list(self.stock_names), stage="daily_basic", run_id=result.run_id, artifact_root=self.config.artifact_root, worker=worker, result=result)
+        daily_basic_rows = self.row_counts.get("stock_daily_basic", 0)
+        daily_bar_rows = self.row_counts.get("stock_daily_bar_fact", 0)
+        coverage = daily_basic_rows / max(daily_bar_rows, 1)
+        if coverage < MIN_DAILY_BASIC_MARKET_VALUE_COVERAGE:
+            raise RuntimeError(
+                f"daily-basic market-value coverage below gate: {coverage:.6f}"
+            )
 
     def activate_n1_sources(self, _result: BootstrapResult) -> None:
         domains = {"stock_identity": "stock", "index_identity": "index", "board_identity": "board", "index_membership_fact": "index", "board_membership_fact": "board", "stock_daily_bar_fact": "stock", "index_daily_bar_fact": "index", "board_daily_bar_fact": "board", "stock_financial_metrics_fact": "stock", "stock_daily_basic": "stock"}
         for data_type, domain in domains.items():
             count = self.row_counts.get(data_type, 0)
             if count <= 0: raise RuntimeError(f"cannot activate empty source: {data_type}")
-            self.repository.activate_source(data_domain=domain, data_type=data_type, scope_key=self.config.end_date, source_version=self.version, batch_id=f"windows_n1_activate_{data_type}_{self.config.end_date}", row_count=count)
+            revision = "_v2" if data_type in {"stock_financial_metrics_fact", "stock_daily_basic"} else ""
+            self.repository.activate_source(data_domain=domain, data_type=data_type, scope_key=self.config.end_date, source_version=self.version, batch_id=f"windows_n1_activate_{data_type}{revision}_{self.config.end_date}", row_count=count)
 
     def n1_data_ready(self, result: BootstrapResult) -> None:
         ready_counts = self.repository.assert_n1_data_ready(self.config.end_date)

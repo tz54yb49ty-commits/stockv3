@@ -27,7 +27,16 @@ class FakeTQ:
 
 class FakeEltdx:
     def fetch_finance_batch(self, codes):
-        return [{"code": "600000", "zong_gu_ben": 100, "liu_tong_gu_ben": 60}]
+        return [{
+            "code": "600000",
+            "zong_gu_ben_raw_float": 100,
+            "liu_tong_gu_ben_raw_float": 60,
+            "zhu_ying_shou_ru_raw_float": 1000,
+            "jing_li_run_raw_float": 100,
+            "jing_zi_chan_raw_float": 500,
+            "mei_gu_jing_zi_chan_raw_float": 5,
+            "eps_raw": 0.5,
+        }]
 
     def fetch_three_reports(self, code):
         return {"balance": [{"code": code}], "income": [{"code": code}], "cashflow": [{"code": code}]}
@@ -70,6 +79,17 @@ class WindowsN1ProductionTest(unittest.TestCase):
             tables = {table for table, _rows in repository.tables}
             self.assertIn("stock_daily_basic", tables)
             self.assertNotIn("common_trade_calendar", tables)
+            financial = next(rows[0] for table, rows in repository.tables if table == "stock_financial_metrics_fact")
+            self.assertEqual(
+                (financial["total_revenue"], financial["net_profit"], financial["net_assets"]),
+                (1000, 100, 500),
+            )
+            self.assertEqual((financial["eps"], financial["bps"]), (0.5, 5))
+            self.assertEqual((financial["total_mv"], financial["circ_mv"]), (1000.0, 600.0))
+            daily_basic = next(rows[0] for table, rows in repository.tables if table == "stock_daily_basic")
+            self.assertEqual((daily_basic["total_mv"], daily_basic["circ_mv"]), (1000.0, 600.0))
+            self.assertIn("_v2_", financial["source_batch_id"])
+            self.assertIn("_v2_", daily_basic["source_batch_id"])
 
 
 if __name__ == "__main__": unittest.main()

@@ -207,4 +207,14 @@ class WindowsN1PostgresRepository:
                 cur.execute("SELECT count(*) FROM common_trade_calendar")
                 if int(cur.fetchone()[0]) != 0:
                     raise RuntimeError("common_trade_calendar must remain empty in Windows N1")
+                cur.execute(
+                    "SELECT count(*),count(*) FILTER (WHERE total_mv IS NOT NULL AND circ_mv IS NOT NULL) "
+                    "FROM stock_daily_basic"
+                )
+                total_rows, market_value_rows = map(int, cur.fetchone())
+                market_value_coverage = market_value_rows / max(total_rows, 1)
+                if market_value_coverage < 0.90:
+                    raise RuntimeError(
+                        f"daily-basic market-value coverage below gate: {market_value_coverage:.6f}"
+                    )
         return counts
