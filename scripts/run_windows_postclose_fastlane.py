@@ -68,6 +68,20 @@ def validate_n4_readiness(
         raise RuntimeError(
             f"N3 context terminal counts do not match N2 objects: {terminal} != {expected}"
         )
+    usable = {
+        asset_kind: int(context.status_counts[asset_kind].get("ready", 0))
+        + int(context.status_counts[asset_kind].get("partial", 0))
+        for asset_kind in expected
+    }
+    unusable_channels = tuple(
+        asset_kind
+        for asset_kind, expected_count in expected.items()
+        if expected_count > 0 and usable[asset_kind] == 0
+    )
+    if unusable_channels:
+        raise RuntimeError(
+            "N3 context has no usable rows for: " + ", ".join(unusable_channels)
+        )
 
     runtime = runtime_builder(model)
     snapshots = {

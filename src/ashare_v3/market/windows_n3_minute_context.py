@@ -308,7 +308,7 @@ class _EltdxMinuteFetcher:
         trade_date: str,
         require_complete: bool,
     ) -> PreviousDayMinuteContext | None:
-        rows = self.client.bars.get(
+        response = self.client.bars.get(
             _eltdx_code(request),
             period="1m",
             start=0,
@@ -316,6 +316,7 @@ class _EltdxMinuteFetcher:
             adjust=None,
             kind="stock" if self.asset_kind == "stock" else "index",
         )
+        rows = getattr(response, "bars", response)
         bars = normalize_minute_bars(
             request.identity_key,
             trade_date,

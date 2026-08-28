@@ -722,13 +722,48 @@ class PostgresPreviousDayContextRepository:
             )
             if actual_context_run_id != context_run_id or actual != required:
                 raise RuntimeError("existing N3 context run lineage/count mismatch")
-            return context_run_id, str(values[4]) == "completed"
+            if str(values[4]) != "completed":
+                return context_run_id, False
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM stock_n3_previous_day_context
+                  WHERE context_run_id = %s AND status = 'failed'
+                  UNION ALL
+                  SELECT 1 FROM index_n3_previous_day_context
+                  WHERE context_run_id = %s AND status = 'failed'
+                  UNION ALL
+                  SELECT 1 FROM board_n3_previous_day_context
+                  WHERE context_run_id = %s AND status = 'failed'
+                )
+                """,
+                (context_run_id, context_run_id, context_run_id),
+            )
+            has_failed = bool(_row_values(cursor.fetchone())[0])
+            if not has_failed:
+                return context_run_id, True
+            cursor.execute(
+                """
+                UPDATE common_n3_previous_day_context_run
+                SET status='running',
+                    terminal_stock_count=0,
+                    terminal_index_count=0,
+                    terminal_board_count=0,
+                    result_summary='{}'::JSONB,
+                    finished_at=NULL,
+                    updated_at=now()
+                WHERE context_run_id=%s
+                """,
+                (context_run_id,),
+            )
+            return context_run_id, False
 
     def terminal_identity_keys(self, context_run_id: str, asset_kind: str) -> set[str]:
         table, identity_column = _asset_table(asset_kind)
         with self._connect(self.dsn) as connection, connection.cursor() as cursor:
             cursor.execute(
-                f"SELECT {identity_column} FROM {table} WHERE context_run_id = %s",
+                f"SELECT {identity_column} FROM {table} "
+                "WHERE context_run_id = %s AND status <> 'failed'",
                 (context_run_id,),
             )
             return {str(_row_values(row)[0]) for row in cursor.fetchall()}
@@ -758,7 +793,22 @@ class PostgresPreviousDayContextRepository:
               %s, %s, %s, %s, %s, %s, %s, %s, %s,
               %s, %s, %s, %s, %s, %s, %s::JSONB, %s, %s
             )
-            ON CONFLICT (context_run_id, {identity_column}) DO NOTHING
+            ON CONFLICT (context_run_id, {identity_column}) DO UPDATE SET
+              exchange=EXCLUDED.exchange,
+              code=EXCLUDED.code,
+              name=EXCLUDED.name,
+              basis_trade_date=EXCLUDED.basis_trade_date,
+              provider=EXCLUDED.provider,
+              status=EXCLUDED.status,
+              minute_count=EXCLUDED.minute_count,
+              tq_minute_count=EXCLUDED.tq_minute_count,
+              eltdx_minute_count=EXCLUDED.eltdx_minute_count,
+              cumulative_amounts=EXCLUDED.cumulative_amounts,
+              windows_json=EXCLUDED.windows_json,
+              content_sha256=EXCLUDED.content_sha256,
+              error_summary=EXCLUDED.error_summary,
+              updated_at=now()
+            WHERE {table}.status = 'failed'
         """
         params = [
             (
@@ -777,7 +827,11 @@ class PostgresPreviousDayContextRepository:
                 row.tq_minute_count,
                 row.eltdx_minute_count,
                 list(row.cumulative_amounts),
-                json.dumps(list(row.windows), ensure_ascii=False, sort_keys=True),
+                json.dumps(
+                    [dict(value) for value in row.windows],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 row.content_sha256,
                 row.error_summary,
             )
@@ -814,6 +868,11 @@ class PostgresPreviousDayContextRepository:
                     raise RuntimeError(
                         f"N3 context terminal count mismatch for {asset_kind}: "
                         f"{terminal[asset_kind]} != {expected[asset_kind]}"
+                    )
+                usable_count = counts.get("ready", 0) + counts.get("partial", 0)
+                if expected[asset_kind] > 0 and usable_count == 0:
+                    raise RuntimeError(
+                        f"N3 context has no usable rows for {asset_kind}"
                     )
             summary_json = json.dumps(status_counts, ensure_ascii=False, sort_keys=True)
             cursor.execute(

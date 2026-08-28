@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from ashare_v3.market.windows_n3_intraday import (
@@ -22,6 +24,7 @@ from ashare_v3.market.windows_n3_read_model import (
     N2PeriodRuntimeBaseline,
     N3ActiveReadModel,
 )
+from scripts.run_windows_n3_n4_memory import parse_args as parse_memory_args
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -232,6 +235,19 @@ class WindowsN3IntradayTest(unittest.TestCase):
         self.assertEqual(summary.cycles, 0)
         self.assertEqual(repository.loaded, 0)
         self.assertEqual(stock.calls, [])
+
+    def test_late_start_tq_module_path_is_accepted_and_forwarded(self):
+        module_path = r"C:\new_tdx64\PYPlugins\sys\tqcenter.py"
+        with patch.object(
+            sys,
+            "argv",
+            ["run_windows_n3_n4_memory.py", "--tq-module-path", module_path],
+        ):
+            self.assertEqual(parse_memory_args().tq_module_path, module_path)
+        source = (
+            Path(__file__).parents[1] / "scripts/run_windows_n3_n4_memory.py"
+        ).read_text()
+        self.assertIn("load_windows_tq_client(args.tq_module_path)", source)
 
     def test_new_n3_modules_do_not_write_sql_emit_events_or_import_n4(self):
         root = Path(__file__).parents[1]

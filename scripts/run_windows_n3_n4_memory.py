@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--for-trade-date",
         default=datetime.now(SHANGHAI_TIMEZONE).strftime("%Y%m%d"),
     )
+    parser.add_argument("--tq-module-path")
     return parser.parse_args()
 
 
@@ -111,7 +112,7 @@ def main() -> int:
             and now.time() >= time(9, 31)
         ):
             try:
-                tq_client = load_windows_tq_client()
+                tq_client = load_windows_tq_client(args.tq_module_path)
                 tq_stock = TQStockMinuteContextProvider(tq_client)
                 tq_index = TQIndexMinuteContextProvider(tq_client)
                 tq_board = TQBoardMinuteContextProvider(tq_client)

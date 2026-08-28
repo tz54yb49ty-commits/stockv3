@@ -62,6 +62,12 @@ class FakeBarsClient:
         return self.rows
 
 
+class KlineSeriesBarsClient(FakeBarsClient):
+    def get(self, code, **kwargs):
+        self.calls.append((code, kwargs))
+        return SimpleNamespace(bars=tuple(self.rows))
+
+
 class RetryBarsClient:
     def __init__(self, rows_by_code):
         self.bars = self
@@ -122,6 +128,14 @@ class WindowsN3MinuteContextTest(unittest.TestCase):
         self.assertEqual(board_client.calls[0][1]["kind"], "index")
         self.assertEqual(stock_client.calls[0][1]["period"], "1m")
         self.assertEqual(stock_client.calls[0][1]["count"], 320)
+
+    def test_real_kline_series_bars_payload_is_unwrapped(self):
+        client = KlineSeriesBarsClient(raw_day())
+        batch = EltdxStockMinuteContextProvider(
+            client,
+            max_workers=1,
+        ).fetch_many((self.stock,), "20260827")
+        self.assertEqual(len(batch.contexts[self.stock.identity_key].bars), 240)
 
     def test_incomplete_previous_day_is_unavailable_not_fabricated(self):
         client = FakeBarsClient(raw_day(count=239))

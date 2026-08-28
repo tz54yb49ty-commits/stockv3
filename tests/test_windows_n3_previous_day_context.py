@@ -14,12 +14,14 @@ from ashare_v3.market.windows_n3_minute_context import (
 )
 from ashare_v3.market.windows_n3_previous_day_context import (
     MinuteContextFetchBatch,
+    PostgresPreviousDayContextRepository,
     PreviousDayContextPreloadSummary,
     PostgresPreviousDayContextLoader,
     TQStockMinuteContextProvider,
     TQWithEltdxMinuteContextProvider,
     UnavailableTQMinuteContextProvider,
     WindowsN3PreviousDayContextPreloader,
+    context_run_id_for,
     context_record_sha256,
     make_context_record,
 )
@@ -242,6 +244,60 @@ class LoaderConnection:
 
     def cursor(self):
         return LoaderCursor()
+
+
+class RetryRepositoryCursor:
+    def __init__(self, state):
+        self.state = state
+        self.rows = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, _params=()):
+        normalized = " ".join(query.split())
+        self.state.setdefault("queries", []).append(normalized)
+        if normalized.startswith("SELECT context_run_id"):
+            self.rows = [self.state["run_row"]]
+        elif normalized.startswith("SELECT EXISTS"):
+            self.rows = [(self.state["has_failed"],)]
+        elif normalized.startswith("SELECT stock_identity_key"):
+            self.rows = list(self.state.get("terminal_rows", ()))
+        else:
+            self.rows = []
+        if "SET status='running'" in normalized:
+            self.state["reopened"] = True
+            self.rowcount = 1
+
+    def executemany(self, query, params):
+        values = list(params)
+        self.state["executemany_query"] = " ".join(query.split())
+        self.state["executemany_params"] = values
+        self.rowcount = len(values)
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class RetryRepositoryConnection:
+    def __init__(self, state):
+        self.state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def cursor(self):
+        return RetryRepositoryCursor(self.state)
 
 
 class WindowsN3PreviousDayContextTest(unittest.TestCase):
@@ -558,6 +614,68 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
             (second.identity_key,),
         )
 
+    def test_completed_failed_run_reopens_and_only_failed_rows_are_replaceable(self):
+        identity = request(0)
+        object_row = N2ObjectRuntimeInput(
+            "stock",
+            identity.identity_key,
+            "SH",
+            identity.code,
+            identity.name,
+            {},
+            "20260827",
+        )
+        model = N3ActiveReadModel(
+            "condition-1", "20260827", "20260828", (object_row,), (), ()
+        )
+        context_run_id = context_run_id_for(model.run_id)
+        state = {
+            "run_row": (
+                context_run_id,
+                model.run_id,
+                model.source_trade_date,
+                model.for_trade_date,
+                "completed",
+                1,
+                0,
+                0,
+            ),
+            "has_failed": True,
+            "terminal_rows": [("stock:SH:600001",)],
+        }
+        repository = PostgresPreviousDayContextRepository(
+            "postgresql://example",
+            connect=lambda _dsn: RetryRepositoryConnection(state),
+        )
+
+        run_id, already_complete = repository.begin_run(model)
+        self.assertEqual(run_id, context_run_id)
+        self.assertFalse(already_complete)
+        self.assertTrue(state["reopened"])
+        self.assertEqual(
+            repository.terminal_identity_keys(context_run_id, "stock"),
+            {"stock:SH:600001"},
+        )
+        terminal_query = next(
+            query for query in state["queries"] if query.startswith("SELECT stock_identity_key")
+        )
+        self.assertIn("status <> 'failed'", terminal_query)
+
+        record = make_context_record(
+            object_row,
+            provider="eltdx.test",
+            status="ready",
+            context=minute_context(identity.identity_key, "20260827"),
+            error_summary=None,
+            eltdx_minute_count=240,
+        )
+        self.assertEqual(repository.save_records(context_run_id, model, (record,)), 1)
+        self.assertIn("DO UPDATE SET", state["executemany_query"])
+        self.assertIn(
+            "WHERE stock_n3_previous_day_context.status = 'failed'",
+            state["executemany_query"],
+        )
+
     def test_ready_context_has_240_points_eight_windows_and_stable_sha(self):
         row = N2ObjectRuntimeInput(
             "stock", request(0).identity_key, "SH", request(0).code, "浦发", {}, "20260827"
@@ -605,6 +723,12 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         self.assertEqual(schema.count("eltdx_minute_count INTEGER"), 3)
         self.assertIn("TO ashare_v3_user", schema)
         self.assertNotIn("GRANT DELETE", schema)
+
+        retry_grant = (
+            root / "sql/041_windows_n3_previous_day_context_retry_grant.sql"
+        ).read_text()
+        self.assertIn("GRANT UPDATE", retry_grant)
+        self.assertNotIn("GRANT DELETE", retry_grant)
 
     def test_intraday_path_has_no_full_market_minute_pull_or_boundary_refresh(self):
         root = Path(__file__).parents[1]

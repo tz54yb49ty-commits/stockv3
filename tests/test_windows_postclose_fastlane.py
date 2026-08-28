@@ -154,6 +154,22 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
                 runtime_builder=runtime_builder,
             )
 
+    def test_all_failed_channel_blocks_false_postclose_pass(self):
+        failed = context()
+        failed.status_counts = {
+            "stock": {"failed": 2},
+            "index": {"failed": 1},
+            "board": {"failed": 1},
+        }
+        with self.assertRaisesRegex(RuntimeError, "no usable rows"):
+            run_postclose_fastlane(
+                run_n2=lambda: n2_result(),
+                run_n3=lambda _date: n3_result(),
+                load_model=lambda _date: model(),
+                load_context=lambda _active: failed,
+                runtime_builder=runtime_builder,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
