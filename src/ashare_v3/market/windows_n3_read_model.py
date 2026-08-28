@@ -45,6 +45,7 @@ class N2ObjectRuntimeInput:
     code: str
     name: str
     periods: Mapping[str, N2PeriodRuntimeBaseline]
+    basis_trade_date: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "periods", MappingProxyType(dict(self.periods)))
@@ -177,6 +178,7 @@ class WindowsN3ReadOnlyRepository:
                    {exchange_expression} AS exchange,
                    {code_column} AS code,
                    {name_column} AS name,
+                   period_key_d AS basis_trade_date,
                    period_grade_y, period_grade_q, period_grade_m,
                    period_grade_w, period_grade_d,
                    period_transition_y, period_transition_q, period_transition_m,
@@ -194,7 +196,7 @@ class WindowsN3ReadOnlyRepository:
 
 
 def _runtime_input(asset_kind: str, row: Any) -> N2ObjectRuntimeInput:
-    baseline = _json_object(_value(row, "period_trigger_baseline_json", 14))
+    baseline = _json_object(_value(row, "period_trigger_baseline_json", 15))
     baseline_periods = baseline.get("periods")
     if not isinstance(baseline_periods, Mapping):
         baseline_periods = {}
@@ -205,8 +207,8 @@ def _runtime_input(asset_kind: str, row: Any) -> N2ObjectRuntimeInput:
             entry = {}
         periods[period] = N2PeriodRuntimeBaseline(
             period=period,
-            grade=_optional_text(_value(row, f"period_grade_{period.lower()}", 4 + offset)),
-            transition=_optional_text(_value(row, f"period_transition_{period.lower()}", 9 + offset)),
+            grade=_optional_text(_value(row, f"period_grade_{period.lower()}", 5 + offset)),
+            transition=_optional_text(_value(row, f"period_transition_{period.lower()}", 10 + offset)),
             previous_entity_high=_decimal(entry.get("trigger_previous_entity_high")),
             previous_entity_low=_decimal(entry.get("trigger_previous_entity_low")),
             previous_amount_baseline=_decimal(entry.get("trigger_previous_amount_baseline")),
@@ -219,6 +221,7 @@ def _runtime_input(asset_kind: str, row: Any) -> N2ObjectRuntimeInput:
         exchange=str(_value(row, "exchange", 1)),
         code=str(_value(row, "code", 2)),
         name=str(_value(row, "name", 3)),
+        basis_trade_date=_optional_text(_value(row, "basis_trade_date", 4)),
         periods=periods,
     )
 

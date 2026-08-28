@@ -31,6 +31,8 @@ MINUTES_PER_DAY = 240
 MINUTES_PER_WINDOW = 30
 WINDOWS_PER_DAY = 8
 ELTDX_MINUTE_MAX_WORKERS = 16
+ELTDX_MINUTE_REQUEST_COUNT = 320
+ELTDX_MINUTE_RETRY_DELAYS_SECONDS = (0.5, 1.5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,8 +136,21 @@ class BoardMinuteContextProvider(Protocol):
 class EltdxStockMinuteContextProvider:
     provider_name = "eltdx.stock.bars.1m"
 
-    def __init__(self, client: Any, *, max_workers: int = ELTDX_MINUTE_MAX_WORKERS) -> None:
-        self._fetcher = _EltdxMinuteFetcher(client, "stock", max_workers)
+    def __init__(
+        self,
+        client: Any,
+        *,
+        max_workers: int = ELTDX_MINUTE_MAX_WORKERS,
+        sleep: Any | None = None,
+        retry_delays: Sequence[float] = ELTDX_MINUTE_RETRY_DELAYS_SECONDS,
+    ) -> None:
+        self._fetcher = _EltdxMinuteFetcher(
+            client,
+            "stock",
+            max_workers,
+            sleep=sleep,
+            retry_delays=retry_delays,
+        )
 
     def fetch_many(self, requests, trade_date, *, require_complete=True):
         return self._fetcher.fetch_many(
@@ -149,8 +164,21 @@ class EltdxStockMinuteContextProvider:
 class EltdxIndexMinuteContextProvider:
     provider_name = "eltdx.index.bars.1m"
 
-    def __init__(self, client: Any, *, max_workers: int = ELTDX_MINUTE_MAX_WORKERS) -> None:
-        self._fetcher = _EltdxMinuteFetcher(client, "index", max_workers)
+    def __init__(
+        self,
+        client: Any,
+        *,
+        max_workers: int = ELTDX_MINUTE_MAX_WORKERS,
+        sleep: Any | None = None,
+        retry_delays: Sequence[float] = ELTDX_MINUTE_RETRY_DELAYS_SECONDS,
+    ) -> None:
+        self._fetcher = _EltdxMinuteFetcher(
+            client,
+            "index",
+            max_workers,
+            sleep=sleep,
+            retry_delays=retry_delays,
+        )
 
     def fetch_many(self, requests, trade_date, *, require_complete=True):
         return self._fetcher.fetch_many(
@@ -164,8 +192,21 @@ class EltdxIndexMinuteContextProvider:
 class EltdxBoardMinuteContextProvider:
     provider_name = "eltdx.board.bars.1m"
 
-    def __init__(self, client: Any, *, max_workers: int = ELTDX_MINUTE_MAX_WORKERS) -> None:
-        self._fetcher = _EltdxMinuteFetcher(client, "board", max_workers)
+    def __init__(
+        self,
+        client: Any,
+        *,
+        max_workers: int = ELTDX_MINUTE_MAX_WORKERS,
+        sleep: Any | None = None,
+        retry_delays: Sequence[float] = ELTDX_MINUTE_RETRY_DELAYS_SECONDS,
+    ) -> None:
+        self._fetcher = _EltdxMinuteFetcher(
+            client,
+            "board",
+            max_workers,
+            sleep=sleep,
+            retry_delays=retry_delays,
+        )
 
     def fetch_many(self, requests, trade_date, *, require_complete=True):
         return self._fetcher.fetch_many(
@@ -177,12 +218,29 @@ class EltdxBoardMinuteContextProvider:
 
 
 class _EltdxMinuteFetcher:
-    def __init__(self, client: Any, asset_kind: str, max_workers: int) -> None:
+    def __init__(
+        self,
+        client: Any,
+        asset_kind: str,
+        max_workers: int,
+        *,
+        sleep: Any | None,
+        retry_delays: Sequence[float],
+    ) -> None:
         if max_workers <= 0:
             raise ValueError("max_workers must be positive")
+        if len(tuple(retry_delays)) != 2:
+            raise ValueError("eltdx retry_delays must contain exactly two delays")
         self.client = client
         self.asset_kind = asset_kind
         self.max_workers = max_workers
+        if sleep is None:
+            from time import sleep as system_sleep
+
+            self.sleep = system_sleep
+        else:
+            self.sleep = sleep
+        self.retry_delays = tuple(float(value) for value in retry_delays)
 
     def fetch_many(
         self,
@@ -197,20 +255,41 @@ class _EltdxMinuteFetcher:
         errors: list[str] = []
         if not requested:
             return MinuteContextBatch({}, (), (), provider)
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {
-                pool.submit(self._fetch_one, request, trade_date, require_complete): request
-                for request in requested
-            }
-            for future in as_completed(futures):
-                request = futures[future]
-                try:
-                    context = future.result()
-                except Exception as error:
-                    errors.append(f"{request.identity_key}:{type(error).__name__}:{error}")
-                    continue
-                if context is not None:
-                    contexts[request.identity_key] = context
+        pending = requested
+        for attempt in range(3):
+            failed: list[RequestT] = []
+            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                futures = {
+                    pool.submit(
+                        self._fetch_one,
+                        request,
+                        trade_date,
+                        require_complete,
+                    ): request
+                    for request in pending
+                }
+                for future in as_completed(futures):
+                    request = futures[future]
+                    try:
+                        context = future.result()
+                    except Exception as error:
+                        errors.append(
+                            f"{request.identity_key}:attempt={attempt + 1}:"
+                            f"{type(error).__name__}:{error}"
+                        )
+                        failed.append(request)
+                        continue
+                    if context is None:
+                        errors.append(
+                            f"{request.identity_key}:attempt={attempt + 1}:empty_or_incomplete"
+                        )
+                        failed.append(request)
+                    else:
+                        contexts[request.identity_key] = context
+            pending = tuple(failed)
+            if not pending or attempt == 2:
+                break
+            self.sleep(self.retry_delays[attempt])
         missing = tuple(
             request.identity_key
             for request in requested
@@ -233,7 +312,7 @@ class _EltdxMinuteFetcher:
             _eltdx_code(request),
             period="1m",
             start=0,
-            count=800,
+            count=ELTDX_MINUTE_REQUEST_COUNT,
             adjust=None,
             kind="stock" if self.asset_kind == "stock" else "index",
         )
@@ -498,9 +577,25 @@ def _decimal(value: Any) -> Decimal | None:
 def _coerce_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+        if numeric > 10_000_000_000_000:
+            numeric /= 1_000_000_000
+        elif numeric > 10_000_000_000:
+            numeric /= 1_000
+        try:
+            return datetime.fromtimestamp(numeric).replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return None
     if isinstance(value, str):
         normalized = value.strip().replace("T", " ")
-        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d %H:%M"):
+        for pattern in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y%m%d%H%M%S",
+            "%Y%m%d%H%M",
+            "%Y%m%d %H:%M",
+        ):
             try:
                 return datetime.strptime(normalized, pattern)
             except ValueError:

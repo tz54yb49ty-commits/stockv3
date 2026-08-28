@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Build resumable Windows N3 compressed previous-day context after N2."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import ExitStack
+from dataclasses import asdict
+from datetime import datetime, time
+import json
+import os
+from zoneinfo import ZoneInfo
+
+from ashare_v3.market.windows_n3_minute_context import (
+    EltdxBoardMinuteContextProvider,
+    EltdxIndexMinuteContextProvider,
+    EltdxStockMinuteContextProvider,
+)
+from ashare_v3.market.windows_n3_previous_day_context import (
+    PostgresPreviousDayContextRepository,
+    TQBoardMinuteContextProvider,
+    TQIndexMinuteContextProvider,
+    TQStockMinuteContextProvider,
+    WindowsN3PreviousDayContextPreloader,
+    load_windows_tq_client,
+)
+from ashare_v3.market.windows_n3_read_model import WindowsN3ReadOnlyRepository
+
+
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dsn",
+        default=os.environ.get(
+            "ASHARE_V3_DSN",
+            "postgresql://ashare_v3_user@127.0.0.1:5432/ashare_v3",
+        ),
+    )
+    parser.add_argument("--for-trade-date", required=True)
+    parser.add_argument("--tq-module-path")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    now = datetime.now(SHANGHAI_TIMEZONE)
+    today = now.strftime("%Y%m%d")
+    if args.for_trade_date < today or (
+        args.for_trade_date == today and now.time() >= time(9, 0)
+    ):
+        raise RuntimeError("N3 context preload deadline has passed")
+
+    from eltdx import TdxClient
+
+    model = WindowsN3ReadOnlyRepository(args.dsn).load_active(args.for_trade_date)
+    tq_client = load_windows_tq_client(args.tq_module_path)
+    with ExitStack() as stack:
+        client = stack.enter_context(
+            TdxClient.from_hosts(pool_size=16, probe_hosts=True, timeout=8)
+        )
+        summary = WindowsN3PreviousDayContextPreloader(
+            repository=PostgresPreviousDayContextRepository(args.dsn),
+            tq_stock=TQStockMinuteContextProvider(tq_client),
+            tq_index=TQIndexMinuteContextProvider(tq_client),
+            tq_board=TQBoardMinuteContextProvider(tq_client),
+            eltdx_stock=EltdxStockMinuteContextProvider(client),
+            eltdx_index=EltdxIndexMinuteContextProvider(client),
+            eltdx_board=EltdxBoardMinuteContextProvider(client),
+        ).execute(model)
+    print(json.dumps(asdict(summary), ensure_ascii=False, default=str, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

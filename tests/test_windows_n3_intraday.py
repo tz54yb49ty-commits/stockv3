@@ -103,6 +103,19 @@ class MinuteProvider:
         return MinuteContextBatch(values, (), (), f"fake.{self.asset_kind}")
 
 
+class ContextLoader:
+    def __init__(self):
+        self.calls = []
+
+    def load(self, active_model):
+        self.calls.append(active_model.run_id)
+        return SimpleNamespace(
+            stock={"stock:SH:600000": context("stock:SH:600000", "20260827")},
+            index={"index:SH:000001": context("index:SH:000001", "20260827")},
+            board={"board:TDX:881333": context("board:TDX:881333", "20260827")},
+        )
+
+
 class Runtime:
     def __init__(self):
         self.calls = []
@@ -127,9 +140,10 @@ class WindowsN3IntradayTest(unittest.TestCase):
         clock = Clock(now)
         runner = WindowsN3IntradayRunner(
             repository=repository or Repository(),
-            stock_minute_provider=stock or MinuteProvider("stock"),
-            index_minute_provider=index or MinuteProvider("index"),
-            board_minute_provider=board or MinuteProvider("board"),
+            context_loader=ContextLoader(),
+            current_stock_minute_provider=stock or MinuteProvider("stock"),
+            current_index_minute_provider=index or MinuteProvider("index"),
+            current_board_minute_provider=board or MinuteProvider("board"),
             runtime_factory=lambda _model: runtime,
             clock=clock,
             sleep=lambda _seconds: None,
@@ -148,7 +162,7 @@ class WindowsN3IntradayTest(unittest.TestCase):
         self.assertEqual(repository.loaded, 0)
         self.assertEqual(stock.calls, [])
 
-    def test_0915_preload_reads_previous_day_only_in_three_independent_channels(self):
+    def test_0915_preload_reads_compressed_database_context_without_minute_requests(self):
         stock = MinuteProvider("stock")
         index = MinuteProvider("index")
         board = MinuteProvider("board")
@@ -160,9 +174,9 @@ class WindowsN3IntradayTest(unittest.TestCase):
         )
         session = runner.prepare("20260828")
         self.assertIsNotNone(session)
-        self.assertEqual(stock.calls[0][0:2], ("20260827", True))
-        self.assertEqual(index.calls[0][0:2], ("20260827", True))
-        self.assertEqual(board.calls[0][0:2], ("20260827", True))
+        self.assertEqual(stock.calls, [])
+        self.assertEqual(index.calls, [])
+        self.assertEqual(board.calls, [])
         self.assertEqual(len(session.previous_stock), 1)
         self.assertEqual(len(session.previous_index), 1)
         self.assertEqual(len(session.previous_board), 1)
@@ -174,24 +188,26 @@ class WindowsN3IntradayTest(unittest.TestCase):
             stock=stock,
         )
         session = runner.prepare("20260828")
-        self.assertEqual(stock.calls[1][0:2], ("20260828", False))
+        self.assertEqual(stock.calls[0][0:2], ("20260828", False))
         cycle = runner.run_one_cycle(session, datetime(2026, 8, 28, 10, 5, tzinfo=TZ))
         call = runtime.calls[-1]
         key = "stock:SH:600000"
         self.assertEqual(call["stock_30m_elapsed"][key], Decimal("50"))
         self.assertEqual(cycle.stock_30m_references[key].bucket_index, 1)
         self.assertEqual(cycle.stock_30m_references[key].adjacent_completed_entity_high, Decimal("11"))
+        runner.run_one_cycle(session, datetime(2026, 8, 28, 10, 30, 5, tzinfo=TZ))
+        self.assertEqual(len(stock.calls), 1)
 
-    def test_one_minute_channel_failure_does_not_block_other_preloads(self):
+    def test_late_rebuild_channel_failure_does_not_block_database_context(self):
         runner, _runtime, _clock = self.make_runner(
-            now=datetime(2026, 8, 28, 9, 15, tzinfo=TZ),
+            now=datetime(2026, 8, 28, 10, 5, tzinfo=TZ),
             stock=MinuteProvider("stock", fail=True),
         )
         session = runner.prepare("20260828")
-        self.assertEqual(session.previous_stock, {})
+        self.assertEqual(len(session.previous_stock), 1)
         self.assertEqual(len(session.previous_index), 1)
         self.assertEqual(len(session.previous_board), 1)
-        self.assertIn("RuntimeError", session.preload_errors["stock"][0])
+        self.assertEqual(session.current_stock, {})
 
     def test_schedule_helpers_cover_sessions_lunch_and_all_boundaries(self):
         self.assertTrue(is_live_session(datetime(2026, 8, 28, 9, 30).time()))

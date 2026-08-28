@@ -62,6 +62,23 @@ class FakeBarsClient:
         return self.rows
 
 
+class RetryBarsClient:
+    def __init__(self, rows_by_code):
+        self.bars = self
+        self.rows_by_code = {
+            code: list(values) for code, values in rows_by_code.items()
+        }
+        self.calls = []
+
+    def get(self, code, **kwargs):
+        self.calls.append((code, kwargs))
+        values = self.rows_by_code[code]
+        value = values.pop(0) if len(values) > 1 else values[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
 class WindowsN3MinuteContextTest(unittest.TestCase):
     def setUp(self):
         self.stock = StockSnapshotRequest("stock:SH:600000", "SH", "600000", "浦发")
@@ -104,15 +121,45 @@ class WindowsN3MinuteContextTest(unittest.TestCase):
         self.assertEqual(index_client.calls[0][1]["kind"], "index")
         self.assertEqual(board_client.calls[0][1]["kind"], "index")
         self.assertEqual(stock_client.calls[0][1]["period"], "1m")
+        self.assertEqual(stock_client.calls[0][1]["count"], 320)
 
     def test_incomplete_previous_day_is_unavailable_not_fabricated(self):
         client = FakeBarsClient(raw_day(count=239))
-        batch = EltdxStockMinuteContextProvider(client, max_workers=1).fetch_many(
+        batch = EltdxStockMinuteContextProvider(
+            client,
+            max_workers=1,
+            sleep=lambda _value: None,
+        ).fetch_many(
             (self.stock,),
             "20260827",
         )
         self.assertEqual(batch.contexts, {})
         self.assertEqual(batch.missing_identity_keys, (self.stock.identity_key,))
+
+    def test_eltdx_retries_only_failed_objects_with_fixed_delays(self):
+        second = StockSnapshotRequest(
+            "stock:SH:600001",
+            "SH",
+            "600001",
+            "第二只",
+        )
+        delays = []
+        client = RetryBarsClient(
+            {
+                "sh600000": [RuntimeError("one"), RuntimeError("two"), raw_day()],
+                "sh600001": [raw_day()],
+            }
+        )
+        batch = EltdxStockMinuteContextProvider(
+            client,
+            max_workers=2,
+            sleep=delays.append,
+        ).fetch_many((self.stock, second), "20260827")
+        calls = [code for code, _kwargs in client.calls]
+        self.assertEqual(calls.count("sh600000"), 3)
+        self.assertEqual(calls.count("sh600001"), 1)
+        self.assertEqual(delays, [0.5, 1.5])
+        self.assertEqual(set(batch.contexts), {self.stock.identity_key, second.identity_key})
 
     def test_day_and_30m_virtual_context_use_same_progress_previous_day(self):
         previous_bars = normalize_minute_bars(self.stock.identity_key, "20260827", raw_day())

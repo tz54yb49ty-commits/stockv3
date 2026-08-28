@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, time
 import json
 import os
 from zoneinfo import ZoneInfo
@@ -22,6 +22,14 @@ from ashare_v3.market.windows_n3_minute_context import (
     EltdxBoardMinuteContextProvider,
     EltdxIndexMinuteContextProvider,
     EltdxStockMinuteContextProvider,
+)
+from ashare_v3.market.windows_n3_previous_day_context import (
+    PostgresPreviousDayContextLoader,
+    TQBoardMinuteContextProvider,
+    TQIndexMinuteContextProvider,
+    TQStockMinuteContextProvider,
+    TQWithEltdxMinuteContextProvider,
+    load_windows_tq_client,
 )
 from ashare_v3.market.windows_n3_read_model import WindowsN3ReadOnlyRepository
 from ashare_v3.market.windows_n3_snapshot import (
@@ -56,6 +64,7 @@ def main() -> int:
     from eltdx import TdxClient
 
     repository = WindowsN3ReadOnlyRepository(args.dsn)
+    context_loader = PostgresPreviousDayContextLoader(args.dsn)
     n4_holder = {}
     with ExitStack() as stack:
         stock_client = stack.enter_context(
@@ -94,13 +103,33 @@ def main() -> int:
                 raise RuntimeError("N4 runtime was not initialized from N2")
             n4_holder["latest"] = runtime.consume_cycle(cycle)
 
+        current_provider_args = {}
+        now = datetime.now(SHANGHAI_TIMEZONE)
+        if (
+            now.strftime("%Y%m%d") == args.for_trade_date
+            and now.time() >= time(9, 31)
+        ):
+            tq_client = load_windows_tq_client()
+            current_provider_args = {
+                "current_stock_minute_provider": TQWithEltdxMinuteContextProvider(
+                    TQStockMinuteContextProvider(tq_client),
+                    EltdxStockMinuteContextProvider(stock_client),
+                ),
+                "current_index_minute_provider": TQWithEltdxMinuteContextProvider(
+                    TQIndexMinuteContextProvider(tq_client),
+                    EltdxIndexMinuteContextProvider(index_client),
+                ),
+                "current_board_minute_provider": TQWithEltdxMinuteContextProvider(
+                    TQBoardMinuteContextProvider(tq_client),
+                    EltdxBoardMinuteContextProvider(board_client),
+                ),
+            }
         runner = WindowsN3IntradayRunner(
             repository=repository,
-            stock_minute_provider=EltdxStockMinuteContextProvider(stock_client),
-            index_minute_provider=EltdxIndexMinuteContextProvider(index_client),
-            board_minute_provider=EltdxBoardMinuteContextProvider(board_client),
+            context_loader=context_loader,
             runtime_factory=runtime_factory,
             publish=publish,
+            **current_provider_args,
         )
         summary = runner.execute(args.for_trade_date)
 

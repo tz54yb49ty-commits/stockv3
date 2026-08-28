@@ -8,7 +8,6 @@ logic, database writes, event generation, service registration, or scheduler.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from types import MappingProxyType
@@ -17,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from ashare_v3.market.windows_n3_memory import (
     N3MemoryCycleResult,
+    RealtimeMetric,
     WindowsN3MemoryRuntime,
 )
 from ashare_v3.market.windows_n3_minute_context import (
@@ -27,6 +27,10 @@ from ashare_v3.market.windows_n3_minute_context import (
     StockMinuteContextProvider,
     ThirtyMinuteRuntimeReference,
     build_cycle_inputs,
+    trading_bucket_position,
+)
+from ashare_v3.market.windows_n3_previous_day_context import (
+    PreviousDayContextLoader,
 )
 from ashare_v3.market.windows_n3_read_model import (
     N3ActiveReadModel,
@@ -50,6 +54,9 @@ class PreparedN3Session:
     current_board: Mapping[str, PreviousDayMinuteContext] = field(default_factory=dict)
     current_completed_windows: int = 0
     preload_errors: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    stock_price_tracker: "_EntityPriceTracker" = field(default_factory=lambda: _EntityPriceTracker())
+    index_price_tracker: "_EntityPriceTracker" = field(default_factory=lambda: _EntityPriceTracker())
+    board_price_tracker: "_EntityPriceTracker" = field(default_factory=lambda: _EntityPriceTracker())
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +88,10 @@ class WindowsN3IntradayRunner:
         self,
         *,
         repository: WindowsN3ReadOnlyRepository,
-        stock_minute_provider: StockMinuteContextProvider,
-        index_minute_provider: IndexMinuteContextProvider,
-        board_minute_provider: BoardMinuteContextProvider,
+        context_loader: PreviousDayContextLoader,
+        current_stock_minute_provider: StockMinuteContextProvider | None = None,
+        current_index_minute_provider: IndexMinuteContextProvider | None = None,
+        current_board_minute_provider: BoardMinuteContextProvider | None = None,
         runtime_factory: Callable[[N3ActiveReadModel], WindowsN3MemoryRuntime],
         publish: Callable[[N3IntradayCycle], None] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -93,9 +101,10 @@ class WindowsN3IntradayRunner:
         if cycle_seconds < 5:
             raise ValueError("cycle_seconds must be at least 5")
         self.repository = repository
-        self.stock_minute_provider = stock_minute_provider
-        self.index_minute_provider = index_minute_provider
-        self.board_minute_provider = board_minute_provider
+        self.context_loader = context_loader
+        self.current_stock_minute_provider = current_stock_minute_provider
+        self.current_index_minute_provider = current_index_minute_provider
+        self.current_board_minute_provider = current_board_minute_provider
         self.runtime_factory = runtime_factory
         self.publish = publish or (lambda _cycle: None)
         self.clock = clock or _shanghai_now
@@ -110,73 +119,56 @@ class WindowsN3IntradayRunner:
         if not self.repository.is_open_trade_date(for_trade_date):
             return None
         model = self.repository.load_active(for_trade_date)
-        stock_requests = model.stock_requests()
-        index_requests = model.index_requests()
-        board_requests = model.board_requests()
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            stock_future = pool.submit(
-                self.stock_minute_provider.fetch_many,
-                stock_requests,
-                model.source_trade_date,
-            )
-            index_future = pool.submit(
-                self.index_minute_provider.fetch_many,
-                index_requests,
-                model.source_trade_date,
-            )
-            board_future = pool.submit(
-                self.board_minute_provider.fetch_many,
-                board_requests,
-                model.source_trade_date,
-            )
-            stock_batch = _safe_batch(stock_future, "stock")
-            index_batch = _safe_batch(index_future, "index")
-            board_batch = _safe_batch(board_future, "board")
+        loaded = self.context_loader.load(model)
         session = PreparedN3Session(
             model=model,
             runtime=self.runtime_factory(model),
-            previous_stock=stock_batch.contexts,
-            previous_index=index_batch.contexts,
-            previous_board=board_batch.contexts,
-            preload_errors={
-                "stock": stock_batch.errors,
-                "index": index_batch.errors,
-                "board": board_batch.errors,
-            },
+            previous_stock=loaded.stock,
+            previous_index=loaded.index,
+            previous_board=loaded.board,
+            preload_errors={},
         )
         now = _as_shanghai(self.clock())
         if now.strftime("%Y%m%d") == for_trade_date and now.time() >= time(9, 31):
-            self.refresh_current_day(session)
+            self._rebuild_current_day_once(session)
         return session
 
-    def refresh_current_day(self, session: PreparedN3Session) -> None:
+    def _rebuild_current_day_once(self, session: PreparedN3Session) -> None:
+        providers = (
+            self.current_stock_minute_provider,
+            self.current_index_minute_provider,
+            self.current_board_minute_provider,
+        )
+        if any(provider is None for provider in providers):
+            return
         model = session.model
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            stock_future = pool.submit(
-                self.stock_minute_provider.fetch_many,
-                model.stock_requests(),
-                model.for_trade_date,
-                require_complete=False,
-            )
-            index_future = pool.submit(
-                self.index_minute_provider.fetch_many,
-                model.index_requests(),
-                model.for_trade_date,
-                require_complete=False,
-            )
-            board_future = pool.submit(
-                self.board_minute_provider.fetch_many,
-                model.board_requests(),
-                model.for_trade_date,
-                require_complete=False,
-            )
-            stock_batch = _safe_batch(stock_future, "stock")
-            index_batch = _safe_batch(index_future, "index")
-            board_batch = _safe_batch(board_future, "board")
+        # TQ terminal RPC is single-channel. Keep the three asset contracts
+        # independent, but execute the one-time late-start rebuild serially.
+        stock_batch = _safe_current_batch(
+            self.current_stock_minute_provider,
+            model.stock_requests(),
+            model.for_trade_date,
+            "stock",
+        )
+        index_batch = _safe_current_batch(
+            self.current_index_minute_provider,
+            model.index_requests(),
+            model.for_trade_date,
+            "index",
+        )
+        board_batch = _safe_current_batch(
+            self.current_board_minute_provider,
+            model.board_requests(),
+            model.for_trade_date,
+            "board",
+        )
         session.current_stock = stock_batch.contexts
         session.current_index = index_batch.contexts
         session.current_board = board_batch.contexts
         session.current_completed_windows = completed_window_count(_as_shanghai(self.clock()).time())
+        session.stock_price_tracker.seed(session.current_stock)
+        session.index_price_tracker.seed(session.current_index)
+        session.board_price_tracker.seed(session.current_board)
 
     def run_one_cycle(
         self,
@@ -184,13 +176,6 @@ class WindowsN3IntradayRunner:
         observed_at: datetime | None = None,
     ) -> N3IntradayCycle:
         now = _as_shanghai(observed_at or self.clock())
-        # The 15:00 close completes the eighth window but there is no following
-        # live bucket that needs its adjacent reference.  Avoid a full-market
-        # minute refresh at shutdown so the process can exit before 15:05.
-        completed = min(completed_window_count(now.time()), 7)
-        if completed > session.current_completed_windows:
-            self.refresh_current_day(session)
-            now = _as_shanghai(observed_at or self.clock())
         model = session.model
         stock_contexts, stock_elapsed, stock_references = build_cycle_inputs(
             session.previous_stock,
@@ -220,6 +205,27 @@ class WindowsN3IntradayRunner:
             stock_30m_elapsed=stock_elapsed,
             index_30m_elapsed=index_elapsed,
             board_30m_elapsed=board_elapsed,
+        )
+        stock_references = _update_runtime_references(
+            session.previous_stock,
+            stock_references,
+            metrics.stock.states,
+            session.stock_price_tracker,
+            now,
+        )
+        index_references = _update_runtime_references(
+            session.previous_index,
+            index_references,
+            metrics.index.states,
+            session.index_price_tracker,
+            now,
+        )
+        board_references = _update_runtime_references(
+            session.previous_board,
+            board_references,
+            metrics.board.states,
+            session.board_price_tracker,
+            now,
         )
         cycle = N3IntradayCycle(
             generated_at=now,
@@ -289,9 +295,18 @@ def completed_window_count(wall_time: time) -> int:
     return sum(1 for boundary in boundaries if wall_time >= boundary)
 
 
-def _safe_batch(future: Any, asset_kind: str) -> MinuteContextBatch[Any]:
+def _safe_current_batch(
+    provider: Any,
+    requests: Any,
+    trade_date: str,
+    asset_kind: str,
+) -> MinuteContextBatch[Any]:
     try:
-        return future.result()
+        return provider.fetch_many(
+            requests,
+            trade_date,
+            require_complete=False,
+        )
     except Exception as error:
         return MinuteContextBatch(
             {},
@@ -299,6 +314,110 @@ def _safe_batch(future: Any, asset_kind: str) -> MinuteContextBatch[Any]:
             (f"{asset_kind}:{type(error).__name__}:{error}",),
             f"{asset_kind}.unavailable",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _EntityBucketPrice:
+    bucket_index: int
+    open: Any
+    close: Any
+
+
+class _EntityPriceTracker:
+    """Bounded in-memory 30m entity boundary tracker."""
+
+    def __init__(self) -> None:
+        self.current: dict[str, _EntityBucketPrice] = {}
+        self.completed: dict[tuple[str, int], tuple[Any, Any]] = {}
+
+    def seed(self, contexts: Mapping[str, PreviousDayMinuteContext]) -> None:
+        for identity_key, context in contexts.items():
+            for window in context.windows:
+                self.completed[(identity_key, window.bucket_index)] = (
+                    window.entity_high,
+                    window.entity_low,
+                )
+            if context.bars:
+                last = context.bars[-1]
+                bucket_index = (last.minute_index - 1) // 30
+                bucket_bars = tuple(
+                    row
+                    for row in context.bars
+                    if (row.minute_index - 1) // 30 == bucket_index
+                )
+                if bucket_bars:
+                    self.current[identity_key] = _EntityBucketPrice(
+                        bucket_index,
+                        bucket_bars[0].open,
+                        bucket_bars[-1].close,
+                    )
+
+    def observe(self, metric: RealtimeMetric, bucket_index: int) -> None:
+        quote = metric.quote
+        if quote is None or quote.current_price is None or not metric.fresh:
+            return
+        previous = self.current.get(metric.identity_key)
+        if previous is None:
+            self.current[metric.identity_key] = _EntityBucketPrice(
+                bucket_index,
+                quote.current_price,
+                quote.current_price,
+            )
+            return
+        if previous.bucket_index == bucket_index:
+            self.current[metric.identity_key] = _EntityBucketPrice(
+                bucket_index,
+                previous.open,
+                quote.current_price,
+            )
+            return
+        self.completed[(metric.identity_key, previous.bucket_index)] = (
+            max(previous.open, previous.close),
+            min(previous.open, previous.close),
+        )
+        self.current[metric.identity_key] = _EntityBucketPrice(
+            bucket_index,
+            quote.current_price,
+            quote.current_price,
+        )
+
+    def adjacent(self, identity_key: str, bucket_index: int) -> tuple[Any, Any] | None:
+        return self.completed.get((identity_key, bucket_index - 1))
+
+
+def _update_runtime_references(
+    previous_contexts: Mapping[str, PreviousDayMinuteContext],
+    existing: Mapping[str, ThirtyMinuteRuntimeReference],
+    states: Mapping[str, RealtimeMetric],
+    tracker: _EntityPriceTracker,
+    observed_at: datetime,
+) -> Mapping[str, ThirtyMinuteRuntimeReference]:
+    position = trading_bucket_position(observed_at.time().replace(tzinfo=None))
+    if position is None:
+        return MappingProxyType(dict(existing))
+    bucket_index, _elapsed = position
+    for metric in states.values():
+        tracker.observe(metric, bucket_index)
+    merged = dict(existing)
+    if bucket_index == 0:
+        return MappingProxyType(merged)
+    for identity_key, previous in previous_contexts.items():
+        if identity_key in merged:
+            continue
+        window = next(
+            (row for row in previous.windows if row.bucket_index == bucket_index),
+            None,
+        )
+        adjacent = tracker.adjacent(identity_key, bucket_index)
+        if window is None or adjacent is None:
+            continue
+        merged[identity_key] = ThirtyMinuteRuntimeReference(
+            bucket_index=bucket_index,
+            previous_day_same_window_amount=window.full_amount,
+            adjacent_completed_entity_high=adjacent[0],
+            adjacent_completed_entity_low=adjacent[1],
+        )
+    return MappingProxyType(merged)
 
 
 def _as_shanghai(value: datetime) -> datetime:

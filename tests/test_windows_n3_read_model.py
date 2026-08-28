@@ -30,6 +30,7 @@ def basis_row(asset_kind, identity_key, exchange, code, name):
         "exchange": exchange,
         "code": code,
         "name": name,
+        "basis_trade_date": "20260826",
         "period_trigger_baseline_json": baseline(),
     }
     for period in ("y", "q", "m", "w", "d"):
@@ -107,6 +108,7 @@ class WindowsN3ReadModelTest(unittest.TestCase):
         self.assertEqual(model.board_requests()[0].identity_key, "board:TDX:881333")
         self.assertEqual(model.higher_amount_baselines("stock")["stock:SH:600000"]["W"].completed_amount_sum, Decimal("600"))
         self.assertEqual(model.stock[0].periods["D"].previous_entity_high, Decimal("12"))
+        self.assertEqual(model.stock[0].basis_trade_date, "20260826")
         queries = [query for query, _params in connections[0].queries]
         self.assertTrue(all(query.startswith("SELECT") for query in queries))
         self.assertTrue(all("minute_target_scope" not in query for query in queries))
