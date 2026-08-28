@@ -50,6 +50,7 @@ from ashare_v3.trigger.windows_n4_memory import (
     WindowsN4MemoryRuntime,
     build_windows_n4_runtime,
     realtime_transition,
+    thirty_minute_transition,
 )
 
 
@@ -236,9 +237,9 @@ class WindowsN4MemoryTest(unittest.TestCase):
         )
         second = consumer.consume(view("stock", "600000", version=2, row=changed_stale))
         second_state = second.states["stock:600000"]
-        self.assertEqual(second_state.current_price, first_state.current_price)
-        self.assertEqual(second_state.realtime_transitions, first_state.realtime_transitions)
-        self.assertEqual(second_state.realtime_virtual_amounts, first_state.realtime_virtual_amounts)
+        self.assertIsNone(second_state.current_price)
+        self.assertEqual(set(second_state.realtime_transitions.values()), {"unknown"})
+        self.assertTrue(all(value is None for value in second_state.realtime_virtual_amounts.values()))
         self.assertEqual(second_state.live_status, "stale")
         self.assertFalse(second_state.fresh)
 
@@ -250,7 +251,7 @@ class WindowsN4MemoryTest(unittest.TestCase):
             with_quote=False,
         )
         third = consumer.consume(view("stock", "600000", version=3, row=unavailable))
-        self.assertEqual(third.states["stock:600000"].realtime_transitions, first_state.realtime_transitions)
+        self.assertEqual(set(third.states["stock:600000"].realtime_transitions.values()), {"unknown"})
         self.assertEqual(third.states["stock:600000"].live_status, "unavailable")
 
     def test_atomic_replacement_is_bounded_and_old_view_is_immutable(self) -> None:
@@ -351,6 +352,77 @@ class WindowsN4MemoryTest(unittest.TestCase):
             "low_volume_up",
         )
 
+    def test_transition_windows_are_exact_and_day_never_carries(self) -> None:
+        for period, window in (("W", 1), ("M", 5), ("Q", 22), ("Y", 66)):
+            carrying = RuntimePeriodBaseline(
+                period=period,
+                source_transition="volume_up",
+                source_amount=Decimal("90"),
+                comparison_entity_high=Decimal("10"),
+                comparison_entity_low=Decimal("8"),
+                comparison_amount=Decimal("100"),
+                current_trade_days=window,
+            )
+            self.assertEqual(
+                realtime_transition(
+                    period=period,
+                    current_price=Decimal("11"),
+                    current_amount=Decimal("99"),
+                    baseline=carrying,
+                ),
+                "volume_up",
+            )
+            expired = replace_period(
+                carrying,
+                period=period,
+                current_trade_days=window + 1,
+            )
+            self.assertEqual(
+                realtime_transition(
+                    period=period,
+                    current_price=Decimal("11"),
+                    current_amount=Decimal("99"),
+                    baseline=expired,
+                ),
+                "low_volume_up",
+            )
+        day = replace_period(carrying, period="D", current_trade_days=1)
+        self.assertEqual(
+            realtime_transition(
+                period="D",
+                current_price=Decimal("11"),
+                current_amount=Decimal("99"),
+                baseline=day,
+            ),
+            "low_volume_up",
+        )
+
+    def test_30m_has_only_four_states_and_no_carry(self) -> None:
+        base = RuntimePeriodBaseline(
+            period="30m",
+            source_transition="volume_up",
+            source_amount=Decimal("100"),
+            comparison_entity_high=Decimal("10"),
+            comparison_entity_low=Decimal("8"),
+            comparison_amount=Decimal("100"),
+        )
+        cases = (
+            ("11", "101", "volume_up"),
+            ("7", "99", "shrink_down"),
+            ("11", "99", "none"),
+            ("7", "101", "none"),
+            ("9", "100", "none"),
+        )
+        for price, amount, expected in cases:
+            self.assertEqual(
+                thirty_minute_transition(
+                    current_price=Decimal(price),
+                    current_amount=Decimal(amount),
+                    baseline=base,
+                ),
+                expected,
+            )
+
     def test_not_ready_baseline_produces_unknown_only_for_that_period(self) -> None:
         periods = period_baselines()
         periods["D"] = RuntimePeriodBaseline(
@@ -448,6 +520,69 @@ class WindowsN4MemoryTest(unittest.TestCase):
         self.assertEqual(state.source_transitions["30m"], "unknown")
         self.assertEqual(state.source_amounts["30m"], Decimal("100"))
 
+    def test_30m_uses_first_and_later_adjacent_completed_price_boundaries(self) -> None:
+        consumer = StockStateConsumer([baseline("stock", "600000")])
+        first = consumer.consume(
+            view("stock", "600000", version=1, row=metric("stock", "600000", price="10.5")),
+            thirty_minute_references={
+                "stock:600000": ThirtyMinuteRuntimeReference(
+                    bucket_index=0,
+                    previous_day_same_window_amount=Decimal("100"),
+                    adjacent_completed_entity_high=Decimal("10"),
+                    adjacent_completed_entity_low=Decimal("8"),
+                )
+            },
+        )
+        later = consumer.consume(
+            view("stock", "600000", version=2, row=metric("stock", "600000", price="10.5")),
+            thirty_minute_references={
+                "stock:600000": ThirtyMinuteRuntimeReference(
+                    bucket_index=1,
+                    previous_day_same_window_amount=Decimal("100"),
+                    adjacent_completed_entity_high=Decimal("11"),
+                    adjacent_completed_entity_low=Decimal("9"),
+                )
+            },
+        )
+        self.assertEqual(first.states["stock:600000"].realtime_transitions["30m"], "volume_up")
+        self.assertEqual(later.states["stock:600000"].realtime_transitions["30m"], "none")
+
+    def test_three_channels_replace_one_bounded_generation_per_cycle(self) -> None:
+        runtime = self.make_runtime()
+        first = runtime.consume_views(
+            stock=view("stock", "600000", version=1),
+            index=view("index", "000001", version=1),
+            board=view("board", "881333", version=1),
+        )
+        second = runtime.consume_views(
+            stock=view("stock", "600000", version=2),
+            index=view("index", "000001", version=2),
+            board=view("board", "881333", version=2),
+        )
+        self.assertEqual([item.version for item in (first.stock, first.index, first.board)], [1, 1, 1])
+        self.assertEqual([item.version for item in (second.stock, second.index, second.board)], [2, 2, 2])
+        self.assertEqual([len(item.states) for item in (second.stock, second.index, second.board)], [1, 1, 1])
+
+    def test_three_channel_prevalidation_prevents_partial_replacement(self) -> None:
+        runtime = self.make_runtime()
+        bad_board = ChannelStateView(
+            for_trade_date="20260828",
+            source_condition_run_id=RUN_ID,
+            version=1,
+            generated_at=NOW,
+            channel_status="ready",
+            states=MappingProxyType({"board:unexpected": metric("board", "unexpected")}),
+        )
+        with self.assertRaisesRegex(ValueError, "outside N2 universe"):
+            runtime.consume_views(
+                stock=view("stock", "600000", version=1),
+                index=view("index", "000001", version=1),
+                board=bad_board,
+            )
+        self.assertEqual(runtime.get_stock_states().version, 0)
+        self.assertEqual(runtime.get_index_states().version, 0)
+        self.assertEqual(runtime.get_board_states().version, 0)
+
     def test_missing_30m_reference_only_makes_30m_unknown(self) -> None:
         state = StockStateConsumer([baseline("stock", "600000")]).consume(
             view("stock", "600000")
@@ -521,7 +656,7 @@ class WindowsN4MemoryTest(unittest.TestCase):
             periods = {
                 period: N2PeriodRuntimeBaseline(
                     period=period,
-                    grade="volume_up",
+                    grade="low_volume_down",
                     transition="flat->volume_up",
                     previous_entity_high=Decimal("10"),
                     previous_entity_low=Decimal("8"),
@@ -580,6 +715,7 @@ def replace_period(
     value: RuntimePeriodBaseline,
     *,
     period: str,
+    current_trade_days: int | None = None,
 ) -> RuntimePeriodBaseline:
     return RuntimePeriodBaseline(
         period=period,
@@ -588,7 +724,9 @@ def replace_period(
         comparison_entity_high=value.comparison_entity_high,
         comparison_entity_low=value.comparison_entity_low,
         comparison_amount=value.comparison_amount,
-        current_trade_days=value.current_trade_days,
+        current_trade_days=(
+            value.current_trade_days if current_trade_days is None else current_trade_days
+        ),
         ready=value.ready,
     )
 
