@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import json
 from types import MappingProxyType
@@ -35,6 +36,7 @@ class N2PeriodRuntimeBaseline:
     previous_amount_baseline: Decimal | None
     completed_amount_sum: Decimal | None
     completed_trade_days: int | None
+    period_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,9 +149,9 @@ class WindowsN3ReadOnlyRepository:
             run = runs[0]
             run_id = str(_value(run, "run_id", 0))
             source_trade_date = str(_value(run, "source_trade_date", 1))
-            stock = self._load_asset(connection, "stock", run_id)
-            index = self._load_asset(connection, "index", run_id)
-            board = self._load_asset(connection, "board", run_id)
+            stock = self._load_asset(connection, "stock", run_id, source_trade_date, for_trade_date)
+            index = self._load_asset(connection, "index", run_id, source_trade_date, for_trade_date)
+            board = self._load_asset(connection, "board", run_id, source_trade_date, for_trade_date)
             return N3ActiveReadModel(
                 run_id=run_id,
                 source_trade_date=source_trade_date,
@@ -166,6 +168,8 @@ class WindowsN3ReadOnlyRepository:
         connection: Any,
         asset_kind: str,
         run_id: str,
+        source_trade_date: str,
+        for_trade_date: str,
     ) -> tuple[N2ObjectRuntimeInput, ...]:
         identity_column = f"{asset_kind}_identity_key"
         table = f"{asset_kind}_condition_basis"
@@ -183,19 +187,20 @@ class WindowsN3ReadOnlyRepository:
                    period_grade_w, period_grade_d,
                    period_transition_y, period_transition_q, period_transition_m,
                    period_transition_w, period_transition_d,
-                   period_trigger_baseline_json
+                   period_trigger_baseline_json,
+                   period_key_y, period_key_q, period_key_m, period_key_w, period_key_d
             FROM {table}
             WHERE run_id = %s
             ORDER BY {identity_column}, updated_at DESC, created_at DESC
         """
         rows = _fetchall(connection, query, (run_id,))
         return tuple(
-            _runtime_input(asset_kind, row)
+            _runtime_input(asset_kind, row, source_trade_date, for_trade_date)
             for row in rows
         )
 
 
-def _runtime_input(asset_kind: str, row: Any) -> N2ObjectRuntimeInput:
+def _runtime_input(asset_kind: str, row: Any, source_trade_date: str, for_trade_date: str) -> N2ObjectRuntimeInput:
     baseline = _json_object(_value(row, "period_trigger_baseline_json", 15))
     baseline_periods = baseline.get("periods")
     if not isinstance(baseline_periods, Mapping):
@@ -205,15 +210,33 @@ def _runtime_input(asset_kind: str, row: Any) -> N2ObjectRuntimeInput:
         entry = baseline_periods.get(period)
         if not isinstance(entry, Mapping):
             entry = {}
+        factor = Decimal(1000) if asset_kind == "stock" else Decimal(1)
+        source_key = _period_key(source_trade_date, period)
+        for_key = _period_key(for_trade_date, period)
+        stored_key = _optional_text(entry.get("period_key_current")) or _optional_text(
+            _value(row, f"period_key_{period.lower()}", 16 + offset)
+        )
+        current_total = _decimal(entry.get("current_amount_total_seed"))
+        current_days = _integer(entry.get("current_trade_days_seed"))
+        current_average = _decimal(entry.get("current_amount_seed"))
+        previous_average = _decimal(entry.get("previous_avg_amount")) or _decimal(
+            entry.get("classification_previous_amount_baseline")
+        )
+        rollover = period in HIGHER_PERIODS and source_key != for_key
+        if rollover:
+            previous_average = current_average
+            current_total = Decimal(0)
+            current_days = 0
         periods[period] = N2PeriodRuntimeBaseline(
             period=period,
             grade=_optional_text(_value(row, f"period_grade_{period.lower()}", 5 + offset)),
             transition=_optional_text(_value(row, f"period_transition_{period.lower()}", 10 + offset)),
             previous_entity_high=_decimal(entry.get("trigger_previous_entity_high")),
             previous_entity_low=_decimal(entry.get("trigger_previous_entity_low")),
-            previous_amount_baseline=_decimal(entry.get("trigger_previous_amount_baseline")),
-            completed_amount_sum=_decimal(entry.get("current_amount_total_seed")),
-            completed_trade_days=_integer(entry.get("current_trade_days_seed")),
+            previous_amount_baseline=previous_average * factor if previous_average is not None else None,
+            completed_amount_sum=current_total * factor if current_total is not None else None,
+            completed_trade_days=current_days,
+            period_key=stored_key,
         )
     return N2ObjectRuntimeInput(
         asset_kind=asset_kind,
@@ -288,3 +311,20 @@ def _integer(value: Any) -> int | None:
 
 def _optional_text(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _period_key(trade_date: str, period: str) -> str | None:
+    try:
+        value = datetime.strptime(trade_date, "%Y%m%d")
+    except ValueError:
+        return None
+    if period == "W":
+        year, week, _ = value.isocalendar()
+        return f"{year}W{week:02d}"
+    if period == "M":
+        return value.strftime("%Y%m")
+    if period == "Q":
+        return f"{value.year}Q{(value.month - 1) // 3 + 1}"
+    if period == "Y":
+        return str(value.year)
+    return trade_date

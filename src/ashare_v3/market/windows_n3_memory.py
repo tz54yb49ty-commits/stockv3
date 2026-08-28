@@ -334,12 +334,14 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
             except Exception as error:
                 view = self._replace_after_channel_failure(requested, self.clock(), error)
             else:
+                finished_at = self.clock()
                 view = self._replace_from_batch(
                     requested,
                     batch,
-                    self.clock(),
+                    batch.observed_at,
                     contexts or {},
                     current_30m_elapsed_amounts or {},
+                    channel_stale=finished_at - started_at > timedelta(seconds=5),
                 )
             self._publish_latest(view)
             return view
@@ -367,6 +369,8 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
         now: datetime,
         contexts: Mapping[str, VirtualAmountContext],
         current_30m_elapsed_amounts: Mapping[str, Decimal],
+        *,
+        channel_stale: bool = False,
     ) -> ChannelStateView[RealtimeMetric]:
         previous = self.store.read().states
         quotes = {row.identity_key: row for row in batch.rows}
@@ -389,8 +393,8 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
                             elapsed_amount_seed=current_30m_elapsed_amounts.get(request.identity_key),
                         ),
                     ),
-                    live_status="available",
-                    fresh=True,
+                    live_status="stale" if channel_stale else "available",
+                    fresh=not channel_stale,
                     last_success_at=quote.observed_at,
                 )
                 continue
@@ -402,7 +406,7 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
                 self.stale_after,
             )
         error_summary = "; ".join(batch.errors) if batch.errors else None
-        status = "degraded" if batch.errors and requests and not batch.rows else "ready"
+        status = "degraded" if channel_stale or (batch.errors and requests and not batch.rows) else "ready"
         return self.store.replace(
             states,
             generated_at=now,

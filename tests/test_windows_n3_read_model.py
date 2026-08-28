@@ -18,6 +18,8 @@ def baseline():
                 "trigger_previous_amount_baseline": "100",
                 "current_amount_total_seed": "600",
                 "current_trade_days_seed": 3,
+                "current_amount_seed": "200",
+                "previous_avg_amount": "80",
             }
             for period in ("Y", "Q", "M", "W", "D")
         }
@@ -91,6 +93,23 @@ class Connection:
 
 
 class WindowsN3ReadModelTest(unittest.TestCase):
+    def test_week_rollover_promotes_current_average_and_resets_seed(self):
+        connection = Connection()
+        connection.run_rows[0]["source_trade_date"] = "20260828"
+        connection.run_rows[0]["for_trade_date"] = "20260831"
+        model = WindowsN3ReadOnlyRepository("postgresql://example", connect=lambda _dsn: connection).load_active("20260831")
+        week = model.stock[0].periods["W"]
+        self.assertEqual(week.previous_amount_baseline, Decimal("200000"))
+        self.assertEqual(week.completed_amount_sum, Decimal("0"))
+        self.assertEqual(week.completed_trade_days, 0)
+
+    def test_same_week_preserves_seed(self):
+        model = WindowsN3ReadOnlyRepository("postgresql://example", connect=lambda _dsn: Connection()).load_active("20260828")
+        week = model.stock[0].periods["W"]
+        self.assertEqual(week.previous_amount_baseline, Decimal("80000"))
+        self.assertEqual(week.completed_amount_sum, Decimal("600000"))
+        self.assertEqual(week.completed_trade_days, 3)
+
     def test_loads_full_three_channel_n2_basis_without_scope_filter(self):
         connections = []
 
@@ -106,7 +125,9 @@ class WindowsN3ReadModelTest(unittest.TestCase):
         self.assertEqual(model.stock_requests()[0].identity_key, "stock:SH:600000")
         self.assertEqual(model.index_requests()[0].identity_key, "index:SH:000001")
         self.assertEqual(model.board_requests()[0].identity_key, "board:TDX:881333")
-        self.assertEqual(model.higher_amount_baselines("stock")["stock:SH:600000"]["W"].completed_amount_sum, Decimal("600"))
+        self.assertEqual(model.higher_amount_baselines("stock")["stock:SH:600000"]["W"].completed_amount_sum, Decimal("600000"))
+        self.assertEqual(model.higher_amount_baselines("index")["index:SH:000001"]["W"].completed_amount_sum, Decimal("600"))
+        self.assertEqual(model.higher_amount_baselines("board")["board:TDX:881333"]["W"].completed_amount_sum, Decimal("600"))
         self.assertEqual(model.stock[0].periods["D"].previous_entity_high, Decimal("12"))
         self.assertEqual(model.stock[0].basis_trade_date, "20260826")
         queries = [query for query, _params in connections[0].queries]

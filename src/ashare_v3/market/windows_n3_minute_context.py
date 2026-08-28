@@ -333,6 +333,8 @@ def normalize_minute_bars(
     identity_key: str,
     trade_date: str,
     rows: Sequence[Any],
+    *,
+    amount_multiplier: Decimal = Decimal(1),
 ) -> tuple[NormalizedMinuteBar, ...]:
     """Normalize either start-labelled or close-labelled CN A-share minutes."""
 
@@ -368,7 +370,7 @@ def normalize_minute_bars(
             high=high_price,
             low=low_price,
             close=close_price,
-            amount=amount,
+            amount=amount * amount_multiplier,
         )
     return tuple(normalized[index] for index in sorted(normalized))
 

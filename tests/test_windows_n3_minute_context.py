@@ -86,6 +86,16 @@ class RetryBarsClient:
 
 
 class WindowsN3MinuteContextTest(unittest.TestCase):
+    def test_amount_multiplier_normalizes_tq_wan_yuan_without_changing_shape(self):
+        bars = normalize_minute_bars(
+            self.stock.identity_key,
+            "20260827",
+            raw_day(),
+            amount_multiplier=Decimal("10000"),
+        )
+        self.assertEqual(len(bars), 240)
+        self.assertEqual(bars[0].amount, Decimal("100000"))
+        self.assertEqual(len(build_minute_context(self.stock.identity_key, "20260827", bars).windows), 8)
     def setUp(self):
         self.stock = StockSnapshotRequest("stock:SH:600000", "SH", "600000", "浦发")
         self.index = IndexSnapshotRequest("index:SZ:399001", "SZ", "399001", "深成")

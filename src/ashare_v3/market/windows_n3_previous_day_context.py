@@ -316,7 +316,13 @@ class _TQMinuteFetcher:
             errors.extend(batch_errors)
             for request in batch:
                 rows = rows_by_code.get(_tq_vendor_code(request), ())
-                bars = normalize_minute_bars(request.identity_key, trade_date, rows)
+                # TQ minute Amount is reported in ten-thousand yuan; N3 core is yuan-only.
+                bars = normalize_minute_bars(
+                    request.identity_key,
+                    trade_date,
+                    rows,
+                    amount_multiplier=Decimal(10000),
+                )
                 if not bars:
                     continue
                 contexts[request.identity_key] = build_minute_context(
@@ -373,6 +379,7 @@ class _TQMinuteFetcher:
                             request.identity_key,
                             trade_date,
                             rows_by_code.get(_tq_vendor_code(request), ()),
+                            amount_multiplier=Decimal(10000),
                         )
                     )
                     != MINUTES_PER_DAY

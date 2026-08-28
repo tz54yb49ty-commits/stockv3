@@ -495,6 +495,7 @@ def _normalize_quote(
         low=_decimal(_first(raw, "low_price", "low", "Low", "Min")),
         pre_close=_decimal(_first(raw, "pre_close_price", "prev_close", "pre_close", "LastClose")),
         volume=_decimal(_first(raw, "total_hand", "volume", "Volume", "vol")),
+        # Both Windows realtime snapshot transports expose amount in yuan.
         amount=_decimal(_first(raw, "amount", "Amount", "turnover")),
         source_time=source_time,
         observed_at=observed_at,

@@ -87,6 +87,12 @@ class SlowFailureProvider(Provider):
         raise RuntimeError(f"{self.asset_kind} unavailable")
 
 
+class SlowSuccessProvider(Provider):
+    def fetch_many(self, requests):
+        self.clock.advance(6)
+        return super().fetch_many(requests)
+
+
 class AmountSequenceProvider(Provider):
     def __init__(self, batch_type, asset_kind, clock, amounts):
         super().__init__(batch_type, asset_kind, clock)
@@ -108,6 +114,15 @@ class AmountSequenceProvider(Provider):
 
 
 class WindowsN3MemoryTest(unittest.TestCase):
+    def test_channel_batch_over_five_seconds_is_stale_at_completion_time(self):
+        provider = SlowSuccessProvider(StockSnapshotBatch, "stock", self.clock)
+        view = self.channel(provider).run_cycle((self.stock_request,))
+        metric = view.states[self.stock_request.identity_key]
+        self.assertEqual(view.generated_at, self.clock.value)
+        self.assertEqual(view.channel_status, "degraded")
+        self.assertEqual(metric.live_status, "stale")
+        self.assertFalse(metric.fresh)
+
     def setUp(self):
         self.clock = Clock()
         self.stock_request = StockSnapshotRequest("stock:SH:600000", "SH", "600000", "浦发")
