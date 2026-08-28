@@ -14,12 +14,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from threading import Lock, RLock
 from typing import Any, Protocol
 
 
 ELTDX_SNAPSHOT_BATCH_SIZE = 80
 ELTDX_SNAPSHOT_MAX_WORKERS = 16
-TQ_SNAPSHOT_MAX_WORKERS = 16
+TQ_SNAPSHOT_MAX_WORKERS = 1
+_TQ_RPC_LOCKS_GUARD = Lock()
+_TQ_RPC_LOCKS: dict[int, RLock] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,7 @@ class RealtimeQuote:
     source_time: datetime
     observed_at: datetime
     provider: str
+    source_time_raw: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +340,7 @@ class _TQSnapshotFetcher:
         self._client = client
         self._max_workers = max_workers
         self._clock = clock or _utc_now
+        self._rpc_lock = _tq_rpc_lock(client)
 
     def fetch(
         self,
@@ -354,7 +359,8 @@ class _TQSnapshotFetcher:
 
         def fetch_one(vendor_code: str) -> tuple[dict[str, Any] | None, str | None]:
             try:
-                raw = self._client.get_market_snapshot(vendor_code)
+                with self._rpc_lock:
+                    raw = self._client.get_market_snapshot(vendor_code)
                 record = _single_record(raw, vendor_code)
                 if record is not None:
                     record.setdefault("full_code", vendor_code)
@@ -419,6 +425,18 @@ def _fetch_with_fallback(
     )
 
 
+def _tq_rpc_lock(client: Any) -> RLock:
+    """Serialize calls that share TQ's process-global DLL/run_id client."""
+
+    key = id(client)
+    with _TQ_RPC_LOCKS_GUARD:
+        lock = _TQ_RPC_LOCKS.get(key)
+        if lock is None:
+            lock = RLock()
+            _TQ_RPC_LOCKS[key] = lock
+        return lock
+
+
 def _normalize_batch(
     requests: Sequence[SnapshotRequest],
     vendor_codes: Sequence[str],
@@ -460,6 +478,7 @@ def _normalize_quote(
     provider: str,
     observed_at: datetime,
 ) -> RealtimeQuote:
+    source_time_raw = _first(raw, "source_time_raw", "time_raw", "source_time", "datetime", "time", "Time")
     source_time = _datetime(_first(raw, "source_time", "datetime", "time", "Time")) or observed_at
     return RealtimeQuote(
         asset_kind=asset_kind,
@@ -469,14 +488,15 @@ def _normalize_quote(
         name=request.name,
         current_price=_decimal(_first(raw, "last_price", "current_price", "Now", "price", "close")),
         open=_decimal(_first(raw, "open_price", "open", "Open")),
-        high=_decimal(_first(raw, "high_price", "high", "High")),
-        low=_decimal(_first(raw, "low_price", "low", "Low")),
-        pre_close=_decimal(_first(raw, "prev_close", "pre_close", "LastClose")),
-        volume=_decimal(_first(raw, "volume", "Volume", "vol")),
+        high=_decimal(_first(raw, "high_price", "high", "High", "Max")),
+        low=_decimal(_first(raw, "low_price", "low", "Low", "Min")),
+        pre_close=_decimal(_first(raw, "pre_close_price", "prev_close", "pre_close", "LastClose")),
+        volume=_decimal(_first(raw, "total_hand", "volume", "Volume", "vol")),
         amount=_decimal(_first(raw, "amount", "Amount", "turnover")),
         source_time=source_time,
         observed_at=observed_at,
         provider=provider,
+        source_time_raw=source_time_raw,
     )
 
 
