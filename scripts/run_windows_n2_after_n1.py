@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wait for Windows N1 completion and run the existing N2 execute entrypoint."""
+"""Select the latest eligible Windows N1 completion and run existing N2."""
 
 from __future__ import annotations
 
@@ -65,7 +65,12 @@ def execute_existing_n2(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Windows N2 after the daily N1 completion marker.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run Windows N2 after today's scheduled N1 marker, or use the latest "
+            "completed N1 date when recovering outside the scheduled wait window."
+        )
+    )
     parser.add_argument("--dsn", default=os.environ.get("ASHARE_V3_POSTGRES_DSN", DEFAULT_DSN))
     parser.add_argument(
         "--policy",

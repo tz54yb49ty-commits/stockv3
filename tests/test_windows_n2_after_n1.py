@@ -4,10 +4,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ashare_v3.condition.windows_n2_after_n1 import (
     ActiveConditionRun,
     CalendarContext,
+    PostgresAfterN1Repository,
     run_windows_n2_after_n1,
 )
 
@@ -22,16 +24,27 @@ class FakeRepository:
     is_open: bool = True
     for_trade_date: str | None = FOR_DATE
     n1_statuses: list[str | None] = field(default_factory=lambda: ["passed"])
+    latest_completed_date: str | None = SOURCE_DATE
+    calendars: Mapping[str, CalendarContext] = field(default_factory=dict)
     active_runs: Sequence[ActiveConditionRun] = ()
     completion_calls: int = 0
+    latest_completion_calls: int = 0
+    calendar_calls: list[str] = field(default_factory=list)
 
     def calendar_context(self, trade_date: str) -> CalendarContext:
+        self.calendar_calls.append(trade_date)
+        if trade_date in self.calendars:
+            return self.calendars[trade_date]
         return CalendarContext(trade_date, self.is_open, self.for_trade_date)
 
     def n1_completion_status(self, trade_date: str) -> str | None:
         index = min(self.completion_calls, len(self.n1_statuses) - 1)
         self.completion_calls += 1
         return self.n1_statuses[index]
+
+    def latest_completed_n1_date(self, on_or_before: str) -> str | None:
+        self.latest_completion_calls += 1
+        return self.latest_completed_date
 
     def active_condition_runs(
         self, source_trade_date: str, for_trade_date: str,
@@ -50,11 +63,14 @@ class FakeClock:
         self.current += timedelta(seconds=seconds)
 
 
-def passed_report() -> Mapping[str, Any]:
+def passed_report(
+    source_trade_date: str = SOURCE_DATE,
+    for_trade_date: str = FOR_DATE,
+) -> Mapping[str, Any]:
     return {
         "execute_run_id": "condition_layer_20260827_to_20260828_execute",
-        "source_trade_date": SOURCE_DATE,
-        "for_trade_date": FOR_DATE,
+        "source_trade_date": source_trade_date,
+        "for_trade_date": for_trade_date,
         "policy_hash": POLICY_HASH,
         "postcheck": {
             "run_status": "passed_active",
@@ -77,6 +93,110 @@ class WindowsN2AfterN1Test(unittest.TestCase):
         self.assertEqual(result.active_run_id, "condition_layer_20260827_to_20260828_execute")
         self.assertEqual(calls, [SOURCE_DATE])
 
+    def test_normal_window_waits_for_today_then_selects_latest_completion(self) -> None:
+        repository = FakeRepository(n1_statuses=[None, "passed"])
+        clock = FakeClock()
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: passed_report(),
+            now_fn=clock.now,
+            sleep_fn=clock.sleep,
+            poll_seconds=1,
+        )
+        self.assertEqual(result.result, "N2_AFTER_N1_PASS")
+        self.assertEqual(repository.completion_calls, 2)
+        self.assertEqual(repository.latest_completion_calls, 1)
+
+    def test_delayed_morning_uses_latest_completed_n1_date(self) -> None:
+        repository = FakeRepository(
+            latest_completed_date=SOURCE_DATE,
+            calendars={
+                "20260828": CalendarContext("20260828", True, "20260831"),
+                SOURCE_DATE: CalendarContext(SOURCE_DATE, True, FOR_DATE),
+            },
+        )
+        calls: list[str] = []
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda source_date: calls.append(source_date) or passed_report(),
+            now_fn=lambda: datetime(2026, 8, 28, 9, 0),
+        )
+        self.assertEqual(result.result, "N2_AFTER_N1_PASS")
+        self.assertEqual(result.source_trade_date, SOURCE_DATE)
+        self.assertEqual(result.for_trade_date, FOR_DATE)
+        self.assertEqual(calls, [SOURCE_DATE])
+        self.assertEqual(repository.completion_calls, 0)
+        self.assertEqual(repository.latest_completion_calls, 1)
+        self.assertEqual(repository.calendar_calls, ["20260828", SOURCE_DATE])
+
+    def test_delayed_cross_weekend_uses_friday_completion_for_monday(self) -> None:
+        source_date = "20260828"
+        for_date = "20260831"
+        repository = FakeRepository(
+            latest_completed_date=source_date,
+            calendars={
+                for_date: CalendarContext(for_date, True, "20260901"),
+                source_date: CalendarContext(source_date, True, for_date),
+            },
+        )
+        calls: list[str] = []
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda source: calls.append(source) or passed_report(source, for_date),
+            now_fn=lambda: datetime(2026, 8, 31, 8, 45),
+        )
+        self.assertEqual(result.result, "N2_AFTER_N1_PASS")
+        self.assertEqual(result.source_trade_date, source_date)
+        self.assertEqual(result.for_trade_date, for_date)
+        self.assertEqual(calls, [source_date])
+
+    def test_delayed_start_without_any_completed_n1_blocks(self) -> None:
+        repository = FakeRepository(
+            latest_completed_date=None,
+            calendars={
+                "20260828": CalendarContext("20260828", True, "20260831"),
+            },
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(AssertionError("must not execute")),
+            now_fn=lambda: datetime(2026, 8, 28, 9, 0),
+        )
+        self.assertEqual(result.result, "BLOCKED_N1_COMPLETION_MISSING")
+        self.assertEqual(repository.completion_calls, 0)
+
+    def test_after_deadline_uses_latest_completion_without_polling(self) -> None:
+        repository = FakeRepository(latest_completed_date=SOURCE_DATE)
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: passed_report(),
+            now_fn=lambda: datetime(2026, 8, 27, 21, 5),
+        )
+        self.assertEqual(result.result, "N2_AFTER_N1_PASS")
+        self.assertEqual(repository.completion_calls, 0)
+        self.assertEqual(repository.latest_completion_calls, 1)
+
+    def test_normal_window_does_not_fall_back_to_older_completion(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=["passed"],
+            latest_completed_date="20260826",
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(AssertionError("must not execute")),
+            now_fn=FakeClock().now,
+        )
+        self.assertEqual(result.result, "BLOCKED_N1_COMPLETION_MISSING")
+        self.assertEqual(result.source_trade_date, SOURCE_DATE)
+        self.assertEqual(repository.completion_calls, 1)
+        self.assertEqual(repository.latest_completion_calls, 1)
+
     def test_n1_failure_blocks_without_execute(self) -> None:
         called = False
 
@@ -89,6 +209,7 @@ class WindowsN2AfterN1Test(unittest.TestCase):
             repository=FakeRepository(n1_statuses=["failed"]),
             policy_hash=POLICY_HASH,
             execute_n2=execute,
+            now_fn=FakeClock().now,
         )
         self.assertEqual(result.result, "BLOCKED_N1_FAILED")
         self.assertFalse(called)
@@ -102,6 +223,7 @@ class WindowsN2AfterN1Test(unittest.TestCase):
         )
         self.assertEqual(result.result, "SKIPPED_NON_TRADING_DAY")
         self.assertEqual(repository.completion_calls, 0)
+        self.assertEqual(repository.latest_completion_calls, 0)
 
     def test_identical_passed_active_is_idempotent(self) -> None:
         repository = FakeRepository(active_runs=(
@@ -111,6 +233,7 @@ class WindowsN2AfterN1Test(unittest.TestCase):
             repository=repository,
             policy_hash=POLICY_HASH,
             execute_n2=lambda _: (_ for _ in ()).throw(AssertionError("must not execute")),
+            now_fn=FakeClock().now,
         )
         self.assertEqual(result.result, "SKIPPED_IDENTICAL_PASSED_ACTIVE")
         self.assertEqual(result.active_run_id, "condition-run")
@@ -123,6 +246,7 @@ class WindowsN2AfterN1Test(unittest.TestCase):
             repository=repository,
             policy_hash=POLICY_HASH,
             execute_n2=lambda _: (_ for _ in ()).throw(AssertionError("must not execute")),
+            now_fn=FakeClock().now,
         )
         self.assertEqual(result.result, "BLOCKED_ACTIVE_RUN_CONFLICT")
         self.assertEqual(result.active_run_id, "condition-run")
@@ -136,6 +260,7 @@ class WindowsN2AfterN1Test(unittest.TestCase):
             repository=repository,
             policy_hash=POLICY_HASH,
             execute_n2=lambda _: (_ for _ in ()).throw(AssertionError("must not execute")),
+            now_fn=FakeClock().now,
         )
         self.assertEqual(result.result, "BLOCKED_ACTIVE_RUN_CONFLICT")
 
@@ -158,5 +283,34 @@ class WindowsN2AfterN1Test(unittest.TestCase):
             repository=FakeRepository(),
             policy_hash=POLICY_HASH,
             execute_n2=lambda _: report,
+            now_fn=FakeClock().now,
         )
         self.assertEqual(result.result, "N2_EXECUTE_POSTCHECK_FAILED")
+
+
+class PostgresAfterN1RepositoryTest(unittest.TestCase):
+    def test_latest_completed_n1_date_is_read_only_and_cut_off(self) -> None:
+        connection = MagicMock()
+        cursor = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        cursor.fetchone.return_value = (SOURCE_DATE,)
+        with patch(
+            "ashare_v3.condition.windows_n2_after_n1.psycopg.connect"
+        ) as connect:
+            connect.return_value.__enter__.return_value = connection
+            result = PostgresAfterN1Repository("postgresql://example").latest_completed_n1_date(
+                "20260828"
+            )
+
+        self.assertEqual(result, SOURCE_DATE)
+        connect.assert_called_once_with(
+            "postgresql://example",
+            connect_timeout=10,
+            options="-c default_transaction_read_only=on",
+        )
+        statement, parameters = cursor.execute.call_args.args
+        self.assertIn("trade_date <= %s", statement)
+        self.assertIn("data_type='fastlane_complete'", statement)
+        self.assertIn("status='passed'", statement)
+        self.assertIn("ORDER BY trade_date DESC", statement)
+        self.assertEqual(parameters, ("20260828",))

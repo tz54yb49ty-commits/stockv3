@@ -52,6 +52,8 @@ class AfterN1Repository(Protocol):
 
     def n1_completion_status(self, trade_date: str) -> str | None: ...
 
+    def latest_completed_n1_date(self, on_or_before: str) -> str | None: ...
+
     def active_condition_runs(
         self, source_trade_date: str, for_trade_date: str,
     ) -> Sequence[ActiveConditionRun]: ...
@@ -113,6 +115,30 @@ class PostgresAfterN1Repository:
             row = cur.fetchone()
             return None if row is None else str(row[0])
 
+    def latest_completed_n1_date(self, on_or_before: str) -> str | None:
+        with psycopg.connect(
+            self.dsn,
+            connect_timeout=10,
+            options="-c default_transaction_read_only=on",
+        ) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date
+                FROM common_ingest_batch
+                WHERE trade_date <= %s
+                  AND data_domain='common'
+                  AND data_type='fastlane_complete'
+                  AND status='passed'
+                ORDER BY trade_date DESC,
+                         finished_at DESC NULLS LAST,
+                         started_at DESC
+                LIMIT 1
+                """,
+                (on_or_before,),
+            )
+            row = cur.fetchone()
+            return None if row is None else str(row[0])
+
     def active_condition_runs(
         self, source_trade_date: str, for_trade_date: str,
     ) -> Sequence[ActiveConditionRun]:
@@ -151,45 +177,69 @@ def run_windows_n2_after_n1(
     now_fn: Callable[[], datetime] = datetime.now,
     sleep_fn: Callable[[float], None] = time_module.sleep,
     poll_seconds: float = 30.0,
+    scheduled_start: time = time(16, 35),
     deadline: time = time(21, 0),
 ) -> WindowsN2AfterN1Result:
-    """Wait for today's N1 marker and execute exactly one N2 run if needed."""
+    """Select one completed N1 date and execute exactly one N2 run if needed."""
     started_at = now_fn()
-    source_trade_date = started_at.strftime("%Y%m%d")
-    calendar = repository.calendar_context(source_trade_date)
-    if not calendar.is_open:
+    today = started_at.strftime("%Y%m%d")
+    today_calendar = repository.calendar_context(today)
+    if not today_calendar.is_open:
         return WindowsN2AfterN1Result(
             result="SKIPPED_NON_TRADING_DAY",
-            source_trade_date=source_trade_date,
+            source_trade_date=today,
             for_trade_date=None,
             policy_hash=policy_hash,
         )
-    if not calendar.for_trade_date:
+    if not today_calendar.for_trade_date:
         raise RuntimeError("open trade date has no for_trade_date")
 
     deadline_at = datetime.combine(started_at.date(), deadline)
+    in_scheduled_window = scheduled_start <= started_at.time() <= deadline
     n1_status: str | None = None
-    while True:
-        n1_status = repository.n1_completion_status(source_trade_date)
-        if n1_status == "passed":
-            break
-        if n1_status in TERMINAL_N1_FAILURE_STATUSES:
-            return WindowsN2AfterN1Result(
-                result="BLOCKED_N1_FAILED",
-                source_trade_date=source_trade_date,
-                for_trade_date=calendar.for_trade_date,
-                policy_hash=policy_hash,
-                n1_status=n1_status,
-            )
-        if now_fn() >= deadline_at:
-            return WindowsN2AfterN1Result(
-                result="BLOCKED_N1_TIMEOUT",
-                source_trade_date=source_trade_date,
-                for_trade_date=calendar.for_trade_date,
-                policy_hash=policy_hash,
-                n1_status=n1_status,
-            )
-        sleep_fn(poll_seconds)
+    if in_scheduled_window:
+        while True:
+            n1_status = repository.n1_completion_status(today)
+            if n1_status == "passed":
+                break
+            if n1_status in TERMINAL_N1_FAILURE_STATUSES:
+                return WindowsN2AfterN1Result(
+                    result="BLOCKED_N1_FAILED",
+                    source_trade_date=today,
+                    for_trade_date=today_calendar.for_trade_date,
+                    policy_hash=policy_hash,
+                    n1_status=n1_status,
+                )
+            if now_fn() >= deadline_at:
+                return WindowsN2AfterN1Result(
+                    result="BLOCKED_N1_TIMEOUT",
+                    source_trade_date=today,
+                    for_trade_date=today_calendar.for_trade_date,
+                    policy_hash=policy_hash,
+                    n1_status=n1_status,
+                )
+            sleep_fn(poll_seconds)
+
+    source_trade_date = repository.latest_completed_n1_date(today)
+    if source_trade_date is None or (in_scheduled_window and source_trade_date != today):
+        return WindowsN2AfterN1Result(
+            result="BLOCKED_N1_COMPLETION_MISSING",
+            source_trade_date=today,
+            for_trade_date=today_calendar.for_trade_date,
+            policy_hash=policy_hash,
+            n1_status=n1_status,
+        )
+    calendar = (
+        today_calendar
+        if source_trade_date == today
+        else repository.calendar_context(source_trade_date)
+    )
+    if not calendar.is_open or not calendar.for_trade_date:
+        raise RuntimeError(
+            f"completed N1 date is not an open date with a successor: {source_trade_date}"
+        )
+    if not in_scheduled_window:
+        n1_status = "passed"
 
     active_runs = tuple(repository.active_condition_runs(
         source_trade_date,
