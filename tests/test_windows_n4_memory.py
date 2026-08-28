@@ -19,6 +19,13 @@ from ashare_v3.market.windows_n3_memory import (
     VirtualAmountContext,
     WindowsN3MemoryRuntime,
 )
+from ashare_v3.market.windows_n3_intraday import N3IntradayCycle
+from ashare_v3.market.windows_n3_minute_context import ThirtyMinuteRuntimeReference
+from ashare_v3.market.windows_n3_read_model import (
+    N2ObjectRuntimeInput,
+    N2PeriodRuntimeBaseline,
+    N3ActiveReadModel,
+)
 from ashare_v3.market.windows_n3_snapshot import (
     BoardSnapshotBatch,
     BoardSnapshotRequest,
@@ -34,12 +41,14 @@ from ashare_v3.trigger.windows_n4_memory import (
     IndexRuntimeState,
     IndexStateConsumer,
     N2RuntimeBaseline,
+    N2_RUNTIME_PERIODS,
     OutOfOrderN3Snapshot,
     RUNTIME_PERIODS,
     RuntimePeriodBaseline,
     StockRuntimeState,
     StockStateConsumer,
     WindowsN4MemoryRuntime,
+    build_windows_n4_runtime,
     realtime_transition,
 )
 
@@ -65,7 +74,7 @@ def period_baselines(
             current_trade_days=current_trade_days,
             ready=ready,
         )
-        for period in RUNTIME_PERIODS
+        for period in N2_RUNTIME_PERIODS
     }
 
 
@@ -148,6 +157,17 @@ def view(
     )
 
 
+def reference(kind: str, code: str) -> dict[str, ThirtyMinuteRuntimeReference]:
+    return {
+        f"{kind}:{code}": ThirtyMinuteRuntimeReference(
+            bucket_index=0,
+            previous_day_same_window_amount=Decimal("100"),
+            adjacent_completed_entity_high=Decimal("10"),
+            adjacent_completed_entity_low=Decimal("8"),
+        )
+    }
+
+
 class _StaticProvider:
     def __init__(self, kind: str, batch_type: type) -> None:
         self.kind = kind
@@ -188,6 +208,9 @@ class WindowsN4MemoryTest(unittest.TestCase):
             stock=view("stock", "600000"),
             index=view("index", "000001"),
             board=view("board", "881333"),
+            stock_30m_references=reference("stock", "600000"),
+            index_30m_references=reference("index", "000001"),
+            board_30m_references=reference("board", "881333"),
         )
         self.assertIsInstance(result.stock.states["stock:600000"], StockRuntimeState)
         self.assertIsInstance(result.index.states["index:000001"], IndexRuntimeState)
@@ -330,8 +353,8 @@ class WindowsN4MemoryTest(unittest.TestCase):
 
     def test_not_ready_baseline_produces_unknown_only_for_that_period(self) -> None:
         periods = period_baselines()
-        periods["30m"] = RuntimePeriodBaseline(
-            period="30m",
+        periods["D"] = RuntimePeriodBaseline(
+            period="D",
             source_transition="unknown",
             source_amount=None,
             comparison_entity_high=None,
@@ -353,8 +376,8 @@ class WindowsN4MemoryTest(unittest.TestCase):
         state = StockStateConsumer([custom]).consume(
             view("stock", "600000")
         ).states["stock:600000"]
-        self.assertEqual(state.realtime_transitions["30m"], "unknown")
-        self.assertEqual(state.realtime_transitions["D"], "volume_up")
+        self.assertEqual(state.realtime_transitions["D"], "unknown")
+        self.assertEqual(state.realtime_transitions["W"], "volume_up")
 
     def test_duplicate_and_older_n3_versions_are_handled(self) -> None:
         consumer = StockStateConsumer([baseline("stock", "600000")])
@@ -390,6 +413,47 @@ class WindowsN4MemoryTest(unittest.TestCase):
         self.assertEqual(result.stock.channel_status, "degraded")
         self.assertEqual(result.index.channel_status, "ready")
         self.assertEqual(result.board.channel_status, "ready")
+
+    def test_n2_baseline_cannot_embed_a_fake_30m_period(self) -> None:
+        periods = period_baselines()
+        periods["30m"] = RuntimePeriodBaseline(
+            period="30m",
+            source_transition="unknown",
+            source_amount=None,
+            comparison_entity_high=None,
+            comparison_entity_low=None,
+            comparison_amount=None,
+            ready=False,
+        )
+        with self.assertRaisesRegex(ValueError, "D/W/M/Q/Y"):
+            N2RuntimeBaseline(
+                source_condition_run_id=RUN_ID,
+                source_trade_date="20260827",
+                for_trade_date="20260828",
+                asset_kind="stock",
+                identity_key="stock:600000",
+                exchange="SH",
+                code="600000",
+                name="浦发",
+                periods=periods,
+            )
+
+    def test_30m_grade_uses_n3_reference_not_n2_baseline(self) -> None:
+        consumer = StockStateConsumer([baseline("stock", "600000")])
+        state = consumer.consume(
+            view("stock", "600000"),
+            thirty_minute_references=reference("stock", "600000"),
+        ).states["stock:600000"]
+        self.assertEqual(state.realtime_transitions["30m"], "volume_up")
+        self.assertEqual(state.source_transitions["30m"], "unknown")
+        self.assertEqual(state.source_amounts["30m"], Decimal("100"))
+
+    def test_missing_30m_reference_only_makes_30m_unknown(self) -> None:
+        state = StockStateConsumer([baseline("stock", "600000")]).consume(
+            view("stock", "600000")
+        ).states["stock:600000"]
+        self.assertEqual(state.realtime_transitions["30m"], "unknown")
+        self.assertEqual(state.realtime_transitions["D"], "volume_up")
 
     def test_consume_latest_uses_real_n3_immutable_channel_views(self) -> None:
         stock_channel = StockSnapshotChannel(
@@ -432,10 +496,67 @@ class WindowsN4MemoryTest(unittest.TestCase):
         self.assertEqual(result.index.source_n3_version, 1)
         self.assertEqual(result.board.source_n3_version, 1)
         self.assertEqual(result.stock.states["stock:600000"].realtime_transitions["D"], "volume_up")
+        self.assertEqual(result.stock.states["stock:600000"].realtime_transitions["30m"], "unknown")
+
+    def test_consume_intraday_cycle_passes_three_reference_maps(self) -> None:
+        metrics = type("Metrics", (), {
+            "stock": view("stock", "600000"),
+            "index": view("index", "000001"),
+            "board": view("board", "881333"),
+        })()
+        cycle = N3IntradayCycle(
+            generated_at=NOW,
+            metrics=metrics,
+            stock_30m_references=reference("stock", "600000"),
+            index_30m_references=reference("index", "000001"),
+            board_30m_references=reference("board", "881333"),
+        )
+        result = self.make_runtime().consume_cycle(cycle)
+        self.assertEqual(result.stock.states["stock:600000"].realtime_transitions["30m"], "volume_up")
+        self.assertEqual(result.index.states["index:000001"].realtime_transitions["30m"], "volume_up")
+        self.assertEqual(result.board.states["board:881333"].realtime_transitions["30m"], "volume_up")
+
+    def test_build_runtime_adapts_only_n2_d_to_y_fields(self) -> None:
+        def row(kind, key, code):
+            periods = {
+                period: N2PeriodRuntimeBaseline(
+                    period=period,
+                    grade="volume_up",
+                    transition="flat->volume_up",
+                    previous_entity_high=Decimal("10"),
+                    previous_entity_low=Decimal("8"),
+                    previous_amount_baseline=Decimal("100"),
+                    completed_amount_sum=Decimal("600"),
+                    completed_trade_days=3,
+                )
+                for period in N2_RUNTIME_PERIODS
+            }
+            return N2ObjectRuntimeInput(kind, key, "SH", code, kind, periods)
+
+        model = N3ActiveReadModel(
+            run_id=RUN_ID,
+            source_trade_date="20260827",
+            for_trade_date="20260828",
+            stock=(row("stock", "stock:600000", "600000"),),
+            index=(row("index", "index:000001", "000001"),),
+            board=(row("board", "board:881333", "881333"),),
+        )
+        runtime = build_windows_n4_runtime(model)
+        stock = runtime.stock_states["stock:600000"]
+        self.assertEqual(stock.source_transitions["D"], "volume_up")
+        self.assertEqual(stock.source_amounts["W"], Decimal("200"))
+        self.assertEqual(stock.source_transitions["30m"], "unknown")
+        self.assertIsNone(stock.source_amounts["30m"])
 
     def test_module_has_no_persistence_or_downstream_contract(self) -> None:
-        module_path = Path(__file__).parents[1] / "src/ashare_v3/trigger/windows_n4_memory.py"
-        source = module_path.read_text(encoding="utf-8").lower()
+        root = Path(__file__).parents[1]
+        source = "\n".join(
+            (root / path).read_text(encoding="utf-8").lower()
+            for path in (
+                "src/ashare_v3/trigger/windows_n4_memory.py",
+                "scripts/run_windows_n3_n4_memory.py",
+            )
+        )
         for forbidden in (
             "import psycopg",
             "create table",

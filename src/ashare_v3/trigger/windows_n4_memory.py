@@ -22,9 +22,12 @@ from ashare_v3.market.windows_n3_memory import (
     RealtimeMetric,
     WindowsN3MemoryRuntime,
 )
+from ashare_v3.market.windows_n3_minute_context import ThirtyMinuteRuntimeReference
+from ashare_v3.market.windows_n3_read_model import N2ObjectRuntimeInput, N3ActiveReadModel
 
 
 RUNTIME_PERIODS = ("30m", "D", "W", "M", "Q", "Y")
+N2_RUNTIME_PERIODS = ("D", "W", "M", "Q", "Y")
 VALID_TRANSITIONS = {
     "volume_up",
     "low_volume_up",
@@ -99,8 +102,8 @@ class N2RuntimeBaseline:
         if not self.identity_key.startswith(f"{self.asset_kind}:"):
             raise ValueError("identity_key must match asset_kind")
         values = dict(self.periods)
-        if set(values) != set(RUNTIME_PERIODS):
-            raise ValueError("period baselines must contain exactly 30m/D/W/M/Q/Y")
+        if set(values) != set(N2_RUNTIME_PERIODS):
+            raise ValueError("N2 period baselines must contain exactly D/W/M/Q/Y")
         for period, baseline in values.items():
             if baseline.period != period:
                 raise ValueError(f"period key mismatch: {period} != {baseline.period}")
@@ -288,13 +291,16 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
     def consume(
         self,
         view: ChannelStateView[RealtimeMetric],
+        *,
+        thirty_minute_references: Mapping[str, ThirtyMinuteRuntimeReference] | None = None,
     ) -> RuntimeStateSnapshot[RuntimeStateT]:
         with self._consume_lock:
-            return self._consume_locked(view)
+            return self._consume_locked(view, thirty_minute_references or {})
 
     def _consume_locked(
         self,
         view: ChannelStateView[RealtimeMetric],
+        thirty_minute_references: Mapping[str, ThirtyMinuteRuntimeReference],
     ) -> RuntimeStateSnapshot[RuntimeStateT]:
         current = self._store.read()
         self._validate_view(view)
@@ -305,6 +311,12 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
             )
         if view.version == current.source_n3_version:
             return current
+        unknown_references = set(thirty_minute_references).difference(self._baselines)
+        if unknown_references:
+            raise ValueError(
+                "30m references contain identities outside N2 universe: "
+                f"{sorted(unknown_references)[:3]}"
+            )
 
         next_states: dict[str, RuntimeStateT] = {}
         for identity_key, baseline in self._baselines.items():
@@ -319,6 +331,7 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
                 previous,
                 metric,
                 view.version,
+                thirty_minute_references.get(identity_key),
             )
         return self._store.replace(
             next_states,
@@ -344,6 +357,7 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
         previous: RuntimeStateT,
         metric: RealtimeMetric | None,
         source_n3_version: int,
+        thirty_minute_reference: ThirtyMinuteRuntimeReference | None,
     ) -> RuntimeStateT:
         if (
             metric is None
@@ -363,12 +377,14 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
         quote = metric.quote
         if quote.asset_kind != self.asset_kind or quote.identity_key != baseline.identity_key:
             raise ValueError(f"N3 quote identity mismatch for {baseline.identity_key}")
+        period_baselines = dict(baseline.periods)
+        period_baselines["30m"] = _thirty_minute_baseline(thirty_minute_reference)
         transitions = {
             period: realtime_transition(
                 period=period,
                 current_price=quote.current_price,
                 current_amount=metric.virtual_amounts.get(period),
-                baseline=baseline.periods[period],
+                baseline=period_baselines[period],
             )
             for period in RUNTIME_PERIODS
         }
@@ -382,11 +398,11 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
             code=baseline.code,
             name=baseline.name,
             source_transitions={
-                period: baseline.periods[period].source_transition
+                period: period_baselines[period].source_transition
                 for period in RUNTIME_PERIODS
             },
             source_amounts={
-                period: baseline.periods[period].source_amount
+                period: period_baselines[period].source_amount
                 for period in RUNTIME_PERIODS
             },
             realtime_transitions=transitions,
@@ -476,11 +492,26 @@ class WindowsN4MemoryRuntime:
         stock: ChannelStateView[RealtimeMetric],
         index: ChannelStateView[RealtimeMetric],
         board: ChannelStateView[RealtimeMetric],
+        stock_30m_references: Mapping[str, ThirtyMinuteRuntimeReference] | None = None,
+        index_30m_references: Mapping[str, ThirtyMinuteRuntimeReference] | None = None,
+        board_30m_references: Mapping[str, ThirtyMinuteRuntimeReference] | None = None,
     ) -> N4MemoryCycleResult:
         with ThreadPoolExecutor(max_workers=3) as pool:
-            stock_future = pool.submit(self.stock_consumer.consume, stock)
-            index_future = pool.submit(self.index_consumer.consume, index)
-            board_future = pool.submit(self.board_consumer.consume, board)
+            stock_future = pool.submit(
+                self.stock_consumer.consume,
+                stock,
+                thirty_minute_references=stock_30m_references,
+            )
+            index_future = pool.submit(
+                self.index_consumer.consume,
+                index,
+                thirty_minute_references=index_30m_references,
+            )
+            board_future = pool.submit(
+                self.board_consumer.consume,
+                board,
+                thirty_minute_references=board_30m_references,
+            )
             return N4MemoryCycleResult(
                 stock=stock_future.result(),
                 index=index_future.result(),
@@ -492,6 +523,18 @@ class WindowsN4MemoryRuntime:
             stock=runtime.get_stock_metrics(),
             index=runtime.get_index_metrics(),
             board=runtime.get_board_metrics(),
+        )
+
+    def consume_cycle(self, cycle: object) -> N4MemoryCycleResult:
+        """Consume the N3 intraday handoff without coupling N3 back to N4."""
+
+        return self.consume_views(
+            stock=cycle.metrics.stock,
+            index=cycle.metrics.index,
+            board=cycle.metrics.board,
+            stock_30m_references=cycle.stock_30m_references,
+            index_30m_references=cycle.index_30m_references,
+            board_30m_references=cycle.board_30m_references,
         )
 
 
@@ -551,11 +594,19 @@ def _initial_state(
         code=baseline.code,
         name=baseline.name,
         source_transitions={
-            period: baseline.periods[period].source_transition
+            period: (
+                "unknown"
+                if period == "30m"
+                else baseline.periods[period].source_transition
+            )
             for period in RUNTIME_PERIODS
         },
         source_amounts={
-            period: baseline.periods[period].source_amount
+            period: (
+                None
+                if period == "30m"
+                else baseline.periods[period].source_amount
+            )
             for period in RUNTIME_PERIODS
         },
         realtime_transitions={},
@@ -576,3 +627,99 @@ def _initial_state(
 def _require_yyyymmdd(value: str, field: str) -> None:
     if len(value) != 8 or not value.isdigit():
         raise ValueError(f"{field} must be YYYYMMDD")
+
+
+def build_windows_n4_runtime(model: N3ActiveReadModel) -> WindowsN4MemoryRuntime:
+    """Adapt the N2 startup read model without copying user-facing fields."""
+
+    return WindowsN4MemoryRuntime(
+        StockStateConsumer(_channel_baselines(model, "stock")),
+        IndexStateConsumer(_channel_baselines(model, "index")),
+        BoardStateConsumer(_channel_baselines(model, "board")),
+    )
+
+
+def _channel_baselines(
+    model: N3ActiveReadModel,
+    asset_kind: str,
+) -> tuple[N2RuntimeBaseline, ...]:
+    return tuple(
+        _n2_runtime_baseline(model, row)
+        for row in getattr(model, asset_kind)
+    )
+
+
+def _n2_runtime_baseline(
+    model: N3ActiveReadModel,
+    row: N2ObjectRuntimeInput,
+) -> N2RuntimeBaseline:
+    periods: dict[str, RuntimePeriodBaseline] = {}
+    for period in N2_RUNTIME_PERIODS:
+        source = row.periods[period]
+        source_amount = _average_source_amount(
+            source.completed_amount_sum,
+            source.completed_trade_days,
+        )
+        ready = all(
+            value is not None
+            for value in (
+                source.previous_entity_high,
+                source.previous_entity_low,
+                source.previous_amount_baseline,
+            )
+        )
+        transition = source.grade if source.grade in VALID_TRANSITIONS else "unknown"
+        periods[period] = RuntimePeriodBaseline(
+            period=period,
+            source_transition=transition,
+            source_amount=source_amount,
+            comparison_entity_high=source.previous_entity_high,
+            comparison_entity_low=source.previous_entity_low,
+            comparison_amount=source.previous_amount_baseline,
+            current_trade_days=max(source.completed_trade_days or 1, 1),
+            ready=ready,
+        )
+    return N2RuntimeBaseline(
+        source_condition_run_id=model.run_id,
+        source_trade_date=model.source_trade_date,
+        for_trade_date=model.for_trade_date,
+        asset_kind=row.asset_kind,
+        identity_key=row.identity_key,
+        exchange=row.exchange,
+        code=row.code,
+        name=row.name,
+        periods=periods,
+    )
+
+
+def _average_source_amount(
+    amount_sum: Decimal | None,
+    trade_days: int | None,
+) -> Decimal | None:
+    if amount_sum is None or trade_days is None or trade_days <= 0:
+        return None
+    return amount_sum / Decimal(trade_days)
+
+
+def _thirty_minute_baseline(
+    reference: ThirtyMinuteRuntimeReference | None,
+) -> RuntimePeriodBaseline:
+    if reference is None:
+        return RuntimePeriodBaseline(
+            period="30m",
+            source_transition="unknown",
+            source_amount=None,
+            comparison_entity_high=None,
+            comparison_entity_low=None,
+            comparison_amount=None,
+            ready=False,
+        )
+    return RuntimePeriodBaseline(
+        period="30m",
+        source_transition="unknown",
+        source_amount=reference.previous_day_same_window_amount,
+        comparison_entity_high=reference.adjacent_completed_entity_high,
+        comparison_entity_low=reference.adjacent_completed_entity_low,
+        comparison_amount=reference.previous_day_same_window_amount,
+        ready=True,
+    )
