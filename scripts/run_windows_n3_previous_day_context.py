@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
-from dataclasses import asdict
 from datetime import datetime, time
 import json
 import os
@@ -29,6 +28,22 @@ from ashare_v3.market.windows_n3_read_model import WindowsN3ReadOnlyRepository
 
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def summary_to_dict(summary) -> dict:
+    return {
+        "result": summary.result,
+        "context_run_id": summary.context_run_id,
+        "source_condition_run_id": summary.source_condition_run_id,
+        "source_trade_date": summary.source_trade_date,
+        "for_trade_date": summary.for_trade_date,
+        "expected_counts": dict(summary.expected_counts),
+        "terminal_counts": dict(summary.terminal_counts),
+        "status_counts": {
+            key: dict(value) for key, value in summary.status_counts.items()
+        },
+        "inserted_count": summary.inserted_count,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +94,7 @@ def main() -> int:
             eltdx_index=EltdxIndexMinuteContextProvider(client),
             eltdx_board=EltdxBoardMinuteContextProvider(client),
         ).execute(model)
-    print(json.dumps(asdict(summary), ensure_ascii=False, default=str, sort_keys=True))
+    print(json.dumps(summary_to_dict(summary), ensure_ascii=False, default=str, sort_keys=True))
     return 0
 
 

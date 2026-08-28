@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 
 from ashare_v3.market.windows_n3_minute_context import (
@@ -27,6 +28,7 @@ from ashare_v3.market.windows_n3_read_model import (
     N3ActiveReadModel,
 )
 from ashare_v3.market.windows_n3_snapshot import StockSnapshotRequest
+from scripts.run_windows_n3_previous_day_context import summary_to_dict
 
 
 def request(index: int) -> StockSnapshotRequest:
@@ -243,6 +245,25 @@ class LoaderConnection:
 
 
 class WindowsN3PreviousDayContextTest(unittest.TestCase):
+    def test_preload_summary_serializes_mapping_proxies_as_json_objects(self):
+        summary = PreviousDayContextPreloadSummary(
+            result="N3_PREVIOUS_DAY_CONTEXT_COMPLETE",
+            context_run_id="context-1",
+            source_condition_run_id="condition-1",
+            source_trade_date="20260828",
+            for_trade_date="20260831",
+            expected_counts=MappingProxyType({"stock": 1}),
+            terminal_counts=MappingProxyType({"stock": 1}),
+            status_counts=MappingProxyType(
+                {"stock": MappingProxyType({"ready": 1})}
+            ),
+            inserted_count=1,
+        )
+        payload = summary_to_dict(summary)
+        self.assertEqual(payload["expected_counts"], {"stock": 1})
+        self.assertEqual(payload["status_counts"], {"stock": {"ready": 1}})
+        json.dumps(payload)
+
     def test_unavailable_tq_marks_every_identity_for_eltdx(self):
         requested = (request(0), request(1))
         primary = UnavailableTQMinuteContextProvider(
