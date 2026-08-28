@@ -6,6 +6,7 @@ from threading import Lock
 from types import SimpleNamespace
 import time
 import unittest
+from zoneinfo import ZoneInfo
 
 from ashare_v3.market.windows_n3_snapshot import (
     BoardSnapshotRequest,
@@ -84,6 +85,30 @@ class ConcurrentProbeTQ(FakeTQ):
                 self.active -= 1
 
 
+class SharedConcurrencyProbe:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.lock = Lock()
+
+
+class IndependentProbeTQ(FakeTQ):
+    def __init__(self, probe):
+        super().__init__()
+        self.probe = probe
+
+    def get_market_snapshot(self, code):
+        with self.probe.lock:
+            self.probe.active += 1
+            self.probe.max_active = max(self.probe.max_active, self.probe.active)
+        try:
+            time.sleep(0.002)
+            return super().get_market_snapshot(code)
+        finally:
+            with self.probe.lock:
+                self.probe.active -= 1
+
+
 def quote(identity_key):
     return RealtimeQuote(
         asset_kind="stock",
@@ -120,6 +145,10 @@ class WindowsN3SnapshotProviderTest(unittest.TestCase):
         self.assertEqual(str(batch.rows[0].volume), "100")
         self.assertEqual(str(batch.rows[0].amount), "12345")
         self.assertEqual(batch.rows[0].source_time_raw, 93500)
+        self.assertEqual(
+            batch.rows[0].source_time.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H%M%S"),
+            "093500",
+        )
         self.assertEqual(batch.missing_identity_keys, ())
 
     def test_board_provider_owns_sh88_code_translation_for_eltdx_and_tq(self):
@@ -178,6 +207,25 @@ class WindowsN3SnapshotProviderTest(unittest.TestCase):
             for future in futures:
                 self.assertEqual(len(future.result().rows), 1)
         self.assertEqual(client.max_active, 1)
+
+    def test_tq_providers_with_distinct_clients_still_serialize_process_dll_calls(self):
+        probe = SharedConcurrencyProbe()
+        stock_provider = TQStockSnapshotProvider(IndependentProbeTQ(probe), clock=lambda: NOW)
+        index_provider = TQIndexSnapshotProvider(IndependentProbeTQ(probe), clock=lambda: NOW)
+        board_provider = TQBoardSnapshotProvider(IndependentProbeTQ(probe), clock=lambda: NOW)
+        stock = StockSnapshotRequest("stock:SH:600000", "SH", "600000", "浦发")
+        index = IndexSnapshotRequest("index:SH:000001", "SH", "000001", "上证")
+        board = BoardSnapshotRequest("board:TDX:881333", "SH", "881333", "元器件")
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = (
+                pool.submit(stock_provider.fetch_many, (stock,)),
+                pool.submit(index_provider.fetch_many, (index,)),
+                pool.submit(board_provider.fetch_many, (board,)),
+            )
+            for future in futures:
+                self.assertEqual(len(future.result().rows), 1)
+        self.assertEqual(probe.max_active, 1)
 
 
 if __name__ == "__main__":

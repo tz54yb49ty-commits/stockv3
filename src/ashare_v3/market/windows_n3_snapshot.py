@@ -14,15 +14,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from threading import Lock, RLock
+from threading import RLock
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 
 ELTDX_SNAPSHOT_BATCH_SIZE = 80
 ELTDX_SNAPSHOT_MAX_WORKERS = 16
 TQ_SNAPSHOT_MAX_WORKERS = 1
-_TQ_RPC_LOCKS_GUARD = Lock()
-_TQ_RPC_LOCKS: dict[int, RLock] = {}
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_TQ_RPC_LOCK = RLock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,13 +310,14 @@ class _EltdxBatchFetcher:
         batch_factory: type[StockSnapshotBatch] | type[IndexSnapshotBatch] | type[BoardSnapshotBatch],
     ) -> StockSnapshotBatch | IndexSnapshotBatch | BoardSnapshotBatch:
         requested = tuple(requests)
-        observed_at = self._clock()
         if not requested:
+            observed_at = self._clock()
             return batch_factory((), (), provider, observed_at)
         vendor_codes = [code_formatter(request) for request in requested]
         pages = [vendor_codes[index : index + self._batch_size] for index in range(0, len(vendor_codes), self._batch_size)]
         with ThreadPoolExecutor(max_workers=min(self._max_workers, len(pages))) as pool:
             raw_pages = tuple(pool.map(self._client.quotes.get_snapshots, pages))
+        observed_at = self._clock()
         records = [record for page in raw_pages for record in _records(page)]
         return _normalize_batch(
             requested,
@@ -352,8 +354,8 @@ class _TQSnapshotFetcher:
         batch_factory: type[StockSnapshotBatch] | type[IndexSnapshotBatch] | type[BoardSnapshotBatch],
     ) -> StockSnapshotBatch | IndexSnapshotBatch | BoardSnapshotBatch:
         requested = tuple(requests)
-        observed_at = self._clock()
         if not requested:
+            observed_at = self._clock()
             return batch_factory((), (), provider, observed_at)
         vendor_codes = [code_formatter(request) for request in requested]
 
@@ -370,6 +372,7 @@ class _TQSnapshotFetcher:
 
         with ThreadPoolExecutor(max_workers=min(self._max_workers, len(vendor_codes))) as pool:
             outcomes = tuple(pool.map(fetch_one, vendor_codes))
+        observed_at = self._clock()
         records = [record for record, _error in outcomes if record is not None]
         errors = tuple(error for _record, error in outcomes if error is not None)
         batch = _normalize_batch(
@@ -425,16 +428,10 @@ def _fetch_with_fallback(
     )
 
 
-def _tq_rpc_lock(client: Any) -> RLock:
-    """Serialize calls that share TQ's process-global DLL/run_id client."""
+def _tq_rpc_lock(_client: Any) -> RLock:
+    """Serialize every call through TQ's process-global DLL/run_id state."""
 
-    key = id(client)
-    with _TQ_RPC_LOCKS_GUARD:
-        lock = _TQ_RPC_LOCKS.get(key)
-        if lock is None:
-            lock = RLock()
-            _TQ_RPC_LOCKS[key] = lock
-        return lock
+    return _TQ_RPC_LOCK
 
 
 def _normalize_batch(
@@ -479,7 +476,13 @@ def _normalize_quote(
     observed_at: datetime,
 ) -> RealtimeQuote:
     source_time_raw = _first(raw, "source_time_raw", "time_raw", "source_time", "datetime", "time", "Time")
-    source_time = _datetime(_first(raw, "source_time", "datetime", "time", "Time")) or observed_at
+    source_time = (
+        _datetime(
+            _first(raw, "source_time", "datetime", "time", "Time", "time_raw"),
+            reference=observed_at,
+        )
+        or observed_at
+    )
     return RealtimeQuote(
         asset_kind=asset_kind,
         identity_key=request.identity_key,
@@ -610,12 +613,29 @@ def _decimal(value: Any) -> Decimal | None:
     return result if result.is_finite() else None
 
 
-def _datetime(value: Any) -> datetime | None:
+def _datetime(value: Any, *, reference: datetime | None = None) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     if value in (None, ""):
         return None
     text = str(value).strip().replace("Z", "+00:00")
+    digits = text.removesuffix(".0") if text.endswith(".0") else text
+    if digits.isdigit() and len(digits) in {5, 6} and reference is not None:
+        hhmmss = digits.zfill(6)
+        try:
+            wall_time = datetime.strptime(hhmmss, "%H%M%S").time()
+        except ValueError:
+            return None
+        normalized_reference = (
+            reference if reference.tzinfo is not None else reference.replace(tzinfo=timezone.utc)
+        )
+        local_date = normalized_reference.astimezone(SHANGHAI_TIMEZONE).date()
+        return datetime.combine(local_date, wall_time, tzinfo=SHANGHAI_TIMEZONE)
+    if digits.isdigit() and len(digits) == 14:
+        try:
+            return datetime.strptime(digits, "%Y%m%d%H%M%S").replace(tzinfo=SHANGHAI_TIMEZONE)
+        except ValueError:
+            return None
     try:
         result = datetime.fromisoformat(text)
     except ValueError:
