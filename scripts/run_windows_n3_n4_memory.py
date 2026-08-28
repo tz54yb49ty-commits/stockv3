@@ -29,6 +29,7 @@ from ashare_v3.market.windows_n3_previous_day_context import (
     TQIndexMinuteContextProvider,
     TQStockMinuteContextProvider,
     TQWithEltdxMinuteContextProvider,
+    UnavailableTQMinuteContextProvider,
     load_windows_tq_client,
 )
 from ashare_v3.market.windows_n3_read_model import WindowsN3ReadOnlyRepository
@@ -109,18 +110,26 @@ def main() -> int:
             now.strftime("%Y%m%d") == args.for_trade_date
             and now.time() >= time(9, 31)
         ):
-            tq_client = load_windows_tq_client()
+            try:
+                tq_client = load_windows_tq_client()
+                tq_stock = TQStockMinuteContextProvider(tq_client)
+                tq_index = TQIndexMinuteContextProvider(tq_client)
+                tq_board = TQBoardMinuteContextProvider(tq_client)
+            except Exception as error:  # late-start recovery must still use eltdx
+                tq_stock = UnavailableTQMinuteContextProvider(error)
+                tq_index = UnavailableTQMinuteContextProvider(error)
+                tq_board = UnavailableTQMinuteContextProvider(error)
             current_provider_args = {
                 "current_stock_minute_provider": TQWithEltdxMinuteContextProvider(
-                    TQStockMinuteContextProvider(tq_client),
+                    tq_stock,
                     EltdxStockMinuteContextProvider(stock_client),
                 ),
                 "current_index_minute_provider": TQWithEltdxMinuteContextProvider(
-                    TQIndexMinuteContextProvider(tq_client),
+                    tq_index,
                     EltdxIndexMinuteContextProvider(index_client),
                 ),
                 "current_board_minute_provider": TQWithEltdxMinuteContextProvider(
-                    TQBoardMinuteContextProvider(tq_client),
+                    tq_board,
                     EltdxBoardMinuteContextProvider(board_client),
                 ),
             }

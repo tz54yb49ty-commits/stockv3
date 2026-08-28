@@ -21,6 +21,7 @@ from ashare_v3.market.windows_n3_previous_day_context import (
     TQBoardMinuteContextProvider,
     TQIndexMinuteContextProvider,
     TQStockMinuteContextProvider,
+    UnavailableTQMinuteContextProvider,
     WindowsN3PreviousDayContextPreloader,
     load_windows_tq_client,
 )
@@ -56,16 +57,24 @@ def main() -> int:
     from eltdx import TdxClient
 
     model = WindowsN3ReadOnlyRepository(args.dsn).load_active(args.for_trade_date)
-    tq_client = load_windows_tq_client(args.tq_module_path)
+    try:
+        tq_client = load_windows_tq_client(args.tq_module_path)
+        tq_stock = TQStockMinuteContextProvider(tq_client)
+        tq_index = TQIndexMinuteContextProvider(tq_client)
+        tq_board = TQBoardMinuteContextProvider(tq_client)
+    except Exception as error:  # terminal/module availability varies by host
+        tq_stock = UnavailableTQMinuteContextProvider(error)
+        tq_index = UnavailableTQMinuteContextProvider(error)
+        tq_board = UnavailableTQMinuteContextProvider(error)
     with ExitStack() as stack:
         client = stack.enter_context(
             TdxClient.from_hosts(pool_size=16, probe_hosts=True, timeout=8)
         )
         summary = WindowsN3PreviousDayContextPreloader(
             repository=PostgresPreviousDayContextRepository(args.dsn),
-            tq_stock=TQStockMinuteContextProvider(tq_client),
-            tq_index=TQIndexMinuteContextProvider(tq_client),
-            tq_board=TQBoardMinuteContextProvider(tq_client),
+            tq_stock=tq_stock,
+            tq_index=tq_index,
+            tq_board=tq_board,
             eltdx_stock=EltdxStockMinuteContextProvider(client),
             eltdx_index=EltdxIndexMinuteContextProvider(client),
             eltdx_board=EltdxBoardMinuteContextProvider(client),

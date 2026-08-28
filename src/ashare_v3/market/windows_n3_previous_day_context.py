@@ -117,6 +117,36 @@ class TQBoardMinuteContextProvider:
         )
 
 
+class UnavailableTQMinuteContextProvider(Generic[RequestT]):
+    """Represent an unavailable TQ bridge so eltdx can take every request."""
+
+    provider_name = "tq.unavailable"
+
+    def __init__(self, error: BaseException | str) -> None:
+        self.error = (
+            error
+            if isinstance(error, str)
+            else f"{type(error).__name__}:{error}"
+        )
+
+    def fetch_many(
+        self,
+        requests: Sequence[RequestT],
+        trade_date: str,
+        *,
+        require_complete: bool = True,
+    ) -> MinuteContextFetchBatch[RequestT]:
+        del trade_date, require_complete
+        identity_keys = tuple(row.identity_key for row in requests)
+        return MinuteContextFetchBatch(
+            contexts={},
+            provider_by_identity={},
+            missing_identity_keys=identity_keys,
+            failed_batch_identity_keys=identity_keys,
+            errors=(f"tq_unavailable:{self.error}",),
+        )
+
+
 class TQWithEltdxMinuteContextProvider(Generic[RequestT]):
     """One-shot TQ primary with targeted eltdx fallback."""
 

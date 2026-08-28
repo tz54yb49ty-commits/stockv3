@@ -17,6 +17,7 @@ from ashare_v3.market.windows_n3_previous_day_context import (
     PostgresPreviousDayContextLoader,
     TQStockMinuteContextProvider,
     TQWithEltdxMinuteContextProvider,
+    UnavailableTQMinuteContextProvider,
     WindowsN3PreviousDayContextPreloader,
     context_record_sha256,
     make_context_record,
@@ -242,6 +243,31 @@ class LoaderConnection:
 
 
 class WindowsN3PreviousDayContextTest(unittest.TestCase):
+    def test_unavailable_tq_marks_every_identity_for_eltdx(self):
+        requested = (request(0), request(1))
+        primary = UnavailableTQMinuteContextProvider(
+            ModuleNotFoundError("tqcenter")
+        ).fetch_many(requested, "20260827")
+        self.assertEqual(
+            primary.missing_identity_keys,
+            tuple(row.identity_key for row in requested),
+        )
+        self.assertEqual(
+            primary.failed_batch_identity_keys,
+            tuple(row.identity_key for row in requested),
+        )
+
+        eltdx = EltdxProvider()
+        result = TQWithEltdxMinuteContextProvider(
+            UnavailableTQMinuteContextProvider("not installed"),
+            eltdx,
+        ).fetch_many(requested, "20260827")
+        self.assertEqual(
+            eltdx.calls,
+            [tuple(row.identity_key for row in requested)],
+        )
+        self.assertEqual(result.missing_identity_keys, ())
+
     def test_tq_uses_500_object_outer_batches_and_exact_options(self):
         client = TQClient()
         provider = TQStockMinuteContextProvider(client, sleep=lambda _value: None)
