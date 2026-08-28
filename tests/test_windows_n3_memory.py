@@ -11,6 +11,7 @@ from ashare_v3.market.windows_n3_memory import (
     IndexSnapshotChannel,
     RatioAmountBaseline,
     StockSnapshotChannel,
+    ThirtyMinuteAmountTracker,
     VirtualAmountContext,
     WindowsN3MemoryRuntime,
 )
@@ -78,6 +79,13 @@ class Provider:
         return self.batch_type(rows, missing, f"fake-{self.asset_kind}", self.clock())
 
 
+class SlowFailureProvider(Provider):
+    def fetch_many(self, requests):
+        self.calls += 1
+        self.clock.advance(16)
+        raise RuntimeError(f"{self.asset_kind} unavailable")
+
+
 class WindowsN3MemoryTest(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
@@ -117,6 +125,67 @@ class WindowsN3MemoryTest(unittest.TestCase):
         self.assertTrue(metric.fresh)
         self.assertEqual(view.channel_status, "ready")
 
+    def test_first_trading_bucket_30m_amount_is_derived_from_daily_cumulative_amount(self):
+        context = VirtualAmountContext(
+            window_30m=RatioAmountBaseline(Decimal("20"), Decimal("80")),
+        )
+        view = self.channel().run_cycle(
+            (self.stock_request,),
+            contexts={self.stock_request.identity_key: context},
+        )
+        self.assertEqual(
+            view.states[self.stock_request.identity_key].virtual_amounts["30m"],
+            Decimal("400"),
+        )
+
+    def test_mid_bucket_restart_requires_seed_then_continues_in_memory(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 2, 5, tzinfo=timezone.utc)
+        first = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="200",
+        )
+        self.assertIsNone(tracker.observe(first))
+        self.assertEqual(tracker.observe(first, elapsed_amount_seed=Decimal("25")), Decimal("25"))
+        self.clock.advance(300)
+        later = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="230",
+        )
+        self.assertEqual(tracker.observe(later), Decimal("55"))
+
+    def test_safe_30m_boundary_uses_previous_cumulative_amount(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 1, 59, 50, tzinfo=timezone.utc)
+        before = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="200",
+        )
+        self.assertEqual(tracker.observe(before), Decimal("200"))
+        self.clock.advance(10)
+        after = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="210",
+        )
+        self.assertEqual(tracker.observe(after), Decimal("10"))
+
+    def test_30m_tracker_prunes_objects_outside_current_universe(self):
+        tracker = ThirtyMinuteAmountTracker()
+        other = StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安")
+        tracker.observe(make_quote(self.stock_request, asset_kind="stock", observed_at=self.clock()))
+        tracker.observe(make_quote(other, asset_kind="stock", observed_at=self.clock()))
+        self.assertEqual(tracker.size, 2)
+        tracker.retain({self.stock_request.identity_key})
+        self.assertEqual(tracker.size, 1)
+
     def test_cycles_replace_state_instead_of_accumulating_history(self):
         channel = self.channel()
         first = channel.run_cycle((self.stock_request,))
@@ -126,6 +195,8 @@ class WindowsN3MemoryTest(unittest.TestCase):
         self.assertEqual((first.version, second.version), (1, 2))
         with self.assertRaises(TypeError):
             second.states["new"] = second.states[self.stock_request.identity_key]
+        self.assertEqual(channel.events.qsize(), 1)
+        self.assertEqual(channel.events.get_nowait().version, 2)
 
     def test_missing_object_becomes_stale_after_15_seconds_and_recovers(self):
         provider = Provider(StockSnapshotBatch, "stock", self.clock)
@@ -182,6 +253,37 @@ class WindowsN3MemoryTest(unittest.TestCase):
         self.assertEqual(result.board.channel_status, "ready")
         self.assertTrue(result.index.states[self.index_request.identity_key].fresh)
         self.assertTrue(result.board.states[self.board_request.identity_key].fresh)
+
+    def test_partial_object_error_keeps_channel_ready(self):
+        provider = Provider(StockSnapshotBatch, "stock", self.clock)
+        other = StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安")
+
+        def fetch_many(requests):
+            row = make_quote(requests[0], asset_kind="stock", observed_at=self.clock())
+            return StockSnapshotBatch(
+                (row,),
+                (requests[1].identity_key,),
+                "fake-stock",
+                self.clock(),
+                ("single_object_error",),
+            )
+
+        provider.fetch_many = fetch_many
+        view = self.channel(provider).run_cycle((self.stock_request, other))
+        self.assertEqual(view.channel_status, "ready")
+        self.assertEqual(view.error_summary, "single_object_error")
+        self.assertEqual(view.states[other.identity_key].live_status, "unavailable")
+
+    def test_slow_channel_failure_uses_completion_time_for_stale_age(self):
+        provider = Provider(StockSnapshotBatch, "stock", self.clock)
+        channel = self.channel(provider)
+        channel.run_cycle((self.stock_request,))
+        channel.provider = SlowFailureProvider(StockSnapshotBatch, "stock", self.clock)
+        failed = channel.run_cycle((self.stock_request,))
+        metric = failed.states[self.stock_request.identity_key]
+        self.assertEqual(failed.channel_status, "degraded")
+        self.assertEqual(metric.live_status, "stale")
+        self.assertFalse(metric.fresh)
 
     def test_n3_memory_modules_have_no_database_or_ddl_path(self):
         root = Path(__file__).parents[1] / "src" / "ashare_v3" / "market"

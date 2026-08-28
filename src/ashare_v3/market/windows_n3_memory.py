@@ -11,12 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from queue import Queue
+from queue import Empty, Full, Queue
 from threading import Lock, RLock
 from types import MappingProxyType
 from typing import Generic, TypeVar
+from zoneinfo import ZoneInfo
 
 from ashare_v3.market.windows_n3_snapshot import (
     BoardSnapshotBatch,
@@ -35,6 +36,27 @@ from ashare_v3.market.windows_n3_snapshot import (
 VIRTUAL_AMOUNT_PERIODS = ("30m", "D", "W", "M", "Q", "Y")
 DEFAULT_STALE_AFTER_SECONDS = 15.0
 DEFAULT_MIN_CYCLE_SECONDS = 5.0
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+THIRTY_MINUTE_BOUNDARY_TOLERANCE = timedelta(seconds=15)
+
+
+@dataclass(frozen=True, slots=True)
+class _TradingBucket:
+    index: int
+    start: time
+    end: time
+
+
+THIRTY_MINUTE_BUCKETS = (
+    _TradingBucket(0, time(9, 30), time(10, 0)),
+    _TradingBucket(1, time(10, 0), time(10, 30)),
+    _TradingBucket(2, time(10, 30), time(11, 0)),
+    _TradingBucket(3, time(11, 0), time(11, 30)),
+    _TradingBucket(4, time(13, 0), time(13, 30)),
+    _TradingBucket(5, time(13, 30), time(14, 0)),
+    _TradingBucket(6, time(14, 0), time(14, 30)),
+    _TradingBucket(7, time(14, 30), time(15, 0)),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +177,78 @@ class AtomicSnapshotStore(Generic[T]):
             return self._view
 
 
+@dataclass(frozen=True, slots=True)
+class _ThirtyMinuteAmountEntry:
+    trade_date: date
+    bucket_index: int
+    bucket_start_amount: Decimal | None
+    last_amount: Decimal
+    last_source_time: datetime
+
+
+class ThirtyMinuteAmountTracker:
+    """Bounded per-object accumulator derived from cumulative daily amount.
+
+    A process that starts inside a later 30-minute bucket cannot infer that
+    bucket's opening cumulative amount. In that case the result stays None
+    until a safe boundary is observed or an elapsed-amount seed is supplied.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _ThirtyMinuteAmountEntry] = {}
+
+    @property
+    def size(self) -> int:
+        return len(self._entries)
+
+    def retain(self, identity_keys: set[str]) -> None:
+        self._entries = {
+            identity_key: entry
+            for identity_key, entry in self._entries.items()
+            if identity_key in identity_keys
+        }
+
+    def observe(
+        self,
+        quote: RealtimeQuote,
+        *,
+        elapsed_amount_seed: Decimal | None = None,
+    ) -> Decimal | None:
+        amount = quote.amount
+        if amount is None or amount < 0:
+            return None
+        bucket_context = _trading_bucket_context(quote.source_time)
+        if bucket_context is None:
+            return None
+        trade_date, bucket, bucket_start, _bucket_end = bucket_context
+        previous = self._entries.get(quote.identity_key)
+
+        if elapsed_amount_seed is not None:
+            if elapsed_amount_seed < 0 or elapsed_amount_seed > amount:
+                return None
+            bucket_start_amount = amount - elapsed_amount_seed
+        elif previous is not None and previous.trade_date == trade_date and previous.bucket_index == bucket.index:
+            bucket_start_amount = previous.bucket_start_amount
+        elif bucket.index == 0:
+            bucket_start_amount = Decimal(0)
+        elif _safe_previous_bucket_boundary(previous, trade_date, bucket, bucket_start, amount):
+            assert previous is not None
+            bucket_start_amount = previous.last_amount
+        else:
+            bucket_start_amount = None
+
+        if bucket_start_amount is not None and amount < bucket_start_amount:
+            bucket_start_amount = None
+        self._entries[quote.identity_key] = _ThirtyMinuteAmountEntry(
+            trade_date=trade_date,
+            bucket_index=bucket.index,
+            bucket_start_amount=bucket_start_amount,
+            last_amount=amount,
+            last_source_time=quote.source_time,
+        )
+        return amount - bucket_start_amount if bucket_start_amount is not None else None
+
+
 class ChannelCycleInProgress(RuntimeError):
     """Raised when a second cycle is attempted for the same channel."""
 
@@ -189,7 +283,8 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
             source_condition_run_id=source_condition_run_id,
             clock=self.clock,
         )
-        self.events: Queue[ChannelStateView[RealtimeMetric]] = Queue()
+        self._amount_30m = ThirtyMinuteAmountTracker()
+        self.events: Queue[ChannelStateView[RealtimeMetric]] = Queue(maxsize=1)
         self._cycle_lock = Lock()
         self._last_cycle_started_at: datetime | None = None
 
@@ -208,26 +303,41 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
     ) -> ChannelStateView[RealtimeMetric]:
         if not self._cycle_lock.acquire(blocking=False):
             raise ChannelCycleInProgress(f"{self.asset_kind} snapshot cycle already running")
-        now = self.clock()
-        self._last_cycle_started_at = now
+        started_at = self.clock()
+        self._last_cycle_started_at = started_at
         requested = tuple(requests)
+        self._amount_30m.retain({request.identity_key for request in requested})
         try:
             try:
                 batch = self.provider.fetch_many(requested)
             except Exception as error:
-                view = self._replace_after_channel_failure(requested, now, error)
+                view = self._replace_after_channel_failure(requested, self.clock(), error)
             else:
                 view = self._replace_from_batch(
                     requested,
                     batch,
-                    now,
+                    self.clock(),
                     contexts or {},
                     current_30m_elapsed_amounts or {},
                 )
-            self.events.put(view)
+            self._publish_latest(view)
             return view
         finally:
             self._cycle_lock.release()
+
+    def _publish_latest(self, view: ChannelStateView[RealtimeMetric]) -> None:
+        """Keep only the newest handoff view; N3 never accumulates history."""
+
+        while True:
+            try:
+                self.events.put_nowait(view)
+                return
+            except Full:
+                try:
+                    self.events.get_nowait()
+                except Empty:
+                    continue
+                self.events.task_done()
 
     def _replace_from_batch(
         self,
@@ -253,7 +363,10 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
                     virtual_amounts=calculate_virtual_amounts(
                         quote,
                         contexts.get(request.identity_key),
-                        current_30m_elapsed_amount=current_30m_elapsed_amounts.get(request.identity_key),
+                        current_30m_elapsed_amount=self._amount_30m.observe(
+                            quote,
+                            elapsed_amount_seed=current_30m_elapsed_amounts.get(request.identity_key),
+                        ),
                     ),
                     live_status="available",
                     fresh=True,
@@ -268,7 +381,7 @@ class _SnapshotChannel(Generic[RequestT, BatchT]):
                 self.stale_after,
             )
         error_summary = "; ".join(batch.errors) if batch.errors else None
-        status = "degraded" if batch.errors else "ready"
+        status = "degraded" if batch.errors and requests and not batch.rows else "ready"
         return self.store.replace(
             states,
             generated_at=now,
@@ -513,6 +626,56 @@ def _average_with_projected_day(
     if projected_day_amount is None or basis is None:
         return None
     return (basis.completed_amount_sum + projected_day_amount) / Decimal(basis.completed_unit_count + 1)
+
+
+def _trading_bucket_context(
+    source_time: datetime,
+) -> tuple[date, _TradingBucket, datetime, datetime] | None:
+    normalized = source_time if source_time.tzinfo is not None else source_time.replace(tzinfo=timezone.utc)
+    local = normalized.astimezone(SHANGHAI_TIMEZONE)
+    wall_time = local.time().replace(tzinfo=None)
+    bucket: _TradingBucket | None = None
+    for candidate in THIRTY_MINUTE_BUCKETS:
+        if candidate.start <= wall_time < candidate.end:
+            bucket = candidate
+            break
+    if wall_time == time(11, 30):
+        bucket = THIRTY_MINUTE_BUCKETS[3]
+    elif wall_time == time(15, 0):
+        bucket = THIRTY_MINUTE_BUCKETS[-1]
+    if bucket is None:
+        return None
+    bucket_start = datetime.combine(local.date(), bucket.start, tzinfo=SHANGHAI_TIMEZONE)
+    bucket_end = datetime.combine(local.date(), bucket.end, tzinfo=SHANGHAI_TIMEZONE)
+    return local.date(), bucket, bucket_start, bucket_end
+
+
+def _safe_previous_bucket_boundary(
+    previous: _ThirtyMinuteAmountEntry | None,
+    trade_date: date,
+    bucket: _TradingBucket,
+    bucket_start: datetime,
+    current_amount: Decimal,
+) -> bool:
+    if (
+        previous is None
+        or previous.trade_date != trade_date
+        or previous.bucket_index != bucket.index - 1
+        or previous.last_amount > current_amount
+    ):
+        return False
+    previous_context = _trading_bucket_context(previous.last_source_time)
+    if previous_context is None:
+        return False
+    _previous_date, previous_bucket, _previous_start, previous_end = previous_context
+    if previous_bucket.index != previous.bucket_index:
+        return False
+    previous_local = previous.last_source_time.astimezone(SHANGHAI_TIMEZONE)
+    distance_to_end = previous_end - previous_local
+    return (
+        timedelta(0) <= distance_to_end <= THIRTY_MINUTE_BOUNDARY_TOLERANCE
+        and bucket_start >= previous_end
+    )
 
 
 def _missing_metric(
