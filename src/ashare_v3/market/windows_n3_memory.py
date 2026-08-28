@@ -184,6 +184,7 @@ class _ThirtyMinuteAmountEntry:
     bucket_start_amount: Decimal | None
     last_amount: Decimal
     last_source_time: datetime
+    seed_consumed: bool
 
 
 class ThirtyMinuteAmountTracker:
@@ -192,6 +193,8 @@ class ThirtyMinuteAmountTracker:
     A process that starts inside a later 30-minute bucket cannot infer that
     bucket's opening cumulative amount. In that case the result stays None
     until a safe boundary is observed or an elapsed-amount seed is supplied.
+    A restart seed is consumed once per object/bucket; an amount regression
+    invalidates that bucket until the next safe boundary.
     """
 
     def __init__(self) -> None:
@@ -223,28 +226,46 @@ class ThirtyMinuteAmountTracker:
         trade_date, bucket, bucket_start, _bucket_end = bucket_context
         previous = self._entries.get(quote.identity_key)
 
-        if elapsed_amount_seed is not None:
-            if elapsed_amount_seed < 0 or elapsed_amount_seed > amount:
-                return None
-            bucket_start_amount = amount - elapsed_amount_seed
-        elif previous is not None and previous.trade_date == trade_date and previous.bucket_index == bucket.index:
+        same_bucket = (
+            previous is not None
+            and previous.trade_date == trade_date
+            and previous.bucket_index == bucket.index
+        )
+        seed_consumed = previous.seed_consumed if same_bucket else False
+        amount_regressed = same_bucket and amount < previous.last_amount
+
+        if amount_regressed:
+            bucket_start_amount = None
+            seed_consumed = True
+        elif same_bucket and previous.bucket_start_amount is not None:
             bucket_start_amount = previous.bucket_start_amount
+        elif same_bucket and seed_consumed:
+            bucket_start_amount = None
         elif bucket.index == 0:
             bucket_start_amount = Decimal(0)
         elif _safe_previous_bucket_boundary(previous, trade_date, bucket, bucket_start, amount):
             assert previous is not None
             bucket_start_amount = previous.last_amount
+        elif elapsed_amount_seed is not None and not seed_consumed:
+            if elapsed_amount_seed < 0 or elapsed_amount_seed > amount:
+                return None
+            bucket_start_amount = amount - elapsed_amount_seed
+            seed_consumed = True
+        elif same_bucket:
+            bucket_start_amount = previous.bucket_start_amount
         else:
             bucket_start_amount = None
 
         if bucket_start_amount is not None and amount < bucket_start_amount:
             bucket_start_amount = None
+            seed_consumed = True
         self._entries[quote.identity_key] = _ThirtyMinuteAmountEntry(
             trade_date=trade_date,
             bucket_index=bucket.index,
             bucket_start_amount=bucket_start_amount,
             last_amount=amount,
             last_source_time=quote.source_time,
+            seed_consumed=seed_consumed,
         )
         return amount - bucket_start_amount if bucket_start_amount is not None else None
 

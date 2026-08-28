@@ -14,6 +14,7 @@ from ashare_v3.market.windows_n3_memory import (
     ThirtyMinuteAmountTracker,
     VirtualAmountContext,
     WindowsN3MemoryRuntime,
+    calculate_virtual_amounts,
 )
 from ashare_v3.market.windows_n3_snapshot import (
     BoardSnapshotBatch,
@@ -86,6 +87,26 @@ class SlowFailureProvider(Provider):
         raise RuntimeError(f"{self.asset_kind} unavailable")
 
 
+class AmountSequenceProvider(Provider):
+    def __init__(self, batch_type, asset_kind, clock, amounts):
+        super().__init__(batch_type, asset_kind, clock)
+        self.amounts = iter(amounts)
+
+    def fetch_many(self, requests):
+        self.calls += 1
+        amount = next(self.amounts)
+        rows = tuple(
+            make_quote(
+                request,
+                asset_kind=self.asset_kind,
+                observed_at=self.clock(),
+                amount=amount,
+            )
+            for request in requests
+        )
+        return self.batch_type(rows, (), f"fake-{self.asset_kind}", self.clock())
+
+
 class WindowsN3MemoryTest(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
@@ -103,6 +124,7 @@ class WindowsN3MemoryTest(unittest.TestCase):
         )
 
     def test_virtual_amounts_are_calculated_in_memory_from_injected_context(self):
+        self.clock.value = datetime(2026, 8, 28, 2, 5, tzinfo=timezone.utc)
         context = VirtualAmountContext(
             window_30m=RatioAmountBaseline(Decimal("20"), Decimal("80")),
             day=RatioAmountBaseline(Decimal("50"), Decimal("200")),
@@ -124,6 +146,44 @@ class WindowsN3MemoryTest(unittest.TestCase):
         self.assertEqual(metric.virtual_amounts["W"], Decimal("250"))
         self.assertTrue(metric.fresh)
         self.assertEqual(view.channel_status, "ready")
+
+    def test_restart_seed_is_one_shot_for_stock_index_and_board_channels(self):
+        context = VirtualAmountContext(
+            window_30m=RatioAmountBaseline(Decimal("20"), Decimal("80")),
+        )
+        cases = (
+            (StockSnapshotChannel, StockSnapshotBatch, "stock", self.stock_request),
+            (IndexSnapshotChannel, IndexSnapshotBatch, "index", self.index_request),
+            (BoardSnapshotChannel, BoardSnapshotBatch, "board", self.board_request),
+        )
+        for channel_type, batch_type, asset_kind, request in cases:
+            with self.subTest(asset_kind=asset_kind):
+                self.clock.value = datetime(2026, 8, 28, 2, 5, tzinfo=timezone.utc)
+                provider = AmountSequenceProvider(
+                    batch_type,
+                    asset_kind,
+                    self.clock,
+                    ("200", "230"),
+                )
+                channel = channel_type(
+                    provider,
+                    for_trade_date="20260828",
+                    source_condition_run_id="condition-20260827",
+                    clock=self.clock,
+                )
+                first = channel.run_cycle(
+                    (request,),
+                    contexts={request.identity_key: context},
+                    current_30m_elapsed_amounts={request.identity_key: Decimal("25")},
+                )
+                self.assertEqual(first.states[request.identity_key].virtual_amounts["30m"], Decimal("100"))
+                self.clock.advance(300)
+                second = channel.run_cycle(
+                    (request,),
+                    contexts={request.identity_key: context},
+                    current_30m_elapsed_amounts={request.identity_key: Decimal("25")},
+                )
+                self.assertEqual(second.states[request.identity_key].virtual_amounts["30m"], Decimal("220"))
 
     def test_first_trading_bucket_30m_amount_is_derived_from_daily_cumulative_amount(self):
         context = VirtualAmountContext(
@@ -156,7 +216,96 @@ class WindowsN3MemoryTest(unittest.TestCase):
             observed_at=self.clock(),
             amount="230",
         )
-        self.assertEqual(tracker.observe(later), Decimal("55"))
+        self.assertEqual(
+            tracker.observe(later, elapsed_amount_seed=Decimal("25")),
+            Decimal("55"),
+        )
+
+    def test_mid_bucket_amount_regression_invalidates_seed_until_next_boundary(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 2, 5, tzinfo=timezone.utc)
+        first = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="200",
+        )
+        self.assertEqual(tracker.observe(first, elapsed_amount_seed=Decimal("25")), Decimal("25"))
+        self.clock.advance(300)
+        regressed = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="190",
+        )
+        self.assertIsNone(tracker.observe(regressed, elapsed_amount_seed=Decimal("25")))
+        self.clock.advance(300)
+        recovered_amount = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="210",
+        )
+        self.assertIsNone(tracker.observe(recovered_amount, elapsed_amount_seed=Decimal("25")))
+        self.clock.value = datetime(2026, 8, 28, 2, 29, 55, tzinfo=timezone.utc)
+        before_next_boundary = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="220",
+        )
+        self.assertIsNone(tracker.observe(before_next_boundary, elapsed_amount_seed=Decimal("25")))
+        self.clock.value = datetime(2026, 8, 28, 2, 30, tzinfo=timezone.utc)
+        after_next_boundary = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="225",
+        )
+        self.assertEqual(tracker.observe(after_next_boundary), Decimal("5"))
+
+    def test_first_bucket_amount_regression_stays_invalid_until_next_boundary(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 1, 35, tzinfo=timezone.utc)
+        first = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="100",
+        )
+        self.assertEqual(tracker.observe(first), Decimal("100"))
+        self.clock.advance(300)
+        regressed = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="90",
+        )
+        self.assertIsNone(tracker.observe(regressed))
+        self.clock.advance(300)
+        later = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="110",
+        )
+        self.assertIsNone(tracker.observe(later))
+        self.clock.value = datetime(2026, 8, 28, 1, 59, 55, tzinfo=timezone.utc)
+        before_next_boundary = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="120",
+        )
+        self.assertIsNone(tracker.observe(before_next_boundary))
+        self.clock.value = datetime(2026, 8, 28, 2, 0, tzinfo=timezone.utc)
+        after_next_boundary = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="125",
+        )
+        self.assertEqual(tracker.observe(after_next_boundary), Decimal("5"))
 
     def test_safe_30m_boundary_uses_previous_cumulative_amount(self):
         tracker = ThirtyMinuteAmountTracker()
@@ -176,6 +325,72 @@ class WindowsN3MemoryTest(unittest.TestCase):
             amount="210",
         )
         self.assertEqual(tracker.observe(after), Decimal("10"))
+
+    def test_1015_virtual_amount_uses_boundary_delta_and_same_progress_ratio(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 1, 59, 55, tzinfo=timezone.utc)
+        before = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="100",
+        )
+        self.assertEqual(tracker.observe(before), Decimal("100"))
+        self.clock.value = datetime(2026, 8, 28, 2, 15, tzinfo=timezone.utc)
+        current = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="160",
+        )
+        elapsed = tracker.observe(current)
+        self.assertEqual(elapsed, Decimal("60"))
+        projected = calculate_virtual_amounts(
+            current,
+            VirtualAmountContext(
+                window_30m=RatioAmountBaseline(Decimal("30"), Decimal("90")),
+            ),
+            current_30m_elapsed_amount=elapsed,
+        )
+        self.assertEqual(projected["30m"], Decimal("180"))
+
+    def test_lunch_boundary_uses_1130_cumulative_amount_for_1300_window(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 3, 29, 55, tzinfo=timezone.utc)
+        morning_close = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="500",
+        )
+        self.assertIsNone(tracker.observe(morning_close))
+        self.clock.value = datetime(2026, 8, 28, 5, 15, tzinfo=timezone.utc)
+        afternoon = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="560",
+        )
+        self.assertEqual(tracker.observe(afternoon), Decimal("60"))
+
+    def test_missing_safe_boundary_keeps_later_bucket_unavailable(self):
+        tracker = ThirtyMinuteAmountTracker()
+        self.clock.value = datetime(2026, 8, 28, 3, 29, 30, tzinfo=timezone.utc)
+        old_morning_quote = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="500",
+        )
+        self.assertIsNone(tracker.observe(old_morning_quote))
+        self.clock.value = datetime(2026, 8, 28, 5, 15, tzinfo=timezone.utc)
+        afternoon = make_quote(
+            self.stock_request,
+            asset_kind="stock",
+            observed_at=self.clock(),
+            amount="560",
+        )
+        self.assertIsNone(tracker.observe(afternoon))
 
     def test_30m_tracker_prunes_objects_outside_current_universe(self):
         tracker = ThirtyMinuteAmountTracker()
