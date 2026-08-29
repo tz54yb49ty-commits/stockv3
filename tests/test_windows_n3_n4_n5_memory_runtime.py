@@ -6,6 +6,9 @@ from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+from ashare_v3.action.windows_n5_episode import (
+    WindowsN5EpisodePlanner,
+)
 from ashare_v3.market.windows_n3_action_metric import (
     ActionMetricBatch,
     build_action_confirmation_metric,
@@ -305,6 +308,7 @@ def _orchestrator(
     providers,
     *,
     n4_restore_events=None,
+    n5_restore_events=None,
 ):
     requests = {}
     previous = {}
@@ -341,6 +345,7 @@ def _orchestrator(
             for kind in IDENTITIES
         },
         n4_restore_events=n4_restore_events,
+        n5_restore_events=n5_restore_events,
     )
 
 
@@ -537,6 +542,8 @@ def test_0915_entry_uses_same_process_orchestrator() -> None:
     assert "WindowsN4OutboxReadOnlyRepository" in source
     assert "initial_versions=n4_restore.last_versions" in source
     assert "n4_restore_events=n4_restore.events" in source
+    assert "WindowsN5EpisodeReadOnlyRepository" in source
+    assert "n5_restore_events=n5_restore.events" in source
     assert "event_persistence_count" in source
 
 
@@ -629,3 +636,88 @@ def test_restart_restores_three_n4_channels_before_first_cycle() -> None:
             "TriggerStateChanged"
         ]
         assert events[0].payload_json["trigger_live"] is False
+
+
+def test_restart_restores_three_n5_channels_before_first_cycle() -> None:
+    matched_at = _time("09:35:05")
+    original = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=7,
+                    observed_at=matched_at,
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+    )
+    first = original.consume_cycle(
+        SimpleNamespace(generated_at=matched_at)
+    )
+    n4_restore_events = {
+        kind: getattr(first, kind).trigger_batch.events
+        for kind in IDENTITIES
+    }
+    n5_restore_events = {}
+    for kind in IDENTITIES:
+        matched = n4_restore_events[kind][0]
+        planner = WindowsN5EpisodePlanner(
+            asset_kind=kind,
+            action_run_id=f"action_{kind}_fixture",
+        )
+        eligible = planner.consume_trigger_event(matched).events[0]
+        n5_restore_events[kind] = (matched, eligible)
+
+    restored = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=8,
+                    observed_at=_time("09:40:05"),
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+        n4_restore_events=n4_restore_events,
+        n5_restore_events=n5_restore_events,
+    )
+    before_first_cycle = restored.read_summary().as_dict()
+    assert before_first_cycle["n5_restored_event_counts"] == {
+        "stock": 2,
+        "index": 2,
+        "board": 2,
+    }
+    assert before_first_cycle["n5_restored_episode_counts"] == {
+        "stock": 1,
+        "index": 1,
+        "board": 1,
+    }
+    assert before_first_cycle["n5_restored_versions"] == {
+        "stock": 2,
+        "index": 2,
+        "board": 2,
+    }
+    assert before_first_cycle["n5_state_counts"] == {
+        "stock": 1,
+        "index": 1,
+        "board": 1,
+    }
+
+    first_after_restart = restored.consume_cycle(
+        SimpleNamespace(generated_at=_time("09:40:05"))
+    )
+    for kind in IDENTITIES:
+        result = getattr(first_after_restart, kind)
+        assert result.trigger_batch.events == ()
+        assert all(
+            event.event_type != "ActionEligible"
+            for event in result.n5_events
+        )

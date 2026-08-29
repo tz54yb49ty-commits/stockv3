@@ -11,6 +11,9 @@ import json
 import os
 from zoneinfo import ZoneInfo
 
+from ashare_v3.action.windows_n5_restore import (
+    WindowsN5EpisodeReadOnlyRepository,
+)
 from ashare_v3.market.windows_n3_action_metric import (
     EltdxBoardActionMetricProvider,
     EltdxIndexActionMetricProvider,
@@ -93,6 +96,10 @@ def main() -> int:
 
     repository = WindowsN3ReadOnlyRepository(args.dsn)
     n4_outbox_repository = WindowsN4OutboxReadOnlyRepository(args.dsn)
+    n5_episode_repository = WindowsN5EpisodeReadOnlyRepository(
+        args.dsn,
+        consumer_name="windows_n5_state_v1",
+    )
     context_loader = _CapturingContextLoader(
         PostgresPreviousDayContextLoader(
             args.dsn,
@@ -139,6 +146,12 @@ def main() -> int:
                 )
                 for kind in ("stock", "index", "board")
             }
+            n5_restore = n5_episode_repository.load(
+                source_condition_run_id=model.run_id,
+                for_trade_date=model.for_trade_date,
+                action_run_ids=action_run_ids,
+            )
+            integration_holder["n5_restore"] = n5_restore
             integration_holder["runtime"] = WindowsN3N4N5MemoryOrchestrator(
                 n4_runtime=build_windows_n4_runtime(
                     model,
@@ -156,6 +169,7 @@ def main() -> int:
                 trigger_run_ids=trigger_run_ids,
                 action_run_ids=action_run_ids,
                 n4_restore_events=n4_restore.events,
+                n5_restore_events=n5_restore.events,
             )
             return WindowsN3MemoryRuntime(
                 StockSnapshotChannel(
@@ -249,6 +263,16 @@ def main() -> int:
         payload["n4_restored_versions"] = {
             kind: 0 for kind in ("stock", "index", "board")
         }
+    n5_restore = integration_holder.get("n5_restore")
+    if n5_restore is not None:
+        payload["n5_restored_event_counts"] = {
+            kind: len(n5_restore.events[kind])
+            for kind in ("stock", "index", "board")
+        }
+    else:
+        payload["n5_restored_event_counts"] = {
+            kind: 0 for kind in ("stock", "index", "board")
+        }
     integration = integration_holder.get("runtime")
     if integration is not None:
         runtime_summary = integration.read_summary().as_dict()
@@ -267,9 +291,21 @@ def main() -> int:
         )
         payload["n5_state_counts"] = runtime_summary["n5_state_counts"]
         payload["n5_versions"] = runtime_summary["n5_versions"]
+        payload["n5_restored_episode_counts"] = runtime_summary[
+            "n5_restored_episode_counts"
+        ]
+        payload["n5_restored_versions"] = runtime_summary[
+            "n5_restored_versions"
+        ]
     else:
         payload["trigger_event_count"] = 0
         payload["n5_action_event_count"] = 0
+        payload["n5_restored_episode_counts"] = {
+            kind: 0 for kind in ("stock", "index", "board")
+        }
+        payload["n5_restored_versions"] = {
+            kind: 0 for kind in ("stock", "index", "board")
+        }
     payload["database_write_count"] = 0
     payload["event_persistence_count"] = 0
     print(json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True))

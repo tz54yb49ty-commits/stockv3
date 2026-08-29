@@ -86,6 +86,9 @@ class WindowsN3N4N5RuntimeSummary:
     n4_trigger_event_counts: Mapping[str, Mapping[str, int]]
     n4_restored_event_counts: Mapping[str, int]
     n4_restored_versions: Mapping[str, int]
+    n5_restored_event_counts: Mapping[str, int]
+    n5_restored_episode_counts: Mapping[str, int]
+    n5_restored_versions: Mapping[str, int]
     n5_action_event_counts: Mapping[str, Mapping[str, int]]
     action_metric_identity_request_counts: Mapping[str, int]
     action_metric_ready_counts: Mapping[str, int]
@@ -112,6 +115,9 @@ class WindowsN3N4N5RuntimeSummary:
         for field_name in (
             "n4_restored_event_counts",
             "n4_restored_versions",
+            "n5_restored_event_counts",
+            "n5_restored_episode_counts",
+            "n5_restored_versions",
             "action_metric_identity_request_counts",
             "action_metric_ready_counts",
             "provider_error_counts",
@@ -136,6 +142,13 @@ class WindowsN3N4N5RuntimeSummary:
                 self.n4_restored_event_counts
             ),
             "n4_restored_versions": dict(self.n4_restored_versions),
+            "n5_restored_event_counts": dict(
+                self.n5_restored_event_counts
+            ),
+            "n5_restored_episode_counts": dict(
+                self.n5_restored_episode_counts
+            ),
+            "n5_restored_versions": dict(self.n5_restored_versions),
             "n5_action_event_counts": {
                 kind: dict(values)
                 for kind, values in self.n5_action_event_counts.items()
@@ -163,6 +176,7 @@ class _ChannelRuntime:
         trigger_run_id: str,
         action_run_id: str,
         n4_restore_events: Sequence[EventEnvelope] = (),
+        n5_restore_events: Sequence[EventEnvelope] = (),
     ) -> None:
         by_identity: dict[str, Any] = {}
         for request in requests:
@@ -188,6 +202,13 @@ class _ChannelRuntime:
             asset_kind=asset_kind,
             action_run_id=action_run_id,
         )
+        self.n5_restored_event_count = len(n5_restore_events)
+        self.n5_restored_episode_count = 0
+        self.n5_restored_version = 0
+        if n5_restore_events:
+            restored = self.n5.restore_from_outbox(n5_restore_events)
+            self.n5_restored_episode_count = len(restored.active)
+            self.n5_restored_version = restored.version
         self.metric_watermarks: dict[EpisodeKey, int] = {}
         self.trigger_event_counts: Counter[str] = Counter()
         self.action_event_counts: Counter[str] = Counter()
@@ -328,6 +349,9 @@ class WindowsN3N4N5MemoryOrchestrator:
         n4_restore_events: (
             Mapping[str, Sequence[EventEnvelope]] | None
         ) = None,
+        n5_restore_events: (
+            Mapping[str, Sequence[EventEnvelope]] | None
+        ) = None,
     ) -> None:
         if set(trigger_run_ids) != set(ASSET_KINDS):
             raise ValueError("trigger_run_ids must contain stock/index/board")
@@ -342,6 +366,15 @@ class WindowsN3N4N5MemoryOrchestrator:
             raise ValueError(
                 "n4_restore_events must contain stock/index/board"
             )
+        n5_events = (
+            {kind: () for kind in ASSET_KINDS}
+            if n5_restore_events is None
+            else dict(n5_restore_events)
+        )
+        if set(n5_events) != set(ASSET_KINDS):
+            raise ValueError(
+                "n5_restore_events must contain stock/index/board"
+            )
         self.n4_runtime = n4_runtime
         self._lock = RLock()
         self._generated_at: datetime | None = None
@@ -355,6 +388,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 trigger_run_id=trigger_run_ids["stock"],
                 action_run_id=action_run_ids["stock"],
                 n4_restore_events=restore_events["stock"],
+                n5_restore_events=n5_events["stock"],
             ),
             "index": _ChannelRuntime(
                 asset_kind="index",
@@ -364,6 +398,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 trigger_run_id=trigger_run_ids["index"],
                 action_run_id=action_run_ids["index"],
                 n4_restore_events=restore_events["index"],
+                n5_restore_events=n5_events["index"],
             ),
             "board": _ChannelRuntime(
                 asset_kind="board",
@@ -373,6 +408,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 trigger_run_id=trigger_run_ids["board"],
                 action_run_id=action_run_ids["board"],
                 n4_restore_events=restore_events["board"],
+                n5_restore_events=n5_events["board"],
             ),
         }
 
@@ -426,6 +462,18 @@ class WindowsN3N4N5MemoryOrchestrator:
                 },
                 n4_restored_versions={
                     kind: channel.n4_restored_version
+                    for kind, channel in self._channels.items()
+                },
+                n5_restored_event_counts={
+                    kind: channel.n5_restored_event_count
+                    for kind, channel in self._channels.items()
+                },
+                n5_restored_episode_counts={
+                    kind: channel.n5_restored_episode_count
+                    for kind, channel in self._channels.items()
+                },
+                n5_restored_versions={
+                    kind: channel.n5_restored_version
                     for kind, channel in self._channels.items()
                 },
                 n5_action_event_counts={
