@@ -54,6 +54,9 @@ from ashare_v3.trigger.windows_n4_state_transition import (
     TriggerPlanBatch,
     WindowsN4StateTransitionPlanner,
 )
+from ashare_v3.trigger.windows_n4_transaction import (
+    WindowsN4TransactionCoordinator,
+)
 
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -64,18 +67,12 @@ class N4CycleRuntime(Protocol):
     def consume_cycle(self, cycle: object) -> N4MemoryCycleResult: ...
 
 
-class N4OutboxDeliveryResolver(Protocol):
-    def resolve(
-        self,
-        events: Sequence[EventEnvelope],
-    ) -> Sequence[N4OutboxDelivery]: ...
-
-
 @dataclass(frozen=True, slots=True)
 class N5ChannelTransactionBoundary:
+    n4_connection: Any
+    n4_coordinator: WindowsN4TransactionCoordinator
     connection: Any
     coordinator: WindowsN5TransactionCoordinator
-    n4_delivery_resolver: N4OutboxDeliveryResolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +230,7 @@ class _ChannelRuntime:
             self.n5_restored_episode_count = len(restored.active)
             self.n5_restored_version = restored.version
         self.transaction_boundary = transaction_boundary
-        self._pending_n4_events: tuple[EventEnvelope, ...] = ()
+        self._pending_n4_deliveries: tuple[N4OutboxDelivery, ...] = ()
         self.metric_watermarks: dict[EpisodeKey, int] = {}
         self.trigger_event_counts: Counter[str] = Counter()
         self.action_event_counts: Counter[str] = Counter()
@@ -246,11 +243,37 @@ class _ChannelRuntime:
         snapshot: RuntimeStateSnapshot[Any],
         completed_minute_index: int,
     ) -> ChannelCycleResult:
-        trigger_batch = self.n4.consume(snapshot)
+        boundary = self.transaction_boundary
+        committed_deliveries: tuple[N4OutboxDelivery, ...] = ()
+        if boundary is None:
+            trigger_batch = self.n4.consume(snapshot)
+        else:
+            committed_n4 = boundary.n4_coordinator.deliver(
+                boundary.n4_connection,
+                planner=self.n4,
+                runtime_snapshot=snapshot,
+            )
+            self.n4 = committed_n4.planner
+            trigger_batch = TriggerPlanBatch(
+                snapshot=committed_n4.snapshot,
+                events=committed_n4.output_events,
+            )
+            committed_deliveries = tuple(
+                N4OutboxDelivery(row.outbox_id, row.event)
+                for row in committed_n4.outbox_rows
+            )
+
         action_events: list[EventEnvelope] = []
         for event in trigger_batch.events:
             self.trigger_event_counts[event.event_type] += 1
-        action_events.extend(self._deliver_trigger_events(trigger_batch.events))
+        if boundary is None:
+            action_events.extend(
+                self._deliver_trigger_events(trigger_batch.events)
+            )
+        else:
+            action_events.extend(
+                self._deliver_committed_n4(committed_deliveries)
+            )
 
         current = self.n5.read()
         self.metric_watermarks = {
@@ -355,37 +378,49 @@ class _ChannelRuntime:
         self,
         events: Sequence[EventEnvelope],
     ) -> tuple[EventEnvelope, ...]:
-        if self.transaction_boundary is None:
-            output: list[EventEnvelope] = []
-            for event in events:
-                batch = self.n5.consume_trigger_event(event)
-                output.extend(batch.events)
-            return self._record_action_events(output)
+        if self.transaction_boundary is not None:
+            raise RuntimeError(
+                "transaction mode requires committed N4 outbox rows"
+            )
+        output: list[EventEnvelope] = []
+        for event in events:
+            batch = self.n5.consume_trigger_event(event)
+            output.extend(batch.events)
+        return self._record_action_events(output)
+
+    def _deliver_committed_n4(
+        self,
+        deliveries: Sequence[N4OutboxDelivery],
+    ) -> tuple[EventEnvelope, ...]:
+        boundary = self.transaction_boundary
+        if boundary is None:
+            raise RuntimeError(
+                "N4 committed delivery requires transaction mode"
+            )
 
         pending_by_id = {
-            event.event_id: event
-            for event in self._pending_n4_events
+            delivery.event.event_id: delivery
+            for delivery in self._pending_n4_deliveries
         }
-        for event in events:
-            pending_by_id.setdefault(event.event_id, event)
-        self._pending_n4_events = tuple(pending_by_id.values())
-        if not self._pending_n4_events:
+        for delivery in deliveries:
+            existing = pending_by_id.get(delivery.event.event_id)
+            if existing is not None and existing != delivery:
+                raise ValueError(
+                    "conflicting committed N4 outbox delivery: "
+                    f"{delivery.event.event_id}"
+                )
+            pending_by_id.setdefault(delivery.event.event_id, delivery)
+        self._pending_n4_deliveries = tuple(pending_by_id.values())
+        if not self._pending_n4_deliveries:
             return ()
 
-        boundary = self.transaction_boundary
-        deliveries = tuple(
-            boundary.n4_delivery_resolver.resolve(
-                self._pending_n4_events
-            )
-        )
-        _validate_n4_deliveries(self._pending_n4_events, deliveries)
         committed = boundary.coordinator.deliver_n4(
             boundary.connection,
             planner=self.n5,
-            deliveries=deliveries,
+            deliveries=self._pending_n4_deliveries,
         )
         self.n5 = committed.planner
-        self._pending_n4_events = ()
+        self._pending_n4_deliveries = ()
         return self._record_action_events(committed.output_events)
 
     def _deliver_metric(
@@ -494,13 +529,28 @@ class WindowsN3N4N5MemoryOrchestrator:
             and any(value is None for value in transaction_boundaries.values())
         ):
             raise ValueError("all N5 transaction boundaries are required")
-        connections = [
+        n4_connections = [
+            boundary.n4_connection
+            for boundary in transaction_boundaries.values()
+            if boundary is not None
+        ]
+        if len({id(connection) for connection in n4_connections}) != len(
+            n4_connections
+        ):
+            raise ValueError(
+                "N4 transaction connections must be channel-local"
+            )
+        n5_connections = [
             boundary.connection
             for boundary in transaction_boundaries.values()
             if boundary is not None
         ]
-        if len({id(connection) for connection in connections}) != len(connections):
-            raise ValueError("N5 transaction connections must be channel-local")
+        if len({id(connection) for connection in n5_connections}) != len(
+            n5_connections
+        ):
+            raise ValueError(
+                "N5 transaction connections must be channel-local"
+            )
         self.n4_runtime = n4_runtime
         self._lock = RLock()
         self._generated_at: datetime | None = None
@@ -636,25 +686,3 @@ def _shanghai_wall_time(value: datetime):
     if value.tzinfo is not None:
         value = value.astimezone(SHANGHAI_TIMEZONE)
     return value.time().replace(tzinfo=None)
-
-
-def _validate_n4_deliveries(
-    events: Sequence[EventEnvelope],
-    deliveries: Sequence[N4OutboxDelivery],
-) -> None:
-    expected = {event.event_id: event for event in events}
-    actual = {
-        delivery.event.event_id: delivery.event
-        for delivery in deliveries
-    }
-    if len(expected) != len(events):
-        raise ValueError("duplicate pending N4 event_id")
-    if len(actual) != len(deliveries):
-        raise ValueError("duplicate resolved N4 event_id")
-    if set(actual) != set(expected):
-        raise ValueError("resolved N4 deliveries do not match pending events")
-    for event_id, event in expected.items():
-        if actual[event_id] != event:
-            raise ValueError(
-                f"resolved N4 delivery payload mismatch: {event_id}"
-            )
