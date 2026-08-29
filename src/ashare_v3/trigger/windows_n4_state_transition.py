@@ -142,6 +142,17 @@ class WindowsN4StateTransitionPlanner:
                 raise RuntimeError("no N4 snapshot has been consumed")
             return self._snapshot
 
+    def fork(self) -> WindowsN4StateTransitionPlanner:
+        """Return an isolated candidate with the same immutable state."""
+
+        with self._lock:
+            candidate = WindowsN4StateTransitionPlanner(
+                asset_kind=self.asset_kind,
+                trigger_run_id=self.trigger_run_id,
+            )
+            candidate._snapshot = self._snapshot
+            return candidate
+
     def restore_from_outbox(
         self,
         events: Sequence[EventEnvelope],
