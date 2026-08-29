@@ -56,6 +56,7 @@ from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
 from ashare_v3.runtime_control.windows_n4_outbox_restore import (
     WindowsN4OutboxReadOnlyRepository,
 )
+from ashare_v3.runtime_control.windows_state_bridge import WindowsStateBridge
 from ashare_v3.trigger.windows_n4_memory import build_windows_n4_runtime
 from ashare_v3.trigger.windows_n4_transaction import (
     WindowsN4TransactionCoordinator,
@@ -85,6 +86,8 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("ASHARE_V3_N3_CONTEXT_VERSION", "v1"),
     )
     parser.add_argument("--tq-module-path")
+    parser.add_argument("--state-bridge-host", default="127.0.0.1")
+    parser.add_argument("--state-bridge-port", type=int, default=8796)
     return parser.parse_args()
 
 
@@ -139,6 +142,7 @@ def main() -> int:
     )
     integration_holder = {}
     with ExitStack() as stack:
+        bridge = None
         stock_client = stack.enter_context(
             TdxClient(timeout=8, server_count=4, connections_per_server=4)
         )
@@ -150,6 +154,7 @@ def main() -> int:
         )
 
         def runtime_factory(model):
+            nonlocal bridge
             loaded = context_loader.latest
             if (
                 loaded is None
@@ -214,6 +219,13 @@ def main() -> int:
                 n5_restore_events=n5_restore.events,
                 n5_transaction_boundaries=transaction_boundaries,
             )
+            if bridge is None:
+                bridge = WindowsStateBridge(
+                    integration_holder["runtime"].read_state_bridge_snapshot,
+                    host=args.state_bridge_host,
+                    port=args.state_bridge_port,
+                ).start()
+                stack.callback(bridge.shutdown)
             return WindowsN3MemoryRuntime(
                 StockSnapshotChannel(
                     EltdxStockSnapshotProvider(stock_client),

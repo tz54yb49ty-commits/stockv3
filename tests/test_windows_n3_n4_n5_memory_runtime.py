@@ -459,6 +459,17 @@ def test_three_channels_deliver_trigger_and_closed_minute_once() -> None:
         assert providers[kind].calls == [((IDENTITIES[kind][0],), 1)]
 
     summary = runtime.read_summary().as_dict()
+    bridge_snapshot = runtime.read_state_bridge_snapshot()
+    assert {
+        kind: bridge_snapshot.n4_states[kind].source_n4_version
+        for kind in IDENTITIES
+    } == {kind: 2 for kind in IDENTITIES}
+    assert {
+        kind: bridge_snapshot.n5_episodes[kind].version
+        for kind in IDENTITIES
+    } == {kind: 2 for kind in IDENTITIES}
+    with pytest.raises(TypeError):
+        bridge_snapshot.n5_episodes["stock"] = None
     assert summary["completed_minute_index"] == 1
     assert summary["n5_state_counts"] == {
         "stock": 1,

@@ -97,6 +97,22 @@ class WindowsN3N4N5CycleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowsStateBridgeSnapshot:
+    generated_at: datetime | None
+    n4_memory: Mapping[str, RuntimeStateSnapshot[Any]]
+    n4_states: Mapping[str, Any]
+    n5_episodes: Mapping[str, N5EpisodeSnapshot]
+
+    def __post_init__(self) -> None:
+        for field_name in ("n4_memory", "n4_states", "n5_episodes"):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(getattr(self, field_name))),
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class WindowsN3N4N5RuntimeSummary:
     generated_at: datetime | None
     completed_minute_index: int
@@ -573,6 +589,7 @@ class WindowsN3N4N5MemoryOrchestrator:
         self._lock = RLock()
         self._generated_at: datetime | None = None
         self._completed_minute_index = 0
+        self._n4_memory: N4MemoryCycleResult | None = None
         self._channels = {
             "stock": _ChannelRuntime(
                 asset_kind="stock",
@@ -631,6 +648,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 }
             self._generated_at = generated_at
             self._completed_minute_index = completed_minute_index
+            self._n4_memory = n4_memory
             return WindowsN3N4N5CycleResult(
                 generated_at=generated_at,
                 completed_minute_index=completed_minute_index,
@@ -638,6 +656,30 @@ class WindowsN3N4N5MemoryOrchestrator:
                 stock=channel_results["stock"],
                 index=channel_results["index"],
                 board=channel_results["board"],
+            )
+
+    def read_state_bridge_snapshot(self) -> WindowsStateBridgeSnapshot:
+        """Capture immutable N4/N5 views without advancing either planner."""
+
+        with self._lock:
+            if self._n4_memory is None:
+                raise RuntimeError("no N3/N4/N5 cycle has completed")
+            n4_states = {
+                kind: channel.n4.read()
+                for kind, channel in self._channels.items()
+            }
+            n5_episodes = {
+                kind: channel.n5.read()
+                for kind, channel in self._channels.items()
+            }
+            return WindowsStateBridgeSnapshot(
+                generated_at=self._generated_at,
+                n4_memory={
+                    kind: getattr(self._n4_memory, kind)
+                    for kind in ASSET_KINDS
+                },
+                n4_states=n4_states,
+                n5_episodes=n5_episodes,
             )
 
     def read_summary(self) -> WindowsN3N4N5RuntimeSummary:
