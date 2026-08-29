@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from threading import RLock
@@ -134,6 +134,7 @@ class _RuntimeState:
     last_success_at: datetime | None
     last_error: str | None
     source_n3_version: int
+    comparison_amounts: Mapping[str, Decimal | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.live_status not in {"available", "unavailable", "stale"}:
@@ -147,6 +148,11 @@ class _RuntimeState:
             self,
             "source_amounts",
             MappingProxyType({period: self.source_amounts.get(period) for period in RUNTIME_PERIODS}),
+        )
+        object.__setattr__(
+            self,
+            "comparison_amounts",
+            MappingProxyType({period: self.comparison_amounts.get(period) for period in RUNTIME_PERIODS}),
         )
         object.__setattr__(
             self,
@@ -449,6 +455,10 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
                 period: period_baselines[period].source_amount
                 for period in RUNTIME_PERIODS
             },
+            comparison_amounts={
+                period: period_baselines[period].comparison_amount
+                for period in RUNTIME_PERIODS
+            },
             realtime_transitions=transitions,
             realtime_virtual_amounts=metric.virtual_amounts,
             current_price=quote.current_price,
@@ -686,6 +696,14 @@ def _initial_state(
                 None
                 if period == "30m"
                 else baseline.periods[period].source_amount
+            )
+            for period in RUNTIME_PERIODS
+        },
+        comparison_amounts={
+            period: (
+                None
+                if period == "30m"
+                else baseline.periods[period].comparison_amount
             )
             for period in RUNTIME_PERIODS
         },

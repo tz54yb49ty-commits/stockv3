@@ -1,0 +1,493 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from types import MappingProxyType
+
+import pytest
+
+from ashare_v3.trigger.windows_n4_memory import (
+    BoardRuntimeState,
+    IndexRuntimeState,
+    RuntimeStateSnapshot,
+    StockRuntimeState,
+)
+from ashare_v3.trigger.windows_n4_state_transition import (
+    BUY_CONDITION_KEY,
+    RULE_POLICY_VERSION,
+    SELL_CONDITION_KEY,
+    OutOfOrderN4Snapshot,
+    WindowsN4StateTransitionPlanner,
+)
+
+
+SOURCE_RUN_ID = "condition_layer_20260826_to_20260827_fixture"
+TRIGGER_RUN_ID = "windows_n4_state_transition_20260827_fixture"
+
+
+def _time(label: str) -> datetime:
+    return datetime.fromisoformat(f"2026-08-27T{label}:00+08:00")
+
+
+def _state(
+    *,
+    identity_key: str = "stock:SZ:000001",
+    code: str = "000001",
+    name: str = "平安银行",
+    version: int,
+    observed_at: datetime,
+    source_d: str,
+    live_d: str,
+    source_w: str,
+    live_w: str,
+    live_30m: str,
+    fresh: bool = True,
+    live_status: str = "available",
+    higher_source: dict[str, str] | None = None,
+    higher_live: dict[str, str] | None = None,
+) -> StockRuntimeState:
+    source_transitions = {
+        "30m": "unknown",
+        "D": source_d,
+        "W": "flat",
+        "M": "flat",
+        "Q": "flat",
+        "Y": "flat",
+        **(higher_source or {}),
+    }
+    realtime_transitions = {
+        "30m": live_30m,
+        "D": live_d,
+        "W": "flat",
+        "M": "flat",
+        "Q": "flat",
+        "Y": "flat",
+        **(higher_live or {}),
+    }
+    return StockRuntimeState(
+        source_condition_run_id=SOURCE_RUN_ID,
+        source_trade_date="20260826",
+        for_trade_date="20260827",
+        asset_kind="stock",
+        identity_key=identity_key,
+        exchange=identity_key.split(":")[1],
+        code=code,
+        name=name,
+        source_transitions=source_transitions,
+        source_amounts={
+            "30m": None,
+            "D": Decimal("0"),
+            "W": Decimal(source_w),
+            "M": Decimal("0"),
+            "Q": Decimal("0"),
+            "Y": Decimal("0"),
+        },
+        comparison_amounts={
+            "30m": None,
+            "D": Decimal("0"),
+            "W": Decimal(source_w),
+            "M": Decimal("0"),
+            "Q": Decimal("0"),
+            "Y": Decimal("0"),
+        },
+        realtime_transitions=realtime_transitions,
+        realtime_virtual_amounts={
+            "30m": Decimal("1"),
+            "D": Decimal("1"),
+            "W": Decimal(live_w),
+            "M": Decimal("1"),
+            "Q": Decimal("1"),
+            "Y": Decimal("1"),
+        },
+        current_price=Decimal("10.00") if fresh else None,
+        cumulative_amount=Decimal("100000000") if fresh else None,
+        source_time=observed_at if fresh else None,
+        observed_at=observed_at if fresh else None,
+        provider="fixture" if fresh else None,
+        live_status=live_status,
+        fresh=fresh,
+        last_success_at=observed_at,
+        last_error=None if fresh else "fixture stale",
+        source_n3_version=version,
+    )
+
+
+def _snapshot(
+    version: int,
+    state: StockRuntimeState,
+    *extra_states: StockRuntimeState,
+) -> RuntimeStateSnapshot[StockRuntimeState]:
+    states = {item.identity_key: item for item in (state, *extra_states)}
+    return RuntimeStateSnapshot(
+        source_condition_run_id=SOURCE_RUN_ID,
+        source_trade_date="20260826",
+        for_trade_date="20260827",
+        version=version,
+        source_n3_version=version,
+        generated_at=state.observed_at or _time("09:35"),
+        channel_status="ready",
+        states=MappingProxyType(states),
+    )
+
+
+def _planner() -> WindowsN4StateTransitionPlanner:
+    return WindowsN4StateTransitionPlanner(
+        asset_kind="stock",
+        trigger_run_id=TRIGGER_RUN_ID,
+    )
+
+
+def test_buy_ab_lifecycle_and_new_episode() -> None:
+    planner = _planner()
+    sequence = [
+        ("09:35", "volume_up", "10.80", "none"),
+        ("09:40", "volume_up", "10.90", "none"),
+        ("10:00", "volume_up", "10.90", "volume_up"),
+        ("10:05", "flat", "9.80", "volume_up"),
+        ("10:10", "flat", "9.80", "none"),
+        ("10:20", "volume_up", "10.70", "none"),
+    ]
+    batches = []
+    for version, (label, live_d, live_w, live_30m) in enumerate(sequence, 1):
+        state = _state(
+            version=version,
+            observed_at=_time(label),
+            source_d="low_volume_down",
+            live_d=live_d,
+            source_w="10.00",
+            live_w=live_w,
+            live_30m=live_30m,
+        )
+        batches.append(planner.consume(_snapshot(version, state)))
+
+    assert [event.event_type for event in batches[0].events] == ["TriggerMatched"]
+    first = batches[0].events[0]
+    assert first.payload_json["condition_key"] == BUY_CONDITION_KEY
+    assert first.payload_json["rule_policy_version"] == RULE_POLICY_VERSION
+    assert first.payload_json["match_basis"].startswith(RULE_POLICY_VERSION)
+    assert first.payload_json["trigger_period"] == "D"
+    assert first.payload_json["episode_entry_event_id"] == first.event_id
+    assert first.payload_json["source_w_average_amount"] == "10.00"
+    assert first.payload_json["rule_flags"] == {
+        "A": True,
+        "B": False,
+        "C": False,
+        "D30": False,
+    }
+    assert batches[1].events == ()
+
+    assert [event.event_type for event in batches[2].events] == [
+        "TriggerStateChanged"
+    ]
+    assert batches[2].events[0].payload_json["trigger_live"] is True
+    assert batches[2].events[0].payload_json["activation_sources"] == ["D", "B"]
+
+    assert [event.event_type for event in batches[3].events] == [
+        "TriggerStateChanged"
+    ]
+    assert batches[3].events[0].payload_json["activation_sources"] == ["B"]
+    assert batches[3].events[0].payload_json["trigger_period"] == "30m"
+
+    assert [event.event_type for event in batches[4].events] == [
+        "TriggerStateChanged"
+    ]
+    assert batches[4].events[0].payload_json["trigger_live"] is False
+    assert batches[4].events[0].payload_json["current_status"] == "inactive"
+
+    assert [event.event_type for event in batches[5].events] == ["TriggerMatched"]
+    second = batches[5].events[0]
+    assert first.event_id != second.event_id
+    final_buy = batches[5].snapshot.states["stock:SZ:000001"].buy
+    assert final_buy.episode_number == 2
+    assert final_buy.episode_entry_event_id == second.event_id
+
+
+def test_sell_cd30_lifecycle_is_symmetric() -> None:
+    planner = _planner()
+    inputs = [
+        ("13:05", "low_volume_down", "18.50", "none"),
+        ("13:30", "flat", "21.00", "shrink_down"),
+        ("14:00", "flat", "21.00", "none"),
+    ]
+    batches = []
+    for version, (label, live_d, live_w, live_30m) in enumerate(inputs, 1):
+        state = _state(
+            identity_key="stock:SH:600000",
+            code="600000",
+            name="浦发银行",
+            version=version,
+            observed_at=_time(label),
+            source_d="volume_up",
+            live_d=live_d,
+            source_w="20.00",
+            live_w=live_w,
+            live_30m=live_30m,
+        )
+        batches.append(planner.consume(_snapshot(version, state)))
+
+    matched, changed, inactive = (batch.events[0] for batch in batches)
+    assert matched.event_type == "TriggerMatched"
+    assert matched.payload_json["condition_key"] == SELL_CONDITION_KEY
+    assert matched.payload_json["rule_flags"]["C"] is True
+    assert changed.event_type == "TriggerStateChanged"
+    assert changed.payload_json["trigger_live"] is True
+    assert changed.payload_json["activation_sources"] == ["D30"]
+    assert inactive.event_type == "TriggerStateChanged"
+    assert inactive.payload_json["trigger_live"] is False
+
+
+def test_formal_period_priority_and_30m_fallback() -> None:
+    planner = _planner()
+    formal = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="flat",
+        source_w="10",
+        live_w="10",
+        live_30m="none",
+        higher_live={"Y": "volume_up", "M": "volume_up"},
+    )
+    first = planner.consume(_snapshot(1, formal))
+    buy = first.snapshot.states[formal.identity_key].buy
+    assert buy.formal_triggered_periods == ("Y", "M")
+    assert buy.primary_trigger_period == "Y"
+    assert buy.trigger_period == "Y"
+
+    fallback_planner = _planner()
+    fallback = _state(
+        version=1,
+        observed_at=_time("10:05"),
+        source_d="low_volume_down",
+        live_d="flat",
+        source_w="10",
+        live_w="9",
+        live_30m="volume_up",
+    )
+    fallback_batch = fallback_planner.consume(_snapshot(1, fallback))
+    fallback_buy = fallback_batch.snapshot.states[fallback.identity_key].buy
+    assert fallback_buy.formal_triggered_periods == ()
+    assert fallback_buy.primary_trigger_period is None
+    assert fallback_buy.trigger_period == "30m"
+
+
+def test_ac_use_previous_complete_week_average_not_current_week_seed() -> None:
+    planner = _planner()
+    state = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    values = {
+        field: getattr(state, field)
+        for field in state.__dataclass_fields__
+    }
+    values["source_amounts"] = {
+        **dict(state.source_amounts),
+        "W": Decimal("100"),
+    }
+    state = StockRuntimeState(**values)
+    batch = planner.consume(_snapshot(1, state))
+    assert batch.snapshot.states[state.identity_key].buy.rule_flags["A"] is True
+    assert batch.events[0].payload_json["source_w_average_amount"] == "10"
+
+
+@pytest.mark.parametrize(
+    ("state_type", "asset_kind", "identity_key", "exchange", "code"),
+    [
+        (IndexRuntimeState, "index", "index:SH:000001", "SH", "000001"),
+        (BoardRuntimeState, "board", "board:SH:881001", "SH", "881001"),
+    ],
+)
+def test_index_and_board_channels_share_the_same_pure_planner(
+    state_type: type[IndexRuntimeState] | type[BoardRuntimeState],
+    asset_kind: str,
+    identity_key: str,
+    exchange: str,
+    code: str,
+) -> None:
+    stock = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    values = {
+        field: getattr(stock, field)
+        for field in stock.__dataclass_fields__
+    }
+    values.update(
+        asset_kind=asset_kind,
+        identity_key=identity_key,
+        exchange=exchange,
+        code=code,
+    )
+    state = state_type(**values)
+    snapshot = RuntimeStateSnapshot(
+        source_condition_run_id=SOURCE_RUN_ID,
+        source_trade_date="20260826",
+        for_trade_date="20260827",
+        version=1,
+        source_n3_version=1,
+        generated_at=_time("09:35"),
+        channel_status="ready",
+        states=MappingProxyType({identity_key: state}),
+    )
+    planner = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=TRIGGER_RUN_ID,
+    )
+    batch = planner.consume(snapshot)
+    assert batch.events[0].asset_kind == asset_kind
+    assert batch.snapshot.states[identity_key].buy.trigger_live is True
+
+
+def test_abcd_buy_sell_are_mutually_exclusive() -> None:
+    cases = [
+        ("low_volume_down", "volume_up", "11", "volume_up"),
+        ("volume_up", "low_volume_down", "9", "shrink_down"),
+        ("flat", "volume_up", "11", "none"),
+        ("flat", "low_volume_down", "9", "none"),
+    ]
+    for source_d, live_d, live_w, live_30m in cases:
+        planner = _planner()
+        state = _state(
+            version=1,
+            observed_at=_time("09:35"),
+            source_d=source_d,
+            live_d=live_d,
+            source_w="10",
+            live_w=live_w,
+            live_30m=live_30m,
+        )
+        batch = planner.consume(_snapshot(1, state))
+        object_state = batch.snapshot.states[state.identity_key]
+        assert not (object_state.buy.trigger_live and object_state.sell.trigger_live)
+
+
+def test_stale_or_unknown_evidence_does_not_deactivate() -> None:
+    planner = _planner()
+    active = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="low_volume_down",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    first = planner.consume(_snapshot(1, active))
+    assert first.snapshot.states[active.identity_key].buy.trigger_live is True
+
+    stale = _state(
+        version=2,
+        observed_at=_time("09:40"),
+        source_d="low_volume_down",
+        live_d="unknown",
+        source_w="10",
+        live_w="11",
+        live_30m="unknown",
+        fresh=False,
+        live_status="stale",
+    )
+    second = planner.consume(_snapshot(2, stale))
+    assert second.events == ()
+    assert second.snapshot.states[active.identity_key].buy.trigger_live is True
+    assert second.snapshot.states[active.identity_key].buy.source_n4_version == 2
+
+    unknown = _state(
+        version=3,
+        observed_at=_time("09:45"),
+        source_d="low_volume_down",
+        live_d="unknown",
+        source_w="10",
+        live_w="11",
+        live_30m="unknown",
+    )
+    third = planner.consume(_snapshot(3, unknown))
+    assert third.events == ()
+    assert third.snapshot.states[active.identity_key].buy.trigger_live is True
+    assert third.snapshot.states[active.identity_key].buy.source_n4_version == 3
+
+
+def test_repeated_and_out_of_order_versions_are_safe_and_bounded() -> None:
+    planner = _planner()
+    first_state = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="flat",
+        source_w="10",
+        live_w="10",
+        live_30m="none",
+    )
+    extra = _state(
+        identity_key="stock:SH:600000",
+        code="600000",
+        name="浦发银行",
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="flat",
+        source_w="20",
+        live_w="20",
+        live_30m="none",
+    )
+    first = planner.consume(_snapshot(1, first_state, extra))
+    repeated = planner.consume(_snapshot(1, first_state, extra))
+    assert repeated.events == ()
+    assert len(repeated.snapshot.states) == 2
+
+    second_state = replace_runtime_version(first_state, 2, _time("09:40"))
+    extra_second = replace_runtime_version(extra, 2, _time("09:40"))
+    second = planner.consume(_snapshot(2, second_state, extra_second))
+    assert len(second.snapshot.states) == 2
+    assert len(first.snapshot.states) == len(second.snapshot.states)
+
+    with pytest.raises(OutOfOrderN4Snapshot):
+        planner.consume(_snapshot(1, first_state, extra))
+
+
+def replace_runtime_version(
+    state: StockRuntimeState,
+    version: int,
+    observed_at: datetime,
+) -> StockRuntimeState:
+    values = {
+        field: getattr(state, field)
+        for field in state.__dataclass_fields__
+    }
+    values.update(
+        {
+            "source_n3_version": version,
+            "source_time": observed_at,
+            "observed_at": observed_at,
+            "last_success_at": observed_at,
+        }
+    )
+    return StockRuntimeState(**values)
+
+
+def test_module_is_pure_and_does_not_write_events() -> None:
+    source = Path(
+        "src/ashare_v3/trigger/windows_n4_state_transition.py"
+    ).read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "psycopg",
+        "insert into",
+        "outboxrepository",
+        "write_event",
+        "actioneligible",
+        "n5_action",
+        "eltdx",
+        "requests",
+    ):
+        assert forbidden not in source
