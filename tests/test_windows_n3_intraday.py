@@ -241,13 +241,22 @@ class WindowsN3IntradayTest(unittest.TestCase):
         with patch.object(
             sys,
             "argv",
-            ["run_windows_n3_n4_memory.py", "--tq-module-path", module_path],
+            [
+                "run_windows_n3_n4_memory.py",
+                "--tq-module-path",
+                module_path,
+                "--context-version",
+                "pretrade_4e20cf5_v1",
+            ],
         ):
-            self.assertEqual(parse_memory_args().tq_module_path, module_path)
+            args = parse_memory_args()
+            self.assertEqual(args.tq_module_path, module_path)
+            self.assertEqual(args.context_version, "pretrade_4e20cf5_v1")
         source = (
             Path(__file__).parents[1] / "scripts/run_windows_n3_n4_memory.py"
         ).read_text()
         self.assertIn("load_windows_tq_client(args.tq_module_path)", source)
+        self.assertIn("context_version=args.context_version", source)
 
     def test_new_n3_modules_do_not_write_sql_emit_events_or_import_n4(self):
         root = Path(__file__).parents[1]

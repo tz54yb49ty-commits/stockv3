@@ -135,6 +135,9 @@ def run_postclose_fastlane(
     n3_result = str(n3.get("result") or "")
     if n3_result not in N3_PASS_RESULTS:
         raise RuntimeError(f"N3 previous-day context stage did not pass: {n3_result}")
+    context_version = str(n3.get("context_version") or "")
+    if not context_version:
+        raise RuntimeError("N3 previous-day context result is missing context_version")
 
     model = load_model(for_trade_date)
     if (
@@ -144,6 +147,8 @@ def run_postclose_fastlane(
     ) != (active_run_id, source_trade_date, for_trade_date):
         raise RuntimeError("active N2 lineage changed after the N3 stage")
     context = load_context(model)
+    if str(context.context_version) != context_version:
+        raise RuntimeError("loaded N3 context version does not match the N3 stage")
     readiness = validate_n4_readiness(
         model,
         context,
@@ -159,6 +164,7 @@ def run_postclose_fastlane(
         "for_trade_date": for_trade_date,
         "n3_result": n3_result,
         "n3_context_run_id": str(n3.get("context_run_id") or context.context_run_id),
+        "n3_context_version": context_version,
         "n3_expected_counts": dict(n3.get("expected_counts") or {}),
         "n3_terminal_counts": dict(n3.get("terminal_counts") or readiness.context_terminal_counts),
         "n3_status_counts": dict(n3.get("status_counts") or context.status_counts),
@@ -208,6 +214,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--policy", default="configs/n2_policy/default_policy_draft.json")
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--context-version",
+        default=os.environ.get("ASHARE_V3_N3_CONTEXT_VERSION", "v1"),
+    )
     parser.add_argument("--tq-module-path")
     return parser.parse_args()
 
@@ -234,6 +244,8 @@ def main() -> int:
             args.dsn,
             "--for-trade-date",
             for_trade_date,
+            "--context-version",
+            args.context_version,
         ]
         if args.tq_module_path:
             argv.extend(("--tq-module-path", args.tq_module_path))
@@ -244,7 +256,10 @@ def main() -> int:
             run_n2=lambda: _run_json_command(n2_argv, cwd=root),
             run_n3=run_n3,
             load_model=WindowsN3ReadOnlyRepository(args.dsn).load_active,
-            load_context=PostgresPreviousDayContextLoader(args.dsn).load,
+            load_context=PostgresPreviousDayContextLoader(
+                args.dsn,
+                context_version=args.context_version,
+            ).load,
         )
     except Exception as error:
         print(

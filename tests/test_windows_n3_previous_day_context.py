@@ -33,6 +33,9 @@ from ashare_v3.market.windows_n3_snapshot import StockSnapshotRequest
 from scripts.run_windows_n3_previous_day_context import summary_to_dict
 
 
+CONTEXT_VERSION = "pretrade_4e20cf5_v1"
+
+
 def request(index: int) -> StockSnapshotRequest:
     code = f"{600000 + index:06d}"
     return StockSnapshotRequest(f"stock:SH:{code}", "SH", code, code)
@@ -216,7 +219,8 @@ class Repository:
 
 
 class LoaderCursor:
-    def __init__(self):
+    def __init__(self, state):
+        self.state = state
         self.rows = []
 
     def __enter__(self):
@@ -226,8 +230,18 @@ class LoaderCursor:
         return False
 
     def execute(self, query, _params):
+        self.state["query"] = " ".join(query.split())
+        self.state["params"] = tuple(_params)
         if "FROM common_n3_previous_day_context_run" in query:
-            self.rows = [("context-1", "wrong-run", "20260827", "20260828")]
+            self.rows = [
+                (
+                    "context-1",
+                    "wrong-run",
+                    self.state["context_version"],
+                    "20260827",
+                    "20260828",
+                )
+            ]
         else:
             self.rows = []
 
@@ -236,6 +250,9 @@ class LoaderCursor:
 
 
 class LoaderConnection:
+    def __init__(self, state):
+        self.state = state
+
     def __enter__(self):
         return self
 
@@ -243,7 +260,7 @@ class LoaderConnection:
         return False
 
     def cursor(self):
-        return LoaderCursor()
+        return LoaderCursor(self.state)
 
 
 class RetryRepositoryCursor:
@@ -261,6 +278,7 @@ class RetryRepositoryCursor:
     def execute(self, query, _params=()):
         normalized = " ".join(query.split())
         self.state.setdefault("queries", []).append(normalized)
+        self.state.setdefault("params", []).append(tuple(_params))
         if normalized.startswith("SELECT context_run_id"):
             self.rows = [self.state["run_row"]]
         elif normalized.startswith("SELECT EXISTS"):
@@ -301,6 +319,19 @@ class RetryRepositoryConnection:
 
 
 class WindowsN3PreviousDayContextTest(unittest.TestCase):
+    def test_context_run_id_versioning_preserves_v1_and_isolates_new_version(self):
+        source_run_id = "condition-1"
+        self.assertEqual(
+            context_run_id_for(source_run_id),
+            context_run_id_for(source_run_id, "v1"),
+        )
+        self.assertNotEqual(
+            context_run_id_for(source_run_id),
+            context_run_id_for(source_run_id, CONTEXT_VERSION),
+        )
+        with self.assertRaisesRegex(ValueError, "invalid N3 context version"):
+            context_run_id_for(source_run_id, "bad version")
+
     def test_preload_summary_serializes_mapping_proxies_as_json_objects(self):
         summary = PreviousDayContextPreloadSummary(
             result="N3_PREVIOUS_DAY_CONTEXT_COMPLETE",
@@ -628,11 +659,12 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         model = N3ActiveReadModel(
             "condition-1", "20260827", "20260828", (object_row,), (), ()
         )
-        context_run_id = context_run_id_for(model.run_id)
+        context_run_id = context_run_id_for(model.run_id, CONTEXT_VERSION)
         state = {
             "run_row": (
                 context_run_id,
                 model.run_id,
+                CONTEXT_VERSION,
                 model.source_trade_date,
                 model.for_trade_date,
                 "completed",
@@ -645,6 +677,7 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         }
         repository = PostgresPreviousDayContextRepository(
             "postgresql://example",
+            context_version=CONTEXT_VERSION,
             connect=lambda _dsn: RetryRepositoryConnection(state),
         )
 
@@ -652,6 +685,7 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         self.assertEqual(run_id, context_run_id)
         self.assertFalse(already_complete)
         self.assertTrue(state["reopened"])
+        self.assertIn((model.run_id, CONTEXT_VERSION), state["params"])
         self.assertEqual(
             repository.terminal_identity_keys(context_run_id, "stock"),
             {"stock:SH:600001"},
@@ -700,12 +734,19 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         model = N3ActiveReadModel(
             "condition-1", "20260827", "20260828", (), (), ()
         )
+        state = {"context_version": CONTEXT_VERSION}
         loader = PostgresPreviousDayContextLoader(
             "postgresql://example",
-            connect=lambda _dsn: LoaderConnection(),
+            context_version=CONTEXT_VERSION,
+            connect=lambda _dsn: LoaderConnection(state),
         )
         with self.assertRaisesRegex(RuntimeError, "lineage mismatch"):
             loader.load(model)
+        self.assertIn("context_version=%s", state["query"])
+        self.assertEqual(
+            state["params"],
+            (model.run_id, CONTEXT_VERSION, model.source_trade_date, model.for_trade_date),
+        )
 
     def test_schema_is_compressed_context_only(self):
         root = Path(__file__).parents[1]
@@ -729,6 +770,22 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         ).read_text()
         self.assertIn("GRANT UPDATE", retry_grant)
         self.assertNotIn("GRANT DELETE", retry_grant)
+
+        version_migration = (
+            root / "sql/042_windows_n3_previous_day_context_version.sql"
+        ).read_text()
+        self.assertIn("ADD COLUMN context_version TEXT NOT NULL DEFAULT 'v1'", version_migration)
+        self.assertIn(
+            "DROP CONSTRAINT common_n3_previous_day_context_run_source_condition_run_id_key",
+            version_migration,
+        )
+        self.assertIn(
+            "UNIQUE (source_condition_run_id, context_version)",
+            version_migration,
+        )
+        self.assertIn("context_version ~ '^[a-z0-9][a-z0-9._-]{0,63}$'", version_migration)
+        for forbidden in ("INSERT INTO", "UPDATE ", "DELETE FROM", "CREATE TABLE"):
+            self.assertNotIn(forbidden, version_migration)
 
     def test_intraday_path_has_no_full_market_minute_pull_or_boundary_refresh(self):
         root = Path(__file__).parents[1]

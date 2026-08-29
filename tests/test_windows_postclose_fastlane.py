@@ -9,6 +9,7 @@ from scripts.run_windows_postclose_fastlane import run_postclose_fastlane
 SOURCE_DATE = "20260828"
 FOR_DATE = "20260831"
 RUN_ID = "condition_layer_20260828_to_20260831_v1"
+CONTEXT_VERSION = "pretrade_4e20cf5_v1"
 
 
 def n2_result(result="N2_AFTER_N1_PASS"):
@@ -25,6 +26,7 @@ def n3_result(result="N3_PREVIOUS_DAY_CONTEXT_COMPLETE"):
     return {
         "result": result,
         "context_run_id": "windows_n3_previous_day_context_1",
+        "context_version": CONTEXT_VERSION,
         "expected_counts": counts,
         "terminal_counts": counts,
         "status_counts": {
@@ -52,6 +54,7 @@ def context():
         source_condition_run_id=RUN_ID,
         source_trade_date=SOURCE_DATE,
         for_trade_date=FOR_DATE,
+        context_version=CONTEXT_VERSION,
         status_counts={
             "stock": {"ready": 1, "unavailable": 1},
             "index": {"ready": 1},
@@ -90,6 +93,7 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
             ["n2", ("n3", FOR_DATE), ("model", FOR_DATE), ("context", RUN_ID)],
         )
         self.assertEqual(result["result"], "WINDOWS_POSTCLOSE_FASTLANE_PASS")
+        self.assertEqual(result["n3_context_version"], CONTEXT_VERSION)
         self.assertEqual(result["n4_readiness"]["state_counts"], {"stock": 2, "index": 1, "board": 1})
         self.assertEqual(result["n4_database_write_count"], 0)
         self.assertEqual(result["trigger_event_count"], 0)
@@ -135,6 +139,18 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
                 run_n3=lambda _date: self.fail("N3 must not run"),
                 load_model=lambda _date: model(),
                 load_context=lambda _active: context(),
+                runtime_builder=runtime_builder,
+            )
+
+    def test_context_version_mismatch_blocks_n4_readiness(self):
+        broken = context()
+        broken.context_version = "v1"
+        with self.assertRaisesRegex(RuntimeError, "context version"):
+            run_postclose_fastlane(
+                run_n2=lambda: n2_result(),
+                run_n3=lambda _date: n3_result(),
+                load_model=lambda _date: model(),
+                load_context=lambda _active: broken,
                 runtime_builder=runtime_builder,
             )
 

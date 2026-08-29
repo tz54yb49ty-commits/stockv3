@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import sys
 from types import MappingProxyType
 from typing import Any, Generic, Protocol, TypeVar
@@ -44,6 +45,8 @@ TQ_MINUTE_ATTEMPTS = 3
 TQ_RETRY_DELAYS_SECONDS = (30.0, 120.0)
 TERMINAL_CONTEXT_STATUSES = frozenset({"ready", "partial", "unavailable", "failed"})
 ASSET_KINDS = ("stock", "index", "board")
+DEFAULT_CONTEXT_VERSION = "v1"
+CONTEXT_VERSION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 RequestT = TypeVar(
@@ -457,6 +460,7 @@ class PreviousDayContextLoad:
     index: Mapping[str, PreviousDayMinuteContext]
     board: Mapping[str, PreviousDayMinuteContext]
     status_counts: Mapping[str, Mapping[str, int]]
+    context_version: str = DEFAULT_CONTEXT_VERSION
 
     def __post_init__(self) -> None:
         for name in ASSET_KINDS:
@@ -481,6 +485,7 @@ class PreviousDayContextPreloadSummary:
     terminal_counts: Mapping[str, int]
     status_counts: Mapping[str, Mapping[str, int]]
     inserted_count: int
+    context_version: str = DEFAULT_CONTEXT_VERSION
 
 
 class PreviousDayContextWriteRepository(Protocol):
@@ -540,6 +545,7 @@ class WindowsN3PreviousDayContextPreloader:
                 terminal_counts=summary.terminal_counts,
                 status_counts=summary.status_counts,
                 inserted_count=0,
+                context_version=summary.context_version,
             )
 
         inserted = 0
@@ -664,43 +670,53 @@ class WindowsN3PreviousDayContextPreloader:
             terminal_counts=summary.terminal_counts,
             status_counts=summary.status_counts,
             inserted_count=inserted,
+            context_version=summary.context_version,
         )
 
 
 class PostgresPreviousDayContextRepository:
-    def __init__(self, dsn: str, *, connect: Callable[[str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        context_version: str = DEFAULT_CONTEXT_VERSION,
+        connect: Callable[[str], Any] | None = None,
+    ) -> None:
         self.dsn = dsn
+        self.context_version = _validate_context_version(context_version)
         self._connect = connect or _connect_write
 
     def begin_run(self, model: N3ActiveReadModel) -> tuple[str, bool]:
-        context_run_id = context_run_id_for(model.run_id)
+        context_run_id = context_run_id_for(model.run_id, self.context_version)
         expected = _expected_counts(model)
         with self._connect(self.dsn) as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT context_run_id, source_condition_run_id,
+                SELECT context_run_id, source_condition_run_id, context_version,
                        source_trade_date, for_trade_date,
                        status, expected_stock_count, expected_index_count,
                        expected_board_count
                 FROM common_n3_previous_day_context_run
                 WHERE source_condition_run_id = %s
+                  AND context_version = %s
                 FOR UPDATE
                 """,
-                (model.run_id,),
+                (model.run_id, self.context_version),
             )
             row = cursor.fetchone()
             if row is None:
                 cursor.execute(
                     """
                     INSERT INTO common_n3_previous_day_context_run (
-                      context_run_id, source_condition_run_id,
+                      context_run_id, source_condition_run_id, context_version,
                       source_trade_date, for_trade_date,
                       expected_stock_count, expected_index_count, expected_board_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         context_run_id,
                         model.run_id,
+                        self.context_version,
                         model.source_trade_date,
                         model.for_trade_date,
                         expected["stock"],
@@ -715,12 +731,14 @@ class PostgresPreviousDayContextRepository:
                 str(values[1]),
                 str(values[2]),
                 str(values[3]),
-                int(values[5]),
+                str(values[4]),
                 int(values[6]),
                 int(values[7]),
+                int(values[8]),
             )
             required = (
                 model.run_id,
+                self.context_version,
                 model.source_trade_date,
                 model.for_trade_date,
                 expected["stock"],
@@ -729,7 +747,7 @@ class PostgresPreviousDayContextRepository:
             )
             if actual_context_run_id != context_run_id or actual != required:
                 raise RuntimeError("existing N3 context run lineage/count mismatch")
-            if str(values[4]) != "completed":
+            if str(values[5]) != "completed":
                 return context_run_id, False
             cursor.execute(
                 """
@@ -894,6 +912,7 @@ class PostgresPreviousDayContextRepository:
                     updated_at=now()
                 WHERE context_run_id=%s
                   AND source_condition_run_id=%s
+                  AND context_version=%s
                   AND source_trade_date=%s
                   AND for_trade_date=%s
                 """,
@@ -904,6 +923,7 @@ class PostgresPreviousDayContextRepository:
                     summary_json,
                     context_run_id,
                     model.run_id,
+                    self.context_version,
                     model.source_trade_date,
                     model.for_trade_date,
                 ),
@@ -920,27 +940,41 @@ class PostgresPreviousDayContextRepository:
                 {key: MappingProxyType(value) for key, value in status_counts.items()}
             ),
             inserted_count=0,
+            context_version=self.context_version,
         )
 
 
 class PostgresPreviousDayContextLoader:
-    def __init__(self, dsn: str, *, connect: Callable[[str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        context_version: str = DEFAULT_CONTEXT_VERSION,
+        connect: Callable[[str], Any] | None = None,
+    ) -> None:
         self.dsn = dsn
+        self.context_version = _validate_context_version(context_version)
         self._connect = connect or _connect_read_only
 
     def load(self, model: N3ActiveReadModel) -> PreviousDayContextLoad:
         with self._connect(self.dsn) as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT context_run_id, source_condition_run_id,
+                SELECT context_run_id, source_condition_run_id, context_version,
                        source_trade_date, for_trade_date
                 FROM common_n3_previous_day_context_run
                 WHERE source_condition_run_id=%s
+                  AND context_version=%s
                   AND source_trade_date=%s
                   AND for_trade_date=%s
                   AND status='completed'
                 """,
-                (model.run_id, model.source_trade_date, model.for_trade_date),
+                (
+                    model.run_id,
+                    self.context_version,
+                    model.source_trade_date,
+                    model.for_trade_date,
+                ),
             )
             run = cursor.fetchone()
             if run is None:
@@ -949,10 +983,12 @@ class PostgresPreviousDayContextLoader:
             context_run_id = str(run_values[0])
             if (
                 str(run_values[1]),
-                str(run_values[2]),
                 str(run_values[3]),
+                str(run_values[4]),
             ) != (model.run_id, model.source_trade_date, model.for_trade_date):
                 raise RuntimeError("completed N3 context lineage mismatch")
+            if str(run_values[2]) != self.context_version:
+                raise RuntimeError("completed N3 context version mismatch")
             contexts: dict[str, dict[str, PreviousDayMinuteContext]] = {}
             status_counts: dict[str, dict[str, int]] = {}
             for asset_kind in ASSET_KINDS:
@@ -1026,6 +1062,7 @@ class PostgresPreviousDayContextLoader:
             index=contexts["index"],
             board=contexts["board"],
             status_counts=status_counts,
+            context_version=self.context_version,
         )
 
 
@@ -1128,9 +1165,25 @@ def context_from_record(
     )
 
 
-def context_run_id_for(source_condition_run_id: str) -> str:
-    digest = hashlib.sha256(source_condition_run_id.encode("utf-8")).hexdigest()[:24]
+def context_run_id_for(
+    source_condition_run_id: str,
+    context_version: str = DEFAULT_CONTEXT_VERSION,
+) -> str:
+    version = _validate_context_version(context_version)
+    identity = (
+        source_condition_run_id
+        if version == DEFAULT_CONTEXT_VERSION
+        else f"{source_condition_run_id}\0{version}"
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return f"windows_n3_previous_day_context_{digest}"
+
+
+def _validate_context_version(value: str) -> str:
+    version = str(value)
+    if CONTEXT_VERSION_PATTERN.fullmatch(version) is None:
+        raise ValueError("invalid N3 context version")
+    return version
 
 
 def load_windows_tq_client(module_path: str | None = None) -> Any:

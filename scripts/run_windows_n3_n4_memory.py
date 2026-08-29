@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
         "--for-trade-date",
         default=datetime.now(SHANGHAI_TIMEZONE).strftime("%Y%m%d"),
     )
+    parser.add_argument(
+        "--context-version",
+        default=os.environ.get("ASHARE_V3_N3_CONTEXT_VERSION", "v1"),
+    )
     parser.add_argument("--tq-module-path")
     return parser.parse_args()
 
@@ -66,7 +70,10 @@ def main() -> int:
     from eltdx import TdxClient
 
     repository = WindowsN3ReadOnlyRepository(args.dsn)
-    context_loader = PostgresPreviousDayContextLoader(args.dsn)
+    context_loader = PostgresPreviousDayContextLoader(
+        args.dsn,
+        context_version=args.context_version,
+    )
     n4_holder = {}
     with ExitStack() as stack:
         stock_client = stack.enter_context(

@@ -35,6 +35,7 @@ def summary_to_dict(summary) -> dict:
         "result": summary.result,
         "context_run_id": summary.context_run_id,
         "source_condition_run_id": summary.source_condition_run_id,
+        "context_version": summary.context_version,
         "source_trade_date": summary.source_trade_date,
         "for_trade_date": summary.for_trade_date,
         "expected_counts": dict(summary.expected_counts),
@@ -56,6 +57,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--for-trade-date", required=True)
+    parser.add_argument(
+        "--context-version",
+        default=os.environ.get("ASHARE_V3_N3_CONTEXT_VERSION", "v1"),
+    )
     parser.add_argument("--tq-module-path")
     return parser.parse_args()
 
@@ -86,7 +91,10 @@ def main() -> int:
             TdxClient.from_hosts(pool_size=16, probe_hosts=True, timeout=8)
         )
         summary = WindowsN3PreviousDayContextPreloader(
-            repository=PostgresPreviousDayContextRepository(args.dsn),
+            repository=PostgresPreviousDayContextRepository(
+                args.dsn,
+                context_version=args.context_version,
+            ),
             tq_stock=tq_stock,
             tq_index=tq_index,
             tq_board=tq_board,
