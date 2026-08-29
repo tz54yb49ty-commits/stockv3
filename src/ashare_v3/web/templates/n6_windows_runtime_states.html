@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <style>
+    :root{--bg:#f4f6f7;--panel:#fff;--ink:#172124;--muted:#607176;--line:#d7e0e3;--accent:#0f766e;--warn:#a15c07}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",sans-serif}
+    header{background:#fff;border-bottom:1px solid var(--line)}.wrap{width:min(1720px,calc(100vw - 28px));margin:auto}
+    .topbar{min-height:68px;display:flex;align-items:center;justify-content:space-between;gap:12px}nav{display:flex;gap:7px;flex-wrap:wrap}
+    a,button{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:8px 11px;text-decoration:none;font-weight:650}
+    a.active{border-color:var(--accent);color:var(--accent)}main{display:grid;gap:14px;padding:16px 0 30px}
+    .banner,.surface{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}.simulation{background:#fff3cd;border-color:#ffcf66;color:#7a4b00;font-weight:800}
+    .offline{background:#fef0c7;border-color:#fec84b;color:#7a2e0e;font-weight:750}.meta{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:13px}
+    form{display:flex;gap:8px;flex-wrap:wrap}input,select{min-height:36px;border:1px solid var(--line);border-radius:6px;padding:0 9px;background:#fff}
+    .table-wrap{overflow:auto}table{width:100%;min-width:1600px;border-collapse:collapse}th,td{padding:8px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:12px;white-space:nowrap}
+    th{position:sticky;top:0;background:#f8fafb;color:var(--muted)}pre{margin:0;max-width:420px;white-space:pre-wrap;word-break:break-word}
+  </style>
+</head>
+<body>
+<header><div class="wrap topbar"><div><strong>{{ title }}</strong><div class="meta">Windows loopback只读快照</div></div><nav>
+{% for item in nav.links %}<a class="{% if nav.active == item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>{% endfor %}
+{% if nav.is_admin %}<a href="/n6/admin/users">用户管理</a>{% endif %}<button id="logout">退出</button></nav></div></header>
+<main class="wrap">
+{% if page.simulation %}<div class="banner simulation">{{ page.simulation_label or 'SIMULATED / NOT PRODUCTION' }} · 数据仅在当前Fixture进程内，不写数据库。</div>{% endif %}
+{% if page.runtime_status == 'runtime_offline' %}<div class="banner offline">runtime_offline：N3/N4/N5进程未运行或loopback桥不可达。不会回退到旧内存值。</div>{% endif %}
+<section class="surface"><form method="get">
+  <select name="asset_kind"><option value="">全部资产</option>{% for value in ['stock','index','board'] %}<option value="{{ value }}" {% if filters.asset_kind == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+  <input name="identity" value="{{ filters.identity or '' }}" placeholder="代码/identity">
+  <select name="direction"><option value="">全部方向</option>{% for value in ['BUY','SELL'] %}<option value="{{ value }}" {% if filters.direction == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+  <select name="live_status"><option value="">全部质量</option>{% for value in ['available','stale','unavailable'] %}<option value="{{ value }}" {% if filters.live_status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+  <button type="submit">筛选</button>
+</form></section>
+<section class="surface"><div class="meta">
+  <span>runtime={{ page.runtime_status }}</span><span>version={{ page.version }}</span><span>lineage={{ page.source_condition_run_id }}</span>
+  <span>source={{ page.source_trade_date }}</span><span>for={{ page.for_trade_date }}</span><span>rows={{ page.item_count }}/{{ page.total_count or page.item_count }}</span>
+</div></section>
+<section class="surface table-wrap"><table><thead><tr>
+{% if layer == 'n4' %}
+<th>资产</th><th>identity</th><th>代码/名称</th><th>方向/触发</th><th>质量</th><th>当前价/累计额</th><th>N2源过渡</th><th>金额基准</th><th>虚拟金额</th><th>实时分级</th><th>A/B/C/D30</th><th>版本/时间</th>
+{% else %}
+<th>资产</th><th>identity</th><th>代码/名称</th><th>方向</th><th>主触发周期</th><th>Action状态</th><th>确认状态</th><th>来源事件</th><th>episode</th><th>版本/时间</th>
+{% endif %}
+</tr></thead><tbody>
+{% for row in page.items %}<tr>
+{% if layer == 'n4' %}
+<td>{{ row.asset_kind }}</td><td>{{ row.identity }}</td><td>{{ row.code }}<br>{{ row.name }}</td><td>{{ row.direction or '—' }}<br>live={{ row.trigger_live }}</td><td>{{ row.live_status }}<br>fresh={{ row.fresh }}</td><td>{{ row.current_price }}<br>{{ row.cumulative_amount }}</td><td><pre>{{ row.source_transitions | tojson(indent=2) }}</pre></td><td><pre>{{ row.comparison_amounts | tojson(indent=2) }}</pre></td><td><pre>{{ row.realtime_virtual_amounts | tojson(indent=2) }}</pre></td><td><pre>{{ row.realtime_transitions | tojson(indent=2) }}</pre></td><td><pre>{{ row.rule_flags | tojson(indent=2) }}</pre></td><td>{{ row.n4_state_version }}<br>{{ row.updated_at }}</td>
+{% else %}
+<td>{{ row.asset_kind }}</td><td>{{ row.identity }}</td><td>{{ row.code }}<br>{{ row.name }}</td><td>{{ row.direction }}</td><td>{{ row.primary_trigger_period or '—' }} / {{ row.trigger_period or '—' }}</td><td>{{ row.action_state }}</td><td>{{ row.confirmation_status }}</td><td>{{ row.source_trigger_event_id }}</td><td>{{ row.episode_entry_event_id }}</td><td>{{ row.n5_state_version }}<br>{{ row.updated_at }}</td>
+{% endif %}
+</tr>{% else %}<tr><td colspan="12">暂无当前内存状态</td></tr>{% endfor %}
+</tbody></table></section>
+</main><script>document.getElementById('logout').onclick=async()=>{await fetch('/api/n6/auth/logout',{method:'POST'});location.href='/n6/login'};</script>
+</body></html>

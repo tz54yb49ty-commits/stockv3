@@ -13,7 +13,10 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows
+    fcntl = None
 import hashlib
 import json
 import os
@@ -27,11 +30,21 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from ashare_v3.runtime.intraday_worker_lineage import (
-    DEFAULT_LINEAGE_CONFIG_PATH,
-    LineageConfigError,
-    load_intraday_worker_lineage_config,
-)
+try:
+    from ashare_v3.runtime.intraday_worker_lineage import (
+        DEFAULT_LINEAGE_CONFIG_PATH,
+        LineageConfigError,
+        load_intraday_worker_lineage_config,
+    )
+except ImportError:  # pragma: no cover - native Windows always passes --for-trade-date
+    DEFAULT_LINEAGE_CONFIG_PATH = ""
+
+    class LineageConfigError(RuntimeError):
+        pass
+
+    def load_intraday_worker_lineage_config(path: Any) -> dict[str, Any]:
+        raise LineageConfigError("lineage_config_unavailable_on_native_windows")
+
 from ashare_v3.user.projection_execute import (
     ProjectionExecuteSnapshot,
     build_card_row,
@@ -170,6 +183,8 @@ def _acquire_singleton_lock(
     release_id: str,
     source_commit: str,
 ) -> SingletonLockHandle:
+    if fcntl is None:
+        raise SingletonLockContractError("posix_singleton_lock_unavailable")
     path = Path(lock_path)
     expected = Path(expected_path)
     if not path.is_absolute() or str(path) != str(expected) or path.name != expected.name:
@@ -513,8 +528,9 @@ def _cas_snapshot(checkpoint: Mapping[str, Any], events: Sequence[Mapping[str, A
 
 
 class PostgresBTrackProjectionRepository:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, windows_projection_contract: bool = False) -> None:
         self.dsn = dsn
+        self.windows_projection_contract = windows_projection_contract
 
     def is_open_trade_date(self, trade_date: str) -> bool:
         with psycopg.connect(
@@ -672,25 +688,44 @@ class PostgresBTrackProjectionRepository:
                                 inbox_count += 1
                                 continue
                             assert snapshot is not None
-                            projection_row = build_projection_row(event, projection_run_id, snapshot)
-                            _enforce_n6_display_payload_contract(
-                                projection_row,
-                                event,
-                                payload_key="display_payload_json",
-                            )
-                            projection_id = insert_signal_projection(cur, projection_row)
-                            card_row = build_card_row(event, projection_run_id, snapshot)
-                            _enforce_n6_display_payload_contract(
-                                card_row,
-                                event,
-                                payload_key="card_payload_json",
-                            )
-                            card_row["user_signal_projection_id"] = projection_id
-                            insert_signal_card(cur, card_row)
+                            if self.windows_projection_contract:
+                                projected, cards = _project_windows_event_for_scoped_users(
+                                    cur,
+                                    event,
+                                    projection_run_id=projection_run_id,
+                                )
+                                projection_count += projected
+                                card_count += cards
+                            else:
+                                projection_row = build_projection_row(event, projection_run_id, snapshot)
+                                _enforce_n6_display_payload_contract(
+                                    projection_row,
+                                    event,
+                                    payload_key="display_payload_json",
+                                )
+                                projection_id = insert_signal_projection(cur, projection_row)
+                                card_row = build_card_row(event, projection_run_id, snapshot)
+                                _enforce_n6_display_payload_contract(
+                                    card_row,
+                                    event,
+                                    payload_key="card_payload_json",
+                                )
+                                card_row["user_signal_projection_id"] = projection_id
+                                insert_signal_card(cur, card_row)
+                                projection_count += 1
+                                card_count += 1
                             _insert_inbox(cur, event, consumer_name)
-                            projection_count += 1
-                            card_count += 1
                             inbox_count += 1
+                        if projection_events:
+                            cur.execute(
+                                """
+                                UPDATE user_projection_run
+                                SET output_projection_count = %s,
+                                    updated_at = now()
+                                WHERE user_projection_run_id = %s
+                                """,
+                                (projection_count, projection_run_id),
+                            )
                         _upsert_checkpoint(
                             cur,
                             selected_events,
@@ -1356,6 +1391,204 @@ def _fetch_default_profile(cur: psycopg.Cursor[dict[str, Any]], admin_user_id: i
     )
     row = cur.fetchone()
     return FilterProfile(**dict(row)) if row else None
+
+
+WINDOWS_MONITOR_TABLE_BY_ASSET = {
+    "stock": "user_monitor_stock",
+    "index": "user_monitor_index",
+    "board": "user_monitor_board",
+}
+WINDOWS_N6_CONSUMER_NAME = "windows_n6_action_projection_v1"
+
+
+def windows_card_mutation_for_event(event_type: str) -> str:
+    if event_type == "ActionEligible":
+        return "create"
+    if event_type in {"ActionExecuted", "ActionBlocked", "ActionSkipped"}:
+        return "update"
+    return "none"
+
+
+def _fetch_windows_scoped_users(
+    cur: psycopg.Cursor[dict[str, Any]],
+    event: ProjectionEvent,
+) -> list[dict[str, Any]]:
+    monitor_table = WINDOWS_MONITOR_TABLE_BY_ASSET[event.asset_kind]
+    direction = str(event.payload_json.get("direction") or "").lower()
+    condition_key = str(event.payload_json.get("condition_key") or "")
+    cur.execute(
+        f"""
+        WITH scoped AS (
+          SELECT principal_id, principal_type, user_id
+          FROM user_realtime_monitor_scope
+          WHERE asset_kind = %s
+            AND identity_key = %s
+            AND status = 'active'
+          UNION
+          SELECT principal_id, principal_type, user_id
+          FROM {monitor_table}
+          WHERE identity_key = %s
+            AND direction = %s
+            AND status = 'active'
+            AND quality_status = 'reviewed'
+            AND (valid_for_trade_date IS NULL OR valid_for_trade_date = %s)
+            AND (condition_key IS NULL OR condition_key = '' OR condition_key = %s)
+        )
+        SELECT DISTINCT s.principal_id,
+               s.principal_type,
+               s.user_id,
+               u.login_name,
+               u.role,
+               u.status,
+               p.user_filter_profile_id,
+               p.profile_name,
+               p.is_default,
+               p.status AS profile_status
+        FROM scoped s
+        JOIN user_account u
+          ON u.user_id = s.user_id
+         AND u.status = 'active'
+        LEFT JOIN LATERAL (
+          SELECT user_filter_profile_id, profile_name, is_default, status
+          FROM user_filter_profile
+          WHERE user_id = s.user_id
+            AND is_default = true
+            AND status = 'active'
+          ORDER BY user_filter_profile_id
+          LIMIT 1
+        ) p ON true
+        ORDER BY s.user_id, s.principal_id, s.principal_type
+        """,
+        (
+            event.asset_kind,
+            event.identity_key,
+            event.identity_key,
+            direction,
+            event.trade_date,
+            condition_key,
+        ),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _windows_user_snapshot(
+    event: ProjectionEvent,
+    projection_run_id: str,
+    scoped_user: Mapping[str, Any],
+) -> ProjectionExecuteSnapshot:
+    profile = None
+    if scoped_user.get("user_filter_profile_id") is not None:
+        profile = FilterProfile(
+            user_filter_profile_id=int(scoped_user["user_filter_profile_id"]),
+            user_id=int(scoped_user["user_id"]),
+            profile_name=str(scoped_user.get("profile_name") or ""),
+            is_default=bool(scoped_user.get("is_default")),
+            status=str(scoped_user.get("profile_status") or "active"),
+        )
+    return ProjectionExecuteSnapshot(
+        input_snapshot=ProjectionInputSnapshot(
+            table_counts={},
+            admin=AdminUser(
+                user_id=int(scoped_user["user_id"]),
+                login_name=str(scoped_user.get("login_name") or ""),
+                role=str(scoped_user.get("role") or "user"),
+                status=str(scoped_user.get("status") or "active"),
+            ),
+            default_profile=profile,
+            n5_outbox_counts={},
+            display_basis_counts={},
+            events=[event],
+        ),
+        projection_run_id=projection_run_id,
+        scoped_counts={},
+        linked_counts={},
+    )
+
+
+def _project_windows_event_for_scoped_users(
+    cur: psycopg.Cursor[dict[str, Any]],
+    event: ProjectionEvent,
+    *,
+    projection_run_id: str,
+) -> tuple[int, int]:
+    projection_count = 0
+    card_count = 0
+    mutation = windows_card_mutation_for_event(event.event_type)
+    episode_entry_event_id = str(event.payload_json.get("episode_entry_event_id") or "")
+    for scoped_user in _fetch_windows_scoped_users(cur, event):
+        snapshot = _windows_user_snapshot(event, projection_run_id, scoped_user)
+        projection_row = build_projection_row(event, projection_run_id, snapshot)
+        projection_row["display_payload_json"].update({
+            "principal_id": int(scoped_user["principal_id"]),
+            "principal_type": str(scoped_user["principal_type"]),
+            "episode_entry_event_id": episode_entry_event_id,
+            "projection_idempotency_key": f"{event.outbox_id}:{event.event_id}:{scoped_user['user_id']}",
+            "windows_projection_contract": "windows_n6_action_projection_v1",
+        })
+        _enforce_n6_display_payload_contract(projection_row, event, payload_key="display_payload_json")
+        projection_id = insert_signal_projection(cur, projection_row)
+        projection_count += 1
+        if mutation == "create":
+            card_row = build_card_row(event, projection_run_id, snapshot)
+            card_row["card_payload_json"].update({
+                "principal_id": int(scoped_user["principal_id"]),
+                "principal_type": str(scoped_user["principal_type"]),
+                "episode_entry_event_id": episode_entry_event_id,
+                "windows_projection_contract": "windows_n6_action_projection_v1",
+            })
+            _enforce_n6_display_payload_contract(card_row, event, payload_key="card_payload_json")
+            card_row["user_signal_projection_id"] = projection_id
+            insert_signal_card(cur, card_row)
+            card_count += 1
+        elif mutation == "update":
+            card_count += _update_windows_episode_card(cur, event, snapshot, episode_entry_event_id)
+    return projection_count, card_count
+
+
+def _update_windows_episode_card(
+    cur: psycopg.Cursor[dict[str, Any]],
+    event: ProjectionEvent,
+    snapshot: ProjectionExecuteSnapshot,
+    episode_entry_event_id: str,
+) -> int:
+    if not episode_entry_event_id:
+        return 0
+    card = build_card_row(event, snapshot.projection_run_id, snapshot)
+    card["card_payload_json"]["episode_entry_event_id"] = episode_entry_event_id
+    cur.execute(
+        """
+        UPDATE user_signal_card c
+        SET card_status = %(card_status)s,
+            display_priority = %(display_priority)s,
+            title = %(title)s,
+            summary = %(summary)s,
+            current_price = %(current_price)s,
+            source_event_id = %(source_event_id)s,
+            source_action_event_id = %(source_action_event_id)s,
+            source_action_event_type = %(source_action_event_type)s,
+            action_state = %(action_state)s,
+            action_mark = %(action_mark)s,
+            trace_json = %(trace_json)s,
+            projection_policy = %(projection_policy)s,
+            card_payload_json = %(card_payload_json)s,
+            updated_at = now()
+        FROM user_signal_projection p
+        WHERE c.user_signal_projection_id = p.user_signal_projection_id
+          AND c.user_id = %(user_id)s
+          AND p.source_action_event_type = 'ActionEligible'
+          AND p.asset_kind = %(asset_kind)s
+          AND p.identity_key = %(identity_key)s
+          AND p.direction = %(direction)s
+          AND p.source_payload_json #>> '{payload_json,episode_entry_event_id}' = %(episode_entry_event_id)s
+        """,
+        {
+            **card,
+            "card_payload_json": Jsonb(card["card_payload_json"]),
+            "trace_json": Jsonb(card.get("trace_json") or {}),
+            "episode_entry_event_id": episode_entry_event_id,
+        },
+    )
+    return max(int(cur.rowcount or 0), 0)
 
 
 def _insert_inbox(

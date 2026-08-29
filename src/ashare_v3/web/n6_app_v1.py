@@ -127,6 +127,7 @@ APP_PAGE_LABELS = {
     "pnl": "收益",
     "ai-users": "AI助手",
     "leaderboard": "排行榜",
+    "trade-log": "买卖日志",
 }
 APP_NAV_LABELS = {
     "dashboard": "首页",
@@ -138,12 +139,13 @@ APP_NAV_LABELS = {
     "buy-messages": "买入消息",
     "filter-center": "筛选中心",
     "my-monitor": "监控对象",
-    "status-monitor": "状态监控",
+    "status-monitor": "触发状态",
     "proposals": "方案",
     "portfolio": "组合",
     "pnl": "收益",
     "ai-users": "AI助手",
     "leaderboard": "排行榜",
+    "trade-log": "买卖日志",
 }
 APP_COMPONENT_LABELS = {
     "B Track Me": "我的身份",
@@ -480,14 +482,14 @@ MEMBERSHIP_CACHE_SOURCE_BY_ASSET = {
 def app_nav_context(active: str) -> dict[str, Any]:
     links = [
         {"key": "dashboard", "label": APP_NAV_LABELS["dashboard"], "href": "/n6/app/dashboard"},
-        {"key": "watchlist", "label": APP_NAV_LABELS["watchlist"], "href": "/n6/app/watchlist"},
-        {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
         {"key": "filter-center", "label": APP_NAV_LABELS["filter-center"], "href": "/n6/app/filter-center"},
         {"key": "my-monitor", "label": APP_NAV_LABELS["my-monitor"], "href": "/n6/app/my-monitor"},
+        {"key": "realtime-scope", "label": APP_NAV_LABELS["realtime-scope"], "href": "/n6/app/realtime-scope"},
+        {"key": "status-monitor", "label": APP_NAV_LABELS["status-monitor"], "href": "/n6/app/status-monitor"},
         {"key": "signals", "label": APP_NAV_LABELS["signals"], "href": "/n6/app/signals"},
         {"key": "messages", "label": APP_NAV_LABELS["messages"], "href": "/n6/app/messages"},
-        {"key": "buy-messages", "label": APP_NAV_LABELS["buy-messages"], "href": "/n6/app/buy-messages"},
-        {"key": "account", "label": APP_NAV_LABELS["account"], "href": "/n6/app/account"},
+        {"key": "account", "label": "虚拟账户", "href": "/n6/app/account"},
+        {"key": "trade-log", "label": APP_NAV_LABELS["trade-log"], "href": "/n6/app/trade-log"},
     ]
     return {"active": "dashboard" if active == "home" else active, "links": links}
 

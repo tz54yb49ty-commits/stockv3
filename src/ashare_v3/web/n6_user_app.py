@@ -99,6 +99,15 @@ from ashare_v3.web.n6_ui_v1 import (
 from ashare_v3.web.post_close_fastlane_status import read_post_close_fastlane_status
 from ashare_v3.web.rag_status import read_rag_status_answer
 from ashare_v3.web.runtime_archive_status import read_runtime_archive_status
+from ashare_v3.web.windows_n6_runtime import (
+    HttpWindowsRuntimeBridge,
+    InMemoryWindowsRuntimeFixture,
+    OfflineWindowsRuntimeBridge,
+    WindowsRuntimeBridge,
+    read_runtime_page,
+    windows_archive_status,
+    windows_postclose_status,
+)
 
 
 COOKIE_NAME = "ashare_v3_n6_session"
@@ -616,6 +625,11 @@ class N6UserWebConfig:
     rag_docs_root: str = DEFAULT_RAG_DOCS_ROOT
     rag_sql_root: str = DEFAULT_RAG_SQL_ROOT
     replay_docs_root: str = DEFAULT_REPLAY_DOCS_ROOT
+    windows_mode: bool = False
+    windows_runtime_bridge_url: str = "http://127.0.0.1:8791"
+    windows_runtime_bridge_timeout_seconds: float = 1.0
+    windows_fixture_mode: bool = False
+    virtual_executor_enabled: bool = True
 
 
 def build_app_v2_message_dashboard(
@@ -8503,6 +8517,11 @@ def config_from_env() -> N6UserWebConfig:
         runtime_archive_root=os.environ.get("ASHARE_V3_RUNTIME_ARCHIVE_ROOT", DEFAULT_RUNTIME_ARCHIVE_ROOT),
         rag_docs_root=os.environ.get("ASHARE_V3_RAG_DOCS_ROOT", DEFAULT_RAG_DOCS_ROOT),
         rag_sql_root=os.environ.get("ASHARE_V3_RAG_SQL_ROOT", DEFAULT_RAG_SQL_ROOT),
+        windows_mode=os.environ.get("ASHARE_V3_WINDOWS_N6_MODE", "0") == "1",
+        windows_runtime_bridge_url=os.environ.get("ASHARE_V3_WINDOWS_N6_RUNTIME_BRIDGE_URL", "http://127.0.0.1:8791"),
+        windows_runtime_bridge_timeout_seconds=float(os.environ.get("ASHARE_V3_WINDOWS_N6_RUNTIME_BRIDGE_TIMEOUT_SECONDS", "1.0")),
+        windows_fixture_mode=os.environ.get("ASHARE_V3_WINDOWS_N6_FIXTURE_MODE", "0") == "1",
+        virtual_executor_enabled=os.environ.get("ASHARE_V3_N6_VIRTUAL_EXECUTOR_ENABLED", "1") == "1",
     )
 
 
@@ -8513,12 +8532,24 @@ def create_app(
     config: N6UserWebConfig | None = None,
     password_verifier: PasswordVerifier | None = None,
     password_hasher: PasswordHasher | None = None,
+    runtime_bridge: WindowsRuntimeBridge | None = None,
 ) -> FastAPI:
     web_config = config or config_from_env()
     repo = repository or PostgresN6UserRepository(web_config.dsn)
     buy_repo = buy_execution_repository or PostgresVirtualBuyExecutionRepository(web_config.dsn)
     verifier = password_verifier or verify_password
     hasher = password_hasher or hash_password
+    if runtime_bridge is not None:
+        windows_runtime = runtime_bridge
+    elif web_config.windows_fixture_mode:
+        windows_runtime = InMemoryWindowsRuntimeFixture()
+    elif web_config.windows_mode:
+        windows_runtime = HttpWindowsRuntimeBridge(
+            base_url=web_config.windows_runtime_bridge_url,
+            timeout_seconds=web_config.windows_runtime_bridge_timeout_seconds,
+        )
+    else:
+        windows_runtime = OfflineWindowsRuntimeBridge()
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app = FastAPI(
         title="Ashare v3 N6 User MVP",
@@ -8891,6 +8922,8 @@ def create_app(
         principal = resolve_app_principal(session, repo)
         if principal is None:
             return JSONResponse({"ok": False, "error": "principal_scope_unavailable"}, status_code=403)
+        if web_config.windows_mode or web_config.windows_fixture_mode or not web_config.virtual_executor_enabled:
+            return JSONResponse(virtual_buy_rejected_response("virtual_executor_disabled"), status_code=403)
         try:
             body = await request.json()
         except Exception:
@@ -9839,7 +9872,14 @@ def create_app(
     ) -> dict[str, Any]:
         user = session_user_payload(session)
         if page_key in {"home", "dashboard"}:
-            return build_app_dashboard_data(session, principal)
+            data = build_app_dashboard_data(session, principal)
+            if web_config.windows_mode or web_config.windows_fixture_mode:
+                data["virtual_executor_enabled"] = False
+                data["virtual_executor_status"] = "未启用"
+                data["safety_banner"] = list(data.get("safety_banner") or []) + [
+                    "Windows虚拟成交executor未启用",
+                ]
+            return data
         if page_key == "account":
             account, snapshot = app_account_sources(repo, principal)
             return app_account_model(principal, user=user, account=account, cash_snapshot=snapshot)
@@ -9979,6 +10019,10 @@ def create_app(
             return app_leaderboard_model(principal, user=user)
         if page_key == "ai-users":
             return app_ai_users_model(principal, user=user)
+        if page_key == "trade-log":
+            return app_locked_future_module_model(
+                principal, user=user, module_key="trade-log", component="B Track Trade Log"
+            )
         component = {
             "watchlist": "B Track Watchlist",
             "proposals": "B Track Proposals",
@@ -10027,6 +10071,7 @@ def create_app(
             "pnl",
             "ai-users",
             "leaderboard",
+            "trade-log",
             "home",
         }:
             return HTMLResponse("not found", status_code=404)
@@ -10315,6 +10360,65 @@ def create_app(
             },
         )
 
+    def windows_runtime_query(request: Request) -> dict[str, Any]:
+        return {
+            "asset_kind": request.query_params.get("asset_kind"),
+            "identity": request.query_params.get("identity"),
+            "direction": request.query_params.get("direction"),
+            "live_status": request.query_params.get("live_status"),
+            "trigger_live": request.query_params.get("trigger_live"),
+            "cursor": request.query_params.get("cursor"),
+            "limit": request.query_params.get("limit") or "100",
+        }
+
+    def require_windows_admin(request: Request) -> AuthSession | Response:
+        session = current_session(request, repo)
+        if session is None:
+            return RedirectResponse("/n6/login", status_code=303)
+        if session.role != "admin":
+            return HTMLResponse("forbidden", status_code=403)
+        return session
+
+    @app.get("/api/n6/ui/v1/windows/n4-runtime-states")
+    async def windows_n4_runtime_states_api(request: Request) -> JSONResponse:
+        session = current_session(request, repo)
+        if session is None:
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+        if session.role != "admin":
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        return JSONResponse(jsonable_encoder(read_runtime_page(windows_runtime, "n4", windows_runtime_query(request))))
+
+    @app.get("/api/n6/ui/v1/windows/n5-runtime-states")
+    async def windows_n5_runtime_states_api(request: Request) -> JSONResponse:
+        session = current_session(request, repo)
+        if session is None:
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+        if session.role != "admin":
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        return JSONResponse(jsonable_encoder(read_runtime_page(windows_runtime, "n5", windows_runtime_query(request))))
+
+    @app.get("/n6/n4-runtime-states", response_class=HTMLResponse)
+    async def windows_n4_runtime_states_page(request: Request) -> Response:
+        session = require_windows_admin(request)
+        if isinstance(session, Response):
+            return session
+        return templates.TemplateResponse(request, "n6_windows_runtime_states.html", {
+            "request": request, "user": session_user_payload(session), "nav": nav_context(session, "n4_runtime_states"),
+            "title": "N4实时内存状态", "layer": "n4", "filters": windows_runtime_query(request),
+            "page": read_runtime_page(windows_runtime, "n4", windows_runtime_query(request)),
+        })
+
+    @app.get("/n6/n5-runtime-states", response_class=HTMLResponse)
+    async def windows_n5_runtime_states_page(request: Request) -> Response:
+        session = require_windows_admin(request)
+        if isinstance(session, Response):
+            return session
+        return templates.TemplateResponse(request, "n6_windows_runtime_states.html", {
+            "request": request, "user": session_user_payload(session), "nav": nav_context(session, "n5_runtime_states"),
+            "title": "N5活动Episode", "layer": "n5", "filters": windows_runtime_query(request),
+            "page": read_runtime_page(windows_runtime, "n5", windows_runtime_query(request)),
+        })
+
     @app.get("/n6/post-close-fastlane-status", response_class=HTMLResponse)
     async def post_close_fastlane_status(request: Request) -> Response:
         session = current_session(request, repo)
@@ -10322,6 +10426,17 @@ def create_app(
             return RedirectResponse("/n6/login", status_code=303)
         if session.role != "admin":
             return HTMLResponse("forbidden", status_code=403)
+        if web_config.windows_mode or web_config.windows_fixture_mode:
+            return templates.TemplateResponse(
+                request,
+                "n6_windows_status.html",
+                {
+                    "request": request,
+                    "user": session_user_payload(session),
+                    "nav": nav_context(session, "post_close_fastlane_status"),
+                    "page": windows_postclose_status(windows_runtime),
+                },
+            )
         status_page = post_close_fastlane_status_model(
             read_post_close_fastlane_status(
                 docs_root=web_config.post_close_fastlane_docs_root,
@@ -10376,6 +10491,17 @@ def create_app(
             return RedirectResponse("/n6/login", status_code=303)
         if session.role != "admin":
             return HTMLResponse("forbidden", status_code=403)
+        if web_config.windows_mode or web_config.windows_fixture_mode:
+            return templates.TemplateResponse(
+                request,
+                "n6_windows_status.html",
+                {
+                    "request": request,
+                    "user": session_user_payload(session),
+                    "nav": nav_context(session, "archive_status"),
+                    "page": windows_archive_status(windows_runtime),
+                },
+            )
         archive_page = runtime_archive_status_model(
             read_runtime_archive_status(
                 docs_root=web_config.runtime_archive_docs_root,
@@ -11069,13 +11195,8 @@ def nav_context(session: AuthSession, active: str) -> dict[str, Any]:
             {"key": "post_close_fastlane_status", "label": "收盘状态", "href": "/n6/post-close-fastlane-status"},
             {"key": "archive_status", "label": "归档状态", "href": "/n6/archive-status"},
             {"key": "n2_condition_basis", "label": "N2条件基础表", "href": "/n6/n2-condition-basis/index"},
-            {"key": "n3_messages", "label": "N3消息", "href": "/n6/n3-messages"},
-            {"key": "n4_messages", "label": "N4消息", "href": "/n6/n4-messages"},
-            {"key": "input_messages", "label": "N6输入消息", "href": "/n6/input-messages"},
-            {"key": "n5_messages", "label": "N5消息", "href": "/n6/n5-messages"},
-            {"key": "n5_actions", "label": "N5动作", "href": "/n6/n5-actions"},
-            {"key": "b_track_buy_signals", "label": "B轨买入信号", "href": "/n6/b-track/buy-signals"},
-            {"key": "rag", "label": "RAG问答", "href": "/n6/rag"},
+            {"key": "n4_runtime_states", "label": "N4状态表", "href": "/n6/n4-runtime-states"},
+            {"key": "n5_runtime_states", "label": "N5状态表", "href": "/n6/n5-runtime-states"},
         ],
     }
 
