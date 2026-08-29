@@ -99,15 +99,15 @@ class WindowsN3ReadModelTest(unittest.TestCase):
         connection.run_rows[0]["for_trade_date"] = "20260831"
         model = WindowsN3ReadOnlyRepository("postgresql://example", connect=lambda _dsn: connection).load_active("20260831")
         week = model.stock[0].periods["W"]
-        self.assertEqual(week.previous_amount_baseline, Decimal("200000"))
+        self.assertEqual(week.previous_amount_baseline, Decimal("2000000"))
         self.assertEqual(week.completed_amount_sum, Decimal("0"))
         self.assertEqual(week.completed_trade_days, 0)
 
     def test_same_week_preserves_seed(self):
         model = WindowsN3ReadOnlyRepository("postgresql://example", connect=lambda _dsn: Connection()).load_active("20260828")
         week = model.stock[0].periods["W"]
-        self.assertEqual(week.previous_amount_baseline, Decimal("80000"))
-        self.assertEqual(week.completed_amount_sum, Decimal("600000"))
+        self.assertEqual(week.previous_amount_baseline, Decimal("800000"))
+        self.assertEqual(week.completed_amount_sum, Decimal("6000000"))
         self.assertEqual(week.completed_trade_days, 3)
 
     def test_loads_full_three_channel_n2_basis_without_scope_filter(self):
@@ -125,15 +125,39 @@ class WindowsN3ReadModelTest(unittest.TestCase):
         self.assertEqual(model.stock_requests()[0].identity_key, "stock:SH:600000")
         self.assertEqual(model.index_requests()[0].identity_key, "index:SH:000001")
         self.assertEqual(model.board_requests()[0].identity_key, "board:TDX:881333")
-        self.assertEqual(model.higher_amount_baselines("stock")["stock:SH:600000"]["W"].completed_amount_sum, Decimal("600000"))
-        self.assertEqual(model.higher_amount_baselines("index")["index:SH:000001"]["W"].completed_amount_sum, Decimal("600"))
-        self.assertEqual(model.higher_amount_baselines("board")["board:TDX:881333"]["W"].completed_amount_sum, Decimal("600"))
+        self.assertEqual(model.higher_amount_baselines("stock")["stock:SH:600000"]["W"].completed_amount_sum, Decimal("6000000"))
+        self.assertEqual(model.higher_amount_baselines("index")["index:SH:000001"]["W"].completed_amount_sum, Decimal("6000000"))
+        self.assertEqual(model.higher_amount_baselines("board")["board:TDX:881333"]["W"].completed_amount_sum, Decimal("6000000"))
         self.assertEqual(model.stock[0].periods["D"].previous_entity_high, Decimal("12"))
         self.assertEqual(model.stock[0].basis_trade_date, "20260826")
         queries = [query for query, _params in connections[0].queries]
         self.assertTrue(all(query.startswith("SELECT") for query in queries))
         self.assertTrue(all("minute_target_scope" not in query for query in queries))
         self.assertTrue(connections[0].closed)
+
+    def test_converts_windows_tq_daily_amounts_to_yuan_for_all_channels(self):
+        connection = Connection()
+        samples = (
+            (connection.stock_rows[0], "52881.77", Decimal("528817700")),
+            (connection.index_rows[0], "19119030", Decimal("191190300000")),
+            (connection.board_rows[0], "13490581", Decimal("134905810000")),
+        )
+        for row, source_amount, _expected_yuan in samples:
+            week = row["period_trigger_baseline_json"]["periods"]["W"]
+            week["current_amount_total_seed"] = source_amount
+            week["previous_avg_amount"] = source_amount
+
+        model = WindowsN3ReadOnlyRepository(
+            "postgresql://example",
+            connect=lambda _dsn: connection,
+        ).load_active("20260828")
+
+        for item, (_row, _source_amount, expected_yuan) in zip(
+            (model.stock[0], model.index[0], model.board[0]),
+            samples,
+        ):
+            self.assertEqual(item.periods["W"].completed_amount_sum, expected_yuan)
+            self.assertEqual(item.periods["W"].previous_amount_baseline, expected_yuan)
 
     def test_missing_active_run_fails_closed(self):
         connection = Connection()

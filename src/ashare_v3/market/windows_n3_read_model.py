@@ -20,6 +20,7 @@ from ashare_v3.market.windows_n3_snapshot import (
 
 PERIODS = ("Y", "Q", "M", "W", "D")
 HIGHER_PERIODS = ("W", "M", "Q", "Y")
+WINDOWS_TQ_DAILY_AMOUNT_TO_YUAN = Decimal("10000")
 
 
 class ActiveN2RunUnavailable(RuntimeError):
@@ -210,7 +211,7 @@ def _runtime_input(asset_kind: str, row: Any, source_trade_date: str, for_trade_
         entry = baseline_periods.get(period)
         if not isinstance(entry, Mapping):
             entry = {}
-        factor = Decimal(1000) if asset_kind == "stock" else Decimal(1)
+        factor = WINDOWS_TQ_DAILY_AMOUNT_TO_YUAN
         source_key = _period_key(source_trade_date, period)
         for_key = _period_key(for_trade_date, period)
         stored_key = _optional_text(entry.get("period_key_current")) or _optional_text(
