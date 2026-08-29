@@ -9,11 +9,12 @@ from ashare_v3.action.windows_n5_delivery import (
     WindowsN5DeliveryPlan,
     n4_outbox_delivery_from_row,
     persist_windows_n5_delivery,
+    plan_expiry_delivery,
+    plan_metric_delivery,
     plan_n4_deliveries,
-    plan_output_events,
 )
 from ashare_v3.action.windows_n5_episode import WindowsN5EpisodePlanner
-from tests.test_windows_n5_episode import _matched, _metric, _state_changed
+from tests.test_windows_n5_episode import _matched, _metric, _state_changed, _time
 
 
 class _FakeCursor:
@@ -78,6 +79,9 @@ def test_outbox_row_round_trip_and_candidate_plan() -> None:
         "ActionEligible"
     ]
     assert len(plan.snapshot.active) == 1
+    assert planner.read().active == {}
+    assert plan.candidate_planner is not None
+    assert len(plan.candidate_planner.read().active) == 1
 
 
 def test_delivery_persistence_is_atomic_intent_and_idempotent() -> None:
@@ -132,10 +136,14 @@ def test_metric_output_persists_without_new_n4_acknowledgement() -> None:
         action_run_id="windows_n5_delivery_fixture",
     )
     planner.consume_trigger_event(_matched())
-    metric_batch = planner.consume_metric(_metric())
-    plan = plan_output_events(metric_batch.snapshot, metric_batch.events)
+    plan = plan_metric_delivery(planner, _metric())
     cursor = _FakeCursor()
 
+    assert next(iter(planner.read().active.values())).action_state == "eligible"
+    assert plan.candidate_planner is not None
+    assert next(
+        iter(plan.candidate_planner.read().active.values())
+    ).action_state == "executed"
     result = persist_windows_n5_delivery(
         cursor,
         plan=plan,
@@ -146,7 +154,52 @@ def test_metric_output_persists_without_new_n4_acknowledgement() -> None:
     assert result.inbox_insert_count == 0
     assert result.checkpoint_upsert_count == 0
     assert result.outbox_insert_count == 1
-    assert next(iter(cursor.outbox)) == metric_batch.events[0].event_id
+    assert next(iter(cursor.outbox)) == plan.output_events[0].event_id
+
+
+def test_failed_persistence_discards_candidate_and_retry_still_emits() -> None:
+    matched = _matched()
+    delivery = N4OutboxDelivery(10, matched)
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="windows_n5_delivery_fixture",
+    )
+    first_plan = plan_n4_deliveries(planner, [delivery])
+
+    class FailingCursor:
+        def execute(self, _query, _params) -> None:
+            raise RuntimeError("fixture transaction failure")
+
+    with pytest.raises(RuntimeError, match="fixture transaction failure"):
+        persist_windows_n5_delivery(
+            FailingCursor(),
+            plan=first_plan,
+            consumer_name="windows_n5_state_v1",
+            json_adapter=lambda value: value,
+        )
+
+    assert planner.read().active == {}
+    retry_plan = plan_n4_deliveries(planner, [delivery])
+    assert [event.event_type for event in retry_plan.output_events] == [
+        "ActionEligible"
+    ]
+
+
+def test_expiry_delivery_is_candidate_only_until_adopted() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="windows_n5_delivery_fixture",
+    )
+    planner.consume_trigger_event(_matched())
+
+    plan = plan_expiry_delivery(planner, _time(15, 0))
+
+    assert len(planner.read().active) == 1
+    assert [event.event_type for event in plan.output_events] == [
+        "ActionSkipped"
+    ]
+    assert plan.candidate_planner is not None
+    assert plan.candidate_planner.read().active == {}
 
 
 def test_duplicate_source_outbox_id_is_rejected_before_planning() -> None:

@@ -142,6 +142,27 @@ class WindowsN5EpisodePlanner:
         with self._lock:
             return self._snapshot()
 
+    def fork(self) -> WindowsN5EpisodePlanner:
+        """Return an isolated candidate with the same immutable episode state."""
+
+        with self._lock:
+            candidate = WindowsN5EpisodePlanner(
+                asset_kind=self.asset_kind,
+                action_run_id=self.action_run_id,
+            )
+            candidate._active = dict(self._active)
+            candidate._trigger_watermarks = dict(self._trigger_watermarks)
+            candidate._closed_episode_watermarks = dict(
+                self._closed_episode_watermarks
+            )
+            candidate._processed_trigger_event_count = (
+                self._processed_trigger_event_count
+            )
+            candidate._closed_episode_count = self._closed_episode_count
+            candidate._version = self._version
+            candidate._generated_at = self._generated_at
+            return candidate
+
     def consume_trigger_event(self, event: EventEnvelope) -> N5PlanBatch:
         with self._lock:
             return self._consume_trigger_event(event, emit=True)

@@ -3,8 +3,8 @@
 This module converts persisted N4 outbox rows into canonical envelopes, plans
 them through a candidate in-memory planner, and persists only N5 events plus
 consumer idempotency metadata.  It never opens or commits a database
-connection; the caller owns the surrounding transaction and publishes the
-candidate snapshot only after that transaction commits.
+connection; the caller owns the surrounding transaction and adopts the
+candidate planner only after that transaction commits.
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ from ashare_v3.events.models import (
     N4_SOURCE_LAYER,
     N5_SOURCE_LAYER,
     validate_event_envelope,
+)
+from ashare_v3.market.windows_n3_action_metric import (
+    ActionConfirmationMetric,
 )
 
 
@@ -71,6 +74,7 @@ class N4OutboxDelivery:
 @dataclass(frozen=True, slots=True)
 class WindowsN5DeliveryPlan:
     snapshot: N5EpisodeSnapshot
+    candidate_planner: WindowsN5EpisodePlanner
     source_events: tuple[N4OutboxDelivery, ...]
     output_events: tuple[EventEnvelope, ...]
 
@@ -85,6 +89,10 @@ class WindowsN5DeliveryPlan:
                 raise ValueError(
                     f"unsupported N5 delivery event_type: {event.event_type}"
                 )
+        if self.candidate_planner.read() != self.snapshot:
+            raise ValueError(
+                "candidate planner does not match delivery snapshot"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,27 +162,48 @@ def plan_n4_deliveries(
             ),
         )
     )
+    candidate = planner.fork()
     output: list[EventEnvelope] = []
     for delivery in ordered:
-        batch = planner.consume_trigger_event(delivery.event)
+        batch = candidate.consume_trigger_event(delivery.event)
         output.extend(batch.events)
     return WindowsN5DeliveryPlan(
-        snapshot=planner.read(),
+        snapshot=candidate.read(),
+        candidate_planner=candidate,
         source_events=ordered,
         output_events=tuple(output),
     )
 
 
-def plan_output_events(
-    snapshot: N5EpisodeSnapshot,
-    events: Sequence[EventEnvelope],
+def plan_metric_delivery(
+    planner: WindowsN5EpisodePlanner,
+    metric: ActionConfirmationMetric,
 ) -> WindowsN5DeliveryPlan:
-    """Wrap metric/expiry N5 events that do not acknowledge a new N4 row."""
+    """Plan one closed-minute update without advancing the live planner."""
 
+    candidate = planner.fork()
+    batch = candidate.consume_metric(metric)
     return WindowsN5DeliveryPlan(
-        snapshot=snapshot,
+        snapshot=batch.snapshot,
+        candidate_planner=candidate,
         source_events=(),
-        output_events=tuple(events),
+        output_events=batch.events,
+    )
+
+
+def plan_expiry_delivery(
+    planner: WindowsN5EpisodePlanner,
+    observed_at: datetime,
+) -> WindowsN5DeliveryPlan:
+    """Plan end-of-window expiry without advancing the live planner."""
+
+    candidate = planner.fork()
+    batch = candidate.expire(observed_at)
+    return WindowsN5DeliveryPlan(
+        snapshot=batch.snapshot,
+        candidate_planner=candidate,
+        source_events=(),
+        output_events=batch.events,
     )
 
 
