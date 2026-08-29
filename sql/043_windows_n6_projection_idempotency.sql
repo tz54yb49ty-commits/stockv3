@@ -23,3 +23,5 @@ CREATE INDEX IF NOT EXISTS user_signal_projection_windows_episode_lookup_idx
     ((source_payload_json #>> '{payload_json,episode_entry_event_id}'))
   )
   WHERE source_action_event_type = 'ActionEligible';
+
+COMMIT;

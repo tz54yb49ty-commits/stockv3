@@ -99,6 +99,7 @@ class WindowsN6StaticContractTests(unittest.TestCase):
         self.assertIn("source_outbox_id", schema)
         self.assertIn("source_event_id", schema)
         self.assertIn("user_id", schema)
+        self.assertTrue(schema.rstrip().endswith("COMMIT;"))
 
     def test_fixture_is_explicitly_non_production(self) -> None:
         source = (SRC / "ashare_v3/web/windows_n6_fixture_app.py").read_text(encoding="utf-8")
