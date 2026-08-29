@@ -336,6 +336,32 @@ class N6BTrackSignalProjectionPollerTest(unittest.TestCase):
 
 
 class N6BTrackDualLockAndCasTest(unittest.TestCase):
+    def test_cas_authority_accepts_fixed_windows_consumer_only(self):
+        import run_n6_b_track_signal_projection_poller_once as poller
+
+        common = {
+            "cas_authority_mode": "internal_one_shot",
+            "max_events": poller.MAX_INTERNAL_BATCH_SIZE,
+            "expected_checkpoint_cas_sha256": None,
+            "expected_selected_event_cas_sha256": None,
+            "expected_selected_event_count": None,
+        }
+
+        self.assertEqual(
+            "",
+            poller._validate_cas_authority(
+                consumer_name=poller.WINDOWS_N6_CONSUMER_NAME,
+                **common,
+            ),
+        )
+        self.assertEqual(
+            "invalid_cas_authority",
+            poller._validate_cas_authority(
+                consumer_name="arbitrary_n6_consumer",
+                **common,
+            ),
+        )
+
     def test_internal_one_shot_defaults_to_atomic_batch_of_one_hundred(self):
         import run_n6_b_track_signal_projection_poller_once as poller
 

@@ -1399,6 +1399,9 @@ WINDOWS_MONITOR_TABLE_BY_ASSET = {
     "board": "user_monitor_board",
 }
 WINDOWS_N6_CONSUMER_NAME = "windows_n6_action_projection_v1"
+CAS_AUTHORITY_CONSUMER_NAMES = frozenset(
+    {CONSUMER_NAME, WINDOWS_N6_CONSUMER_NAME}
+)
 
 
 def windows_card_mutation_for_event(event_type: str) -> str:
@@ -1711,7 +1714,10 @@ def _validate_cas_authority(
     expected_selected_event_cas_sha256: str | None,
     expected_selected_event_count: int | None,
 ) -> str:
-    if consumer_name != CONSUMER_NAME or cas_authority_mode not in CAS_AUTHORITY_MODES:
+    if (
+        consumer_name not in CAS_AUTHORITY_CONSUMER_NAMES
+        or cas_authority_mode not in CAS_AUTHORITY_MODES
+    ):
         return "invalid_cas_authority"
     provided = (
         expected_checkpoint_cas_sha256,
