@@ -16,7 +16,12 @@ from types import MappingProxyType
 from typing import Any
 
 from ashare_v3.action.event_factory import build_n5_action_event
-from ashare_v3.events.models import EventEnvelope, N4_SOURCE_LAYER, N5_SOURCE_LAYER
+from ashare_v3.events.models import (
+    EventEnvelope,
+    N4_SOURCE_LAYER,
+    N5_SOURCE_LAYER,
+    validate_event_envelope,
+)
 from ashare_v3.market.windows_n3_action_metric import ActionConfirmationMetric
 
 
@@ -342,14 +347,28 @@ class WindowsN5EpisodePlanner:
                 or self._version
             ):
                 raise RuntimeError("restore requires a new empty planner")
-            for event in events:
+            seen_event_ids: set[str] = set()
+            for event in sorted(events, key=_restore_order_key):
+                validate_event_envelope(event)
+                if event.event_id in seen_event_ids:
+                    continue
+                seen_event_ids.add(event.event_id)
                 if event.asset_kind != self.asset_kind:
                     continue
                 if event.source_layer == N4_SOURCE_LAYER:
                     self._consume_trigger_event(event, emit=False)
                     continue
                 if event.source_layer == N5_SOURCE_LAYER:
+                    _validate_action_restore_event(
+                        event,
+                        asset_kind=self.asset_kind,
+                        action_run_id=self.action_run_id,
+                    )
                     self._restore_action_event(event)
+                    continue
+                raise ValueError(
+                    f"unsupported restore source_layer: {event.source_layer}"
+                )
             return self._snapshot()
 
     def _consume_trigger_event(
@@ -444,13 +463,21 @@ class WindowsN5EpisodePlanner:
         payload = dict(event.payload_json)
         entry_id = str(payload.get("episode_entry_event_id") or "")
         found = self._find_by_entry_id(entry_id)
-        if event.event_type == "ActionEligible" and found is not None:
+        if event.event_type == "ActionEligible":
+            if found is None:
+                raise ValueError(
+                    "ActionEligible restore requires TriggerMatched entry"
+                )
             key, episode = found
             self._active[key] = replace(
                 episode,
                 eligible_event_id=event.event_id,
             )
-        elif event.event_type == "ActionExecuted" and found is not None:
+        elif event.event_type == "ActionExecuted":
+            if found is None:
+                raise ValueError(
+                    "ActionExecuted restore requires TriggerMatched entry"
+                )
             market_proof = payload.get("final_market_proof")
             key, episode = found
             self._active[key] = replace(
@@ -468,6 +495,14 @@ class WindowsN5EpisodePlanner:
                     else None
                 ),
             )
+        elif event.event_type == "ActionBlocked":
+            if found is None:
+                raise ValueError(
+                    "ActionBlocked restore requires TriggerMatched entry"
+                )
+            key, _episode = found
+            del self._active[key]
+            self._mark_episode_closed(key)
         elif event.event_type == "ActionSkipped" and found is not None:
             key, _episode = found
             del self._active[key]
@@ -828,6 +863,41 @@ def _validate_trigger_event(event: EventEnvelope, asset_kind: str) -> None:
         raise ValueError("unsupported runtime signal_type")
     if (signal_type == "B_BUY") != (direction == "buy"):
         raise ValueError("direction and signal_type mismatch")
+
+
+def _validate_action_restore_event(
+    event: EventEnvelope,
+    *,
+    asset_kind: str,
+    action_run_id: str,
+) -> None:
+    if event.source_layer != N5_SOURCE_LAYER:
+        raise ValueError("N5 restore accepts only N5 action events")
+    if event.event_type not in {
+        "ActionEligible",
+        "ActionBlocked",
+        "ActionExecuted",
+        "ActionSkipped",
+    }:
+        raise ValueError(f"unsupported N5 event_type: {event.event_type}")
+    if event.asset_kind != asset_kind:
+        raise ValueError("N5 restore event asset_kind mismatch")
+    if event.source_run_id != action_run_id:
+        raise ValueError("N5 restore event action_run_id mismatch")
+    payload = event.payload_json
+    if str(payload.get("run_id") or "") != action_run_id:
+        raise ValueError("N5 restore payload run_id mismatch")
+    if not str(payload.get("episode_entry_event_id") or ""):
+        raise ValueError("N5 restore event requires episode_entry_event_id")
+
+
+def _restore_order_key(event: EventEnvelope) -> tuple[Any, ...]:
+    return (
+        event.event_time,
+        event.created_at,
+        0 if event.source_layer == N4_SOURCE_LAYER else 1,
+        event.event_id,
+    )
 
 
 def _matched_event_is_live(payload: Mapping[str, Any]) -> bool:
