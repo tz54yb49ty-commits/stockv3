@@ -42,7 +42,7 @@
 <th>资产</th><th>identity</th><th>代码/名称</th><th>方向</th><th>主触发周期</th><th>Action状态</th><th>确认状态</th><th>来源事件</th><th>episode</th><th>版本/时间</th>
 {% endif %}
 </tr></thead><tbody>
-{% for row in page.items %}<tr>
+{% for row in page['items'] %}<tr>
 {% if layer == 'n4' %}
 <td>{{ row.asset_kind }}</td><td>{{ row.identity }}</td><td>{{ row.code }}<br>{{ row.name }}</td><td>{{ row.direction or '—' }}<br>live={{ row.trigger_live }}</td><td>{{ row.live_status }}<br>fresh={{ row.fresh }}</td><td>{{ row.current_price }}<br>{{ row.cumulative_amount }}</td><td><pre>{{ row.source_transitions | tojson(indent=2) }}</pre></td><td><pre>{{ row.comparison_amounts | tojson(indent=2) }}</pre></td><td><pre>{{ row.realtime_virtual_amounts | tojson(indent=2) }}</pre></td><td><pre>{{ row.realtime_transitions | tojson(indent=2) }}</pre></td><td><pre>{{ row.rule_flags | tojson(indent=2) }}</pre></td><td>{{ row.n4_state_version }}<br>{{ row.updated_at }}</td>
 {% else %}

@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 import unittest
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -49,6 +51,26 @@ class WindowsN6RuntimeBoundaryTests(unittest.TestCase):
             self.assertEqual("runtime_offline", page["runtime_status"])
             self.assertEqual([], page["items"])
             self.assertIsNone(page["version"])
+
+    def test_offline_runtime_bridge_page_template_renders_without_500(self) -> None:
+        page = read_runtime_page(OfflineWindowsRuntimeBridge(), "n4", {})
+        environment = Environment(
+            loader=FileSystemLoader(SRC / "ashare_v3/web/templates"),
+            autoescape=select_autoescape(("html",)),
+        )
+
+        rendered = environment.get_template(
+            "n6_windows_runtime_states.html"
+        ).render(
+            title="N4实时内存状态",
+            layer="n4",
+            page=page,
+            filters={},
+            nav={"links": (), "active": "n4_runtime_states", "is_admin": True},
+        )
+
+        self.assertIn("runtime_offline", rendered)
+        self.assertIn("暂无当前内存状态", rendered)
 
     def test_status_models_are_windows_specific(self) -> None:
         postclose = windows_postclose_status(self.fixture)
