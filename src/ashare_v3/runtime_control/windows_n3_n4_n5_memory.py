@@ -1,10 +1,10 @@
 """Pure same-process orchestration for Windows N3, N4, and N5 memory state.
 
 The orchestrator consumes one immutable N3 cycle through the existing N4
-memory runtime, plans N4 lifecycle events, delivers them directly to the N5
-episode planners, and requests closed-minute confirmation metrics only for
-currently eligible identities. It owns no database, outbox, scheduler, or
-market client construction.
+memory runtime, delivers N4 lifecycle events through optional caller-owned N5
+transactions, and requests closed-minute confirmation metrics only for
+currently eligible identities. It constructs no database connection, outbox,
+scheduler, or market client.
 """
 
 from __future__ import annotations
@@ -19,13 +19,18 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from ashare_v3.action.windows_n5_delivery import N4OutboxDelivery
 from ashare_v3.action.windows_n5_episode import (
     EpisodeKey,
     N5EpisodeSnapshot,
     WindowsN5EpisodePlanner,
 )
+from ashare_v3.action.windows_n5_transaction import (
+    WindowsN5TransactionCoordinator,
+)
 from ashare_v3.events.models import EventEnvelope
 from ashare_v3.market.windows_n3_action_metric import (
+    ActionConfirmationMetric,
     ActionMetricBatch,
     BoardActionMetricProvider,
     IndexActionMetricProvider,
@@ -57,6 +62,20 @@ ASSET_KINDS = ("stock", "index", "board")
 
 class N4CycleRuntime(Protocol):
     def consume_cycle(self, cycle: object) -> N4MemoryCycleResult: ...
+
+
+class N4OutboxDeliveryResolver(Protocol):
+    def resolve(
+        self,
+        events: Sequence[EventEnvelope],
+    ) -> Sequence[N4OutboxDelivery]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class N5ChannelTransactionBoundary:
+    connection: Any
+    coordinator: WindowsN5TransactionCoordinator
+    n4_delivery_resolver: N4OutboxDeliveryResolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +197,9 @@ class _ChannelRuntime:
         action_run_id: str,
         n4_restore_events: Sequence[EventEnvelope] = (),
         n5_restore_events: Sequence[EventEnvelope] = (),
+        transaction_boundary: (
+            N5ChannelTransactionBoundary | None
+        ) = None,
     ) -> None:
         by_identity: dict[str, Any] = {}
         for request in requests:
@@ -210,6 +232,8 @@ class _ChannelRuntime:
             restored = self.n5.restore_from_outbox(n5_restore_events)
             self.n5_restored_episode_count = len(restored.active)
             self.n5_restored_version = restored.version
+        self.transaction_boundary = transaction_boundary
+        self._pending_n4_events: tuple[EventEnvelope, ...] = ()
         self.metric_watermarks: dict[EpisodeKey, int] = {}
         self.trigger_event_counts: Counter[str] = Counter()
         self.action_event_counts: Counter[str] = Counter()
@@ -226,8 +250,7 @@ class _ChannelRuntime:
         action_events: list[EventEnvelope] = []
         for event in trigger_batch.events:
             self.trigger_event_counts[event.event_type] += 1
-            planned = self.n5.consume_trigger_event(event)
-            action_events.extend(planned.events)
+        action_events.extend(self._deliver_trigger_events(trigger_batch.events))
 
         current = self.n5.read()
         self.metric_watermarks = {
@@ -303,8 +326,7 @@ class _ChannelRuntime:
                             f"metric_missing_from_batch:{request.identity_key}"
                         )
                         continue
-                    planned = self.n5.consume_metric(metric)
-                    action_events.extend(planned.events)
+                    action_events.extend(self._deliver_metric(metric))
                     if metric.metric_ready:
                         ready_count += 1
                         for key in needed_by_identity[request.identity_key]:
@@ -313,11 +335,8 @@ class _ChannelRuntime:
                         pending_count += 1
 
         if completed_minute_index >= MINUTES_PER_DAY:
-            expired = self.n5.expire(snapshot.generated_at)
-            action_events.extend(expired.events)
+            action_events.extend(self._deliver_expiry(snapshot.generated_at))
 
-        for event in action_events:
-            self.action_event_counts[event.event_type] += 1
         self.metric_ready_count += ready_count
         self.provider_error_count += len(provider_errors)
         return ChannelCycleResult(
@@ -331,6 +350,84 @@ class _ChannelRuntime:
             metric_pending_count=pending_count,
             provider_errors=tuple(provider_errors),
         )
+
+    def _deliver_trigger_events(
+        self,
+        events: Sequence[EventEnvelope],
+    ) -> tuple[EventEnvelope, ...]:
+        if self.transaction_boundary is None:
+            output: list[EventEnvelope] = []
+            for event in events:
+                batch = self.n5.consume_trigger_event(event)
+                output.extend(batch.events)
+            return self._record_action_events(output)
+
+        pending_by_id = {
+            event.event_id: event
+            for event in self._pending_n4_events
+        }
+        for event in events:
+            pending_by_id.setdefault(event.event_id, event)
+        self._pending_n4_events = tuple(pending_by_id.values())
+        if not self._pending_n4_events:
+            return ()
+
+        boundary = self.transaction_boundary
+        deliveries = tuple(
+            boundary.n4_delivery_resolver.resolve(
+                self._pending_n4_events
+            )
+        )
+        _validate_n4_deliveries(self._pending_n4_events, deliveries)
+        committed = boundary.coordinator.deliver_n4(
+            boundary.connection,
+            planner=self.n5,
+            deliveries=deliveries,
+        )
+        self.n5 = committed.planner
+        self._pending_n4_events = ()
+        return self._record_action_events(committed.output_events)
+
+    def _deliver_metric(
+        self,
+        metric: ActionConfirmationMetric,
+    ) -> tuple[EventEnvelope, ...]:
+        if self.transaction_boundary is None:
+            batch = self.n5.consume_metric(metric)
+            return self._record_action_events(batch.events)
+        boundary = self.transaction_boundary
+        committed = boundary.coordinator.deliver_metric(
+            boundary.connection,
+            planner=self.n5,
+            metric=metric,
+        )
+        self.n5 = committed.planner
+        return self._record_action_events(committed.output_events)
+
+    def _deliver_expiry(
+        self,
+        observed_at: datetime,
+    ) -> tuple[EventEnvelope, ...]:
+        if self.transaction_boundary is None:
+            batch = self.n5.expire(observed_at)
+            return self._record_action_events(batch.events)
+        boundary = self.transaction_boundary
+        committed = boundary.coordinator.deliver_expiry(
+            boundary.connection,
+            planner=self.n5,
+            observed_at=observed_at,
+        )
+        self.n5 = committed.planner
+        return self._record_action_events(committed.output_events)
+
+    def _record_action_events(
+        self,
+        events: Sequence[EventEnvelope],
+    ) -> tuple[EventEnvelope, ...]:
+        result = tuple(events)
+        for event in result:
+            self.action_event_counts[event.event_type] += 1
+        return result
 
 
 class WindowsN3N4N5MemoryOrchestrator:
@@ -357,6 +454,9 @@ class WindowsN3N4N5MemoryOrchestrator:
         n5_restore_events: (
             Mapping[str, Sequence[EventEnvelope]] | None
         ) = None,
+        n5_transaction_boundaries: (
+            Mapping[str, N5ChannelTransactionBoundary] | None
+        ) = None,
     ) -> None:
         if set(trigger_run_ids) != set(ASSET_KINDS):
             raise ValueError("trigger_run_ids must contain stock/index/board")
@@ -380,6 +480,27 @@ class WindowsN3N4N5MemoryOrchestrator:
             raise ValueError(
                 "n5_restore_events must contain stock/index/board"
             )
+        transaction_boundaries = (
+            {kind: None for kind in ASSET_KINDS}
+            if n5_transaction_boundaries is None
+            else dict(n5_transaction_boundaries)
+        )
+        if set(transaction_boundaries) != set(ASSET_KINDS):
+            raise ValueError(
+                "n5_transaction_boundaries must contain stock/index/board"
+            )
+        if (
+            n5_transaction_boundaries is not None
+            and any(value is None for value in transaction_boundaries.values())
+        ):
+            raise ValueError("all N5 transaction boundaries are required")
+        connections = [
+            boundary.connection
+            for boundary in transaction_boundaries.values()
+            if boundary is not None
+        ]
+        if len({id(connection) for connection in connections}) != len(connections):
+            raise ValueError("N5 transaction connections must be channel-local")
         self.n4_runtime = n4_runtime
         self._lock = RLock()
         self._generated_at: datetime | None = None
@@ -394,6 +515,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 action_run_id=action_run_ids["stock"],
                 n4_restore_events=restore_events["stock"],
                 n5_restore_events=n5_events["stock"],
+                transaction_boundary=transaction_boundaries["stock"],
             ),
             "index": _ChannelRuntime(
                 asset_kind="index",
@@ -404,6 +526,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 action_run_id=action_run_ids["index"],
                 n4_restore_events=restore_events["index"],
                 n5_restore_events=n5_events["index"],
+                transaction_boundary=transaction_boundaries["index"],
             ),
             "board": _ChannelRuntime(
                 asset_kind="board",
@@ -414,6 +537,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                 action_run_id=action_run_ids["board"],
                 n4_restore_events=restore_events["board"],
                 n5_restore_events=n5_events["board"],
+                transaction_boundary=transaction_boundaries["board"],
             ),
         }
 
@@ -512,3 +636,25 @@ def _shanghai_wall_time(value: datetime):
     if value.tzinfo is not None:
         value = value.astimezone(SHANGHAI_TIMEZONE)
     return value.time().replace(tzinfo=None)
+
+
+def _validate_n4_deliveries(
+    events: Sequence[EventEnvelope],
+    deliveries: Sequence[N4OutboxDelivery],
+) -> None:
+    expected = {event.event_id: event for event in events}
+    actual = {
+        delivery.event.event_id: delivery.event
+        for delivery in deliveries
+    }
+    if len(expected) != len(events):
+        raise ValueError("duplicate pending N4 event_id")
+    if len(actual) != len(deliveries):
+        raise ValueError("duplicate resolved N4 event_id")
+    if set(actual) != set(expected):
+        raise ValueError("resolved N4 deliveries do not match pending events")
+    for event_id, event in expected.items():
+        if actual[event_id] != event:
+            raise ValueError(
+                f"resolved N4 delivery payload mismatch: {event_id}"
+            )

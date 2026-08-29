@@ -6,8 +6,14 @@ from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import pytest
+
+from ashare_v3.action.windows_n5_delivery import N4OutboxDelivery
 from ashare_v3.action.windows_n5_episode import (
     WindowsN5EpisodePlanner,
+)
+from ashare_v3.action.windows_n5_transaction import (
+    WindowsN5TransactionCoordinator,
 )
 from ashare_v3.market.windows_n3_action_metric import (
     ActionMetricBatch,
@@ -23,6 +29,7 @@ from ashare_v3.market.windows_n3_snapshot import (
     StockSnapshotRequest,
 )
 from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
+    N5ChannelTransactionBoundary,
     WindowsN3N4N5MemoryOrchestrator,
 )
 from ashare_v3.trigger.windows_n4_memory import (
@@ -32,6 +39,7 @@ from ashare_v3.trigger.windows_n4_memory import (
     RuntimeStateSnapshot,
     StockRuntimeState,
 )
+from tests.test_windows_n5_transaction import _FakeConnection
 
 
 SOURCE_RUN_ID = "condition_layer_20260826_to_20260827_fixture"
@@ -256,6 +264,38 @@ class _FakeN4Runtime:
         return self.results.pop(0)
 
 
+class _DeliveryResolver:
+    def __init__(self, first_outbox_id: int) -> None:
+        self.next_outbox_id = first_outbox_id
+        self.outbox_ids: dict[str, int] = {}
+        self.calls: list[tuple[str, ...]] = []
+
+    def resolve(self, events):
+        values = tuple(events)
+        self.calls.append(tuple(event.event_id for event in values))
+        result = []
+        for event in values:
+            outbox_id = self.outbox_ids.get(event.event_id)
+            if outbox_id is None:
+                outbox_id = self.next_outbox_id
+                self.next_outbox_id += 1
+                self.outbox_ids[event.event_id] = outbox_id
+            result.append(N4OutboxDelivery(outbox_id, event))
+        return tuple(result)
+
+
+class _FailOnTransactionConnection(_FakeConnection):
+    def __init__(self, fail_on_transaction: int) -> None:
+        super().__init__()
+        self.fail_on_transaction = fail_on_transaction
+
+    def transaction(self):
+        self.fail_commit = (
+            self.begin_count + 1 == self.fail_on_transaction
+        )
+        return super().transaction()
+
+
 @dataclass
 class _MetricProvider:
     asset_kind: str
@@ -309,6 +349,7 @@ def _orchestrator(
     *,
     n4_restore_events=None,
     n5_restore_events=None,
+    n5_transaction_boundaries=None,
 ):
     requests = {}
     previous = {}
@@ -344,9 +385,37 @@ def _orchestrator(
             kind: f"action_{kind}_fixture"
             for kind in IDENTITIES
         },
+        n5_transaction_boundaries=n5_transaction_boundaries,
         n4_restore_events=n4_restore_events,
         n5_restore_events=n5_restore_events,
     )
+
+
+def _transaction_boundaries(connections=None):
+    values = (
+        {
+            kind: _FakeConnection()
+            for kind in IDENTITIES
+        }
+        if connections is None
+        else dict(connections)
+    )
+    resolvers = {
+        kind: _DeliveryResolver((index + 1) * 1000)
+        for index, kind in enumerate(IDENTITIES)
+    }
+    boundaries = {
+        kind: N5ChannelTransactionBoundary(
+            connection=values[kind],
+            coordinator=WindowsN5TransactionCoordinator(
+                consumer_name=f"windows_n5_{kind}_state_v1",
+                json_adapter=lambda value: value,
+            ),
+            n4_delivery_resolver=resolvers[kind],
+        )
+        for kind in IDENTITIES
+    }
+    return boundaries, values, resolvers
 
 
 def test_three_channels_deliver_trigger_and_closed_minute_once() -> None:
@@ -767,4 +836,256 @@ def test_restart_restores_three_n5_channels_before_first_cycle() -> None:
         assert all(
             event.event_type != "ActionEligible"
             for event in result.n5_events
+        )
+
+
+def test_three_channels_commit_n4_and_closed_minute_in_separate_transactions() -> None:
+    observed_at = _time("09:31:05")
+    boundaries, connections, resolvers = _transaction_boundaries()
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=observed_at,
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+        n5_transaction_boundaries=boundaries,
+    )
+
+    result = runtime.consume_cycle(
+        SimpleNamespace(generated_at=observed_at)
+    )
+
+    for kind in IDENTITIES:
+        channel = getattr(result, kind)
+        connection = connections[kind]
+        assert [event.event_type for event in channel.n5_events] == [
+            "ActionEligible",
+            "ActionExecuted",
+        ]
+        assert connection.begin_count == 2
+        assert connection.commit_count == 2
+        assert connection.rollback_count == 0
+        assert len(connection.fake_cursor.inbox) == 1
+        assert len(connection.fake_cursor.outbox) == 2
+        assert len(connection.fake_cursor.checkpoints) == 1
+        assert len(resolvers[kind].calls) == 1
+
+
+def test_n4_transaction_failure_keeps_planner_and_pending_event_for_retry() -> None:
+    first_at = _time("09:30:05")
+    second_at = _time("09:30:30")
+    connections = {
+        kind: _FakeConnection()
+        for kind in IDENTITIES
+    }
+    connections["stock"].fail_commit = True
+    boundaries, connections, resolvers = _transaction_boundaries(connections)
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=first_at,
+                    active=True,
+                ),
+                _memory_result(
+                    version=2,
+                    observed_at=second_at,
+                    active=True,
+                ),
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+        n5_transaction_boundaries=boundaries,
+    )
+
+    with pytest.raises(RuntimeError, match="fixture commit failure"):
+        runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
+
+    failed_summary = runtime.read_summary()
+    assert failed_summary.n5_state_counts["stock"] == 0
+    assert connections["stock"].fake_cursor.inbox == set()
+    assert connections["stock"].fake_cursor.outbox == set()
+    assert connections["stock"].fake_cursor.checkpoints == {}
+    assert connections["stock"].rollback_count == 1
+    assert len(resolvers["stock"].calls) == 1
+
+    connections["stock"].fail_commit = False
+    retry = runtime.consume_cycle(
+        SimpleNamespace(generated_at=second_at)
+    )
+
+    assert [event.event_type for event in retry.stock.n5_events] == [
+        "ActionEligible"
+    ]
+    assert len(retry.stock.n5_snapshot.active) == 1
+    assert connections["stock"].commit_count == 1
+    assert connections["stock"].rollback_count == 1
+    assert resolvers["stock"].calls[0] == resolvers["stock"].calls[1]
+
+
+def test_closed_minute_failure_keeps_eligible_planner_then_retries() -> None:
+    first_at = _time("09:31:05")
+    second_at = _time("09:31:30")
+    connections = {
+        "stock": _FailOnTransactionConnection(2),
+        "index": _FakeConnection(),
+        "board": _FakeConnection(),
+    }
+    boundaries, connections, _resolvers = _transaction_boundaries(connections)
+    providers = {
+        kind: _MetricProvider(kind)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=first_at,
+                    active=True,
+                ),
+                _memory_result(
+                    version=2,
+                    observed_at=second_at,
+                    active=True,
+                ),
+            ]
+        ),
+        providers,
+        n5_transaction_boundaries=boundaries,
+    )
+
+    with pytest.raises(RuntimeError, match="fixture commit failure"):
+        runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
+
+    stock_channel = runtime._channels["stock"]
+    active = next(iter(stock_channel.n5.read().active.values()))
+    assert active.action_state == "eligible"
+    assert stock_channel.metric_watermarks == {}
+    assert connections["stock"].commit_count == 1
+    assert connections["stock"].rollback_count == 1
+    assert runtime.read_summary().n5_action_event_counts["stock"] == {
+        "ActionEligible": 1,
+    }
+
+    retry = runtime.consume_cycle(
+        SimpleNamespace(generated_at=second_at)
+    )
+
+    assert [event.event_type for event in retry.stock.n5_events] == [
+        "ActionExecuted"
+    ]
+    executed = next(iter(retry.stock.n5_snapshot.active.values()))
+    assert executed.action_state == "executed"
+    assert providers["stock"].calls == [
+        ((IDENTITIES["stock"][0],), 1),
+        ((IDENTITIES["stock"][0],), 1),
+    ]
+    executed_writes = [
+        values
+        for sql, values in connections["stock"].fake_cursor.calls
+        if "INSERT INTO common_event_outbox" in sql
+        and values[1] == "ActionExecuted"
+    ]
+    assert len(executed_writes) == 2
+    assert executed_writes[0][0] == executed_writes[1][0]
+    assert executed_writes[0][9] == executed_writes[1][9]
+
+
+def test_market_close_action_skipped_uses_transaction_boundary() -> None:
+    observed_at = _time("15:00:05")
+    boundaries, connections, _resolvers = _transaction_boundaries()
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=observed_at,
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind, fail=True)
+            for kind in IDENTITIES
+        },
+        n5_transaction_boundaries=boundaries,
+    )
+
+    result = runtime.consume_cycle(
+        SimpleNamespace(generated_at=observed_at)
+    )
+
+    for kind in IDENTITIES:
+        channel = getattr(result, kind)
+        connection = connections[kind]
+        assert [event.event_type for event in channel.n5_events] == [
+            "ActionEligible",
+            "ActionSkipped",
+        ]
+        assert connection.begin_count == 2
+        assert connection.commit_count == 2
+        assert connection.rollback_count == 0
+        event_types = [
+            values[1]
+            for sql, values in connection.fake_cursor.calls
+            if "INSERT INTO common_event_outbox" in sql
+        ]
+        assert event_types == ["ActionEligible", "ActionSkipped"]
+
+
+def test_transaction_mode_requires_three_channel_local_connections() -> None:
+    observed_at = _time("09:30:05")
+    providers = {
+        kind: _MetricProvider(kind)
+        for kind in IDENTITIES
+    }
+    boundaries, _connections, _resolvers = _transaction_boundaries()
+
+    incomplete = dict(boundaries)
+    del incomplete["board"]
+    with pytest.raises(
+        ValueError,
+        match="must contain stock/index/board",
+    ):
+        _orchestrator(
+            _FakeN4Runtime([]),
+            providers,
+            n5_transaction_boundaries=incomplete,
+        )
+
+    shared = dict(boundaries)
+    shared["board"] = N5ChannelTransactionBoundary(
+        connection=shared["stock"].connection,
+        coordinator=shared["board"].coordinator,
+        n4_delivery_resolver=shared["board"].n4_delivery_resolver,
+    )
+    with pytest.raises(
+        ValueError,
+        match="connections must be channel-local",
+    ):
+        _orchestrator(
+            _FakeN4Runtime(
+                [
+                    _memory_result(
+                        version=1,
+                        observed_at=observed_at,
+                        active=True,
+                    )
+                ]
+            ),
+            providers,
+            n5_transaction_boundaries=shared,
         )
