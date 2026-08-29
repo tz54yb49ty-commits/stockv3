@@ -23,6 +23,7 @@ from ashare_v3.market.windows_n3_previous_day_context import (
     WindowsN3PreviousDayContextPreloader,
     context_run_id_for,
     context_record_sha256,
+    evaluate_context_coverage,
     make_context_record,
 )
 from ashare_v3.market.windows_n3_read_model import (
@@ -218,6 +219,34 @@ class Repository:
         )
 
 
+class CompletedRepository:
+    def begin_run(self, _model):
+        return "context-complete", True
+
+    def complete_run(self, _run, model):
+        return PreviousDayContextPreloadSummary(
+            result="N3_PREVIOUS_DAY_CONTEXT_COMPLETE",
+            context_run_id="context-complete",
+            source_condition_run_id=model.run_id,
+            source_trade_date=model.source_trade_date,
+            for_trade_date=model.for_trade_date,
+            expected_counts={"stock": 1, "index": 0, "board": 0},
+            terminal_counts={"stock": 1, "index": 0, "board": 0},
+            status_counts={"stock": {"ready": 1}, "index": {}, "board": {}},
+            inserted_count=0,
+            expected_total=1,
+            ready_total=1,
+            missing_total=0,
+            missing_ratio=Decimal(0),
+            coverage_gate="passed",
+        )
+
+
+class UnexpectedProvider:
+    def fetch_many(self, *_args, **_kwargs):
+        raise AssertionError("completed context must not request market data")
+
+
 class LoaderCursor:
     def __init__(self, state):
         self.state = state
@@ -349,7 +378,76 @@ class WindowsN3PreviousDayContextTest(unittest.TestCase):
         payload = summary_to_dict(summary)
         self.assertEqual(payload["expected_counts"], {"stock": 1})
         self.assertEqual(payload["status_counts"], {"stock": {"ready": 1}})
+        self.assertEqual(payload["missing_threshold"], 0.2)
+        self.assertEqual(payload["coverage_gate"], "passed")
         json.dumps(payload)
+
+    def test_current_6076_ready_and_6_missing_passes_global_gate(self):
+        coverage = evaluate_context_coverage(
+            {"stock": 5553, "index": 100, "board": 429},
+            {
+                "stock": {"ready": 5547, "partial": 5, "unavailable": 1},
+                "index": {"ready": 100},
+                "board": {"ready": 429},
+            },
+        )
+        self.assertEqual(coverage.expected_total, 6082)
+        self.assertEqual(coverage.ready_total, 6076)
+        self.assertEqual(coverage.missing_total, 6)
+        self.assertEqual(coverage.coverage_gate, "passed")
+
+    def test_global_missing_ratio_exactly_twenty_percent_passes(self):
+        coverage = evaluate_context_coverage(
+            {"stock": 5, "index": 0, "board": 0},
+            {"stock": {"ready": 4, "failed": 1}, "index": {}, "board": {}},
+        )
+        self.assertEqual(coverage.missing_ratio, Decimal("0.2"))
+        self.assertEqual(coverage.coverage_gate, "passed")
+
+    def test_global_missing_ratio_above_twenty_percent_blocks(self):
+        coverage = evaluate_context_coverage(
+            {"stock": 5, "index": 0, "board": 0},
+            {"stock": {"ready": 3, "failed": 2}, "index": {}, "board": {}},
+        )
+        self.assertEqual(coverage.missing_ratio, Decimal("0.4"))
+        self.assertEqual(coverage.coverage_gate, "blocked")
+
+    def test_completed_context_skips_all_market_providers_and_inserts_nothing(self):
+        identity = request(0)
+        row = N2ObjectRuntimeInput(
+            "stock",
+            identity.identity_key,
+            "SH",
+            identity.code,
+            identity.name,
+            {},
+            "20260828",
+        )
+        unavailable = UnexpectedProvider()
+        summary = WindowsN3PreviousDayContextPreloader(
+            repository=CompletedRepository(),
+            tq_stock=unavailable,
+            tq_index=unavailable,
+            tq_board=unavailable,
+            eltdx_stock=unavailable,
+            eltdx_index=unavailable,
+            eltdx_board=unavailable,
+        ).execute(
+            N3ActiveReadModel(
+                "condition-1",
+                "20260828",
+                "20260831",
+                (row,),
+                (),
+                (),
+            )
+        )
+        self.assertEqual(
+            summary.result,
+            "N3_PREVIOUS_DAY_CONTEXT_SKIPPED_COMPLETE",
+        )
+        self.assertEqual(summary.inserted_count, 0)
+        self.assertEqual(summary.coverage_gate, "passed")
 
     def test_unavailable_tq_marks_every_identity_for_eltdx(self):
         requested = (request(0), request(1))

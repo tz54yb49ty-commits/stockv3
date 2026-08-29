@@ -15,6 +15,7 @@ from typing import Any
 
 from ashare_v3.market.windows_n3_previous_day_context import (
     PostgresPreviousDayContextLoader,
+    evaluate_context_coverage,
 )
 from ashare_v3.market.windows_n3_read_model import (
     N3ActiveReadModel,
@@ -68,19 +69,11 @@ def validate_n4_readiness(
         raise RuntimeError(
             f"N3 context terminal counts do not match N2 objects: {terminal} != {expected}"
         )
-    usable = {
-        asset_kind: int(context.status_counts[asset_kind].get("ready", 0))
-        + int(context.status_counts[asset_kind].get("partial", 0))
-        for asset_kind in expected
-    }
-    unusable_channels = tuple(
-        asset_kind
-        for asset_kind, expected_count in expected.items()
-        if expected_count > 0 and usable[asset_kind] == 0
-    )
-    if unusable_channels:
+    coverage = evaluate_context_coverage(expected, context.status_counts)
+    if coverage.coverage_gate == "blocked":
         raise RuntimeError(
-            "N3 context has no usable rows for: " + ", ".join(unusable_channels)
+            "N3 context missing ratio exceeds threshold: "
+            f"{coverage.missing_ratio} > {coverage.missing_threshold}"
         )
 
     runtime = runtime_builder(model)
@@ -91,15 +84,28 @@ def validate_n4_readiness(
     }
     state_counts = {key: len(value.states) for key, value in snapshots.items()}
     versions = {key: int(value.version) for key, value in snapshots.items()}
-    statuses = {key: str(value.channel_status) for key, value in snapshots.items()}
+    statuses = {
+        key: (
+            "degraded"
+            if expected[key] > 0
+            and int(context.status_counts[key].get("ready", 0)) == 0
+            else str(value.channel_status)
+        )
+        for key, value in snapshots.items()
+    }
     if state_counts != expected:
         raise RuntimeError(
             f"N4 warming state counts do not match N2 objects: {state_counts} != {expected}"
         )
     if any(value != 0 for value in versions.values()):
         raise RuntimeError(f"N4 readiness must start at version zero: {versions}")
-    if any(value != "warming" for value in statuses.values()):
-        raise RuntimeError(f"N4 readiness must be warming: {statuses}")
+    invalid_statuses = {
+        key: value
+        for key, value in statuses.items()
+        if value not in {"warming", "degraded"}
+    }
+    if invalid_statuses:
+        raise RuntimeError(f"N4 readiness has invalid channel status: {statuses}")
     return N4Readiness(state_counts, versions, statuses, terminal)
 
 
@@ -154,6 +160,14 @@ def run_postclose_fastlane(
         context,
         runtime_builder=runtime_builder,
     )
+    coverage = evaluate_context_coverage(
+        {
+            "stock": len(model.stock),
+            "index": len(model.index),
+            "board": len(model.board),
+        },
+        context.status_counts,
+    )
 
     return {
         "result": "WINDOWS_POSTCLOSE_FASTLANE_PASS",
@@ -168,6 +182,12 @@ def run_postclose_fastlane(
         "n3_expected_counts": dict(n3.get("expected_counts") or {}),
         "n3_terminal_counts": dict(n3.get("terminal_counts") or readiness.context_terminal_counts),
         "n3_status_counts": dict(n3.get("status_counts") or context.status_counts),
+        "n3_expected_total": coverage.expected_total,
+        "n3_ready_total": coverage.ready_total,
+        "n3_missing_total": coverage.missing_total,
+        "n3_missing_ratio": float(coverage.missing_ratio),
+        "n3_missing_threshold": float(coverage.missing_threshold),
+        "n3_coverage_gate": coverage.coverage_gate,
         "n4_readiness": asdict(readiness),
         "n4_database_write_count": 0,
         "trigger_event_count": 0,

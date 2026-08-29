@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from scripts.run_windows_postclose_fastlane import run_postclose_fastlane
+from scripts.run_windows_postclose_fastlane import (
+    run_postclose_fastlane,
+    validate_n4_readiness,
+)
 
 
 SOURCE_DATE = "20260828"
@@ -30,9 +33,9 @@ def n3_result(result="N3_PREVIOUS_DAY_CONTEXT_COMPLETE"):
         "expected_counts": counts,
         "terminal_counts": counts,
         "status_counts": {
-            "stock": {"ready": 1, "unavailable": 1},
+            "stock": {"ready": 2},
             "index": {"ready": 1},
-            "board": {"partial": 1},
+            "board": {"ready": 1},
         },
     }
 
@@ -56,9 +59,9 @@ def context():
         for_trade_date=FOR_DATE,
         context_version=CONTEXT_VERSION,
         status_counts={
-            "stock": {"ready": 1, "unavailable": 1},
+            "stock": {"ready": 2},
             "index": {"ready": 1},
-            "board": {"partial": 1},
+            "board": {"ready": 1},
         },
     )
 
@@ -94,6 +97,11 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
         )
         self.assertEqual(result["result"], "WINDOWS_POSTCLOSE_FASTLANE_PASS")
         self.assertEqual(result["n3_context_version"], CONTEXT_VERSION)
+        self.assertEqual(result["n3_expected_total"], 4)
+        self.assertEqual(result["n3_ready_total"], 4)
+        self.assertEqual(result["n3_missing_total"], 0)
+        self.assertEqual(result["n3_missing_threshold"], 0.2)
+        self.assertEqual(result["n3_coverage_gate"], "passed")
         self.assertEqual(result["n4_readiness"]["state_counts"], {"stock": 2, "index": 1, "board": 1})
         self.assertEqual(result["n4_database_write_count"], 0)
         self.assertEqual(result["trigger_event_count"], 0)
@@ -170,14 +178,40 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
                 runtime_builder=runtime_builder,
             )
 
-    def test_all_failed_channel_blocks_false_postclose_pass(self):
+    def test_exactly_twenty_percent_missing_still_passes(self):
+        active_model = SimpleNamespace(
+            run_id=RUN_ID,
+            source_trade_date=SOURCE_DATE,
+            for_trade_date=FOR_DATE,
+            stock=tuple(object() for _ in range(5)),
+            index=(),
+            board=(),
+        )
+        loaded = SimpleNamespace(
+            source_condition_run_id=RUN_ID,
+            source_trade_date=SOURCE_DATE,
+            for_trade_date=FOR_DATE,
+            status_counts={
+                "stock": {"ready": 4, "failed": 1},
+                "index": {},
+                "board": {},
+            },
+        )
+        readiness = validate_n4_readiness(
+            active_model,
+            loaded,
+            runtime_builder=runtime_builder,
+        )
+        self.assertEqual(readiness.state_counts["stock"], 5)
+
+    def test_missing_ratio_above_twenty_percent_blocks(self):
         failed = context()
         failed.status_counts = {
-            "stock": {"failed": 2},
-            "index": {"failed": 1},
+            "stock": {"ready": 1, "failed": 1},
+            "index": {"ready": 1},
             "board": {"failed": 1},
         }
-        with self.assertRaisesRegex(RuntimeError, "no usable rows"):
+        with self.assertRaisesRegex(RuntimeError, "missing ratio exceeds threshold"):
             run_postclose_fastlane(
                 run_n2=lambda: n2_result(),
                 run_n3=lambda _date: n3_result(),
@@ -185,6 +219,37 @@ class WindowsPostcloseFastlaneTest(unittest.TestCase):
                 load_context=lambda _active: failed,
                 runtime_builder=runtime_builder,
             )
+
+    def test_small_missing_channel_is_degraded_without_global_block(self):
+        active_model = SimpleNamespace(
+            run_id=RUN_ID,
+            source_trade_date=SOURCE_DATE,
+            for_trade_date=FOR_DATE,
+            stock=tuple(object() for _ in range(10)),
+            index=(object(),),
+            board=(object(),),
+        )
+        loaded = SimpleNamespace(
+            source_condition_run_id=RUN_ID,
+            source_trade_date=SOURCE_DATE,
+            for_trade_date=FOR_DATE,
+            status_counts={
+                "stock": {"ready": 10},
+                "index": {"failed": 1},
+                "board": {"ready": 1},
+            },
+        )
+        readiness = validate_n4_readiness(
+            active_model,
+            loaded,
+            runtime_builder=runtime_builder,
+        )
+        self.assertEqual(
+            readiness.state_counts,
+            {"stock": 10, "index": 1, "board": 1},
+        )
+        self.assertEqual(readiness.channel_statuses["index"], "degraded")
+        self.assertEqual(readiness.channel_statuses["stock"], "warming")
 
 
 if __name__ == "__main__":

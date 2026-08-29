@@ -44,6 +44,12 @@ def summary_to_dict(summary) -> dict:
             key: dict(value) for key, value in summary.status_counts.items()
         },
         "inserted_count": summary.inserted_count,
+        "expected_total": summary.expected_total,
+        "ready_total": summary.ready_total,
+        "missing_total": summary.missing_total,
+        "missing_ratio": float(summary.missing_ratio),
+        "missing_threshold": float(summary.missing_threshold),
+        "coverage_gate": summary.coverage_gate,
     }
 
 

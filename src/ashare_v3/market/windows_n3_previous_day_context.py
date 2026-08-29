@@ -47,6 +47,7 @@ TERMINAL_CONTEXT_STATUSES = frozenset({"ready", "partial", "unavailable", "faile
 ASSET_KINDS = ("stock", "index", "board")
 DEFAULT_CONTEXT_VERSION = "v1"
 CONTEXT_VERSION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_MISSING_CONTEXT_RATIO = Decimal("0.20")
 
 
 RequestT = TypeVar(
@@ -475,6 +476,63 @@ class PreviousDayContextLoad:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextCoverage:
+    expected_total: int
+    ready_total: int
+    missing_total: int
+    missing_ratio: Decimal
+    missing_threshold: Decimal
+    coverage_gate: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "expected_total": self.expected_total,
+            "ready_total": self.ready_total,
+            "missing_total": self.missing_total,
+            "missing_ratio": float(self.missing_ratio),
+            "missing_threshold": float(self.missing_threshold),
+            "coverage_gate": self.coverage_gate,
+        }
+
+
+def evaluate_context_coverage(
+    expected_counts: Mapping[str, int],
+    status_counts: Mapping[str, Mapping[str, int]],
+    *,
+    missing_threshold: Decimal = MAX_MISSING_CONTEXT_RATIO,
+) -> ContextCoverage:
+    expected_total = sum(int(expected_counts.get(key, 0)) for key in ASSET_KINDS)
+    ready_total = sum(
+        int(status_counts.get(key, {}).get("ready", 0)) for key in ASSET_KINDS
+    )
+    missing_total = sum(
+        int(status_counts.get(key, {}).get(status, 0))
+        for key in ASSET_KINDS
+        for status in ("partial", "unavailable", "failed")
+    )
+    if ready_total + missing_total != expected_total:
+        raise RuntimeError(
+            "N3 context coverage counts do not match expected objects: "
+            f"{ready_total} + {missing_total} != {expected_total}"
+        )
+    missing_ratio = (
+        Decimal(missing_total) / Decimal(expected_total)
+        if expected_total
+        else Decimal(0)
+    )
+    return ContextCoverage(
+        expected_total=expected_total,
+        ready_total=ready_total,
+        missing_total=missing_total,
+        missing_ratio=missing_ratio,
+        missing_threshold=missing_threshold,
+        coverage_gate=(
+            "passed" if missing_ratio <= missing_threshold else "blocked"
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PreviousDayContextPreloadSummary:
     result: str
     context_run_id: str
@@ -486,6 +544,12 @@ class PreviousDayContextPreloadSummary:
     status_counts: Mapping[str, Mapping[str, int]]
     inserted_count: int
     context_version: str = DEFAULT_CONTEXT_VERSION
+    expected_total: int = 0
+    ready_total: int = 0
+    missing_total: int = 0
+    missing_ratio: Decimal = Decimal(0)
+    missing_threshold: Decimal = MAX_MISSING_CONTEXT_RATIO
+    coverage_gate: str = "passed"
 
 
 class PreviousDayContextWriteRepository(Protocol):
@@ -546,6 +610,12 @@ class WindowsN3PreviousDayContextPreloader:
                 status_counts=summary.status_counts,
                 inserted_count=0,
                 context_version=summary.context_version,
+                expected_total=summary.expected_total,
+                ready_total=summary.ready_total,
+                missing_total=summary.missing_total,
+                missing_ratio=summary.missing_ratio,
+                missing_threshold=summary.missing_threshold,
+                coverage_gate=summary.coverage_gate,
             )
 
         inserted = 0
@@ -671,6 +741,12 @@ class WindowsN3PreviousDayContextPreloader:
             status_counts=summary.status_counts,
             inserted_count=inserted,
             context_version=summary.context_version,
+            expected_total=summary.expected_total,
+            ready_total=summary.ready_total,
+            missing_total=summary.missing_total,
+            missing_ratio=summary.missing_ratio,
+            missing_threshold=summary.missing_threshold,
+            coverage_gate=summary.coverage_gate,
         )
 
 
@@ -894,12 +970,19 @@ class PostgresPreviousDayContextRepository:
                         f"N3 context terminal count mismatch for {asset_kind}: "
                         f"{terminal[asset_kind]} != {expected[asset_kind]}"
                     )
-                usable_count = counts.get("ready", 0) + counts.get("partial", 0)
-                if expected[asset_kind] > 0 and usable_count == 0:
-                    raise RuntimeError(
-                        f"N3 context has no usable rows for {asset_kind}"
-                    )
-            summary_json = json.dumps(status_counts, ensure_ascii=False, sort_keys=True)
+            coverage = evaluate_context_coverage(expected, status_counts)
+            if coverage.coverage_gate == "blocked":
+                raise RuntimeError(
+                    "N3 context missing ratio exceeds threshold: "
+                    f"{coverage.missing_ratio} > {coverage.missing_threshold}"
+                )
+            summary_payload = dict(status_counts)
+            summary_payload["_coverage"] = coverage.as_dict()
+            summary_json = json.dumps(
+                summary_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             cursor.execute(
                 """
                 UPDATE common_n3_previous_day_context_run
@@ -941,6 +1024,12 @@ class PostgresPreviousDayContextRepository:
             ),
             inserted_count=0,
             context_version=self.context_version,
+            expected_total=coverage.expected_total,
+            ready_total=coverage.ready_total,
+            missing_total=coverage.missing_total,
+            missing_ratio=coverage.missing_ratio,
+            missing_threshold=coverage.missing_threshold,
+            coverage_gate=coverage.coverage_gate,
         )
 
 
@@ -1053,6 +1142,12 @@ class PostgresPreviousDayContextLoader:
                         )
                 contexts[asset_kind] = ready
                 status_counts[asset_kind] = counts
+            coverage = evaluate_context_coverage(_expected_counts(model), status_counts)
+            if coverage.coverage_gate == "blocked":
+                raise RuntimeError(
+                    "N3 context missing ratio exceeds threshold: "
+                    f"{coverage.missing_ratio} > {coverage.missing_threshold}"
+                )
         return PreviousDayContextLoad(
             context_run_id=context_run_id,
             source_condition_run_id=model.run_id,
