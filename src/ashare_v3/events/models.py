@@ -143,6 +143,10 @@ N5_ACTION_STATES = ("eligible", "blocked", "executed", "skipped", "expired")
 N5_CONFIRMATION_STATUSES = ("pending", "passed", "failed", "expired")
 FORMAL_TRIGGER_PERIODS = ("Y", "Q", "M", "W", "D")
 HINT_CONDITION_KEYS = ("BUY_HINT", "SELL_HINT")
+WINDOWS_STATE_CONDITION_KEYS = ("BUY:STATE_V1", "SELL:STATE_V1")
+WINDOWS_STATE_RULE_POLICY_VERSION = (
+    "windows_n4_state_transition_v1"
+)
 
 
 class EventContractError(ValueError):
@@ -387,11 +391,20 @@ def validate_n5_trigger_fact_passthrough_payload(payload: Mapping[str, Any]) -> 
     condition_key = str(payload.get("condition_key") or payload.get("original_condition_key") or "")
     original_condition_key = str(payload.get("original_condition_key") or condition_key)
     is_hint = trigger_kind == "hint" and condition_key in HINT_CONDITION_KEYS and original_condition_key in HINT_CONDITION_KEYS
+    is_windows_state_v1 = (
+        trigger_kind == "trigger"
+        and condition_key in WINDOWS_STATE_CONDITION_KEYS
+        and original_condition_key == condition_key
+        and str(payload.get("rule_policy_version") or "")
+        == WINDOWS_STATE_RULE_POLICY_VERSION
+    )
     period_keys = {"triggered_periods", "all_trigger_periods", "primary_trigger_period"}
     missing = [
         key
         for key in N5_TRIGGER_FACT_PASSTHROUGH_PAYLOAD_KEYS
-        if key not in period_keys and not _payload_has_value(payload, key)
+        if key not in period_keys
+        and not (is_windows_state_v1 and key == "trigger_price")
+        and not _payload_has_value(payload, key)
     ]
     for key in period_keys:
         if key not in payload:
@@ -430,7 +443,15 @@ def validate_n5_trigger_fact_passthrough_payload(payload: Mapping[str, Any]) -> 
         return
     if trigger_kind == "trigger":
         if trigger_period == "30m":
-            raise EventContractError("N5 ordinary trigger fact passthrough must not use trigger_period=30m")
+            if not is_windows_state_v1:
+                raise EventContractError(
+                    "N5 ordinary trigger fact passthrough must not use trigger_period=30m"
+                )
+            if triggered_periods or all_trigger_periods or primary_trigger_period:
+                raise EventContractError(
+                    "N5 Windows STATE_V1 30m fallback requires empty formal trigger periods"
+                )
+            return
         if trigger_period not in FORMAL_TRIGGER_PERIODS:
             raise EventContractError("N5 ordinary trigger fact passthrough requires trigger_period Y/Q/M/W/D")
         if not triggered_periods or not all_trigger_periods or not primary_trigger_period:
