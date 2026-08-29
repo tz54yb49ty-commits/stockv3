@@ -32,6 +32,7 @@ from ashare_v3.market.windows_n3_action_metric import (
     StockActionMetricProvider,
 )
 from ashare_v3.market.windows_n3_minute_context import (
+    MINUTES_PER_DAY,
     PreviousDayMinuteContext,
     trading_elapsed_minutes,
 )
@@ -310,6 +311,10 @@ class _ChannelRuntime:
                             self.metric_watermarks[key] = completed_minute_index
                     else:
                         pending_count += 1
+
+        if completed_minute_index >= MINUTES_PER_DAY:
+            expired = self.n5.expire(snapshot.generated_at)
+            action_events.extend(expired.events)
 
         for event in action_events:
             self.action_event_counts[event.event_type] += 1

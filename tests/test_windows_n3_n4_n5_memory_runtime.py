@@ -488,6 +488,53 @@ def test_one_provider_failure_does_not_stop_other_channels() -> None:
     }
 
 
+def test_market_close_expires_pending_when_all_providers_fail() -> None:
+    observed_at = _time("15:00:05")
+    n4_runtime = _FakeN4Runtime(
+        [
+            _memory_result(
+                version=1,
+                observed_at=observed_at,
+                active=True,
+            )
+        ]
+    )
+    providers = {
+        kind: _MetricProvider(kind, fail=True)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(n4_runtime, providers)
+
+    result = runtime.consume_cycle(SimpleNamespace(generated_at=observed_at))
+
+    for kind in IDENTITIES:
+        channel = getattr(result, kind)
+        assert [event.event_type for event in channel.n5_events] == [
+            "ActionEligible",
+            "ActionSkipped",
+        ]
+        assert (
+            channel.n5_events[-1].payload_json["skipped_reason"]
+            == "window_expired"
+        )
+        assert channel.requested_identity_keys == (IDENTITIES[kind][0],)
+        assert len(channel.n5_snapshot.runtime_states) == 0
+        assert providers[kind].calls == [((IDENTITIES[kind][0],), 240)]
+
+    summary = runtime.read_summary().as_dict()
+    assert summary["completed_minute_index"] == 240
+    assert summary["n5_state_counts"] == {
+        "stock": 0,
+        "index": 0,
+        "board": 0,
+    }
+    for kind in IDENTITIES:
+        assert summary["n5_action_event_counts"][kind] == {
+            "ActionEligible": 1,
+            "ActionSkipped": 1,
+        }
+
+
 def test_stale_n4_evidence_keeps_episode_pending_without_metric_request() -> None:
     first_at = _time("09:30:05")
     second_at = _time("09:31:05")
