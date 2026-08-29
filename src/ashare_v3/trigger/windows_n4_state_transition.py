@@ -373,6 +373,24 @@ class WindowsN4StateTransitionPlanner:
             "name": runtime_state.name,
             "n4_state_version": runtime_snapshot.version,
             "source_n3_version": runtime_state.source_n3_version,
+            "source_transitions": dict(runtime_state.source_transitions),
+            "source_amounts": _decimal_mapping_payload(
+                runtime_state.source_amounts
+            ),
+            "comparison_amounts": _decimal_mapping_payload(
+                runtime_state.comparison_amounts
+            ),
+            "realtime_transitions": dict(runtime_state.realtime_transitions),
+            "realtime_virtual_amounts": _decimal_mapping_payload(
+                runtime_state.realtime_virtual_amounts
+            ),
+            "current_price": _decimal_payload(runtime_state.current_price),
+            "cumulative_amount": _decimal_payload(
+                runtime_state.cumulative_amount
+            ),
+            "provider": runtime_state.provider,
+            "live_status": runtime_state.live_status,
+            "fresh": runtime_state.fresh,
             "effective_time": event_time.isoformat(),
             "data_quality_status": "ready",
             "source_w_average_amount": (
@@ -589,6 +607,19 @@ def _known_equal(value: object, expected: str) -> RuleValue:
 def _known_not_equal(value: object, expected: str) -> RuleValue:
     equal = _known_equal(value, expected)
     return None if equal is None else not equal
+
+
+def _decimal_payload(value: Decimal | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _decimal_mapping_payload(
+    values: Mapping[str, Decimal | None],
+) -> dict[str, str | None]:
+    return {
+        period: _decimal_payload(value)
+        for period, value in values.items()
+    }
 
 
 def _decimal_compare(

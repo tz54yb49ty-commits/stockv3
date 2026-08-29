@@ -2,13 +2,27 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from types import MappingProxyType
+
+import pytest
 
 from ashare_v3.action.windows_n5_episode import WindowsN5EpisodePlanner
 from ashare_v3.market.windows_n3_action_metric import (
     build_action_confirmation_metric,
 )
+from ashare_v3.trigger.windows_n4_memory import (
+    BoardRuntimeState,
+    IndexRuntimeState,
+    RuntimeStateSnapshot,
+    StockRuntimeState,
+)
+from ashare_v3.trigger.windows_n4_state_transition import (
+    WindowsN4StateTransitionPlanner,
+)
 from tests.test_windows_n3_action_metric import _bars, _previous
 from tests.test_windows_n4_state_transition import (
+    SOURCE_RUN_ID,
+    TRIGGER_RUN_ID,
     _planner as n4_planner,
     _snapshot,
     _state,
@@ -32,6 +46,7 @@ def test_actual_n4_ab_lifecycle_drives_n5_episode_lifecycle() -> None:
     ]
     n4_event_types: list[str] = []
     n5_events = []
+    n5_snapshots = []
     for version, (label, live_d, live_w, live_30m) in enumerate(sequence, 1):
         state = _state(
             version=version,
@@ -45,7 +60,9 @@ def test_actual_n4_ab_lifecycle_drives_n5_episode_lifecycle() -> None:
         n4_batch = n4.consume(_snapshot(version, state))
         n4_event_types.extend(event.event_type for event in n4_batch.events)
         for event in n4_batch.events:
-            n5_events.extend(n5.consume_trigger_event(event).events)
+            n5_batch = n5.consume_trigger_event(event)
+            n5_events.extend(n5_batch.events)
+            n5_snapshots.append(n5_batch.snapshot)
 
     assert n4_event_types == [
         "TriggerMatched",
@@ -64,9 +81,94 @@ def test_actual_n4_ab_lifecycle_drives_n5_episode_lifecycle() -> None:
         n5_events[0].payload_json["episode_entry_event_id"]
         != n5_events[2].payload_json["episode_entry_event_id"]
     )
+    changed_runtime = next(iter(n5_snapshots[1].runtime_states.values()))
+    assert changed_runtime.realtime_transitions["30m"] == "volume_up"
+    assert changed_runtime.realtime_virtual_amounts["W"] == Decimal("10.90")
+    assert changed_runtime.n4_current_price == Decimal("10.00")
+    assert changed_runtime.n4_cumulative_amount == Decimal("100000000")
+    assert changed_runtime.provider == "fixture"
+    assert changed_runtime.live_status == "available"
+    assert changed_runtime.fresh is True
     final_episode = tuple(n5.read().active.values())[0]
     assert final_episode.action_state == "eligible"
     assert final_episode.trigger_live is True
+
+
+@pytest.mark.parametrize(
+    ("state_type", "asset_kind", "identity_key", "exchange", "code"),
+    [
+        (StockRuntimeState, "stock", "stock:SZ:000001", "SZ", "000001"),
+        (IndexRuntimeState, "index", "index:SH:000001", "SH", "000001"),
+        (BoardRuntimeState, "board", "board:SH:881001", "SH", "881001"),
+    ],
+)
+def test_actual_n4_event_builds_complete_n5_runtime_state_for_all_channels(
+    state_type: type[StockRuntimeState]
+    | type[IndexRuntimeState]
+    | type[BoardRuntimeState],
+    asset_kind: str,
+    identity_key: str,
+    exchange: str,
+    code: str,
+) -> None:
+    stock = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    values = {
+        field: getattr(stock, field)
+        for field in stock.__dataclass_fields__
+    }
+    values.update(
+        asset_kind=asset_kind,
+        identity_key=identity_key,
+        exchange=exchange,
+        code=code,
+    )
+    state = state_type(**values)
+    n4_snapshot = RuntimeStateSnapshot(
+        source_condition_run_id=SOURCE_RUN_ID,
+        source_trade_date="20260826",
+        for_trade_date="20260827",
+        version=1,
+        source_n3_version=1,
+        generated_at=_time("09:35"),
+        channel_status="ready",
+        states=MappingProxyType({identity_key: state}),
+    )
+    n4 = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=TRIGGER_RUN_ID,
+    )
+    trigger_event = n4.consume(n4_snapshot).events[0]
+    n5 = WindowsN5EpisodePlanner(
+        asset_kind=asset_kind,
+        action_run_id=f"windows_n5_{asset_kind}_runtime_state_fixture",
+    )
+
+    n5_snapshot = n5.consume_trigger_event(trigger_event).snapshot
+    runtime = next(iter(n5_snapshot.runtime_states.values()))
+
+    assert runtime.key.identity_key == identity_key
+    assert runtime.code == code
+    assert runtime.source_condition_run_id == SOURCE_RUN_ID
+    assert runtime.source_trade_date == "20260826"
+    assert runtime.for_trade_date == "20260827"
+    assert runtime.source_transitions == state.source_transitions
+    assert runtime.source_amounts == state.source_amounts
+    assert runtime.comparison_amounts == state.comparison_amounts
+    assert runtime.realtime_transitions == state.realtime_transitions
+    assert runtime.realtime_virtual_amounts == state.realtime_virtual_amounts
+    assert runtime.n4_current_price == state.current_price
+    assert runtime.n4_cumulative_amount == state.cumulative_amount
+    assert runtime.provider == state.provider
+    assert runtime.live_status == state.live_status
+    assert runtime.fresh is state.fresh
 
 
 def test_actual_n3_buy_metric_executes_actual_n4_match() -> None:

@@ -169,6 +169,16 @@ def test_buy_ab_lifecycle_and_new_episode() -> None:
     assert first.payload_json["trigger_period"] == "D"
     assert first.payload_json["episode_entry_event_id"] == first.event_id
     assert first.payload_json["source_w_average_amount"] == "10.00"
+    assert first.payload_json["source_transitions"]["D"] == "low_volume_down"
+    assert first.payload_json["source_amounts"]["W"] == "10.00"
+    assert first.payload_json["comparison_amounts"]["W"] == "10.00"
+    assert first.payload_json["realtime_transitions"]["D"] == "volume_up"
+    assert first.payload_json["realtime_virtual_amounts"]["W"] == "10.80"
+    assert first.payload_json["current_price"] == "10.00"
+    assert first.payload_json["cumulative_amount"] == "100000000"
+    assert first.payload_json["provider"] == "fixture"
+    assert first.payload_json["live_status"] == "available"
+    assert first.payload_json["fresh"] is True
     assert first.payload_json["rule_flags"] == {
         "A": True,
         "B": False,
@@ -180,8 +190,19 @@ def test_buy_ab_lifecycle_and_new_episode() -> None:
     assert [event.event_type for event in batches[2].events] == [
         "TriggerStateChanged"
     ]
-    assert batches[2].events[0].payload_json["trigger_live"] is True
-    assert batches[2].events[0].payload_json["activation_sources"] == ["D", "B"]
+    changed_payload = batches[2].events[0].payload_json
+    assert changed_payload["trigger_live"] is True
+    assert changed_payload["activation_sources"] == ["D", "B"]
+    assert changed_payload["source_transitions"]["D"] == "low_volume_down"
+    assert changed_payload["source_amounts"]["W"] == "10.00"
+    assert changed_payload["comparison_amounts"]["W"] == "10.00"
+    assert changed_payload["realtime_transitions"]["30m"] == "volume_up"
+    assert changed_payload["realtime_virtual_amounts"]["W"] == "10.90"
+    assert changed_payload["current_price"] == "10.00"
+    assert changed_payload["cumulative_amount"] == "100000000"
+    assert changed_payload["provider"] == "fixture"
+    assert changed_payload["live_status"] == "available"
+    assert changed_payload["fresh"] is True
 
     assert [event.event_type for event in batches[3].events] == [
         "TriggerStateChanged"
@@ -300,12 +321,15 @@ def test_ac_use_previous_complete_week_average_not_current_week_seed() -> None:
 @pytest.mark.parametrize(
     ("state_type", "asset_kind", "identity_key", "exchange", "code"),
     [
+        (StockRuntimeState, "stock", "stock:SZ:000001", "SZ", "000001"),
         (IndexRuntimeState, "index", "index:SH:000001", "SH", "000001"),
         (BoardRuntimeState, "board", "board:SH:881001", "SH", "881001"),
     ],
 )
-def test_index_and_board_channels_share_the_same_pure_planner(
-    state_type: type[IndexRuntimeState] | type[BoardRuntimeState],
+def test_all_channels_emit_complete_runtime_context(
+    state_type: type[StockRuntimeState]
+    | type[IndexRuntimeState]
+    | type[BoardRuntimeState],
     asset_kind: str,
     identity_key: str,
     exchange: str,
@@ -347,6 +371,26 @@ def test_index_and_board_channels_share_the_same_pure_planner(
     )
     batch = planner.consume(snapshot)
     assert batch.events[0].asset_kind == asset_kind
+    payload = batch.events[0].payload_json
+    assert payload["source_transitions"] == dict(state.source_transitions)
+    assert payload["source_amounts"] == {
+        period: str(amount) if amount is not None else None
+        for period, amount in state.source_amounts.items()
+    }
+    assert payload["comparison_amounts"] == {
+        period: str(amount) if amount is not None else None
+        for period, amount in state.comparison_amounts.items()
+    }
+    assert payload["realtime_transitions"] == dict(state.realtime_transitions)
+    assert payload["realtime_virtual_amounts"] == {
+        period: str(amount) if amount is not None else None
+        for period, amount in state.realtime_virtual_amounts.items()
+    }
+    assert payload["current_price"] == "10.00"
+    assert payload["cumulative_amount"] == "100000000"
+    assert payload["provider"] == "fixture"
+    assert payload["live_status"] == "available"
+    assert payload["fresh"] is True
     assert batch.snapshot.states[identity_key].buy.trigger_live is True
 
 
