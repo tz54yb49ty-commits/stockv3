@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -41,26 +42,70 @@ class _FakeCursor:
     def __init__(self) -> None:
         self.event_ids: set[str] = set()
         self.dedup_keys: set[str] = set()
+        self.rows: dict[str, tuple[int, tuple[object, ...]]] = {}
+        self.dedup_event_ids: dict[tuple[str, ...], str] = {}
+        self.next_outbox_id = 1
         self.calls: list[tuple[str, tuple[object, ...]]] = []
-        self._returned = None
+        self._returned: list[tuple[object, ...]] = []
 
     def execute(self, query, params) -> None:
         sql = " ".join(str(query).split())
         values = tuple(params)
         self.calls.append((sql, values))
-        self._returned = None
-        assert "INSERT INTO common_event_outbox" in sql
-        assert "ON CONFLICT DO NOTHING" in sql
-        event_id = str(values[0])
-        dedup_key = str(values[9])
-        if event_id in self.event_ids or dedup_key in self.dedup_keys:
+        self._returned = []
+        if "INSERT INTO common_event_outbox" in sql:
+            assert "ON CONFLICT DO NOTHING" in sql
+            event_id = str(values[0])
+            dedup_key = str(values[9])
+            dedup_identity = (
+                str(values[7]),
+                str(values[1]),
+                str(values[8]),
+                dedup_key,
+                str(values[2]),
+            )
+            if (
+                event_id in self.event_ids
+                or dedup_identity in self.dedup_event_ids
+            ):
+                return
+            outbox_id = self.next_outbox_id
+            self.next_outbox_id += 1
+            self.event_ids.add(event_id)
+            self.dedup_keys.add(dedup_key)
+            self.rows[event_id] = (outbox_id, values)
+            self.dedup_event_ids[dedup_identity] = event_id
+            self._returned = [(outbox_id, *values)]
             return
-        self.event_ids.add(event_id)
-        self.dedup_keys.add(dedup_key)
-        self._returned = (event_id,)
+        assert "FROM common_event_outbox" in sql
+        event_id, layer, event_type, run_id, dedup_key, schema = values
+        dedup_identity = tuple(
+            str(value)
+            for value in (
+                layer,
+                event_type,
+                run_id,
+                dedup_key,
+                schema,
+            )
+        )
+        matching_event_ids = {str(event_id)} & set(self.rows)
+        dedup_event_id = self.dedup_event_ids.get(dedup_identity)
+        if dedup_event_id is not None:
+            matching_event_ids.add(dedup_event_id)
+        self._returned = [
+            (self.rows[key][0], *self.rows[key][1])
+            for key in sorted(
+                matching_event_ids,
+                key=lambda item: self.rows[item][0],
+            )[:2]
+        ]
 
     def fetchone(self):
-        return self._returned
+        return self._returned[0] if self._returned else None
+
+    def fetchall(self):
+        return list(self._returned)
 
 
 def _runtime_snapshot(
@@ -136,7 +181,10 @@ def test_candidate_persists_idempotently_before_postcommit_adoption(
 
     assert first.outbox_insert_count == 1
     assert first.database_write_count == 1
+    assert first.outbox_rows[0].outbox_id == 1
+    assert first.outbox_rows[0].event == plan.output_events[0]
     assert replay.database_write_count == 0
+    assert replay.outbox_rows == first.outbox_rows
     with pytest.raises(RuntimeError, match="no N4 snapshot"):
         planner.read()
 
@@ -206,6 +254,45 @@ def test_failed_persistence_discards_candidate_and_retry_is_stable() -> None:
     assert planner.read().source_n4_version == 1
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("dedup_key", "windows-n4-conflicting-dedup"),
+        ("event_id", "windows-n4-conflicting-event-id"),
+    ),
+)
+def test_idempotent_conflict_must_resolve_the_exact_planned_event(
+    field: str,
+    value: str,
+) -> None:
+    planner = WindowsN4StateTransitionPlanner(
+        asset_kind="stock",
+        trigger_run_id="windows_n4_delivery_stock",
+    )
+    plan = plan_windows_n4_delivery(planner, _runtime_snapshot("stock"))
+    cursor = _FakeCursor()
+    persist_windows_n4_delivery(
+        cursor,
+        plan=plan,
+        json_adapter=lambda payload: payload,
+    )
+    conflicting_event = replace(plan.output_events[0], **{field: value})
+    conflicting_plan = replace(
+        plan,
+        output_events=(conflicting_event,),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="authoritative N4 outbox row does not match planned event",
+    ):
+        persist_windows_n4_delivery(
+            cursor,
+            plan=conflicting_plan,
+            json_adapter=lambda payload: payload,
+        )
+
+
 def test_delivery_module_never_connects_commits_or_enters_other_layers() -> None:
     source = Path(
         "src/ashare_v3/trigger/windows_n4_delivery.py"
@@ -216,6 +303,7 @@ def test_delivery_module_never_connects_commits_or_enters_other_layers() -> None
         ".commit(",
         "eltdx",
         "n5_action",
+        "ashare_v3.action",
         "n6_user",
         "register-scheduledtask",
     ):

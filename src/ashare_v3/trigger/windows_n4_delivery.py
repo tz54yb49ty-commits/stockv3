@@ -69,10 +69,38 @@ class WindowsN4DeliveryPlan:
 @dataclass(frozen=True, slots=True)
 class WindowsN4PersistenceResult:
     outbox_insert_count: int
+    outbox_rows: tuple[WindowsN4CommittedOutboxRow, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "outbox_rows", tuple(self.outbox_rows))
+        if not 0 <= self.outbox_insert_count <= len(self.outbox_rows):
+            raise ValueError("invalid N4 outbox insert count")
 
     @property
     def database_write_count(self) -> int:
         return self.outbox_insert_count
+
+
+@dataclass(frozen=True, slots=True)
+class WindowsN4CommittedOutboxRow:
+    """One authoritative N4 row resolved from common_event_outbox."""
+
+    outbox_id: int
+    event: EventEnvelope
+
+    def __post_init__(self) -> None:
+        if self.outbox_id <= 0:
+            raise ValueError("outbox_id must be positive")
+        validate_event_envelope(self.event)
+        if self.event.source_layer != N4_SOURCE_LAYER:
+            raise ValueError(
+                "committed N4 row must use source_layer=N4_trigger"
+            )
+        if self.event.event_type not in N4_DELIVERY_EVENT_TYPES:
+            raise ValueError(
+                "committed N4 row has unsupported event_type: "
+                f"{self.event.event_type}"
+            )
 
 
 def plan_windows_n4_delivery(
@@ -99,23 +127,28 @@ def persist_windows_n4_delivery(
     """Insert N4 events idempotently without committing the transaction."""
 
     adapt_json = json_adapter or _default_json_adapter()
-    outbox_count = sum(
-        _insert_outbox_once(
+    outbox_rows: list[WindowsN4CommittedOutboxRow] = []
+    outbox_count = 0
+    for event in plan.output_events:
+        outbox_row, inserted = _persist_outbox_once(
             cursor,
             event=event,
             json_adapter=adapt_json,
         )
-        for event in plan.output_events
+        outbox_rows.append(outbox_row)
+        outbox_count += int(inserted)
+    return WindowsN4PersistenceResult(
+        outbox_insert_count=outbox_count,
+        outbox_rows=tuple(outbox_rows),
     )
-    return WindowsN4PersistenceResult(outbox_insert_count=outbox_count)
 
 
-def _insert_outbox_once(
+def _persist_outbox_once(
     cursor: Any,
     *,
     event: EventEnvelope,
     json_adapter: JsonAdapter,
-) -> int:
+) -> tuple[WindowsN4CommittedOutboxRow, bool]:
     validate_event_envelope(event)
     if event.source_layer != N4_SOURCE_LAYER:
         raise ValueError("N4 persistence accepts only N4 source events")
@@ -130,7 +163,7 @@ def _insert_outbox_once(
         INSERT INTO common_event_outbox ({", ".join(OUTBOX_COLUMNS)})
         VALUES ({placeholders})
         ON CONFLICT DO NOTHING
-        RETURNING event_id
+        RETURNING outbox_id, {", ".join(OUTBOX_COLUMNS)}
         """,
         tuple(
             json_adapter(record[column])
@@ -139,7 +172,63 @@ def _insert_outbox_once(
             for column in OUTBOX_COLUMNS
         ),
     )
-    return int(cursor.fetchone() is not None)
+    inserted_row = cursor.fetchone()
+    if inserted_row is not None:
+        return _authoritative_outbox_row(inserted_row, event=event), True
+
+    cursor.execute(
+        f"""
+        SELECT outbox_id, {", ".join(OUTBOX_COLUMNS)}
+        FROM common_event_outbox
+        WHERE event_id = %s
+           OR (
+                source_layer = %s
+                AND event_type = %s
+                AND source_run_id = %s
+                AND dedup_key = %s
+                AND event_schema_version = %s
+           )
+        ORDER BY outbox_id
+        LIMIT 2
+        """,
+        (
+            event.event_id,
+            event.source_layer,
+            event.event_type,
+            event.source_run_id,
+            event.dedup_key,
+            event.event_schema_version,
+        ),
+    )
+    resolved_rows = tuple(cursor.fetchall())
+    if len(resolved_rows) != 1:
+        raise RuntimeError(
+            "N4 idempotent conflict did not resolve exactly one "
+            "authoritative outbox row"
+        )
+    return _authoritative_outbox_row(resolved_rows[0], event=event), False
+
+
+def _authoritative_outbox_row(
+    row: Any,
+    *,
+    event: EventEnvelope,
+) -> WindowsN4CommittedOutboxRow:
+    values = tuple(row)
+    if len(values) != len(OUTBOX_COLUMNS) + 1:
+        raise RuntimeError("invalid authoritative N4 outbox row shape")
+    outbox_id = int(values[0])
+    record = dict(zip(OUTBOX_COLUMNS, values[1:]))
+    authoritative_event = EventEnvelope(**record)
+    validate_event_envelope(authoritative_event)
+    if authoritative_event != event:
+        raise RuntimeError(
+            "authoritative N4 outbox row does not match planned event"
+        )
+    return WindowsN4CommittedOutboxRow(
+        outbox_id=outbox_id,
+        event=authoritative_event,
+    )
 
 
 def _default_json_adapter() -> JsonAdapter:
