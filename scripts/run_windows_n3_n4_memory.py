@@ -46,6 +46,9 @@ from ashare_v3.market.windows_n3_snapshot import (
 from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
     WindowsN3N4N5MemoryOrchestrator,
 )
+from ashare_v3.runtime_control.windows_n4_outbox_restore import (
+    WindowsN4OutboxReadOnlyRepository,
+)
 from ashare_v3.trigger.windows_n4_memory import build_windows_n4_runtime
 
 
@@ -89,6 +92,7 @@ def main() -> int:
     from eltdx import TdxClient
 
     repository = WindowsN3ReadOnlyRepository(args.dsn)
+    n4_outbox_repository = WindowsN4OutboxReadOnlyRepository(args.dsn)
     context_loader = _CapturingContextLoader(
         PostgresPreviousDayContextLoader(
             args.dsn,
@@ -116,6 +120,11 @@ def main() -> int:
                 raise RuntimeError(
                     "N3 previous context was not loaded for the active N2 run"
                 )
+            n4_restore = n4_outbox_repository.load(
+                source_condition_run_id=model.run_id,
+                for_trade_date=model.for_trade_date,
+            )
+            integration_holder["n4_restore"] = n4_restore
             trigger_run_ids = {
                 kind: (
                     f"windows_n4_state_transition_"
@@ -131,7 +140,10 @@ def main() -> int:
                 for kind in ("stock", "index", "board")
             }
             integration_holder["runtime"] = WindowsN3N4N5MemoryOrchestrator(
-                n4_runtime=build_windows_n4_runtime(model),
+                n4_runtime=build_windows_n4_runtime(
+                    model,
+                    initial_versions=n4_restore.last_versions,
+                ),
                 stock_requests=model.stock_requests(),
                 index_requests=model.index_requests(),
                 board_requests=model.board_requests(),
@@ -143,6 +155,7 @@ def main() -> int:
                 board_metric_provider=EltdxBoardActionMetricProvider(board_client),
                 trigger_run_ids=trigger_run_ids,
                 action_run_ids=action_run_ids,
+                n4_restore_events=n4_restore.events,
             )
             return WindowsN3MemoryRuntime(
                 StockSnapshotChannel(
@@ -219,6 +232,22 @@ def main() -> int:
             "stock": n4_memory.stock.version,
             "index": n4_memory.index.version,
             "board": n4_memory.board.version,
+        }
+    n4_restore = integration_holder.get("n4_restore")
+    if n4_restore is not None:
+        payload["n4_restored_event_counts"] = {
+            kind: len(n4_restore.events[kind])
+            for kind in ("stock", "index", "board")
+        }
+        payload["n4_restored_versions"] = dict(
+            n4_restore.last_versions
+        )
+    else:
+        payload["n4_restored_event_counts"] = {
+            kind: 0 for kind in ("stock", "index", "board")
+        }
+        payload["n4_restored_versions"] = {
+            kind: 0 for kind in ("stock", "index", "board")
         }
     integration = integration_holder.get("runtime")
     if integration is not None:

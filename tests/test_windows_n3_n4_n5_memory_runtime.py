@@ -300,7 +300,12 @@ class _MetricProvider:
         )
 
 
-def _orchestrator(n4_runtime, providers):
+def _orchestrator(
+    n4_runtime,
+    providers,
+    *,
+    n4_restore_events=None,
+):
     requests = {}
     previous = {}
     for kind in IDENTITIES:
@@ -335,6 +340,7 @@ def _orchestrator(n4_runtime, providers):
             kind: f"action_{kind}_fixture"
             for kind in IDENTITIES
         },
+        n4_restore_events=n4_restore_events,
     )
 
 
@@ -528,4 +534,98 @@ def test_0915_entry_uses_same_process_orchestrator() -> None:
     assert "WindowsN3N4N5MemoryOrchestrator" in source
     assert "EltdxStockActionMetricProvider" in source
     assert "n3_n4_n5_memory" in source
+    assert "WindowsN4OutboxReadOnlyRepository" in source
+    assert "initial_versions=n4_restore.last_versions" in source
+    assert "n4_restore_events=n4_restore.events" in source
     assert "event_persistence_count" in source
+
+
+
+def test_restart_restores_three_n4_channels_before_first_cycle() -> None:
+    matched_at = _time("09:35:05")
+    providers = {
+        kind: _MetricProvider(kind)
+        for kind in IDENTITIES
+    }
+    original = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=7,
+                    observed_at=matched_at,
+                    active=True,
+                )
+            ]
+        ),
+        providers,
+    )
+    first = original.consume_cycle(
+        SimpleNamespace(generated_at=matched_at)
+    )
+    restore_events = {
+        kind: getattr(first, kind).trigger_batch.events
+        for kind in IDENTITIES
+    }
+    assert {
+        kind: len(events)
+        for kind, events in restore_events.items()
+    } == {"stock": 1, "index": 1, "board": 1}
+
+    unchanged = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=8,
+                    observed_at=_time("09:40:05"),
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+        n4_restore_events=restore_events,
+    )
+    unchanged_result = unchanged.consume_cycle(
+        SimpleNamespace(generated_at=_time("09:40:05"))
+    )
+    for kind in IDENTITIES:
+        assert getattr(unchanged_result, kind).trigger_batch.events == ()
+    unchanged_summary = unchanged.read_summary().as_dict()
+    assert unchanged_summary["n4_restored_event_counts"] == {
+        "stock": 1,
+        "index": 1,
+        "board": 1,
+    }
+    assert unchanged_summary["n4_restored_versions"] == {
+        "stock": 7,
+        "index": 7,
+        "board": 7,
+    }
+
+    inactive = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=8,
+                    observed_at=_time("09:40:05"),
+                    active=False,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind)
+            for kind in IDENTITIES
+        },
+        n4_restore_events=restore_events,
+    )
+    inactive_result = inactive.consume_cycle(
+        SimpleNamespace(generated_at=_time("09:40:05"))
+    )
+    for kind in IDENTITIES:
+        events = getattr(inactive_result, kind).trigger_batch.events
+        assert [event.event_type for event in events] == [
+            "TriggerStateChanged"
+        ]
+        assert events[0].payload_json["trigger_live"] is False
