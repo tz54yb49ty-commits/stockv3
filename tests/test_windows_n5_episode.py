@@ -52,6 +52,7 @@ def _matched(
     episode_number: int = 1,
     version: int = 1,
     event_time: datetime | None = None,
+    runtime_context: dict[str, object] | None = None,
 ):
     signal_type, condition_key = _direction_fields(direction)
     identity = _identity(asset_kind)
@@ -86,6 +87,7 @@ def _matched(
         "current_status": "matched",
         "episode_number": episode_number,
         "episode_entry_event_id": None,
+        **(runtime_context or {}),
     }
     kwargs = {
         "event_type": "TriggerMatched",
@@ -293,6 +295,100 @@ def test_episode_event_snapshots_are_nested_immutable_across_fork() -> None:
     assert _one_active(candidate).current_source_event["event_id"] == changed.event_id
 
 
+def test_runtime_state_projects_n4_context_and_latest_closed_minute_metric() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_runtime_state_fixture",
+    )
+    matched = _matched(
+        runtime_context={
+            "source_transitions": {
+                "D": "low_volume_down",
+                "W": "flat",
+            },
+            "source_amounts": {"D": "800", "W": "1000"},
+            "comparison_amounts": {"D": "900", "W": "1000"},
+            "realtime_transitions": {
+                "30m": "volume_up",
+                "D": "volume_up",
+                "W": "volume_up",
+            },
+            "realtime_virtual_amounts": {
+                "30m": "120",
+                "D": "900",
+                "W": "1100",
+            },
+            "current_price": "11.5",
+            "cumulative_amount": "500",
+            "provider": "eltdx.stock.snapshot",
+            "live_status": "available",
+            "fresh": True,
+        }
+    )
+
+    matched_snapshot = planner.consume_trigger_event(matched).snapshot
+    runtime = next(iter(matched_snapshot.runtime_states.values()))
+
+    assert runtime.key.identity_key == matched.identity_key
+    assert runtime.code == "000001"
+    assert runtime.name == "fixture"
+    assert runtime.direction == "buy"
+    assert runtime.primary_trigger_period == "D"
+    assert runtime.source_transitions["D"] == "low_volume_down"
+    assert runtime.source_amounts["W"] == Decimal("1000")
+    assert runtime.comparison_amounts["W"] == Decimal("1000")
+    assert runtime.realtime_transitions["30m"] == "volume_up"
+    assert runtime.realtime_virtual_amounts["W"] == Decimal("1100")
+    assert runtime.n4_current_price == Decimal("11.5")
+    assert runtime.n4_cumulative_amount == Decimal("500")
+    assert runtime.live_status == "available"
+    assert runtime.fresh is True
+    assert runtime.closed_1m_price is None
+
+    with pytest.raises(TypeError):
+        runtime.realtime_transitions["D"] = "flat"
+
+    pending_snapshot = planner.consume_metric(
+        _metric(equality=True, minute_index=7)
+    ).snapshot
+    pending = next(iter(pending_snapshot.runtime_states.values()))
+
+    assert pending.action_state == "eligible"
+    assert pending.confirmation_status == "pending"
+    assert pending.metric_minute_label == "09:37"
+    assert pending.closed_1m_price == Decimal("10")
+    assert pending.previous_120m_body_high == Decimal("10")
+    assert pending.current_5m_virtual_amount == Decimal("200")
+    assert pending.previous_5m_full_amount == Decimal("100")
+    assert pending.current_1m_amount == Decimal("20")
+    assert pending.previous_1m_amount == Decimal("10")
+
+    executed_snapshot = planner.consume_metric(_metric(minute_index=8)).snapshot
+    executed = next(iter(executed_snapshot.runtime_states.values()))
+    assert executed.action_state == "executed"
+    assert executed.confirmation_status == "passed"
+    assert executed.metric_minute_label == "09:38"
+    assert executed.closed_1m_price == Decimal("11")
+
+
+def test_runtime_state_keeps_missing_upstream_context_explicitly_empty() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_missing_context_fixture",
+    )
+
+    runtime = next(
+        iter(planner.consume_trigger_event(_matched()).snapshot.runtime_states.values())
+    )
+
+    assert runtime.source_transitions == {}
+    assert runtime.realtime_transitions == {}
+    assert runtime.realtime_virtual_amounts == {}
+    assert runtime.n4_current_price is None
+    assert runtime.n4_cumulative_amount is None
+    assert runtime.closed_1m_price is None
+
+
 def test_state_change_true_refreshes_source_and_executed_keeps_entry_ref() -> None:
     planner = WindowsN5EpisodePlanner(asset_kind="stock", action_run_id="n5_fixture")
     matched = _matched()
@@ -321,6 +417,7 @@ def test_state_change_false_expires_pending_and_new_match_opens_new_episode() ->
     assert expired.events[0].payload_json["action_state"] == "expired"
     assert expired.events[0].payload_json["skipped_reason"] == "trigger_live_false"
     assert planner.read().active == {}
+    assert planner.read().runtime_states == {}
     assert planner.consume_trigger_event(inactive).events == ()
 
     reopened = _matched(episode_number=2, version=3, event_time=_time(10, 20))
@@ -455,6 +552,10 @@ def test_restore_from_outbox_rebuilds_executed_episode_without_reemission() -> N
     assert (
         restored_episode.latest_metric_proof["previous_120m_body_high"] == "10"
     )
+    restored_runtime = tuple(snapshot.runtime_states.values())[0]
+    assert restored_runtime.closed_1m_price == Decimal("11")
+    assert restored_runtime.previous_120m_body_high == Decimal("10")
+    assert restored_runtime.action_state == "executed"
     assert restored.consume_trigger_event(matched).events == ()
     assert restored.consume_metric(_metric(minute_index=8)).events == ()
 

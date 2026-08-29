@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from threading import RLock
 from types import MappingProxyType
 from typing import Any
@@ -81,6 +81,74 @@ class N5ActionEpisode:
 
 
 @dataclass(frozen=True, slots=True)
+class N5ActionRuntimeState:
+    """Read-only N5 row assembled from one active episode and its latest metric."""
+
+    key: EpisodeKey
+    code: str | None
+    name: str | None
+    source_condition_run_id: str | None
+    source_trade_date: str | None
+    for_trade_date: str
+    source_n4_version: int
+    source_n3_version: int
+    direction: str
+    signal_type: str
+    condition_key: str
+    trigger_live: bool
+    action_state: str
+    confirmation_status: str
+    formal_triggered_periods: tuple[str, ...]
+    primary_trigger_period: str | None
+    trigger_period: str | None
+    rule_flags: Mapping[str, Any]
+    source_transitions: Mapping[str, Any]
+    source_amounts: Mapping[str, Decimal | None]
+    comparison_amounts: Mapping[str, Decimal | None]
+    realtime_transitions: Mapping[str, Any]
+    realtime_virtual_amounts: Mapping[str, Decimal | None]
+    n4_current_price: Decimal | None
+    n4_cumulative_amount: Decimal | None
+    effective_time: str | None
+    provider: str | None
+    live_status: str | None
+    fresh: bool | None
+    updated_at: datetime
+    metric_minute_label: str | None
+    metric_quality_status: str | None
+    closed_1m_price: Decimal | None
+    previous_120m_body_high: Decimal | None
+    previous_120m_body_low: Decimal | None
+    previous_30m_body_high: Decimal | None
+    previous_30m_body_low: Decimal | None
+    previous_5m_body_high: Decimal | None
+    previous_5m_body_low: Decimal | None
+    previous_1m_body_high: Decimal | None
+    previous_1m_body_low: Decimal | None
+    current_5m_virtual_amount: Decimal | None
+    previous_5m_full_amount: Decimal | None
+    current_1m_amount: Decimal | None
+    previous_1m_amount: Decimal | None
+    current_30m_virtual_amount: Decimal | None
+    previous_day_same_window_amount: Decimal | None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "rule_flags",
+            "source_transitions",
+            "source_amounts",
+            "comparison_amounts",
+            "realtime_transitions",
+            "realtime_virtual_amounts",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(getattr(self, field_name))),
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmationDecision:
     metric_ready: bool
     all_passed: bool
@@ -100,6 +168,7 @@ class N5EpisodeSnapshot:
     version: int
     generated_at: datetime | None
     active: Mapping[EpisodeKey, N5ActionEpisode]
+    runtime_states: Mapping[EpisodeKey, N5ActionRuntimeState]
     processed_trigger_event_count: int
     closed_episode_count: int
     trigger_watermark_count: int
@@ -107,6 +176,11 @@ class N5EpisodeSnapshot:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "active", MappingProxyType(dict(self.active)))
+        object.__setattr__(
+            self,
+            "runtime_states",
+            MappingProxyType(dict(self.runtime_states)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +689,10 @@ class WindowsN5EpisodePlanner:
             version=self._version,
             generated_at=self._generated_at,
             active=self._active,
+            runtime_states={
+                key: _runtime_state_from_episode(episode)
+                for key, episode in self._active.items()
+            },
             processed_trigger_event_count=self._processed_trigger_event_count,
             closed_episode_count=self._closed_episode_count,
             trigger_watermark_count=len(self._trigger_watermarks),
@@ -835,6 +913,111 @@ def _event_time(snapshot: Mapping[str, Any]) -> datetime:
     return value
 
 
+def _runtime_state_from_episode(
+    episode: N5ActionEpisode,
+) -> N5ActionRuntimeState:
+    payload = episode.current_source_event["payload_json"]
+    if not isinstance(payload, Mapping):
+        raise ValueError("current N4 payload must be a mapping")
+    metric = episode.latest_metric_proof or {}
+    formal_periods = payload.get("formal_triggered_periods")
+    if not isinstance(formal_periods, (list, tuple)):
+        formal_periods = payload.get("all_trigger_periods")
+    if not isinstance(formal_periods, (list, tuple)):
+        formal_periods = ()
+    return N5ActionRuntimeState(
+        key=episode.key,
+        code=_optional_text(payload.get("code")),
+        name=_optional_text(payload.get("name")),
+        source_condition_run_id=_optional_text(
+            payload.get("source_condition_run_id")
+        ),
+        source_trade_date=_optional_text(payload.get("source_trade_date")),
+        for_trade_date=str(
+            payload.get("for_trade_date") or episode.key.trade_date
+        ),
+        source_n4_version=episode.source_n4_version,
+        source_n3_version=_integer(payload.get("source_n3_version")),
+        direction=episode.key.direction,
+        signal_type=episode.key.signal_type,
+        condition_key=episode.key.condition_key,
+        trigger_live=episode.trigger_live,
+        action_state=episode.action_state,
+        confirmation_status=episode.confirmation_status,
+        formal_triggered_periods=tuple(str(value) for value in formal_periods),
+        primary_trigger_period=_optional_text(
+            payload.get("primary_trigger_period")
+        ),
+        trigger_period=_optional_text(payload.get("trigger_period")),
+        rule_flags=_mapping_or_empty(payload.get("rule_flags")),
+        source_transitions=_mapping_or_empty(
+            payload.get("source_transitions")
+        ),
+        source_amounts=_decimal_mapping(payload.get("source_amounts")),
+        comparison_amounts=_decimal_mapping(
+            payload.get("comparison_amounts")
+        ),
+        realtime_transitions=_mapping_or_empty(
+            payload.get("realtime_transitions")
+        ),
+        realtime_virtual_amounts=_decimal_mapping(
+            payload.get("realtime_virtual_amounts")
+        ),
+        n4_current_price=_optional_decimal(payload.get("current_price")),
+        n4_cumulative_amount=_optional_decimal(
+            payload.get("cumulative_amount")
+        ),
+        effective_time=_optional_text(payload.get("effective_time")),
+        provider=_optional_text(payload.get("provider")),
+        live_status=_optional_text(payload.get("live_status")),
+        fresh=_optional_bool(payload.get("fresh")),
+        updated_at=_event_time(episode.current_source_event),
+        metric_minute_label=_optional_text(metric.get("metric_minute_label")),
+        metric_quality_status=_optional_text(
+            metric.get("metric_quality_status")
+        ),
+        closed_1m_price=_optional_decimal(metric.get("current_1m_close")),
+        previous_120m_body_high=_optional_decimal(
+            metric.get("previous_120m_body_high")
+        ),
+        previous_120m_body_low=_optional_decimal(
+            metric.get("previous_120m_body_low")
+        ),
+        previous_30m_body_high=_optional_decimal(
+            metric.get("previous_30m_body_high")
+        ),
+        previous_30m_body_low=_optional_decimal(
+            metric.get("previous_30m_body_low")
+        ),
+        previous_5m_body_high=_optional_decimal(
+            metric.get("previous_5m_body_high")
+        ),
+        previous_5m_body_low=_optional_decimal(
+            metric.get("previous_5m_body_low")
+        ),
+        previous_1m_body_high=_optional_decimal(
+            metric.get("previous_1m_body_high")
+        ),
+        previous_1m_body_low=_optional_decimal(
+            metric.get("previous_1m_body_low")
+        ),
+        current_5m_virtual_amount=_optional_decimal(
+            metric.get("current_5m_virtual_amount")
+        ),
+        previous_5m_full_amount=_optional_decimal(
+            metric.get("previous_5m_full_amount")
+        ),
+        current_1m_amount=_optional_decimal(metric.get("current_1m_amount")),
+        previous_1m_amount=_optional_decimal(metric.get("previous_1m_amount")),
+        current_30m_virtual_amount=_optional_decimal(
+            metric.get("current_30m_virtual_amount")
+        ),
+        previous_day_same_window_amount=_optional_decimal(
+            metric.get("previous_day_same_window_amount")
+        ),
+    )
+
+
 def _metric_proof(metric: ActionConfirmationMetric) -> dict[str, Any]:
     return {
         "source_basis": "N3T_C1_CLOSED",
@@ -912,3 +1095,38 @@ def _optional_integer(value: Any) -> int | None:
     if value is None:
         return None
     return _integer(value)
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _decimal_mapping(value: Any) -> Mapping[str, Decimal | None]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): _optional_decimal(item)
+        for key, item in value.items()
+    }
