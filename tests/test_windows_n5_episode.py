@@ -321,6 +321,46 @@ def test_stale_state_change_does_not_deactivate_live_episode() -> None:
     assert _one_active(planner).trigger_live is True
 
 
+def test_repeated_episode_churn_keeps_idempotency_memory_bounded() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_bounded_fixture",
+    )
+    first_match = None
+    for episode_number in range(1, 51):
+        matched = _matched(
+            episode_number=episode_number,
+            version=episode_number * 2 - 1,
+            event_time=_time(10, 20),
+        )
+        if first_match is None:
+            first_match = matched
+        assert [
+            event.event_type
+            for event in planner.consume_trigger_event(matched).events
+        ] == ["ActionEligible"]
+        inactive = _state_changed(
+            matched,
+            trigger_live=False,
+            version=episode_number * 2,
+            event_time=_time(10, 21),
+        )
+        assert [
+            event.event_type
+            for event in planner.consume_trigger_event(inactive).events
+        ] == ["ActionSkipped"]
+        assert planner.read().active == {}
+
+    snapshot = planner.read()
+    assert snapshot.processed_trigger_event_count == 100
+    assert snapshot.closed_episode_count == 50
+    assert snapshot.trigger_watermark_count == 1
+    assert snapshot.closed_episode_watermark_count == 1
+    assert first_match is not None
+    assert planner.consume_trigger_event(first_match).events == ()
+    assert planner.read().active == {}
+
+
 def test_strict_equality_fails_then_later_strict_buy_passes() -> None:
     planner = WindowsN5EpisodePlanner(asset_kind="stock", action_run_id="n5_fixture")
     planner.consume_trigger_event(_matched())

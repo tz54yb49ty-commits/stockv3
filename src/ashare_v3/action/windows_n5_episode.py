@@ -25,6 +25,7 @@ SOURCE_RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
 VALID_CONDITION_KEYS = {"BUY:STATE_V1", "SELL:STATE_V1"}
 VALID_SIGNAL_TYPES = {"B_BUY", "S_SELL"}
 VALID_ASSET_KINDS = {"stock", "index", "board"}
+TriggerGrain = tuple[str, str, str, str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +102,8 @@ class N5EpisodeSnapshot:
     active: Mapping[EpisodeKey, N5ActionEpisode]
     processed_trigger_event_count: int
     closed_episode_count: int
+    trigger_watermark_count: int
+    closed_episode_watermark_count: int
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "active", MappingProxyType(dict(self.active)))
@@ -124,8 +127,14 @@ class WindowsN5EpisodePlanner:
         self.action_run_id = action_run_id
         self._lock = RLock()
         self._active: dict[EpisodeKey, N5ActionEpisode] = {}
-        self._processed_trigger_event_ids: set[str] = set()
-        self._closed_episode_entry_ids: set[str] = set()
+        self._trigger_watermarks: dict[
+            TriggerGrain, tuple[int, str]
+        ] = {}
+        self._closed_episode_watermarks: dict[
+            TriggerGrain, str
+        ] = {}
+        self._processed_trigger_event_count = 0
+        self._closed_episode_count = 0
         self._version = 0
         self._generated_at: datetime | None = None
 
@@ -188,9 +197,7 @@ class WindowsN5EpisodePlanner:
                         reason="window_expired",
                     )
                     del self._active[key]
-                    self._closed_episode_entry_ids.add(
-                        key.episode_entry_event_id
-                    )
+                    self._mark_episode_closed(key)
                     output.append(skipped)
                     changed = True
                     continue
@@ -221,9 +228,7 @@ class WindowsN5EpisodePlanner:
                         )
                     )
                     del self._active[key]
-                    self._closed_episode_entry_ids.add(
-                        key.episode_entry_event_id
-                    )
+                    self._mark_episode_closed(key)
             if output:
                 self._advance_version(observed_at)
             return N5PlanBatch(self._snapshot(), tuple(output))
@@ -237,8 +242,8 @@ class WindowsN5EpisodePlanner:
         with self._lock:
             if (
                 self._active
-                or self._processed_trigger_event_ids
-                or self._closed_episode_entry_ids
+                or self._trigger_watermarks
+                or self._closed_episode_watermarks
                 or self._version
             ):
                 raise RuntimeError("restore requires a new empty planner")
@@ -259,11 +264,18 @@ class WindowsN5EpisodePlanner:
         emit: bool,
     ) -> N5PlanBatch:
         _validate_trigger_event(event, self.asset_kind)
-        if event.event_id in self._processed_trigger_event_ids:
-            return N5PlanBatch(self._snapshot(), ())
-        self._processed_trigger_event_ids.add(event.event_id)
         payload = dict(event.payload_json)
+        grain = _trigger_grain(event, payload)
+        source_version = _integer(payload.get("n4_state_version"))
+        watermark = self._trigger_watermarks.get(grain)
+        if watermark is not None and source_version <= watermark[0]:
+            return N5PlanBatch(self._snapshot(), ())
+        self._trigger_watermarks[grain] = (
+            source_version,
+            event.event_id,
+        )
         output: list[EventEnvelope] = []
+        self._processed_trigger_event_count += 1
         if str(payload.get("data_quality_status") or "") != "ready":
             self._advance_version(event.event_time)
             return N5PlanBatch(self._snapshot(), ())
@@ -273,7 +285,7 @@ class WindowsN5EpisodePlanner:
                 self._advance_version(event.event_time)
                 return N5PlanBatch(self._snapshot(), ())
             entry_id = event.event_id
-            if entry_id in self._closed_episode_entry_ids:
+            if self._closed_episode_watermarks.get(grain) == entry_id:
                 self._advance_version(event.event_time)
                 return N5PlanBatch(self._snapshot(), ())
             key = _episode_key(event, entry_id)
@@ -329,7 +341,7 @@ class WindowsN5EpisodePlanner:
                     )
                 )
             del self._active[key]
-            self._closed_episode_entry_ids.add(entry_id)
+            self._mark_episode_closed(key)
         self._advance_version(event.event_time)
         return N5PlanBatch(self._snapshot(), tuple(output))
 
@@ -364,7 +376,7 @@ class WindowsN5EpisodePlanner:
         elif event.event_type == "ActionSkipped" and found is not None:
             key, _episode = found
             del self._active[key]
-            self._closed_episode_entry_ids.add(entry_id)
+            self._mark_episode_closed(key)
         self._advance_version(event.event_time)
 
     def _build_action_eligible(
@@ -562,6 +574,15 @@ class WindowsN5EpisodePlanner:
             None,
         )
 
+    def _mark_episode_closed(self, key: EpisodeKey) -> None:
+        grain = _trigger_grain_from_key(key)
+        if (
+            self._closed_episode_watermarks.get(grain)
+            != key.episode_entry_event_id
+        ):
+            self._closed_episode_count += 1
+        self._closed_episode_watermarks[grain] = key.episode_entry_event_id
+
     def _advance_version(self, generated_at: datetime | None) -> None:
         self._version += 1
         self._generated_at = generated_at
@@ -573,10 +594,12 @@ class WindowsN5EpisodePlanner:
             version=self._version,
             generated_at=self._generated_at,
             active=self._active,
-            processed_trigger_event_count=len(
-                self._processed_trigger_event_ids
+            processed_trigger_event_count=self._processed_trigger_event_count,
+            closed_episode_count=self._closed_episode_count,
+            trigger_watermark_count=len(self._trigger_watermarks),
+            closed_episode_watermark_count=len(
+                self._closed_episode_watermarks
             ),
-            closed_episode_count=len(self._closed_episode_entry_ids),
         )
 
 
@@ -726,6 +749,31 @@ def _episode_key(event: EventEnvelope, entry_id: str) -> EpisodeKey:
         signal_type=str(payload.get("signal_type") or ""),
         condition_key=str(payload.get("condition_key") or ""),
         episode_entry_event_id=entry_id,
+    )
+
+
+def _trigger_grain(
+    event: EventEnvelope,
+    payload: Mapping[str, Any],
+) -> TriggerGrain:
+    return (
+        event.trade_date,
+        event.asset_kind,
+        event.identity_key,
+        str(payload.get("direction") or ""),
+        str(payload.get("signal_type") or ""),
+        str(payload.get("condition_key") or ""),
+    )
+
+
+def _trigger_grain_from_key(key: EpisodeKey) -> TriggerGrain:
+    return (
+        key.trade_date,
+        key.asset_kind,
+        key.identity_key,
+        key.direction,
+        key.signal_type,
+        key.condition_key,
     )
 
 
