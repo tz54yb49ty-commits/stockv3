@@ -50,6 +50,7 @@ class N5ActionEpisode:
     executed_event_id: str | None
     last_checked_minute_index: int | None
     last_checked_minute_label: str | None
+    latest_metric_proof: Mapping[str, Any] | None
     tracking_until: datetime
     source_n4_version: int
 
@@ -70,6 +71,12 @@ class N5ActionEpisode:
             "current_source_event",
             MappingProxyType(dict(self.current_source_event)),
         )
+        if self.latest_metric_proof is not None:
+            object.__setattr__(
+                self,
+                "latest_metric_proof",
+                MappingProxyType(dict(self.latest_metric_proof)),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +176,7 @@ class WindowsN5EpisodePlanner:
                         executed_event_id=action_event.event_id,
                         last_checked_minute_index=metric.expected_minute_index,
                         last_checked_minute_label=metric.metric_minute_label,
+                        latest_metric_proof=_metric_proof(metric),
                     )
                     output.append(action_event)
                     changed = True
@@ -190,6 +198,7 @@ class WindowsN5EpisodePlanner:
                     episode,
                     last_checked_minute_index=metric.expected_minute_index,
                     last_checked_minute_label=metric.metric_minute_label,
+                    latest_metric_proof=_metric_proof(metric),
                 )
                 changed = True
             if changed:
@@ -281,6 +290,7 @@ class WindowsN5EpisodePlanner:
                     executed_event_id=None,
                     last_checked_minute_index=None,
                     last_checked_minute_label=None,
+                    latest_metric_proof=None,
                     tracking_until=_tracking_until(event),
                     source_n4_version=_integer(payload.get("n4_state_version")),
                 )
@@ -334,6 +344,7 @@ class WindowsN5EpisodePlanner:
                 eligible_event_id=event.event_id,
             )
         elif event.event_type == "ActionExecuted" and found is not None:
+            market_proof = payload.get("final_market_proof")
             key, episode = found
             self._active[key] = replace(
                 episode,
@@ -344,6 +355,11 @@ class WindowsN5EpisodePlanner:
                     payload.get("metric_minute_index")
                 ),
                 last_checked_minute_label=payload.get("metric_minute_label"),
+                latest_metric_proof=(
+                    dict(market_proof)
+                    if isinstance(market_proof, Mapping)
+                    else None
+                ),
             )
         elif event.event_type == "ActionSkipped" and found is not None:
             key, _episode = found
@@ -745,17 +761,43 @@ def _metric_proof(metric: ActionConfirmationMetric) -> dict[str, Any]:
         "metric_role": "action_confirmation",
         "proof_consumer": "N5",
         "not_n5_final_proof": False,
+        "trade_date": metric.trade_date,
         "metric_policy_version": metric.metric_policy_version,
+        "boundary_policy_version": metric.boundary_policy_version,
+        "virtual_amount_policy_version": metric.virtual_amount_policy_version,
         "provider": metric.provider,
+        "metric_time": metric.metric_time,
         "metric_minute_label": metric.metric_minute_label,
         "metric_minute_index": metric.expected_minute_index,
+        "observed_minute_index": metric.observed_minute_index,
+        "metric_quality_status": metric.metric_quality_status,
         "current_price": metric.current_price,
+        "current_1m_close": metric.current_price,
+        "previous_120m_body_high": metric.previous_120m_body_high,
+        "previous_120m_body_low": metric.previous_120m_body_low,
+        "previous_30m_body_high": metric.previous_30m_body_high,
+        "previous_30m_body_low": metric.previous_30m_body_low,
+        "previous_5m_body_high": metric.previous_5m_body_high,
+        "previous_5m_body_low": metric.previous_5m_body_low,
+        "previous_1m_body_high": metric.previous_1m_body_high,
+        "previous_1m_body_low": metric.previous_1m_body_low,
         "current_5m_virtual_amount": metric.current_5m_virtual_amount,
+        "previous_5m_full_amount": metric.previous_5m_full_amount,
         "current_1m_amount": metric.current_1m_amount,
+        "previous_1m_amount": metric.previous_1m_amount,
         "current_30m_virtual_amount": metric.current_30m_virtual_amount,
         "previous_day_same_window_amount": (
             metric.previous_day_same_window_amount
         ),
+        "previous_30m_full_amount": metric.previous_30m_full_amount,
+        "is_first_1m_of_day": metric.is_first_1m_of_day,
+        "is_first_5m_of_day": metric.is_first_5m_of_day,
+        "first_1m_amount_default_pass": metric.first_1m_amount_default_pass,
+        "first_5m_amount_default_pass": metric.first_5m_amount_default_pass,
+        "previous_1m_period_source": metric.previous_1m_period_source,
+        "previous_5m_period_source": metric.previous_5m_period_source,
+        "previous_30m_period_source": metric.previous_30m_period_source,
+        "previous_120m_period_source": metric.previous_120m_period_source,
         "amount_unit": metric.amount_unit,
     }
 

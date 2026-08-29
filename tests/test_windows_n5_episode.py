@@ -326,11 +326,19 @@ def test_strict_equality_fails_then_later_strict_buy_passes() -> None:
     planner.consume_trigger_event(_matched())
 
     assert planner.consume_metric(_metric(equality=True, minute_index=7)).events == ()
+    pending_proof = _one_active(planner).latest_metric_proof
+    assert pending_proof is not None
+    assert pending_proof["current_price"] == Decimal("10")
+    assert pending_proof["previous_120m_body_high"] == Decimal("10")
     executed = planner.consume_metric(_metric(minute_index=8)).events[0]
 
     assert executed.event_type == "ActionExecuted"
     assert executed.payload_json["action_mark"] == "30m_volume"
     assert executed.payload_json["confirmation_checks"]["120m_price"] is True
+    episode_proof = _one_active(planner).latest_metric_proof
+    assert episode_proof is not None
+    assert episode_proof["previous_5m_full_amount"] == Decimal("100")
+    assert episode_proof["previous_1m_amount"] == Decimal("10")
 
 
 def test_sell_confirmation_is_strict_and_uses_shrink_mark() -> None:
@@ -381,6 +389,10 @@ def test_restore_from_outbox_rebuilds_executed_episode_without_reemission() -> N
     restored_episode = tuple(snapshot.active.values())[0]
     assert restored_episode.action_state == "executed"
     assert restored_episode.eligible_event_id == eligible.event_id
+    assert restored_episode.latest_metric_proof is not None
+    assert (
+        restored_episode.latest_metric_proof["previous_120m_body_high"] == "10"
+    )
     assert restored.consume_trigger_event(matched).events == ()
     assert restored.consume_metric(_metric(minute_index=8)).events == ()
 

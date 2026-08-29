@@ -119,6 +119,15 @@ def test_actual_n3_buy_metric_executes_actual_n4_match() -> None:
     assert proof["source_basis"] == "N3T_C1_CLOSED"
     assert proof["metric_minute_index"] == 7
     assert proof["current_price"] == str(metric.current_price)
+    assert proof["previous_120m_body_high"] == str(
+        metric.previous_120m_body_high
+    )
+    assert proof["previous_5m_full_amount"] == str(
+        metric.previous_5m_full_amount
+    )
+    episode_proof = tuple(n5.read().active.values())[0].latest_metric_proof
+    assert episode_proof is not None
+    assert episode_proof["previous_1m_amount"] == metric.previous_1m_amount
 
 
 def test_actual_n3_sell_metric_executes_actual_n4_match() -> None:
