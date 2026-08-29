@@ -11,6 +11,11 @@ import json
 import os
 from zoneinfo import ZoneInfo
 
+from ashare_v3.market.windows_n3_action_metric import (
+    EltdxBoardActionMetricProvider,
+    EltdxIndexActionMetricProvider,
+    EltdxStockActionMetricProvider,
+)
 from ashare_v3.market.windows_n3_intraday import WindowsN3IntradayRunner
 from ashare_v3.market.windows_n3_memory import (
     BoardSnapshotChannel,
@@ -37,6 +42,9 @@ from ashare_v3.market.windows_n3_snapshot import (
     EltdxBoardSnapshotProvider,
     EltdxIndexSnapshotProvider,
     EltdxStockSnapshotProvider,
+)
+from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
+    WindowsN3N4N5MemoryOrchestrator,
 )
 from ashare_v3.trigger.windows_n4_memory import build_windows_n4_runtime
 
@@ -65,16 +73,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class _CapturingContextLoader:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.latest = None
+
+    def load(self, model):
+        loaded = self.delegate.load(model)
+        self.latest = loaded
+        return loaded
+
+
 def main() -> int:
     args = parse_args()
     from eltdx import TdxClient
 
     repository = WindowsN3ReadOnlyRepository(args.dsn)
-    context_loader = PostgresPreviousDayContextLoader(
-        args.dsn,
-        context_version=args.context_version,
+    context_loader = _CapturingContextLoader(
+        PostgresPreviousDayContextLoader(
+            args.dsn,
+            context_version=args.context_version,
+        )
     )
-    n4_holder = {}
+    integration_holder = {}
     with ExitStack() as stack:
         stock_client = stack.enter_context(
             TdxClient(timeout=8, server_count=4, connections_per_server=4)
@@ -87,7 +108,42 @@ def main() -> int:
         )
 
         def runtime_factory(model):
-            n4_holder["runtime"] = build_windows_n4_runtime(model)
+            loaded = context_loader.latest
+            if (
+                loaded is None
+                or loaded.source_condition_run_id != model.run_id
+            ):
+                raise RuntimeError(
+                    "N3 previous context was not loaded for the active N2 run"
+                )
+            trigger_run_ids = {
+                kind: (
+                    f"windows_n4_state_transition_"
+                    f"{model.for_trade_date}_{kind}"
+                )
+                for kind in ("stock", "index", "board")
+            }
+            action_run_ids = {
+                kind: (
+                    f"windows_n5_closed_minute_"
+                    f"{model.for_trade_date}_{kind}"
+                )
+                for kind in ("stock", "index", "board")
+            }
+            integration_holder["runtime"] = WindowsN3N4N5MemoryOrchestrator(
+                n4_runtime=build_windows_n4_runtime(model),
+                stock_requests=model.stock_requests(),
+                index_requests=model.index_requests(),
+                board_requests=model.board_requests(),
+                previous_stock=loaded.stock,
+                previous_index=loaded.index,
+                previous_board=loaded.board,
+                stock_metric_provider=EltdxStockActionMetricProvider(stock_client),
+                index_metric_provider=EltdxIndexActionMetricProvider(index_client),
+                board_metric_provider=EltdxBoardActionMetricProvider(board_client),
+                trigger_run_ids=trigger_run_ids,
+                action_run_ids=action_run_ids,
+            )
             return WindowsN3MemoryRuntime(
                 StockSnapshotChannel(
                     EltdxStockSnapshotProvider(stock_client),
@@ -107,10 +163,10 @@ def main() -> int:
             )
 
         def publish(cycle):
-            runtime = n4_holder.get("runtime")
+            runtime = integration_holder.get("runtime")
             if runtime is None:
-                raise RuntimeError("N4 runtime was not initialized from N2")
-            n4_holder["latest"] = runtime.consume_cycle(cycle)
+                raise RuntimeError("N3/N4/N5 runtime was not initialized from N2")
+            integration_holder["latest"] = runtime.consume_cycle(cycle)
 
         current_provider_args = {}
         now = datetime.now(SHANGHAI_TIMEZONE)
@@ -151,20 +207,42 @@ def main() -> int:
         summary = runner.execute(args.for_trade_date)
 
     payload = asdict(summary)
-    latest = n4_holder.get("latest")
+    latest = integration_holder.get("latest")
     if latest is not None:
+        n4_memory = latest.n4_memory
         payload["n4_state_counts"] = {
-            "stock": len(latest.stock.states),
-            "index": len(latest.index.states),
-            "board": len(latest.board.states),
+            "stock": len(n4_memory.stock.states),
+            "index": len(n4_memory.index.states),
+            "board": len(n4_memory.board.states),
         }
         payload["n4_versions"] = {
-            "stock": latest.stock.version,
-            "index": latest.index.version,
-            "board": latest.board.version,
+            "stock": n4_memory.stock.version,
+            "index": n4_memory.index.version,
+            "board": n4_memory.board.version,
         }
+    integration = integration_holder.get("runtime")
+    if integration is not None:
+        runtime_summary = integration.read_summary().as_dict()
+        payload["n3_n4_n5_memory"] = runtime_summary
+        payload["trigger_event_count"] = sum(
+            sum(values.values())
+            for values in runtime_summary[
+                "n4_trigger_event_counts"
+            ].values()
+        )
+        payload["n5_action_event_count"] = sum(
+            sum(values.values())
+            for values in runtime_summary[
+                "n5_action_event_counts"
+            ].values()
+        )
+        payload["n5_state_counts"] = runtime_summary["n5_state_counts"]
+        payload["n5_versions"] = runtime_summary["n5_versions"]
+    else:
+        payload["trigger_event_count"] = 0
+        payload["n5_action_event_count"] = 0
     payload["database_write_count"] = 0
-    payload["trigger_event_count"] = 0
+    payload["event_persistence_count"] = 0
     print(json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True))
     return 0
 
