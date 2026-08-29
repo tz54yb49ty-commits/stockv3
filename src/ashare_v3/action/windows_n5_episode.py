@@ -65,12 +65,12 @@ class N5ActionEpisode:
         object.__setattr__(
             self,
             "entry_trigger_event",
-            MappingProxyType(dict(self.entry_trigger_event)),
+            _immutable_event_snapshot(self.entry_trigger_event),
         )
         object.__setattr__(
             self,
             "current_source_event",
-            MappingProxyType(dict(self.current_source_event)),
+            _immutable_event_snapshot(self.current_source_event),
         )
         if self.latest_metric_proof is not None:
             object.__setattr__(
@@ -815,6 +815,17 @@ def _event_snapshot(event: EventEnvelope) -> dict[str, Any]:
         "source_run_id": event.source_run_id,
         "payload_json": dict(event.payload_json),
     }
+
+
+def _immutable_event_snapshot(
+    snapshot: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    frozen = dict(snapshot)
+    payload = frozen.get("payload_json")
+    if not isinstance(payload, Mapping):
+        raise ValueError("event snapshot payload_json must be a mapping")
+    frozen["payload_json"] = MappingProxyType(dict(payload))
+    return MappingProxyType(frozen)
 
 
 def _event_time(snapshot: Mapping[str, Any]) -> datetime:

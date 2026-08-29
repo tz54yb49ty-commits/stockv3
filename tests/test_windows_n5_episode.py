@@ -271,6 +271,28 @@ def test_trigger_matched_creates_one_eligible_and_replay_is_idempotent() -> None
     assert episode.eligible_event_id == first.events[0].event_id
 
 
+def test_episode_event_snapshots_are_nested_immutable_across_fork() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_immutable_fixture",
+    )
+    matched = _matched()
+    planner.consume_trigger_event(matched)
+    live_episode = _one_active(planner)
+
+    with pytest.raises(TypeError):
+        live_episode.current_source_event["payload_json"][
+            "trigger_live"
+        ] = False
+
+    candidate = planner.fork()
+    changed = _state_changed(matched, trigger_live=True, formal_periods=("W",))
+    candidate.consume_trigger_event(changed)
+
+    assert _one_active(planner).current_source_event["event_id"] == matched.event_id
+    assert _one_active(candidate).current_source_event["event_id"] == changed.event_id
+
+
 def test_state_change_true_refreshes_source_and_executed_keeps_entry_ref() -> None:
     planner = WindowsN5EpisodePlanner(asset_kind="stock", action_run_id="n5_fixture")
     matched = _matched()
