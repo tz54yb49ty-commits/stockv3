@@ -112,6 +112,8 @@ class WindowsN3N4N5RuntimeSummary:
     provider_error_counts: Mapping[str, int]
     n5_state_counts: Mapping[str, int]
     n5_versions: Mapping[str, int]
+    database_write_counts: Mapping[str, int]
+    event_persistence_counts: Mapping[str, int]
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -140,6 +142,8 @@ class WindowsN3N4N5RuntimeSummary:
             "provider_error_counts",
             "n5_state_counts",
             "n5_versions",
+            "database_write_counts",
+            "event_persistence_counts",
         ):
             object.__setattr__(
                 self,
@@ -179,6 +183,10 @@ class WindowsN3N4N5RuntimeSummary:
             "provider_error_counts": dict(self.provider_error_counts),
             "n5_state_counts": dict(self.n5_state_counts),
             "n5_versions": dict(self.n5_versions),
+            "database_write_counts": dict(self.database_write_counts),
+            "event_persistence_counts": dict(
+                self.event_persistence_counts
+            ),
         }
 
 
@@ -237,6 +245,8 @@ class _ChannelRuntime:
         self.metric_identity_request_count = 0
         self.metric_ready_count = 0
         self.provider_error_count = 0
+        self.database_write_count = 0
+        self.event_persistence_count = 0
 
     def consume(
         self,
@@ -253,6 +263,7 @@ class _ChannelRuntime:
                 planner=self.n4,
                 runtime_snapshot=snapshot,
             )
+            self._record_persistence(committed_n4.persistence)
             self.n4 = committed_n4.planner
             trigger_batch = TriggerPlanBatch(
                 snapshot=committed_n4.snapshot,
@@ -419,6 +430,7 @@ class _ChannelRuntime:
             planner=self.n5,
             deliveries=self._pending_n4_deliveries,
         )
+        self._record_persistence(committed.persistence)
         self.n5 = committed.planner
         self._pending_n4_deliveries = ()
         return self._record_action_events(committed.output_events)
@@ -436,6 +448,7 @@ class _ChannelRuntime:
             planner=self.n5,
             metric=metric,
         )
+        self._record_persistence(committed.persistence)
         self.n5 = committed.planner
         return self._record_action_events(committed.output_events)
 
@@ -452,8 +465,13 @@ class _ChannelRuntime:
             planner=self.n5,
             observed_at=observed_at,
         )
+        self._record_persistence(committed.persistence)
         self.n5 = committed.planner
         return self._record_action_events(committed.output_events)
+
+    def _record_persistence(self, persistence: Any) -> None:
+        self.database_write_count += persistence.database_write_count
+        self.event_persistence_count += persistence.outbox_insert_count
 
     def _record_action_events(
         self,
@@ -678,6 +696,14 @@ class WindowsN3N4N5MemoryOrchestrator:
                 n5_versions={
                     kind: snapshot.version
                     for kind, snapshot in n5_snapshots.items()
+                },
+                database_write_counts={
+                    kind: channel.database_write_count
+                    for kind, channel in self._channels.items()
+                },
+                event_persistence_counts={
+                    kind: channel.event_persistence_count
+                    for kind, channel in self._channels.items()
                 },
             )
 

@@ -733,13 +733,9 @@ class WindowsN4MemoryTest(unittest.TestCase):
 
     def test_module_has_no_persistence_or_downstream_contract(self) -> None:
         root = Path(__file__).parents[1]
-        source = "\n".join(
-            (root / path).read_text(encoding="utf-8").lower()
-            for path in (
-                "src/ashare_v3/trigger/windows_n4_memory.py",
-                "scripts/run_windows_n3_n4_memory.py",
-            )
-        )
+        source = (
+            root / "src/ashare_v3/trigger/windows_n4_memory.py"
+        ).read_text(encoding="utf-8").lower()
         for forbidden in (
             "import psycopg",
             "create table",

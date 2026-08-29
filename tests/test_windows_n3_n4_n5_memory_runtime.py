@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -658,8 +659,46 @@ def test_0915_entry_uses_same_process_orchestrator() -> None:
     assert "n4_restore_events=n4_restore.events" in source
     assert "WindowsN5EpisodeReadOnlyRepository" in source
     assert "n5_restore_events=n5_restore.events" in source
+    assert "_open_transaction_boundaries" in source
+    assert "n5_transaction_boundaries=transaction_boundaries" in source
     assert "event_persistence_count" in source
+    assert 'payload["database_write_count"] = sum(' in source
 
+
+
+def test_0915_entry_opens_six_managed_transaction_connections() -> None:
+    from scripts.run_windows_n3_n4_memory import (
+        N5_CONSUMER_NAME,
+        _open_transaction_boundaries,
+    )
+
+    opened = []
+
+    def connect(dsn):
+        assert dsn == "postgresql://fixture"
+        connection = (
+            _N4FakeConnection()
+            if len(opened) % 2 == 0
+            else _N5FakeConnection()
+        )
+        opened.append(connection)
+        return nullcontext(connection)
+
+    with ExitStack() as stack:
+        boundaries = _open_transaction_boundaries(
+            stack,
+            "postgresql://fixture",
+            connect=connect,
+        )
+
+    assert set(boundaries) == set(IDENTITIES)
+    assert len(opened) == 6
+    assert len({id(connection) for connection in opened}) == 6
+    for index, kind in enumerate(IDENTITIES):
+        boundary = boundaries[kind]
+        assert boundary.n4_connection is opened[index * 2]
+        assert boundary.connection is opened[index * 2 + 1]
+        assert boundary.coordinator.consumer_name == N5_CONSUMER_NAME
 
 
 def test_restart_restores_three_n4_channels_before_first_cycle() -> None:
@@ -887,6 +926,17 @@ def test_three_channels_commit_n4_and_closed_minute_in_separate_transactions() -
         assert set(n5_connection.fake_cursor.checkpoints.values()) == {
             authoritative_outbox_id
         }
+    summary = runtime.read_summary().as_dict()
+    assert summary["database_write_counts"] == {
+        "stock": 5,
+        "index": 5,
+        "board": 5,
+    }
+    assert summary["event_persistence_counts"] == {
+        "stock": 3,
+        "index": 3,
+        "board": 3,
+    }
 
 
 def test_n4_failure_keeps_n4_planner_and_never_calls_n5() -> None:
@@ -924,6 +974,8 @@ def test_n4_failure_keeps_n4_planner_and_never_calls_n5() -> None:
     assert n4_connections["stock"].rollback_count == 1
     assert n5_connections["stock"].begin_count == 0
     assert stock._pending_n4_deliveries == ()
+    assert stock.database_write_count == 0
+    assert stock.event_persistence_count == 0
     failed_insert = n4_connections["stock"].fake_cursor.calls[0][1]
 
     n4_connections["stock"].fail_commit = False
@@ -983,6 +1035,8 @@ def test_n5_failure_replays_already_committed_authoritative_n4_row() -> None:
         for delivery in stock._pending_n4_deliveries
     ) == (authoritative_outbox_id,)
     assert n5_connections["stock"].rollback_count == 1
+    assert stock.database_write_count == 1
+    assert stock.event_persistence_count == 1
 
     n5_connections["stock"].fail_commit = False
     retry = stock.consume(

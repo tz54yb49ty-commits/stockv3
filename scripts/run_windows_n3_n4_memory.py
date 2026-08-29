@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one Windows N3/N4 process with no realtime-state persistence."""
+"""Run Windows N3/N4/N5; states stay in memory and events persist."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ from zoneinfo import ZoneInfo
 
 from ashare_v3.action.windows_n5_restore import (
     WindowsN5EpisodeReadOnlyRepository,
+)
+from ashare_v3.action.windows_n5_transaction import (
+    WindowsN5TransactionCoordinator,
 )
 from ashare_v3.market.windows_n3_action_metric import (
     EltdxBoardActionMetricProvider,
@@ -47,15 +50,21 @@ from ashare_v3.market.windows_n3_snapshot import (
     EltdxStockSnapshotProvider,
 )
 from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
+    N5ChannelTransactionBoundary,
     WindowsN3N4N5MemoryOrchestrator,
 )
 from ashare_v3.runtime_control.windows_n4_outbox_restore import (
     WindowsN4OutboxReadOnlyRepository,
 )
 from ashare_v3.trigger.windows_n4_memory import build_windows_n4_runtime
+from ashare_v3.trigger.windows_n4_transaction import (
+    WindowsN4TransactionCoordinator,
+)
 
 
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+ASSET_KINDS = ("stock", "index", "board")
+N5_CONSUMER_NAME = "windows_n5_state_v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +99,28 @@ class _CapturingContextLoader:
         return loaded
 
 
+def _open_transaction_boundaries(stack, dsn, *, connect=None):
+    if not dsn:
+        raise ValueError("dsn is required")
+    if connect is None:
+        import psycopg
+
+        connect = psycopg.connect
+    boundaries = {}
+    for asset_kind in ASSET_KINDS:
+        n4_connection = stack.enter_context(connect(dsn))
+        n5_connection = stack.enter_context(connect(dsn))
+        boundaries[asset_kind] = N5ChannelTransactionBoundary(
+            n4_connection=n4_connection,
+            n4_coordinator=WindowsN4TransactionCoordinator(),
+            connection=n5_connection,
+            coordinator=WindowsN5TransactionCoordinator(
+                consumer_name=N5_CONSUMER_NAME,
+            ),
+        )
+    return boundaries
+
+
 def main() -> int:
     args = parse_args()
     from eltdx import TdxClient
@@ -98,7 +129,7 @@ def main() -> int:
     n4_outbox_repository = WindowsN4OutboxReadOnlyRepository(args.dsn)
     n5_episode_repository = WindowsN5EpisodeReadOnlyRepository(
         args.dsn,
-        consumer_name="windows_n5_state_v1",
+        consumer_name=N5_CONSUMER_NAME,
     )
     context_loader = _CapturingContextLoader(
         PostgresPreviousDayContextLoader(
@@ -152,6 +183,17 @@ def main() -> int:
                 action_run_ids=action_run_ids,
             )
             integration_holder["n5_restore"] = n5_restore
+            transaction_boundaries = integration_holder.get(
+                "transaction_boundaries"
+            )
+            if transaction_boundaries is None:
+                transaction_boundaries = _open_transaction_boundaries(
+                    stack,
+                    args.dsn,
+                )
+                integration_holder["transaction_boundaries"] = (
+                    transaction_boundaries
+                )
             integration_holder["runtime"] = WindowsN3N4N5MemoryOrchestrator(
                 n4_runtime=build_windows_n4_runtime(
                     model,
@@ -170,6 +212,7 @@ def main() -> int:
                 action_run_ids=action_run_ids,
                 n4_restore_events=n4_restore.events,
                 n5_restore_events=n5_restore.events,
+                n5_transaction_boundaries=transaction_boundaries,
             )
             return WindowsN3MemoryRuntime(
                 StockSnapshotChannel(
@@ -297,6 +340,12 @@ def main() -> int:
         payload["n5_restored_versions"] = runtime_summary[
             "n5_restored_versions"
         ]
+        payload["database_write_count"] = sum(
+            runtime_summary["database_write_counts"].values()
+        )
+        payload["event_persistence_count"] = sum(
+            runtime_summary["event_persistence_counts"].values()
+        )
     else:
         payload["trigger_event_count"] = 0
         payload["n5_action_event_count"] = 0
@@ -306,8 +355,8 @@ def main() -> int:
         payload["n5_restored_versions"] = {
             kind: 0 for kind in ("stock", "index", "board")
         }
-    payload["database_write_count"] = 0
-    payload["event_persistence_count"] = 0
+        payload["database_write_count"] = 0
+        payload["event_persistence_count"] = 0
     print(json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True))
     return 0
 
