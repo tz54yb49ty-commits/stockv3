@@ -192,6 +192,41 @@ class WindowsN4MemoryTest(unittest.TestCase):
             BoardStateConsumer([baseline("board", "881333")]),
         )
 
+    def test_outbox_versions_seed_each_channel_and_continue_at_last_plus_one(self) -> None:
+        runtime = WindowsN4MemoryRuntime(
+            StockStateConsumer(
+                [baseline("stock", "600000")],
+                initial_version=12,
+            ),
+            IndexStateConsumer(
+                [baseline("index", "000001")],
+                initial_version=4,
+            ),
+            BoardStateConsumer(
+                [baseline("board", "881333")],
+                initial_version=19,
+            ),
+        )
+        self.assertEqual(runtime.get_stock_states().version, 12)
+        self.assertEqual(runtime.get_index_states().version, 4)
+        self.assertEqual(runtime.get_board_states().version, 19)
+        self.assertEqual(runtime.get_stock_states().source_n3_version, 0)
+
+        result = runtime.consume_views(
+            stock=view("stock", "600000", version=1),
+            index=view("index", "000001", version=1),
+            board=view("board", "881333", version=1),
+        )
+        self.assertEqual(result.stock.version, 13)
+        self.assertEqual(result.index.version, 5)
+        self.assertEqual(result.board.version, 20)
+
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            StockStateConsumer(
+                [baseline("stock", "600000")],
+                initial_version=-1,
+            )
+
     def test_initial_maps_hold_full_n2_universe_as_unavailable(self) -> None:
         runtime = self.make_runtime()
         self.assertIsInstance(runtime.stock_states["stock:600000"], StockRuntimeState)
@@ -682,6 +717,19 @@ class WindowsN4MemoryTest(unittest.TestCase):
         self.assertEqual(stock.source_amounts["W"], Decimal("200"))
         self.assertEqual(stock.source_transitions["30m"], "unknown")
         self.assertIsNone(stock.source_amounts["30m"])
+
+        seeded = build_windows_n4_runtime(
+            model,
+            initial_versions={"stock": 12, "index": 4, "board": 19},
+        )
+        self.assertEqual(seeded.get_stock_states().version, 12)
+        self.assertEqual(seeded.get_index_states().version, 4)
+        self.assertEqual(seeded.get_board_states().version, 19)
+        with self.assertRaisesRegex(ValueError, "exactly stock/index/board"):
+            build_windows_n4_runtime(
+                model,
+                initial_versions={"stock": 12},
+            )
 
     def test_module_has_no_persistence_or_downstream_contract(self) -> None:
         root = Path(__file__).parents[1]

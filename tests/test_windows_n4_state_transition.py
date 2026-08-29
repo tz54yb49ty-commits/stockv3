@@ -535,3 +535,197 @@ def test_module_is_pure_and_does_not_write_events() -> None:
         "requests",
     ):
         assert forbidden not in source
+
+
+
+@pytest.mark.parametrize(
+    ("state_type", "asset_kind", "identity_key", "exchange", "code"),
+    [
+        (StockRuntimeState, "stock", "stock:SZ:000001", "SZ", "000001"),
+        (IndexRuntimeState, "index", "index:SH:000001", "SH", "000001"),
+        (BoardRuntimeState, "board", "board:SH:881001", "SH", "881001"),
+    ],
+)
+def test_restore_outbox_lifecycle_is_symmetric_and_idempotent(
+    state_type: type[StockRuntimeState]
+    | type[IndexRuntimeState]
+    | type[BoardRuntimeState],
+    asset_kind: str,
+    identity_key: str,
+    exchange: str,
+    code: str,
+) -> None:
+    def make_state(
+        *,
+        version: int,
+        label: str,
+        live_d: str,
+        live_w: str,
+        live_30m: str,
+    ) -> StockRuntimeState | IndexRuntimeState | BoardRuntimeState:
+        stock = _state(
+            identity_key="stock:SZ:000001",
+            code=code,
+            name=f"{asset_kind}-{code}",
+            version=version,
+            observed_at=_time(label),
+            source_d="low_volume_down",
+            live_d=live_d,
+            source_w="10",
+            live_w=live_w,
+            live_30m=live_30m,
+        )
+        values = {
+            field: getattr(stock, field)
+            for field in stock.__dataclass_fields__
+        }
+        values.update(
+            asset_kind=asset_kind,
+            identity_key=identity_key,
+            exchange=exchange,
+            code=code,
+        )
+        return state_type(**values)
+
+    def make_snapshot(
+        version: int,
+        state: StockRuntimeState | IndexRuntimeState | BoardRuntimeState,
+    ) -> RuntimeStateSnapshot:
+        return RuntimeStateSnapshot(
+            source_condition_run_id=SOURCE_RUN_ID,
+            source_trade_date="20260826",
+            for_trade_date="20260827",
+            version=version,
+            source_n3_version=version,
+            generated_at=state.observed_at,
+            channel_status="ready",
+            states=MappingProxyType({identity_key: state}),
+        )
+
+    original = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=TRIGGER_RUN_ID,
+    )
+    matched_state = make_state(
+        version=7,
+        label="09:35",
+        live_d="volume_up",
+        live_w="11",
+        live_30m="none",
+    )
+    matched = original.consume(make_snapshot(7, matched_state)).events[0]
+    assert matched.event_type == "TriggerMatched"
+
+    restored_inactive = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=f"{TRIGGER_RUN_ID}_restart_inactive",
+    )
+    restored_snapshot = restored_inactive.restore_from_outbox(
+        [matched, matched]
+    )
+    assert restored_snapshot.source_n4_version == 7
+    assert restored_snapshot.states[identity_key].buy.trigger_live is True
+    assert (
+        restored_inactive.restore_from_outbox([matched])
+        is restored_snapshot
+    )
+
+    inactive_state = make_state(
+        version=8,
+        label="09:40",
+        live_d="flat",
+        live_w="9",
+        live_30m="none",
+    )
+    inactive = restored_inactive.consume(
+        make_snapshot(8, inactive_state)
+    )
+    assert [event.event_type for event in inactive.events] == [
+        "TriggerStateChanged"
+    ]
+    assert inactive.events[0].payload_json["trigger_live"] is False
+    assert (
+        inactive.events[0].payload_json["episode_entry_event_id"]
+        == matched.event_id
+    )
+
+    restored_after_inactive = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=f"{TRIGGER_RUN_ID}_restart_after_inactive",
+    )
+    inactive_snapshot = restored_after_inactive.restore_from_outbox(
+        [inactive.events[0], matched, inactive.events[0]]
+    )
+    assert inactive_snapshot.source_n4_version == 8
+    assert inactive_snapshot.states[identity_key].buy.trigger_live is False
+    assert restored_after_inactive.consume(
+        make_snapshot(9, inactive_state)
+    ).events == ()
+
+    restored_live = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=f"{TRIGGER_RUN_ID}_restart_live",
+    )
+    restored_live.restore_from_outbox([matched])
+    unchanged = restored_live.consume(make_snapshot(8, matched_state))
+    assert unchanged.events == ()
+
+    changed_state = make_state(
+        version=9,
+        label="10:00",
+        live_d="volume_up",
+        live_w="11",
+        live_30m="volume_up",
+    )
+    changed = restored_live.consume(make_snapshot(9, changed_state))
+    assert [event.event_type for event in changed.events] == [
+        "TriggerStateChanged"
+    ]
+    assert changed.events[0].payload_json["trigger_live"] is True
+    assert changed.events[0].payload_json["activation_sources"] == ["D", "B"]
+    assert (
+        changed.events[0].payload_json["episode_entry_event_id"]
+        == matched.event_id
+    )
+
+    restored_after_change = WindowsN4StateTransitionPlanner(
+        asset_kind=asset_kind,
+        trigger_run_id=f"{TRIGGER_RUN_ID}_restart_after_change",
+    )
+    changed_snapshot = restored_after_change.restore_from_outbox(
+        [changed.events[0], matched, changed.events[0]]
+    )
+    assert changed_snapshot.source_n4_version == 9
+    restored_buy = changed_snapshot.states[identity_key].buy
+    assert restored_buy.trigger_live is True
+    assert restored_buy.activation_sources == ("D", "B")
+    assert restored_after_change.consume(
+        make_snapshot(10, changed_state)
+    ).events == ()
+
+
+def test_restore_rejects_conflicting_duplicate_without_mutating_planner() -> None:
+    original = _planner()
+    state = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="low_volume_down",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    matched = original.consume(_snapshot(1, state)).events[0]
+    payload = dict(matched.payload_json)
+    payload["source_condition_run_id"] = "different-lineage"
+    mixed = type(matched)(
+        **{
+            **matched.as_record(),
+            "payload_json": payload,
+        }
+    )
+    restored = _planner()
+    with pytest.raises(ValueError, match="conflicting duplicate event_id"):
+        restored.restore_from_outbox([matched, mixed])
+    with pytest.raises(RuntimeError, match="no N4 snapshot"):
+        restored.read()

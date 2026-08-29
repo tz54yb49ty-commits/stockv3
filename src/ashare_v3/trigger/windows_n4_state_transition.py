@@ -7,14 +7,18 @@ read the database, fetch market data, or start downstream action work.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from threading import RLock
 from types import MappingProxyType
 
-from ashare_v3.events.models import EventEnvelope
+from ashare_v3.events.models import (
+    EventEnvelope,
+    N4_SOURCE_LAYER,
+    validate_event_envelope,
+)
 from ashare_v3.trigger.event_factory import build_n4_trigger_event
 from ashare_v3.trigger.windows_n4_memory import (
     BoardRuntimeState,
@@ -137,6 +141,26 @@ class WindowsN4StateTransitionPlanner:
             if self._snapshot is None:
                 raise RuntimeError("no N4 snapshot has been consumed")
             return self._snapshot
+
+    def restore_from_outbox(
+        self,
+        events: Sequence[EventEnvelope],
+    ) -> TriggerStateSnapshot:
+        """Fold one trading day's immutable N4 Outbox events into memory."""
+
+        with self._lock:
+            restored = _restore_trigger_state_snapshot(
+                events,
+                asset_kind=self.asset_kind,
+            )
+            if self._snapshot is not None:
+                if self._snapshot != restored:
+                    raise ValueError(
+                        "planner already holds different lifecycle state"
+                    )
+                return self._snapshot
+            self._snapshot = restored
+            return restored
 
     def consume(
         self,
@@ -457,6 +481,260 @@ class WindowsN4StateTransitionPlanner:
             payload=payload,
             created_at=runtime_snapshot.generated_at,
         )
+
+
+def _restore_trigger_state_snapshot(
+    events: Sequence[EventEnvelope],
+    *,
+    asset_kind: str,
+) -> TriggerStateSnapshot:
+    if not events:
+        raise ValueError("restore events must not be empty")
+
+    unique: dict[str, EventEnvelope] = {}
+    for event in events:
+        validate_event_envelope(event)
+        _validate_restore_event(event, asset_kind)
+        previous = unique.get(event.event_id)
+        if previous is not None and previous.as_record() != event.as_record():
+            raise ValueError(f"conflicting duplicate event_id: {event.event_id}")
+        unique[event.event_id] = event
+
+    ordered = sorted(
+        unique.values(),
+        key=lambda event: (
+            _restore_int(event.payload_json, "n4_state_version"),
+            event.event_time,
+            event.event_id,
+        ),
+    )
+    first = ordered[0].payload_json
+    lineage = tuple(
+        _restore_str(first, key)
+        for key in (
+            "source_condition_run_id",
+            "source_trade_date",
+            "for_trade_date",
+        )
+    )
+    states: dict[str, ObjectTriggerState] = {}
+    seen_versions: set[tuple[str, str, int]] = set()
+
+    for event in ordered:
+        payload = event.payload_json
+        current_lineage = tuple(
+            _restore_str(payload, key)
+            for key in (
+                "source_condition_run_id",
+                "source_trade_date",
+                "for_trade_date",
+            )
+        )
+        if current_lineage != lineage:
+            raise ValueError("restore events contain mixed N2 lineage or dates")
+        version = _restore_int(payload, "n4_state_version")
+        direction = _restore_str(payload, "direction")
+        version_key = (event.identity_key, direction, version)
+        if version_key in seen_versions:
+            raise ValueError(
+                "multiple N4 lifecycle events share one direction and version"
+            )
+        seen_versions.add(version_key)
+
+        previous_object = states.get(event.identity_key)
+        if previous_object is None:
+            previous_object = _initial_restored_object(event)
+        previous_direction = (
+            previous_object.buy if direction == "buy" else previous_object.sell
+        )
+        current_direction = _restore_direction_state(
+            event,
+            previous_direction,
+            version,
+        )
+        states[event.identity_key] = replace(
+            previous_object,
+            source_n4_version=max(
+                previous_object.source_n4_version,
+                version,
+            ),
+            buy=(
+                current_direction
+                if direction == "buy"
+                else previous_object.buy
+            ),
+            sell=(
+                current_direction
+                if direction == "sell"
+                else previous_object.sell
+            ),
+        )
+
+    return TriggerStateSnapshot(
+        source_condition_run_id=lineage[0],
+        source_trade_date=lineage[1],
+        for_trade_date=lineage[2],
+        asset_kind=asset_kind,
+        source_n4_version=max(
+            _restore_int(event.payload_json, "n4_state_version")
+            for event in ordered
+        ),
+        generated_at=max(event.created_at for event in ordered),
+        states=states,
+    )
+
+
+def _validate_restore_event(
+    event: EventEnvelope,
+    asset_kind: str,
+) -> None:
+    payload = event.payload_json
+    if (
+        event.source_layer != N4_SOURCE_LAYER
+        or event.event_type not in {"TriggerMatched", "TriggerStateChanged"}
+        or event.asset_kind != asset_kind
+    ):
+        raise ValueError("event is not restorable by this N4 channel")
+    if _restore_str(payload, "run_id") != event.source_run_id:
+        raise ValueError("restore payload run_id does not match event")
+    if _restore_str(payload, "rule_policy_version") != RULE_POLICY_VERSION:
+        raise ValueError("restore event rule policy is not supported")
+    if _restore_str(payload, "for_trade_date") != event.trade_date:
+        raise ValueError("restore event trade_date does not match payload")
+
+
+def _initial_restored_object(event: EventEnvelope) -> ObjectTriggerState:
+    payload = event.payload_json
+    parts = event.identity_key.split(":")
+    if len(parts) != 3 or parts[0] != event.asset_kind:
+        raise ValueError(f"invalid restore identity_key: {event.identity_key}")
+    code = _restore_str(payload, "code")
+    if code != parts[2]:
+        raise ValueError("restore payload code does not match identity_key")
+    return ObjectTriggerState(
+        asset_kind=event.asset_kind,
+        identity_key=event.identity_key,
+        exchange=parts[1],
+        code=code,
+        name=_restore_str(payload, "name"),
+        source_n4_version=0,
+        buy=_initial_direction_state("buy"),
+        sell=_initial_direction_state("sell"),
+    )
+
+
+def _restore_direction_state(
+    event: EventEnvelope,
+    previous: DirectionTriggerState,
+    version: int,
+) -> DirectionTriggerState:
+    payload = event.payload_json
+    direction = _restore_str(payload, "direction")
+    expected_signal = "B_BUY" if direction == "buy" else "S_SELL"
+    expected_condition = (
+        BUY_CONDITION_KEY if direction == "buy" else SELL_CONDITION_KEY
+    )
+    if (
+        direction != previous.direction
+        or _restore_str(payload, "signal_type") != expected_signal
+        or _restore_str(payload, "condition_key") != expected_condition
+    ):
+        raise ValueError("restore event direction grain is inconsistent")
+
+    trigger_live = payload.get("trigger_live")
+    if type(trigger_live) is not bool:
+        raise ValueError("restore trigger_live must be boolean")
+    status = _restore_str(payload, "current_status")
+    if status != ("matched" if trigger_live else "inactive"):
+        raise ValueError("restore trigger_live and current_status disagree")
+    episode = _restore_int(payload, "episode_number")
+    entry_event_id = _restore_str(payload, "episode_entry_event_id")
+
+    if event.event_type == "TriggerMatched":
+        if previous.trigger_live or not trigger_live:
+            raise ValueError("TriggerMatched cannot reopen a live episode")
+        if episode != previous.episode_number + 1:
+            raise ValueError("TriggerMatched episode_number is not monotonic")
+        if entry_event_id != event.event_id:
+            raise ValueError(
+                "TriggerMatched episode_entry_event_id must equal event_id"
+            )
+    elif (
+        not previous.trigger_live
+        or episode != previous.episode_number
+        or entry_event_id != previous.episode_entry_event_id
+    ):
+        raise ValueError(
+            "TriggerStateChanged must retain the current live episode"
+        )
+
+    flags = payload.get("rule_flags")
+    if not isinstance(flags, Mapping) or set(flags) != {"A", "B", "C", "D30"}:
+        raise ValueError("restore event has invalid rule_flags")
+    activation_sources = _restore_sequence(payload, "activation_sources")
+    formal_periods = _restore_sequence(
+        payload,
+        "formal_triggered_periods",
+    )
+    primary = payload.get("primary_trigger_period")
+    if primary is not None and primary not in FORMAL_PERIOD_PRIORITY:
+        raise ValueError("restore primary_trigger_period is invalid")
+    projection = _restore_str(payload, "projection_30m_type")
+    if projection not in VALID_30M_GRADES:
+        raise ValueError("restore projection_30m_type is invalid")
+
+    return DirectionTriggerState(
+        direction=direction,
+        signal_type=expected_signal,
+        condition_key=expected_condition,
+        trigger_live=trigger_live,
+        current_status=status,
+        rule_flags=dict(flags),
+        activation_sources=activation_sources,
+        formal_triggered_periods=formal_periods,
+        primary_trigger_period=primary,
+        trigger_period=(
+            _restore_str(payload, "trigger_period")
+            if trigger_live
+            else None
+        ),
+        projection_30m_type=projection,
+        trigger_mark_candidate=_restore_str(
+            payload,
+            "trigger_mark_candidate",
+        ),
+        episode_number=episode,
+        episode_entry_event_id=entry_event_id,
+        last_event_id=event.event_id,
+        source_n4_version=version,
+    )
+
+
+def _restore_str(payload: Mapping[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"restore payload requires {key}")
+    return value
+
+
+def _restore_int(payload: Mapping[str, object], key: str) -> int:
+    value = payload.get(key)
+    if type(value) is not int or value < 1:
+        raise ValueError(f"restore payload requires positive integer {key}")
+    return value
+
+
+def _restore_sequence(
+    payload: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) or not item
+        for item in value
+    ):
+        raise ValueError(f"restore payload requires string sequence {key}")
+    return tuple(value)
 
 
 def _initial_object_state(runtime_state: RuntimeState) -> ObjectTriggerState:

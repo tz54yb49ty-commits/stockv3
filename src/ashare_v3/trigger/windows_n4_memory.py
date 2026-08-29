@@ -206,7 +206,11 @@ class _AtomicRuntimeStateStore(Generic[RuntimeStateT]):
         self,
         baselines: Mapping[str, N2RuntimeBaseline],
         state_type: type[RuntimeStateT],
+        *,
+        initial_version: int = 0,
     ) -> None:
+        if type(initial_version) is not int or initial_version < 0:
+            raise ValueError("initial_version must be a non-negative integer")
         first = next(iter(baselines.values()))
         initial = {
             identity_key: _initial_state(baseline, state_type)
@@ -217,7 +221,7 @@ class _AtomicRuntimeStateStore(Generic[RuntimeStateT]):
             source_condition_run_id=first.source_condition_run_id,
             source_trade_date=first.source_trade_date,
             for_trade_date=first.for_trade_date,
-            version=0,
+            version=initial_version,
             source_n3_version=0,
             generated_at=datetime.now(timezone.utc),
             channel_status="warming",
@@ -263,6 +267,7 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
         *,
         asset_kind: str,
         state_type: type[RuntimeStateT],
+        initial_version: int = 0,
     ) -> None:
         values = tuple(baselines)
         if not values:
@@ -284,7 +289,11 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
         self.asset_kind = asset_kind
         self._baselines = MappingProxyType(by_identity)
         self._state_type = state_type
-        self._store = _AtomicRuntimeStateStore(self._baselines, state_type)
+        self._store = _AtomicRuntimeStateStore(
+            self._baselines,
+            state_type,
+            initial_version=initial_version,
+        )
         self._consume_lock = RLock()
 
     @property
@@ -475,18 +484,48 @@ class _RuntimeStateConsumer(Generic[RuntimeStateT]):
 
 
 class StockStateConsumer(_RuntimeStateConsumer[StockRuntimeState]):
-    def __init__(self, baselines: Sequence[N2RuntimeBaseline]) -> None:
-        super().__init__(baselines, asset_kind="stock", state_type=StockRuntimeState)
+    def __init__(
+        self,
+        baselines: Sequence[N2RuntimeBaseline],
+        *,
+        initial_version: int = 0,
+    ) -> None:
+        super().__init__(
+            baselines,
+            asset_kind="stock",
+            state_type=StockRuntimeState,
+            initial_version=initial_version,
+        )
 
 
 class IndexStateConsumer(_RuntimeStateConsumer[IndexRuntimeState]):
-    def __init__(self, baselines: Sequence[N2RuntimeBaseline]) -> None:
-        super().__init__(baselines, asset_kind="index", state_type=IndexRuntimeState)
+    def __init__(
+        self,
+        baselines: Sequence[N2RuntimeBaseline],
+        *,
+        initial_version: int = 0,
+    ) -> None:
+        super().__init__(
+            baselines,
+            asset_kind="index",
+            state_type=IndexRuntimeState,
+            initial_version=initial_version,
+        )
 
 
 class BoardStateConsumer(_RuntimeStateConsumer[BoardRuntimeState]):
-    def __init__(self, baselines: Sequence[N2RuntimeBaseline]) -> None:
-        super().__init__(baselines, asset_kind="board", state_type=BoardRuntimeState)
+    def __init__(
+        self,
+        baselines: Sequence[N2RuntimeBaseline],
+        *,
+        initial_version: int = 0,
+    ) -> None:
+        super().__init__(
+            baselines,
+            asset_kind="board",
+            state_type=BoardRuntimeState,
+            initial_version=initial_version,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,13 +766,40 @@ def _require_yyyymmdd(value: str, field: str) -> None:
         raise ValueError(f"{field} must be YYYYMMDD")
 
 
-def build_windows_n4_runtime(model: N3ActiveReadModel) -> WindowsN4MemoryRuntime:
+def build_windows_n4_runtime(
+    model: N3ActiveReadModel,
+    *,
+    initial_versions: Mapping[str, int] | None = None,
+) -> WindowsN4MemoryRuntime:
     """Adapt the N2 startup read model without copying user-facing fields."""
 
+    versions = (
+        {"stock": 0, "index": 0, "board": 0}
+        if initial_versions is None
+        else dict(initial_versions)
+    )
+    expected_channels = {"stock", "index", "board"}
+    if set(versions) != expected_channels:
+        raise ValueError(
+            "initial_versions must contain exactly stock/index/board"
+        )
+    if any(type(value) is not int or value < 0 for value in versions.values()):
+        raise ValueError(
+            "initial_versions values must be non-negative integers"
+        )
     return WindowsN4MemoryRuntime(
-        StockStateConsumer(_channel_baselines(model, "stock")),
-        IndexStateConsumer(_channel_baselines(model, "index")),
-        BoardStateConsumer(_channel_baselines(model, "board")),
+        StockStateConsumer(
+            _channel_baselines(model, "stock"),
+            initial_version=versions["stock"],
+        ),
+        IndexStateConsumer(
+            _channel_baselines(model, "index"),
+            initial_version=versions["index"],
+        ),
+        BoardStateConsumer(
+            _channel_baselines(model, "board"),
+            initial_version=versions["board"],
+        ),
     )
 
 
