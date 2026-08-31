@@ -17,6 +17,8 @@ from ashare_v3.condition.windows_n2_after_n1 import (
 POLICY_HASH = "policy-v19"
 SOURCE_DATE = "20260827"
 FOR_DATE = "20260828"
+RECOVERY_SOURCE_DATE = "20260831"
+RECOVERY_FOR_DATE = "20260901"
 
 
 @dataclass
@@ -107,6 +109,163 @@ class WindowsN2AfterN1Test(unittest.TestCase):
         self.assertEqual(result.result, "N2_AFTER_N1_PASS")
         self.assertEqual(repository.completion_calls, 2)
         self.assertEqual(repository.latest_completion_calls, 1)
+
+    def test_fixed_source_date_executes_without_polling_or_latest_selection(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=["passed"],
+            latest_completed_date="20260828",
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, True, RECOVERY_FOR_DATE
+                ),
+            },
+        )
+        calls: list[str] = []
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda source: calls.append(source) or passed_report(
+                RECOVERY_SOURCE_DATE, RECOVERY_FOR_DATE
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+            sleep_fn=lambda _: (_ for _ in ()).throw(
+                AssertionError("fixed recovery must not poll")
+            ),
+        )
+        self.assertEqual(result.result, "N2_AFTER_N1_PASS")
+        self.assertEqual(result.source_trade_date, RECOVERY_SOURCE_DATE)
+        self.assertEqual(result.for_trade_date, RECOVERY_FOR_DATE)
+        self.assertEqual(result.n1_status, "passed")
+        self.assertEqual(calls, [RECOVERY_SOURCE_DATE])
+        self.assertEqual(repository.completion_calls, 1)
+        self.assertEqual(repository.latest_completion_calls, 0)
+        self.assertEqual(repository.calendar_calls, [RECOVERY_SOURCE_DATE])
+
+    def test_fixed_source_date_failed_marker_blocks_immediately(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=["failed"],
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, True, RECOVERY_FOR_DATE
+                ),
+            },
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(
+                AssertionError("must not execute")
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+            sleep_fn=lambda _: (_ for _ in ()).throw(
+                AssertionError("fixed recovery must not poll")
+            ),
+        )
+        self.assertEqual(result.result, "BLOCKED_N1_FAILED")
+        self.assertEqual(result.n1_status, "failed")
+        self.assertEqual(repository.completion_calls, 1)
+        self.assertEqual(repository.latest_completion_calls, 0)
+
+    def test_fixed_source_date_missing_passed_marker_blocks_immediately(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=[None],
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, True, RECOVERY_FOR_DATE
+                ),
+            },
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(
+                AssertionError("must not execute")
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+        )
+        self.assertEqual(result.result, "BLOCKED_N1_COMPLETION_MISSING")
+        self.assertIsNone(result.n1_status)
+        self.assertEqual(repository.latest_completion_calls, 0)
+
+    def test_fixed_source_date_identical_active_is_idempotent(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=["passed"],
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, True, RECOVERY_FOR_DATE
+                ),
+            },
+            active_runs=(
+                ActiveConditionRun("recovery-run", "passed_active", POLICY_HASH),
+            ),
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(
+                AssertionError("must not execute")
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+        )
+        self.assertEqual(result.result, "SKIPPED_IDENTICAL_PASSED_ACTIVE")
+        self.assertEqual(result.active_run_id, "recovery-run")
+
+    def test_fixed_source_date_active_conflict_blocks(self) -> None:
+        repository = FakeRepository(
+            n1_statuses=["passed"],
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, True, RECOVERY_FOR_DATE
+                ),
+            },
+            active_runs=(
+                ActiveConditionRun("conflict-run", "passed_active", "other-policy"),
+            ),
+        )
+        result = run_windows_n2_after_n1(
+            repository=repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(
+                AssertionError("must not execute")
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+        )
+        self.assertEqual(result.result, "BLOCKED_ACTIVE_RUN_CONFLICT")
+        self.assertEqual(result.active_run_id, "conflict-run")
+
+    def test_fixed_source_date_rejects_closed_or_future_date(self) -> None:
+        closed_repository = FakeRepository(
+            calendars={
+                RECOVERY_SOURCE_DATE: CalendarContext(
+                    RECOVERY_SOURCE_DATE, False, None
+                ),
+            },
+        )
+        closed = run_windows_n2_after_n1(
+            repository=closed_repository,
+            policy_hash=POLICY_HASH,
+            execute_n2=lambda _: (_ for _ in ()).throw(
+                AssertionError("must not execute")
+            ),
+            source_trade_date=RECOVERY_SOURCE_DATE,
+            now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+        )
+        self.assertEqual(closed.result, "BLOCKED_SOURCE_DATE_NOT_OPEN")
+        self.assertEqual(closed_repository.completion_calls, 0)
+
+        with self.assertRaisesRegex(ValueError, "future"):
+            run_windows_n2_after_n1(
+                repository=FakeRepository(),
+                policy_hash=POLICY_HASH,
+                execute_n2=lambda _: passed_report(),
+                source_trade_date="20260902",
+                now_fn=lambda: datetime(2026, 9, 1, 0, 15),
+            )
 
     def test_delayed_morning_uses_latest_completed_n1_date(self) -> None:
         repository = FakeRepository(

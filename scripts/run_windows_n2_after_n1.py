@@ -67,8 +67,9 @@ def execute_existing_n2(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run Windows N2 after today's scheduled N1 marker, or use the latest "
-            "completed N1 date when recovering outside the scheduled wait window."
+            "Run Windows N2 after today's scheduled N1 marker, use the latest "
+            "completed N1 date outside the scheduled window, or recover one "
+            "explicit completed N1 source date without polling."
         )
     )
     parser.add_argument("--dsn", default=os.environ.get("ASHARE_V3_POSTGRES_DSN", DEFAULT_DSN))
@@ -77,6 +78,7 @@ def main() -> int:
         default="configs/n2_policy/default_policy_draft.json",
     )
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument("--source-trade-date")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -92,6 +94,7 @@ def main() -> int:
             dsn=args.dsn,
             policy_path=policy_path,
         ),
+        source_trade_date=args.source_trade_date,
         poll_seconds=args.poll_seconds,
     )
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))

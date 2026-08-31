@@ -174,6 +174,7 @@ def run_windows_n2_after_n1(
     repository: AfterN1Repository,
     policy_hash: str,
     execute_n2: Callable[[str], Mapping[str, Any]],
+    source_trade_date: str | None = None,
     now_fn: Callable[[], datetime] = datetime.now,
     sleep_fn: Callable[[float], None] = time_module.sleep,
     poll_seconds: float = 30.0,
@@ -182,64 +183,99 @@ def run_windows_n2_after_n1(
 ) -> WindowsN2AfterN1Result:
     """Select one completed N1 date and execute exactly one N2 run if needed."""
     started_at = now_fn()
-    today = started_at.strftime("%Y%m%d")
-    today_calendar = repository.calendar_context(today)
-    if not today_calendar.is_open:
-        return WindowsN2AfterN1Result(
-            result="SKIPPED_NON_TRADING_DAY",
-            source_trade_date=today,
-            for_trade_date=None,
-            policy_hash=policy_hash,
-        )
-    if not today_calendar.for_trade_date:
-        raise RuntimeError("open trade date has no for_trade_date")
+    if source_trade_date is not None:
+        try:
+            parsed_source_date = datetime.strptime(
+                source_trade_date, "%Y%m%d"
+            ).date()
+        except ValueError as exc:
+            raise ValueError("source_trade_date must use YYYYMMDD") from exc
+        if parsed_source_date > started_at.date():
+            raise ValueError("source_trade_date cannot be in the future")
+        source_trade_date = parsed_source_date.strftime("%Y%m%d")
+        calendar = repository.calendar_context(source_trade_date)
+        if not calendar.is_open or not calendar.for_trade_date:
+            return WindowsN2AfterN1Result(
+                result="BLOCKED_SOURCE_DATE_NOT_OPEN",
+                source_trade_date=source_trade_date,
+                for_trade_date=calendar.for_trade_date,
+                policy_hash=policy_hash,
+            )
+        n1_status = repository.n1_completion_status(source_trade_date)
+        if n1_status != "passed":
+            return WindowsN2AfterN1Result(
+                result=(
+                    "BLOCKED_N1_FAILED"
+                    if n1_status in TERMINAL_N1_FAILURE_STATUSES
+                    else "BLOCKED_N1_COMPLETION_MISSING"
+                ),
+                source_trade_date=source_trade_date,
+                for_trade_date=calendar.for_trade_date,
+                policy_hash=policy_hash,
+                n1_status=n1_status,
+            )
+    else:
+        today = started_at.strftime("%Y%m%d")
+        today_calendar = repository.calendar_context(today)
+        if not today_calendar.is_open:
+            return WindowsN2AfterN1Result(
+                result="SKIPPED_NON_TRADING_DAY",
+                source_trade_date=today,
+                for_trade_date=None,
+                policy_hash=policy_hash,
+            )
+        if not today_calendar.for_trade_date:
+            raise RuntimeError("open trade date has no for_trade_date")
 
-    deadline_at = datetime.combine(started_at.date(), deadline)
-    in_scheduled_window = scheduled_start <= started_at.time() <= deadline
-    n1_status: str | None = None
-    if in_scheduled_window:
-        while True:
-            n1_status = repository.n1_completion_status(today)
-            if n1_status == "passed":
-                break
-            if n1_status in TERMINAL_N1_FAILURE_STATUSES:
-                return WindowsN2AfterN1Result(
-                    result="BLOCKED_N1_FAILED",
-                    source_trade_date=today,
-                    for_trade_date=today_calendar.for_trade_date,
-                    policy_hash=policy_hash,
-                    n1_status=n1_status,
-                )
-            if now_fn() >= deadline_at:
-                return WindowsN2AfterN1Result(
-                    result="BLOCKED_N1_TIMEOUT",
-                    source_trade_date=today,
-                    for_trade_date=today_calendar.for_trade_date,
-                    policy_hash=policy_hash,
-                    n1_status=n1_status,
-                )
-            sleep_fn(poll_seconds)
+        deadline_at = datetime.combine(started_at.date(), deadline)
+        in_scheduled_window = scheduled_start <= started_at.time() <= deadline
+        n1_status = None
+        if in_scheduled_window:
+            while True:
+                n1_status = repository.n1_completion_status(today)
+                if n1_status == "passed":
+                    break
+                if n1_status in TERMINAL_N1_FAILURE_STATUSES:
+                    return WindowsN2AfterN1Result(
+                        result="BLOCKED_N1_FAILED",
+                        source_trade_date=today,
+                        for_trade_date=today_calendar.for_trade_date,
+                        policy_hash=policy_hash,
+                        n1_status=n1_status,
+                    )
+                if now_fn() >= deadline_at:
+                    return WindowsN2AfterN1Result(
+                        result="BLOCKED_N1_TIMEOUT",
+                        source_trade_date=today,
+                        for_trade_date=today_calendar.for_trade_date,
+                        policy_hash=policy_hash,
+                        n1_status=n1_status,
+                    )
+                sleep_fn(poll_seconds)
 
-    source_trade_date = repository.latest_completed_n1_date(today)
-    if source_trade_date is None or (in_scheduled_window and source_trade_date != today):
-        return WindowsN2AfterN1Result(
-            result="BLOCKED_N1_COMPLETION_MISSING",
-            source_trade_date=today,
-            for_trade_date=today_calendar.for_trade_date,
-            policy_hash=policy_hash,
-            n1_status=n1_status,
+        source_trade_date = repository.latest_completed_n1_date(today)
+        if source_trade_date is None or (
+            in_scheduled_window and source_trade_date != today
+        ):
+            return WindowsN2AfterN1Result(
+                result="BLOCKED_N1_COMPLETION_MISSING",
+                source_trade_date=today,
+                for_trade_date=today_calendar.for_trade_date,
+                policy_hash=policy_hash,
+                n1_status=n1_status,
+            )
+        calendar = (
+            today_calendar
+            if source_trade_date == today
+            else repository.calendar_context(source_trade_date)
         )
-    calendar = (
-        today_calendar
-        if source_trade_date == today
-        else repository.calendar_context(source_trade_date)
-    )
-    if not calendar.is_open or not calendar.for_trade_date:
-        raise RuntimeError(
-            f"completed N1 date is not an open date with a successor: {source_trade_date}"
-        )
-    if not in_scheduled_window:
-        n1_status = "passed"
+        if not calendar.is_open or not calendar.for_trade_date:
+            raise RuntimeError(
+                "completed N1 date is not an open date with a successor: "
+                f"{source_trade_date}"
+            )
+        if not in_scheduled_window:
+            n1_status = "passed"
 
     active_runs = tuple(repository.active_condition_runs(
         source_trade_date,
