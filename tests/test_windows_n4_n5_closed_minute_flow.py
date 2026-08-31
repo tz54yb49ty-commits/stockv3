@@ -67,8 +67,6 @@ def test_actual_n4_ab_lifecycle_drives_n5_episode_lifecycle() -> None:
     assert n4_event_types == [
         "TriggerMatched",
         "TriggerStateChanged",
-        "TriggerStateChanged",
-        "TriggerStateChanged",
         "TriggerMatched",
     ]
     assert [event.event_type for event in n5_events] == [
@@ -81,14 +79,14 @@ def test_actual_n4_ab_lifecycle_drives_n5_episode_lifecycle() -> None:
         n5_events[0].payload_json["episode_entry_event_id"]
         != n5_events[2].payload_json["episode_entry_event_id"]
     )
-    changed_runtime = next(iter(n5_snapshots[1].runtime_states.values()))
-    assert changed_runtime.realtime_transitions["30m"] == "volume_up"
-    assert changed_runtime.realtime_virtual_amounts["W"] == Decimal("10.90")
-    assert changed_runtime.n4_current_price == Decimal("10.00")
-    assert changed_runtime.n4_cumulative_amount == Decimal("100000000")
-    assert changed_runtime.provider == "fixture"
-    assert changed_runtime.live_status == "available"
-    assert changed_runtime.fresh is True
+    entry_runtime = next(iter(n5_snapshots[0].runtime_states.values()))
+    assert entry_runtime.realtime_transitions["30m"] == "none"
+    assert entry_runtime.realtime_virtual_amounts["W"] == Decimal("10.80")
+    assert entry_runtime.n4_current_price == Decimal("10.00")
+    assert entry_runtime.n4_cumulative_amount == Decimal("100000000")
+    assert entry_runtime.provider == "fixture"
+    assert entry_runtime.live_status == "available"
+    assert entry_runtime.fresh is True
     final_episode = tuple(n5.read().active.values())[0]
     assert final_episode.action_state == "eligible"
     assert final_episode.trigger_live is True

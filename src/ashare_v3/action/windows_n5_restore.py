@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ashare_v3.action.windows_n5_episode import (
-    SOURCE_RULE_POLICY_VERSION,
+    SUPPORTED_SOURCE_RULE_POLICY_VERSIONS,
     WindowsN5EpisodePlanner,
 )
 from ashare_v3.events.models import (
@@ -48,7 +48,7 @@ N4_INBOX_RESTORE_SELECT = """
       AND raw_json->'source_event'->'payload_json'
             ->>'source_condition_run_id' = %s
       AND raw_json->'source_event'->'payload_json'
-            ->>'rule_policy_version' = %s
+            ->>'rule_policy_version' = ANY(%s)
     ORDER BY
       (raw_json->'source_event'->>'event_time')::timestamptz,
       inbox_id
@@ -201,7 +201,7 @@ class WindowsN5EpisodeReadOnlyRepository:
                         for_trade_date,
                         list(ASSET_KINDS),
                         source_condition_run_id,
-                        SOURCE_RULE_POLICY_VERSION,
+                        list(SUPPORTED_SOURCE_RULE_POLICY_VERSIONS),
                     ),
                 )
                 n4_events = tuple(
@@ -262,7 +262,7 @@ def _validate_restore_event(
             raise ValueError("unsupported N4 inbox restore event")
         if (
             str(payload.get("rule_policy_version") or "")
-            != SOURCE_RULE_POLICY_VERSION
+            not in SUPPORTED_SOURCE_RULE_POLICY_VERSIONS
         ):
             raise ValueError("unsupported N4 restore rule_policy_version")
         return

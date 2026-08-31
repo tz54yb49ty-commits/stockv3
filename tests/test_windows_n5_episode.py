@@ -15,6 +15,8 @@ from ashare_v3.market.windows_n3_action_metric import ActionConfirmationMetric
 from ashare_v3.trigger.event_factory import build_n4_trigger_event
 from ashare_v3.action.windows_n5_episode import (
     ACTION_POLICY_VERSION,
+    DAILY_SOURCE_RULE_POLICY_VERSION,
+    LEGACY_SOURCE_RULE_POLICY_VERSION,
     WindowsN5EpisodePlanner,
     evaluate_confirmation,
 )
@@ -23,7 +25,7 @@ from ashare_v3.action.windows_n5_episode import (
 CST = timezone(timedelta(hours=8))
 TRADE_DATE = "20260827"
 SOURCE_CONDITION_RUN_ID = "condition_20260826_to_20260827"
-RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
+RULE_POLICY_VERSION = LEGACY_SOURCE_RULE_POLICY_VERSION
 
 
 def _time(hour: int, minute: int) -> datetime:
@@ -38,7 +40,18 @@ def _identity(asset_kind: str) -> str:
     }[asset_kind]
 
 
-def _direction_fields(direction: str) -> tuple[str, str]:
+def _direction_fields(
+    direction: str,
+    rule_policy_version: str = RULE_POLICY_VERSION,
+) -> tuple[str, str]:
+    if rule_policy_version == DAILY_SOURCE_RULE_POLICY_VERSION:
+        return (
+            ("B_BUY", "BUY:D_STATE_V2")
+            if direction == "buy"
+            else ("S_SELL", "SELL:D_STATE_V2")
+        )
+    if rule_policy_version != LEGACY_SOURCE_RULE_POLICY_VERSION:
+        raise ValueError("unsupported fixture rule policy")
     if direction == "buy":
         return "B_BUY", "BUY:STATE_V1"
     return "S_SELL", "SELL:STATE_V1"
@@ -53,14 +66,18 @@ def _matched(
     version: int = 1,
     event_time: datetime | None = None,
     runtime_context: dict[str, object] | None = None,
+    rule_policy_version: str = RULE_POLICY_VERSION,
 ):
-    signal_type, condition_key = _direction_fields(direction)
+    signal_type, condition_key = _direction_fields(
+        direction,
+        rule_policy_version,
+    )
     identity = _identity(asset_kind)
     primary = formal_periods[0] if formal_periods else None
     trigger_period = primary or "30m"
     at = event_time or _time(9, 35)
     payload = {
-        "rule_policy_version": RULE_POLICY_VERSION,
+        "rule_policy_version": rule_policy_version,
         "source_condition_run_id": SOURCE_CONDITION_RUN_ID,
         "source_trade_date": "20260826",
         "for_trade_date": TRADE_DATE,
@@ -87,6 +104,11 @@ def _matched(
         "current_status": "matched",
         "episode_number": episode_number,
         "episode_entry_event_id": None,
+        **(
+            {"current_price": "10.00"}
+            if rule_policy_version == DAILY_SOURCE_RULE_POLICY_VERSION
+            else {}
+        ),
         **(runtime_context or {}),
     }
     kwargs = {
@@ -107,7 +129,7 @@ def _matched(
         ),
         "trigger_period": trigger_period,
         "trigger_bucket": f"episode:{episode_number}",
-        "match_basis": f"{RULE_POLICY_VERSION}:fixture",
+        "match_basis": f"{rule_policy_version}:fixture",
         "data_quality_status": "ready",
         "payload": payload,
         "created_at": at,
@@ -128,6 +150,7 @@ def _state_changed(
 ):
     previous = dict(matched.payload_json)
     direction = previous["direction"]
+    rule_policy_version = str(previous["rule_policy_version"])
     primary = formal_periods[0] if formal_periods else None
     at = event_time or _time(10, 0)
     projection = (
@@ -136,7 +159,7 @@ def _state_changed(
         else ("volume_up" if direction == "buy" else "shrink_down")
     )
     payload = {
-        "rule_policy_version": RULE_POLICY_VERSION,
+        "rule_policy_version": rule_policy_version,
         "source_condition_run_id": SOURCE_CONDITION_RUN_ID,
         "source_trade_date": "20260826",
         "for_trade_date": TRADE_DATE,
@@ -188,7 +211,7 @@ def _state_changed(
         ),
         trigger_period=primary or previous["trigger_period"],
         trigger_bucket=f"episode:{previous['episode_number']}",
-        match_basis=f"{RULE_POLICY_VERSION}:fixture-change",
+        match_basis=f"{rule_policy_version}:fixture-change",
         data_quality_status=data_quality_status,
         payload=payload,
         created_at=at,
@@ -271,6 +294,66 @@ def test_trigger_matched_creates_one_eligible_and_replay_is_idempotent() -> None
     episode = _one_active(planner)
     assert episode.key.episode_entry_event_id == matched.event_id
     assert episode.eligible_event_id == first.events[0].event_id
+    assert (
+        first.events[0].payload_json["rule_policy_version"]
+        == LEGACY_SOURCE_RULE_POLICY_VERSION
+    )
+
+
+def test_daily_v2_lifecycle_emits_eligible_then_expired_skip() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_daily_v2_fixture",
+    )
+    matched = _matched(
+        rule_policy_version=DAILY_SOURCE_RULE_POLICY_VERSION,
+    )
+
+    eligible = planner.consume_trigger_event(matched).events[0]
+    assert eligible.event_type == "ActionEligible"
+    assert eligible.payload_json["condition_key"] == "BUY:D_STATE_V2"
+    assert (
+        eligible.payload_json["rule_policy_version"]
+        == DAILY_SOURCE_RULE_POLICY_VERSION
+    )
+
+    inactive = _state_changed(matched, trigger_live=False)
+    expired = planner.consume_trigger_event(inactive).events[0]
+    assert expired.event_type == "ActionSkipped"
+    assert expired.payload_json["action_state"] == "expired"
+    assert expired.payload_json["confirmation_status"] == "expired"
+    assert expired.payload_json["skipped_reason"] == "trigger_live_false"
+    assert (
+        expired.payload_json["rule_policy_version"]
+        == DAILY_SOURCE_RULE_POLICY_VERSION
+    )
+    assert planner.read().active == {}
+
+
+def test_daily_v2_rejects_live_true_state_change_without_mutation() -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="n5_daily_v2_true_change_fixture",
+    )
+    matched = _matched(
+        rule_policy_version=DAILY_SOURCE_RULE_POLICY_VERSION,
+    )
+    planner.consume_trigger_event(matched)
+    changed = _state_changed(
+        matched,
+        trigger_live=True,
+        formal_periods=("D",),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="V2 TriggerStateChanged must be inactive",
+    ):
+        planner.consume_trigger_event(changed)
+
+    episode = _one_active(planner)
+    assert episode.current_source_event["event_id"] == matched.event_id
+    assert planner.read().processed_trigger_event_count == 1
 
 
 def test_episode_event_snapshots_are_nested_immutable_across_fork() -> None:

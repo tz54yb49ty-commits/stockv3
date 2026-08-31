@@ -4,7 +4,11 @@ from collections.abc import Mapping
 
 import pytest
 
-from ashare_v3.action.windows_n5_episode import WindowsN5EpisodePlanner
+from ashare_v3.action.windows_n5_episode import (
+    DAILY_SOURCE_RULE_POLICY_VERSION,
+    SUPPORTED_SOURCE_RULE_POLICY_VERSIONS,
+    WindowsN5EpisodePlanner,
+)
 from ashare_v3.action.windows_n5_restore import (
     N4_INBOX_RESTORE_SELECT,
     N5_OUTBOX_RESTORE_SELECT,
@@ -28,12 +32,24 @@ ACTION_RUN_IDS = {
 CONSUMER_NAME = "windows_n5_state_v1"
 
 
-def _history(asset_kind: str, outcome: str):
+def _history(
+    asset_kind: str,
+    outcome: str,
+    *,
+    rule_policy_version: str | None = None,
+):
     planner = WindowsN5EpisodePlanner(
         asset_kind=asset_kind,
         action_run_id=ACTION_RUN_IDS[asset_kind],
     )
-    matched = _matched(asset_kind=asset_kind)
+    matched = _matched(
+        asset_kind=asset_kind,
+        **(
+            {"rule_policy_version": rule_policy_version}
+            if rule_policy_version is not None
+            else {}
+        ),
+    )
     eligible = planner.consume_trigger_event(matched).events[0]
     if outcome == "eligible":
         return (matched,), (eligible,)
@@ -99,6 +115,27 @@ def test_bundle_restores_three_channel_episode_states_without_reemission() -> No
 
     stock_matched = bundle.events["stock"][0]
     assert planners["stock"].consume_trigger_event(stock_matched).events == ()
+
+
+def test_bundle_restores_daily_v2_without_reemission() -> None:
+    n4_events, n5_events = _history(
+        "stock",
+        "eligible",
+        rule_policy_version=DAILY_SOURCE_RULE_POLICY_VERSION,
+    )
+    bundle = build_windows_n5_episode_restore_bundle(
+        n4_inbox_events=n4_events,
+        n5_outbox_events=n5_events,
+        source_condition_run_id=SOURCE_CONDITION_RUN_ID,
+        for_trade_date=TRADE_DATE,
+        consumer_name=CONSUMER_NAME,
+        action_run_ids=ACTION_RUN_IDS,
+    )
+
+    planner = bundle.restore_planners(ACTION_RUN_IDS)["stock"]
+    episode = next(iter(planner.read().active.values()))
+    assert episode.key.condition_key == "BUY:D_STATE_V2"
+    assert planner.consume_trigger_event(n4_events[0]).events == ()
 
 
 def test_bundle_deduplicates_replayed_inbox_and_outbox_events() -> None:
@@ -227,6 +264,8 @@ def test_repository_reads_inbox_and_outbox_in_one_read_only_session() -> None:
     assert connection.read_only is True
     assert len(connection.cursor_value.executions) == 2
     assert connect_calls == [("postgresql://fixture", {})]
+    n4_params = connection.cursor_value.executions[0][1]
+    assert n4_params[-1] == list(SUPPORTED_SOURCE_RULE_POLICY_VERSIONS)
     assert len(bundle.events["stock"]) == 2
     for sql, _params in connection.cursor_value.executions:
         assert sql.lstrip().upper().startswith("SELECT ")

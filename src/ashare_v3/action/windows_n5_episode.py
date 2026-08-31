@@ -26,8 +26,28 @@ from ashare_v3.market.windows_n3_action_metric import ActionConfirmationMetric
 
 
 ACTION_POLICY_VERSION = "windows_n5_closed_minute_confirmation_v1"
-SOURCE_RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
-VALID_CONDITION_KEYS = {"BUY:STATE_V1", "SELL:STATE_V1"}
+LEGACY_SOURCE_RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
+DAILY_SOURCE_RULE_POLICY_VERSION = "windows_n4_daily_transition_v2"
+# Kept as the historical default for callers that import the old constant.
+SOURCE_RULE_POLICY_VERSION = LEGACY_SOURCE_RULE_POLICY_VERSION
+SOURCE_RULE_CONDITION_KEYS = {
+    LEGACY_SOURCE_RULE_POLICY_VERSION: {
+        "buy": "BUY:STATE_V1",
+        "sell": "SELL:STATE_V1",
+    },
+    DAILY_SOURCE_RULE_POLICY_VERSION: {
+        "buy": "BUY:D_STATE_V2",
+        "sell": "SELL:D_STATE_V2",
+    },
+}
+SUPPORTED_SOURCE_RULE_POLICY_VERSIONS = tuple(
+    SOURCE_RULE_CONDITION_KEYS
+)
+VALID_CONDITION_KEYS = {
+    condition_key
+    for values in SOURCE_RULE_CONDITION_KEYS.values()
+    for condition_key in values.values()
+}
 VALID_SIGNAL_TYPES = {"B_BUY", "S_SELL"}
 VALID_ASSET_KINDS = {"stock", "index", "board"}
 TriggerGrain = tuple[str, str, str, str, str, str]
@@ -589,6 +609,12 @@ class WindowsN5EpisodePlanner:
     ) -> EventEnvelope:
         entry_payload = dict(episode.entry_trigger_event["payload_json"])
         current_payload = dict(source_event["payload_json"])
+        source_rule_policy_version = _source_rule_policy_version(
+            current_payload
+        )
+        trigger_price = current_payload.get("trigger_price")
+        if trigger_price is None:
+            trigger_price = current_payload.get("current_price")
         formal_periods = tuple(
             str(value)
             for value in current_payload.get("all_trigger_periods", ())
@@ -596,14 +622,14 @@ class WindowsN5EpisodePlanner:
         primary_period = current_payload.get("primary_trigger_period")
         trigger_period = str(current_payload.get("trigger_period") or "")
         payload: dict[str, Any] = {
-            "rule_policy_version": SOURCE_RULE_POLICY_VERSION,
+            "rule_policy_version": source_rule_policy_version,
             "episode_entry_event_id": episode.key.episode_entry_event_id,
             "action_entry_trigger_matched_ref": dict(
                 episode.entry_trigger_event
             ),
             "current_active_source_ref": dict(source_event),
             "source_n4_payload": current_payload,
-            "trigger_price": current_payload.get("trigger_price"),
+            "trigger_price": trigger_price,
             "trigger_kind": "trigger",
             "triggered_periods": list(formal_periods),
             "all_trigger_periods": list(formal_periods),
@@ -612,7 +638,7 @@ class WindowsN5EpisodePlanner:
                 "source_condition_run_id": current_payload.get(
                     "source_condition_run_id"
                 ),
-                "rule_policy_version": SOURCE_RULE_POLICY_VERSION,
+                "rule_policy_version": source_rule_policy_version,
             },
             "baseline_source": "windows_n4_memory",
             "metric_minute_index": (
@@ -853,16 +879,33 @@ def _validate_trigger_event(event: EventEnvelope, asset_kind: str) -> None:
     if event.asset_kind != asset_kind:
         raise ValueError("N4 event asset_kind mismatch")
     payload = event.payload_json
-    if str(payload.get("rule_policy_version") or "") != SOURCE_RULE_POLICY_VERSION:
-        raise ValueError("unsupported N4 rule_policy_version")
-    if str(payload.get("condition_key") or "") not in VALID_CONDITION_KEYS:
-        raise ValueError("unsupported Windows state condition_key")
+    policy_version = _source_rule_policy_version(payload)
     signal_type = str(payload.get("signal_type") or "")
     direction = str(payload.get("direction") or "")
+    if direction not in {"buy", "sell"}:
+        raise ValueError("unsupported trigger direction")
     if signal_type not in VALID_SIGNAL_TYPES:
         raise ValueError("unsupported runtime signal_type")
     if (signal_type == "B_BUY") != (direction == "buy"):
         raise ValueError("direction and signal_type mismatch")
+    expected_condition_key = SOURCE_RULE_CONDITION_KEYS[policy_version][
+        direction
+    ]
+    if str(payload.get("condition_key") or "") != expected_condition_key:
+        raise ValueError("unsupported Windows state condition_key")
+    if policy_version == DAILY_SOURCE_RULE_POLICY_VERSION:
+        if event.event_type == "TriggerMatched":
+            if not _matched_event_is_live(payload):
+                raise ValueError("V2 TriggerMatched must be live and ready")
+        elif payload.get("trigger_live") is not False:
+            raise ValueError("V2 TriggerStateChanged must be inactive")
+
+
+def _source_rule_policy_version(payload: Mapping[str, Any]) -> str:
+    policy_version = str(payload.get("rule_policy_version") or "")
+    if policy_version not in SOURCE_RULE_CONDITION_KEYS:
+        raise ValueError("unsupported N4 rule_policy_version")
+    return policy_version
 
 
 def _validate_action_restore_event(
