@@ -17,6 +17,7 @@ from ashare_v3.market.windows_n3_action_metric import (
 )
 from ashare_v3.market.windows_n3_minute_context import (
     NormalizedMinuteBar,
+    PreviousDayMinuteContext,
     build_minute_context,
 )
 from ashare_v3.market.windows_n3_snapshot import (
@@ -58,7 +59,13 @@ def _bars(
     )
 
 
-def _raw_rows(trade_date: str, first: int, last: int) -> list[dict[str, object]]:
+def _raw_rows(
+    trade_date: str,
+    first: int,
+    last: int,
+    *,
+    start_labelled: bool = True,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for index in range(first, last + 1):
         close_time = datetime.strptime(
@@ -66,7 +73,11 @@ def _raw_rows(trade_date: str, first: int, last: int) -> list[dict[str, object]]
         )
         rows.append(
             {
-                "time": close_time - timedelta(minutes=1),
+                "time": (
+                    close_time - timedelta(minutes=1)
+                    if start_labelled
+                    else close_time
+                ),
                 "open": index,
                 "high": index + 1,
                 "low": index - 1,
@@ -79,6 +90,17 @@ def _raw_rows(trade_date: str, first: int, last: int) -> list[dict[str, object]]
 
 def _previous(identity: str):
     return build_minute_context(identity, "20260826", _bars(identity, "20260826", 240))
+
+
+def _compressed_previous(identity: str) -> PreviousDayMinuteContext:
+    context = _previous(identity)
+    return PreviousDayMinuteContext(
+        identity_key=context.identity_key,
+        source_trade_date=context.source_trade_date,
+        bars=(),
+        cumulative_day_amounts=context.cumulative_day_amounts,
+        windows=context.windows,
+    )
 
 
 def test_first_closed_minute_uses_previous_day_price_periods() -> None:
@@ -185,6 +207,73 @@ def test_provider_requests_600_then_3_and_only_active_identity() -> None:
     assert len(client.bars.calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("provider_class", "security_request"),
+    (
+        (
+            EltdxStockActionMetricProvider,
+            StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安银行"),
+        ),
+        (
+            EltdxIndexActionMetricProvider,
+            IndexSnapshotRequest("index:SH:000001", "SH", "000001", "上证指数"),
+        ),
+        (
+            EltdxBoardActionMetricProvider,
+            BoardSnapshotRequest("board:SH:881333", "SH", "881333", "元器件"),
+        ),
+    ),
+)
+def test_three_channels_rebuild_previous_prices_from_initial_history(
+    provider_class,
+    security_request,
+) -> None:
+    identity = security_request.identity_key
+    client = _FakeClient([
+        _raw_rows("20260826", 1, 240) + _raw_rows("20260827", 1, 7),
+    ])
+    provider = provider_class(client, max_workers=1)
+
+    batch = provider.fetch_many(
+        [security_request],
+        "20260827",
+        {identity: _compressed_previous(identity)},
+        7,
+    )
+
+    metric = batch.metrics[identity]
+    assert metric.metric_ready is True
+    assert metric.metric_minute_label == "09:37"
+    assert metric.previous_1m_body_high == Decimal("6.5")
+    assert metric.previous_5m_body_high == Decimal("5.5")
+    assert metric.previous_30m_body_high == Decimal("240.5")
+    assert metric.previous_120m_body_high == Decimal("240.5")
+    assert metric.current_5m_virtual_amount == Decimal(20) / Decimal(13) * Decimal(40)
+    assert metric.current_30m_virtual_amount == Decimal(70) / Decimal(28) * Decimal(465)
+    assert batch.pending_reason_counts == {}
+
+
+def test_close_labelled_eltdx_rows_are_not_shifted_twice() -> None:
+    request = StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安银行")
+    client = _FakeClient([
+        _raw_rows("20260826", 1, 240, start_labelled=False)
+        + _raw_rows("20260827", 1, 7, start_labelled=False),
+    ])
+    provider = EltdxStockActionMetricProvider(client, max_workers=1)
+
+    batch = provider.fetch_many(
+        [request],
+        "20260827",
+        {request.identity_key: _compressed_previous(request.identity_key)},
+        7,
+    )
+
+    metric = batch.metrics[request.identity_key]
+    assert metric.metric_ready is True
+    assert metric.observed_minute_index == 7
+    assert metric.metric_minute_label == "09:37"
+
+
 def test_missing_expected_closed_minute_stays_pending() -> None:
     request = StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安银行")
     client = _FakeClient([_raw_rows("20260827", 1, 6)])
@@ -201,6 +290,7 @@ def test_missing_expected_closed_minute_stays_pending() -> None:
     assert metric.metric_ready is False
     assert metric.error_summary == "expected_closed_minute_missing"
     assert batch.missing_identity_keys == (request.identity_key,)
+    assert batch.pending_reason_counts == {"expected_closed_minute_missing": 1}
 
 
 @pytest.mark.parametrize(
@@ -264,7 +354,51 @@ def test_incomplete_previous_context_stays_pending() -> None:
     )
 
     assert metric.metric_ready is False
-    assert metric.error_summary == "previous_day_context_incomplete"
+    assert metric.error_summary == "previous_day_amount_context_incomplete"
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "security_request", "expected_provider"),
+    (
+        (
+            EltdxStockActionMetricProvider,
+            StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安银行"),
+            "eltdx.stock.closed_1m",
+        ),
+        (
+            EltdxIndexActionMetricProvider,
+            IndexSnapshotRequest("index:SH:000001", "SH", "000001", "上证指数"),
+            "eltdx.index.closed_1m",
+        ),
+        (
+            EltdxBoardActionMetricProvider,
+            BoardSnapshotRequest("board:SH:881333", "SH", "881333", "元器件"),
+            "eltdx.board.closed_1m",
+        ),
+    ),
+)
+def test_three_channels_report_previous_price_context_pending_reason(
+    provider_class,
+    security_request,
+    expected_provider,
+) -> None:
+    client = _FakeClient([_raw_rows("20260827", 1, 1)])
+    provider = provider_class(client, max_workers=1)
+
+    batch = provider.fetch_many(
+        [security_request],
+        "20260827",
+        {security_request.identity_key: _compressed_previous(security_request.identity_key)},
+        1,
+    )
+
+    metric = batch.metrics[security_request.identity_key]
+    assert metric.metric_ready is False
+    assert metric.error_summary == "previous_day_price_context_incomplete"
+    assert batch.provider == expected_provider
+    assert batch.pending_reason_counts == {
+        "previous_day_price_context_incomplete": 1,
+    }
 
 
 def test_module_has_no_database_outbox_or_n5_dependency() -> None:

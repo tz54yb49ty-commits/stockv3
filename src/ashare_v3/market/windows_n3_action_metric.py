@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from threading import RLock
@@ -97,9 +97,21 @@ class ActionMetricBatch(Generic[RequestT]):
     missing_identity_keys: tuple[str, ...]
     provider: str
     errors: tuple[str, ...] = ()
+    pending_reason_counts: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+        object.__setattr__(
+            self,
+            "pending_reason_counts",
+            MappingProxyType(dict(self.pending_reason_counts)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchedMinuteBars:
+    current: tuple[NormalizedMinuteBar, ...]
+    previous: tuple[NormalizedMinuteBar, ...]
 
 
 class StockActionMetricProvider(Protocol):
@@ -188,6 +200,11 @@ class _EltdxActionMetricFetcher:
         self.asset_kind = asset_kind
         self.max_workers = max_workers
         self._cache: dict[tuple[str, str], tuple[NormalizedMinuteBar, ...]] = {}
+        self._previous_cache: dict[
+            tuple[str, str], tuple[NormalizedMinuteBar, ...]
+        ] = {}
+        self._start_labelled: dict[tuple[str, str], bool] = {}
+        self._history_loaded: set[tuple[str, str]] = set()
         self._consume_lock = RLock()
 
     def fetch_many(
@@ -206,8 +223,20 @@ class _EltdxActionMetricFetcher:
             self._cache = {
                 key: bars for key, bars in self._cache.items() if key in active_keys
             }
-            fetched: dict[str, tuple[NormalizedMinuteBar, ...]] = {}
+            self._previous_cache = {
+                key: bars
+                for key, bars in self._previous_cache.items()
+                if key in active_keys
+            }
+            self._start_labelled = {
+                key: value
+                for key, value in self._start_labelled.items()
+                if key in active_keys
+            }
+            self._history_loaded.intersection_update(active_keys)
+            fetched: dict[str, _FetchedMinuteBars] = {}
             errors: list[str] = []
+            fetch_failures: set[str] = set()
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -215,6 +244,11 @@ class _EltdxActionMetricFetcher:
                         request,
                         trade_date,
                         expected_minute_index,
+                        (
+                            previous_contexts[request.identity_key].source_trade_date
+                            if request.identity_key in previous_contexts
+                            else None
+                        ),
                     ): request
                     for request in requested
                 }
@@ -223,30 +257,55 @@ class _EltdxActionMetricFetcher:
                     try:
                         fetched[request.identity_key] = future.result()
                     except Exception as error:
+                        fetch_failures.add(request.identity_key)
                         errors.append(
                             f"{request.identity_key}:{type(error).__name__}:{error}"
                         )
             metrics: dict[str, ActionConfirmationMetric] = {}
             missing: list[str] = []
+            pending_reason_counts: dict[str, int] = {}
             for request in requested:
-                bars = fetched.get(request.identity_key, ())
-                metric = build_action_confirmation_metric(
-                    asset_kind=self.asset_kind,
-                    identity_key=request.identity_key,
-                    trade_date=trade_date,
-                    provider=provider,
-                    current_bars=bars,
-                    previous_context=previous_contexts.get(request.identity_key),
-                    expected_minute_index=expected_minute_index,
+                fetched_bars = fetched.get(
+                    request.identity_key,
+                    _FetchedMinuteBars(current=(), previous=()),
                 )
+                previous_context = _with_fetched_previous_prices(
+                    previous_contexts.get(request.identity_key),
+                    fetched_bars.previous,
+                )
+                if request.identity_key in fetch_failures:
+                    metric = _pending_metric(
+                        self.asset_kind,
+                        request.identity_key,
+                        trade_date,
+                        provider,
+                        expected_minute_index,
+                        None,
+                        "provider_fetch_failed",
+                    )
+                else:
+                    metric = build_action_confirmation_metric(
+                        asset_kind=self.asset_kind,
+                        identity_key=request.identity_key,
+                        trade_date=trade_date,
+                        provider=provider,
+                        current_bars=fetched_bars.current,
+                        previous_context=previous_context,
+                        expected_minute_index=expected_minute_index,
+                    )
                 metrics[request.identity_key] = metric
                 if not metric.metric_ready:
                     missing.append(request.identity_key)
+                    reason = metric.error_summary or "metric_not_ready"
+                    pending_reason_counts[reason] = (
+                        pending_reason_counts.get(reason, 0) + 1
+                    )
             return ActionMetricBatch(
                 metrics=metrics,
                 missing_identity_keys=tuple(missing),
                 provider=provider,
                 errors=tuple(sorted(errors)),
+                pending_reason_counts=dict(sorted(pending_reason_counts.items())),
             )
 
     def _fetch_one(
@@ -254,12 +313,13 @@ class _EltdxActionMetricFetcher:
         request: RequestT,
         trade_date: str,
         expected_minute_index: int,
-    ) -> tuple[NormalizedMinuteBar, ...]:
+        previous_trade_date: str | None,
+    ) -> _FetchedMinuteBars:
         cache_key = (trade_date, request.identity_key)
         cached = self._cache.get(cache_key, ())
         count = (
             ACTION_INCREMENTAL_BAR_COUNT
-            if cached
+            if cache_key in self._history_loaded
             else ACTION_INITIAL_BAR_COUNT
         )
         response = self.client.bars.get(
@@ -271,14 +331,33 @@ class _EltdxActionMetricFetcher:
             kind="stock" if self.asset_kind == "stock" else "index",
         )
         rows = getattr(response, "bars", response)
+        raw_rows = tuple(rows or ())
+        if cache_key not in self._start_labelled:
+            self._start_labelled[cache_key] = _rows_are_start_labelled(
+                raw_rows,
+                trade_date,
+                previous_trade_date,
+            )
+        labelled_rows: Sequence[Any] = raw_rows
+        if self._start_labelled[cache_key]:
+            labelled_rows = _shift_start_labelled_rows(raw_rows)
         normalized = normalize_minute_bars(
             request.identity_key,
             trade_date,
-            _close_labelled_eltdx_rows(rows or ()),
+            labelled_rows,
         )
         merged = _merge_bars(cached, normalized, expected_minute_index)
         self._cache[cache_key] = merged
-        return merged
+        previous = self._previous_cache.get(cache_key, ())
+        if previous_trade_date is not None and cache_key not in self._history_loaded:
+            previous = normalize_minute_bars(
+                request.identity_key,
+                previous_trade_date,
+                labelled_rows,
+            )
+            self._previous_cache[cache_key] = previous
+        self._history_loaded.add(cache_key)
+        return _FetchedMinuteBars(current=merged, previous=previous)
 
 
 def build_action_confirmation_metric(
@@ -299,15 +378,28 @@ def build_action_confirmation_metric(
             expected_minute_index, observed, "previous_day_context_missing",
         )
     if (
-        len(previous_context.bars) != MINUTES_PER_DAY
+        len(previous_context.cumulative_day_amounts) != MINUTES_PER_DAY
         or len(previous_context.windows) != 8
     ):
         return _pending_metric(
             asset_kind, identity_key, trade_date, provider,
-            expected_minute_index, observed, "previous_day_context_incomplete",
+            expected_minute_index, observed, "previous_day_amount_context_incomplete",
         )
-    if tuple(row.minute_index for row in ordered) != tuple(
-        range(1, expected_minute_index + 1)
+    if not _has_complete_closed_minute_axis(
+        previous_context.bars,
+        previous_context.source_trade_date,
+        identity_key,
+        MINUTES_PER_DAY,
+    ):
+        return _pending_metric(
+            asset_kind, identity_key, trade_date, provider,
+            expected_minute_index, observed, "previous_day_price_context_incomplete",
+        )
+    if not _has_complete_closed_minute_axis(
+        ordered,
+        trade_date,
+        identity_key,
+        expected_minute_index,
     ):
         return _pending_metric(
             asset_kind, identity_key, trade_date, provider,
@@ -346,22 +438,23 @@ def build_action_confirmation_metric(
         size: _body_bounds(rows)
         for size, rows in previous_rows.items()
     }
-    required = (
-        latest.close,
-        bounds[120][0], bounds[120][1],
-        bounds[30][0], bounds[30][1],
-        bounds[5][0], bounds[5][1],
-        bounds[1][0], bounds[1][1],
-        virtual_5m,
-        latest.amount,
-        virtual_30m,
-        _amount(previous_same_30m),
-    )
-    ready = all(value is not None for value in required)
-    if not first_1m:
-        ready = ready and previous_1m_amount is not None
-    if not first_5m:
-        ready = ready and previous_5m_amount is not None
+    pending_reasons: list[str] = []
+    for size in (120, 30, 5, 1):
+        if bounds[size][0] is None or bounds[size][1] is None:
+            pending_reasons.append(f"previous_{size}m_aggregate_unavailable")
+    if virtual_5m is None:
+        pending_reasons.append("current_5m_virtual_amount_unavailable")
+    if virtual_30m is None:
+        pending_reasons.append("current_30m_virtual_amount_unavailable")
+    if latest.amount is None:
+        pending_reasons.append("current_1m_amount_unavailable")
+    if _amount(previous_same_30m) is None:
+        pending_reasons.append("previous_day_same_30m_amount_unavailable")
+    if not first_1m and previous_1m_amount is None:
+        pending_reasons.append("previous_1m_amount_unavailable")
+    if not first_5m and previous_5m_amount is None:
+        pending_reasons.append("previous_5m_amount_unavailable")
+    ready = not pending_reasons
 
     return ActionConfirmationMetric(
         asset_kind=asset_kind,
@@ -400,7 +493,7 @@ def build_action_confirmation_metric(
         metric_policy_version=ACTION_METRIC_POLICY_VERSION,
         metric_ready=ready,
         metric_quality_status="passed" if ready else "pending",
-        error_summary=None if ready else "virtual_amount_reference_unavailable",
+        error_summary=None if ready else "|".join(pending_reasons),
         expected_minute_index=expected_minute_index,
         observed_minute_index=observed,
     )
@@ -536,6 +629,83 @@ def _merge_bars(
     )
 
 
+def _with_fetched_previous_prices(
+    context: PreviousDayMinuteContext | None,
+    fetched: Sequence[NormalizedMinuteBar],
+) -> PreviousDayMinuteContext | None:
+    if context is None or len(context.bars) == MINUTES_PER_DAY:
+        return context
+    if (
+        len(context.cumulative_day_amounts) != MINUTES_PER_DAY
+        or len(context.windows) != 8
+        or not _has_complete_closed_minute_axis(
+            fetched,
+            context.source_trade_date,
+            context.identity_key,
+            MINUTES_PER_DAY,
+        )
+    ):
+        return context
+    bars: list[NormalizedMinuteBar] = []
+    previous_cumulative = Decimal(0)
+    for row, cumulative in zip(fetched, context.cumulative_day_amounts, strict=True):
+        amount = cumulative - previous_cumulative
+        if amount < 0:
+            return context
+        bars.append(
+            NormalizedMinuteBar(
+                identity_key=row.identity_key,
+                trade_date=row.trade_date,
+                minute_index=row.minute_index,
+                time_label=row.time_label,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                amount=amount,
+            )
+        )
+        previous_cumulative = cumulative
+    return PreviousDayMinuteContext(
+        identity_key=context.identity_key,
+        source_trade_date=context.source_trade_date,
+        bars=tuple(bars),
+        cumulative_day_amounts=context.cumulative_day_amounts,
+        windows=context.windows,
+    )
+
+
+def _has_complete_closed_minute_axis(
+    bars: Sequence[NormalizedMinuteBar],
+    trade_date: str,
+    identity_key: str,
+    expected_count: int,
+) -> bool:
+    if len(bars) != expected_count:
+        return False
+    for expected_index, row in enumerate(bars, start=1):
+        if (
+            row.identity_key != identity_key
+            or row.trade_date != trade_date
+            or row.minute_index != expected_index
+            or row.time_label != _minute_label(expected_index)
+        ):
+            return False
+    return True
+
+
+def _minute_label(minute_index: int) -> str:
+    if not 1 <= minute_index <= MINUTES_PER_DAY:
+        raise ValueError("minute_index must be between 1 and 240")
+    if minute_index <= 120:
+        value = datetime(2000, 1, 1, 9, 30) + timedelta(minutes=minute_index)
+    else:
+        value = datetime(2000, 1, 1, 13, 0) + timedelta(
+            minutes=minute_index - 120
+        )
+    return value.strftime("%H:%M")
+
+
 def _dedupe_requests(requests: Sequence[RequestT]) -> tuple[RequestT, ...]:
     by_identity: dict[str, RequestT] = {}
     for request in requests:
@@ -552,13 +722,32 @@ def _eltdx_code(request: RequestT) -> str:
     return f"{prefix}{request.code}"
 
 
-def _close_labelled_eltdx_rows(rows: Sequence[Any]) -> tuple[dict[str, Any], ...]:
-    normalized: list[dict[str, Any]] = []
+def _rows_are_start_labelled(
+    rows: Sequence[Any],
+    trade_date: str,
+    previous_trade_date: str | None,
+) -> bool:
+    accepted_dates = {trade_date}
+    if previous_trade_date is not None:
+        accepted_dates.add(previous_trade_date)
+    for row in rows:
+        timestamp = _coerce_datetime(_field(row, "time"))
+        if (
+            timestamp is not None
+            and timestamp.strftime("%Y%m%d") in accepted_dates
+            and timestamp.strftime("%H:%M") in {"09:30", "13:00"}
+        ):
+            return True
+    return False
+
+
+def _shift_start_labelled_rows(rows: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+    shifted: list[dict[str, Any]] = []
     for row in rows:
         timestamp = _coerce_datetime(_field(row, "time"))
         if timestamp is None:
             continue
-        normalized.append(
+        shifted.append(
             {
                 "time": timestamp + timedelta(minutes=1),
                 "open": _field(row, "open"),
@@ -568,7 +757,7 @@ def _close_labelled_eltdx_rows(rows: Sequence[Any]) -> tuple[dict[str, Any], ...
                 "amount": _field(row, "amount"),
             }
         )
-    return tuple(normalized)
+    return tuple(shifted)
 
 
 def _field(row: Any, name: str) -> Any:
