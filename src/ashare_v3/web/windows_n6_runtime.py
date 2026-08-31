@@ -28,6 +28,10 @@ class WindowsRuntimeBridge(Protocol):
     def n5_episodes(self, query: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+class WindowsPersistentStatusRepository(Protocol):
+    def fetch_windows_fastlane_persistent_status(self) -> Mapping[str, Any]: ...
+
+
 class WindowsRuntimeBridgeError(RuntimeError):
     """The loopback runtime bridge did not return a usable immutable page."""
 
@@ -150,8 +154,29 @@ def read_runtime_page(
     return payload
 
 
-def windows_postclose_status(bridge: WindowsRuntimeBridge) -> dict[str, Any]:
+def windows_postclose_status(
+    bridge: WindowsRuntimeBridge,
+    persisted: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     health = read_runtime_health(bridge)
+    if persisted is not None:
+        page = dict(persisted)
+        page.update(
+            title="Windows N1–N3 收盘持久状态",
+            intraday_runtime=(
+                "online"
+                if health.get("runtime_status") == "online"
+                else "offline"
+            ),
+            simulation=bool(health.get("simulation")),
+            simulation_label=health.get("simulation_label", ""),
+            notice=(
+                "盘中runtime在线。"
+                if health.get("runtime_status") == "online"
+                else "盘中runtime已退出；以下为数据库持久收盘事实。"
+            ),
+        )
+        return page
     return {
         "title": "Windows N1–N4 收盘与盘前状态",
         "runtime_status": health.get("runtime_status", RUNTIME_OFFLINE),

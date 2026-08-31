@@ -774,6 +774,9 @@ class AuthSession:
 
 
 class N6UserRepository(Protocol):
+    def fetch_windows_fastlane_persistent_status(self) -> dict[str, Any]:
+        ...
+
     def fetch_user_for_login(self, login_name: str) -> UserAccount | None:
         ...
 
@@ -1210,6 +1213,184 @@ class PostgresN6UserRepository:
             )
             row = cur.fetchone()
         return UserAccount(**dict(row)) if row else None
+
+    def fetch_windows_fastlane_persistent_status(self) -> dict[str, Any]:
+        """Read one strictly joined N1 -> N2 -> N3 Windows Fastlane lineage."""
+
+        empty = _empty_windows_fastlane_status()
+        with self._readonly_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date, batch_id, finished_at, created_at
+                FROM common_ingest_batch
+                WHERE data_domain='common'
+                  AND data_type='fastlane_complete'
+                  AND status='passed'
+                  AND trade_date ~ '^[0-9]{8}$'
+                ORDER BY trade_date DESC,
+                         finished_at DESC NULLS LAST,
+                         started_at DESC
+                LIMIT 1
+                """
+            )
+            n1_row = cur.fetchone()
+            if n1_row is None:
+                return empty
+            n1 = dict(n1_row)
+            source_trade_date = str(n1["trade_date"])
+            cur.execute(
+                """
+                SELECT count(*) AS attempt_count,
+                       count(*) FILTER (WHERE status='failed') AS failed_attempt_count
+                FROM common_ingest_batch
+                WHERE trade_date=%s
+                  AND data_domain='common'
+                  AND data_type='fastlane_complete'
+                """,
+                (source_trade_date,),
+            )
+            attempt = dict(cur.fetchone())
+            cur.execute(
+                """
+                SELECT run_id, source_trade_date, for_trade_date, status, updated_at
+                FROM common_condition_run
+                WHERE source_trade_date=%s
+                  AND status IN ('passed_active', 'active')
+                ORDER BY updated_at DESC, run_id DESC
+                LIMIT 2
+                """,
+                (source_trade_date,),
+            )
+            n2_rows = [dict(row) for row in cur.fetchall()]
+            if not n2_rows:
+                return {
+                    **empty,
+                    "pipeline_status": "waiting_n2",
+                    "source_trade_date": source_trade_date,
+                    "n1_status": "passed",
+                    "n1_batch_id": n1["batch_id"],
+                    "n1_attempt_count": int(attempt["attempt_count"]),
+                    "n1_failed_attempt_count": int(attempt["failed_attempt_count"]),
+                    "updated_at": n1.get("finished_at") or n1.get("created_at"),
+                }
+            if len(n2_rows) != 1:
+                return _blocked_windows_fastlane_lineage(
+                    empty, n1, attempt, reason="multiple_active_n2_runs"
+                )
+            n2 = n2_rows[0]
+            if str(n2["source_trade_date"]) != source_trade_date:
+                return _blocked_windows_fastlane_lineage(
+                    empty, n1, attempt, reason="n2_source_trade_date_mismatch"
+                )
+            run_id = str(n2["run_id"])
+            for_trade_date = str(n2["for_trade_date"])
+            basis_counts: dict[str, int] = {}
+            for asset_kind in ("stock", "index", "board"):
+                cur.execute(
+                    f"SELECT count(*) AS row_count FROM {asset_kind}_condition_basis "
+                    "WHERE run_id=%s AND source_trade_date=%s AND for_trade_date=%s",
+                    (run_id, source_trade_date, for_trade_date),
+                )
+                basis_counts[asset_kind] = int(dict(cur.fetchone())["row_count"])
+            cur.execute(
+                """
+                SELECT context_run_id, source_condition_run_id, context_version,
+                       source_trade_date, for_trade_date, status,
+                       expected_stock_count, expected_index_count, expected_board_count,
+                       terminal_stock_count, terminal_index_count, terminal_board_count,
+                       result_summary, updated_at
+                FROM common_n3_previous_day_context_run
+                WHERE source_condition_run_id=%s
+                  AND source_trade_date=%s
+                  AND for_trade_date=%s
+                  AND status='completed'
+                ORDER BY updated_at DESC, context_run_id DESC
+                LIMIT 2
+                """,
+                (run_id, source_trade_date, for_trade_date),
+            )
+            n3_rows = [dict(row) for row in cur.fetchall()]
+            base = {
+                **empty,
+                "pipeline_status": "waiting_n3",
+                "source_trade_date": source_trade_date,
+                "for_trade_date": for_trade_date,
+                "n1_status": "passed",
+                "n1_batch_id": n1["batch_id"],
+                "n1_attempt_count": int(attempt["attempt_count"]),
+                "n1_failed_attempt_count": int(attempt["failed_attempt_count"]),
+                "n2_status": str(n2["status"]),
+                "n2_run_id": run_id,
+                "source_condition_run_id": run_id,
+                "n2_basis_counts": basis_counts,
+                "updated_at": n2.get("updated_at"),
+            }
+            if not n3_rows:
+                return base
+            if len(n3_rows) != 1:
+                return {
+                    **base,
+                    "pipeline_status": "blocked_lineage_mismatch",
+                    "lineage_blocker": "multiple_completed_n3_contexts",
+                }
+            n3 = n3_rows[0]
+            expected_counts = {
+                kind: int(n3[f"expected_{kind}_count"])
+                for kind in ("stock", "index", "board")
+            }
+            if (
+                str(n3["source_condition_run_id"]) != run_id
+                or str(n3["source_trade_date"]) != source_trade_date
+                or str(n3["for_trade_date"]) != for_trade_date
+                or str(n3["context_version"]) != "pretrade_c2f55d9_v1"
+                or expected_counts != basis_counts
+            ):
+                return {
+                    **base,
+                    "pipeline_status": "blocked_lineage_mismatch",
+                    "lineage_blocker": "n3_lineage_or_expected_count_mismatch",
+                    "n3_context_run_id": n3.get("context_run_id"),
+                    "context_version": n3.get("context_version"),
+                    "updated_at": n3.get("updated_at"),
+                }
+            coverage = dict((n3.get("result_summary") or {}).get("_coverage") or {})
+            expected = sum(expected_counts.values())
+            terminal_counts = {
+                kind: int(n3[f"terminal_{kind}_count"])
+                for kind in ("stock", "index", "board")
+            }
+            ready = int(coverage.get("ready_total") or 0)
+            missing = int(coverage.get("missing_total") or expected - ready)
+            ratio = float(coverage.get("missing_ratio") or (missing / expected if expected else 0.0))
+            gate = str(coverage.get("coverage_gate") or "")
+            if (
+                terminal_counts != expected_counts
+                or int(coverage.get("expected_total") or 0) != expected
+                or ready + missing != expected
+                or gate not in {"passed", "blocked"}
+            ):
+                return {
+                    **base,
+                    "pipeline_status": "blocked_lineage_mismatch",
+                    "lineage_blocker": "n3_coverage_summary_mismatch",
+                    "n3_context_run_id": n3.get("context_run_id"),
+                    "context_version": n3.get("context_version"),
+                    "updated_at": n3.get("updated_at"),
+                }
+            return {
+                **base,
+                "pipeline_status": "passed" if gate == "passed" else "blocked_lineage_mismatch",
+                "lineage_blocker": "" if gate == "passed" else "n3_coverage_gate_blocked",
+                "n3_status": "completed",
+                "n3_context_run_id": str(n3["context_run_id"]),
+                "context_version": str(n3["context_version"]),
+                "expected": expected,
+                "ready": ready,
+                "missing": missing,
+                "missing_ratio": ratio,
+                "coverage_gate": gate,
+                "updated_at": n3.get("updated_at"),
+            }
 
     def create_session(
         self,
@@ -7871,6 +8052,52 @@ class PostgresN6UserRepository:
         )
 
 
+def _empty_windows_fastlane_status() -> dict[str, Any]:
+    return {
+        "pipeline_status": "no_persisted_status",
+        "source_trade_date": None,
+        "for_trade_date": None,
+        "n1_status": None,
+        "n1_batch_id": None,
+        "n1_attempt_count": 0,
+        "n1_failed_attempt_count": 0,
+        "n2_status": None,
+        "n2_run_id": None,
+        "source_condition_run_id": None,
+        "n2_basis_counts": {"stock": 0, "index": 0, "board": 0},
+        "n3_status": None,
+        "n3_context_run_id": None,
+        "context_version": None,
+        "expected": 0,
+        "ready": 0,
+        "missing": 0,
+        "missing_ratio": 0.0,
+        "coverage_gate": None,
+        "updated_at": None,
+        "lineage_blocker": "",
+    }
+
+
+def _blocked_windows_fastlane_lineage(
+    empty: dict[str, Any],
+    n1: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        **empty,
+        "pipeline_status": "blocked_lineage_mismatch",
+        "source_trade_date": str(n1["trade_date"]),
+        "n1_status": "passed",
+        "n1_batch_id": n1["batch_id"],
+        "n1_attempt_count": int(attempt["attempt_count"]),
+        "n1_failed_attempt_count": int(attempt["failed_attempt_count"]),
+        "updated_at": n1.get("finished_at") or n1.get("created_at"),
+        "lineage_blocker": reason,
+    }
+
+
 class SignalBoundVirtualBuyExecutionRepository:
     def __init__(self, delegate: Any, signal: dict[str, Any]) -> None:
         self.delegate = delegate
@@ -9507,6 +9734,14 @@ def create_app(
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
         if session.role != "admin":
             return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        if web_config.windows_mode:
+            data = windows_postclose_status(
+                windows_runtime,
+                repo.fetch_windows_fastlane_persistent_status(),
+            )
+            return JSONResponse(jsonable_encoder(data))
+        if web_config.windows_fixture_mode:
+            return JSONResponse(jsonable_encoder(windows_postclose_status(windows_runtime)))
         data = read_post_close_fastlane_status(
             docs_root=web_config.post_close_fastlane_docs_root,
             for_trade_date=request.query_params.get("for_trade_date"),
@@ -10427,6 +10662,14 @@ def create_app(
         if session.role != "admin":
             return HTMLResponse("forbidden", status_code=403)
         if web_config.windows_mode or web_config.windows_fixture_mode:
+            page = (
+                windows_postclose_status(
+                    windows_runtime,
+                    repo.fetch_windows_fastlane_persistent_status(),
+                )
+                if web_config.windows_mode
+                else windows_postclose_status(windows_runtime)
+            )
             return templates.TemplateResponse(
                 request,
                 "n6_windows_status.html",
@@ -10434,7 +10677,7 @@ def create_app(
                     "request": request,
                     "user": session_user_payload(session),
                     "nav": nav_context(session, "post_close_fastlane_status"),
-                    "page": windows_postclose_status(windows_runtime),
+                    "page": page,
                 },
             )
         status_page = post_close_fastlane_status_model(

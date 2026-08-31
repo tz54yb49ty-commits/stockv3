@@ -3,8 +3,22 @@
 <header><div class="wrap topbar"><strong>{{ page.title }}</strong><nav>{% for item in nav.links %}<a class="{% if nav.active==item.key %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>{% endfor %}{% if nav.is_admin %}<a href="/n6/admin/users">用户管理</a>{% endif %}<button id="logout">退出</button></nav></div></header>
 <main class="wrap">
 {% if page.simulation %}<div class="banner sim">{{ page.simulation_label or 'SIMULATED / NOT PRODUCTION' }} · 零数据库写入</div>{% endif %}
-{% if page.runtime_status=='runtime_offline' %}<div class="banner offline">runtime_offline：当前进程状态不可用，不展示旧值。</div>{% endif %}
-<section class="surface grid"><div class="metric"><span>source_trade_date</span><strong>{{ page.source_trade_date or '—' }}</strong></div><div class="metric"><span>for_trade_date</span><strong>{{ page.for_trade_date or '—' }}</strong></div><div class="metric"><span>N2 lineage</span><strong>{{ page.source_condition_run_id or '—' }}</strong></div><div class="metric"><span>context_version</span><strong>{{ page.context_version or '—' }}</strong></div><div class="metric"><span>coverage</span><strong>{{ page.coverage | tojson }}</strong></div></section>
+{% if page.intraday_runtime=='offline' %}<div class="banner offline">盘中runtime已退出；不影响下方数据库持久收盘事实。</div>{% endif %}
+<section class="surface grid">
+  <div class="metric"><span>pipeline_status</span><strong>{{ page.pipeline_status }}</strong></div>
+  <div class="metric"><span>intraday_runtime</span><strong>{{ page.intraday_runtime }}</strong></div>
+  <div class="metric"><span>source_trade_date</span><strong>{{ page.source_trade_date or '—' }}</strong></div>
+  <div class="metric"><span>for_trade_date</span><strong>{{ page.for_trade_date or '—' }}</strong></div>
+  <div class="metric"><span>N1 status / attempts</span><strong>{{ page.n1_status or '—' }} / {{ page.n1_attempt_count }}（failed={{ page.n1_failed_attempt_count }}）</strong></div>
+  <div class="metric"><span>N2 run</span><strong>{{ page.n2_run_id or '—' }}</strong></div>
+  <div class="metric"><span>N2 basis stock/index/board</span><strong>{{ page.n2_basis_counts.stock or 0 }} / {{ page.n2_basis_counts.index or 0 }} / {{ page.n2_basis_counts.board or 0 }}</strong></div>
+  <div class="metric"><span>N3 context run</span><strong>{{ page.n3_context_run_id or '—' }}</strong></div>
+  <div class="metric"><span>context_version</span><strong>{{ page.context_version or '—' }}</strong></div>
+  <div class="metric"><span>expected / ready / missing</span><strong>{{ page.expected }} / {{ page.ready }} / {{ page.missing }}</strong></div>
+  <div class="metric"><span>missing ratio / gate</span><strong>{{ page.missing_ratio }} / {{ page.coverage_gate or '—' }}</strong></div>
+  <div class="metric"><span>updated_at</span><strong>{{ page.updated_at or '—' }}</strong></div>
+</section>
+{% if page.lineage_blocker %}<section class="banner offline">{{ page.lineage_blocker }}</section>{% endif %}
 {% if page.timeline %}<section class="surface"><h2>Windows时序</h2><table><thead><tr><th>时间</th><th>层</th><th>内容</th></tr></thead><tbody>{% for row in page.timeline %}<tr><td>{{ row.time }}</td><td>{{ row.stage }}</td><td>{{ row.description }}</td></tr>{% endfor %}</tbody></table></section>{% endif %}
 {% if page.tasks %}<section class="surface"><h2>计划任务（只读）</h2><table><thead><tr><th>名称</th><th>时间</th><th>状态</th></tr></thead><tbody>{% for row in page.tasks %}<tr><td>{{ row.name }}</td><td>{{ row.time }}</td><td>{{ row.state }}</td></tr>{% endfor %}</tbody></table></section>{% endif %}
 {% if page.retention %}<section class="surface"><h2>保存边界</h2><p>{{ page.retention }}</p><p>{{ page.runtime_retention }}</p><p>无清理、补跑或执行按钮。</p></section>{% endif %}
