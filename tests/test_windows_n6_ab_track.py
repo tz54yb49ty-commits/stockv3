@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ashare_v3.web.windows_n6_runtime import (  # noqa: E402
+    HttpWindowsRuntimeBridge,
     InMemoryWindowsRuntimeFixture,
     OfflineWindowsRuntimeBridge,
     read_runtime_page,
@@ -23,6 +24,9 @@ from ashare_v3.web.windows_n6_runtime import (  # noqa: E402
 class WindowsN6RuntimeBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = InMemoryWindowsRuntimeFixture()
+
+    def test_http_runtime_bridge_default_timeout_is_30_seconds(self) -> None:
+        self.assertEqual(30.0, HttpWindowsRuntimeBridge().timeout_seconds)
 
     def test_fixture_covers_three_assets_and_quality_states(self) -> None:
         page = read_runtime_page(self.fixture, "n4", {"limit": 100})

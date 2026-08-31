@@ -35,7 +35,7 @@ class WindowsRuntimeBridgeError(RuntimeError):
 @dataclass(frozen=True)
 class HttpWindowsRuntimeBridge:
     base_url: str = "http://127.0.0.1:8791"
-    timeout_seconds: float = 1.0
+    timeout_seconds: float = 30.0
 
     def health(self) -> Mapping[str, Any]:
         return self._get("/internal/v1/health", {})
