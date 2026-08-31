@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -128,6 +132,64 @@ def test_delivery_persistence_is_atomic_intent_and_idempotent() -> None:
         "N4_trigger",
     )
     assert cursor.checkpoints[checkpoint_key] == 12
+
+
+def test_json_adapter_receives_only_json_safe_values() -> None:
+    matched = _matched()
+    matched = replace(
+        matched,
+        payload_json={
+            **matched.payload_json,
+            "nested": {
+                "observed_at": _time(9, 36),
+                "trade_date": date(2026, 8, 31),
+                "amount": Decimal("12.34"),
+            },
+        },
+    )
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="windows_n5_delivery_fixture",
+    )
+    plan = plan_n4_deliveries(
+        planner,
+        [N4OutboxDelivery(10, matched)],
+    )
+    cursor = _FakeCursor()
+    adapted: list[object] = []
+
+    def strict_json_adapter(value):
+        json.dumps(value)
+        adapted.append(value)
+        return value
+
+    result = persist_windows_n5_delivery(
+        cursor,
+        plan=plan,
+        consumer_name="windows_n5_state_v1",
+        json_adapter=strict_json_adapter,
+    )
+
+    assert result.database_write_count == 3
+    assert len(adapted) == 4
+    inbox_values = next(
+        values
+        for sql, values in cursor.calls
+        if "INSERT INTO common_event_inbox" in sql
+    )
+    payload = inbox_values[8]
+    raw_json = inbox_values[9]
+    assert payload["nested"] == {
+        "observed_at": _time(9, 36).isoformat(),
+        "trade_date": "2026-08-31",
+        "amount": "12.34",
+    }
+    assert raw_json["source_event"]["event_time"] == (
+        matched.event_time.isoformat()
+    )
+    assert raw_json["source_event"]["created_at"] == (
+        matched.created_at.isoformat()
+    )
 
 
 def test_metric_output_persists_without_new_n4_acknowledgement() -> None:

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ashare_v3.action.event_factory import json_safe_value
 from ashare_v3.action.windows_n5_episode import (
     N5EpisodeSnapshot,
     WindowsN5EpisodePlanner,
@@ -282,12 +283,16 @@ def _insert_inbox_once(
             event.source_run_id,
             event.dedup_key,
             event.partition_key,
-            json_adapter(dict(event.payload_json)),
             json_adapter(
-                {
-                    "source_outbox_id": delivery.outbox_id,
-                    "source_event": event.as_record(),
-                }
+                json_safe_value(dict(event.payload_json))
+            ),
+            json_adapter(
+                json_safe_value(
+                    {
+                        "source_outbox_id": delivery.outbox_id,
+                        "source_event": event.as_record(),
+                    }
+                )
             ),
         ),
     )
@@ -311,7 +316,7 @@ def _insert_outbox_once(
         RETURNING event_id
         """,
         tuple(
-            json_adapter(record[column])
+            json_adapter(json_safe_value(record[column]))
             if column == "payload_json"
             else record[column]
             for column in OUTBOX_COLUMNS
@@ -356,13 +361,15 @@ def _upsert_checkpoint(
             event.event_time,
             delivery.outbox_id,
             json_adapter(
-                {
-                    "action_run_id": action_run_id,
-                    "n5_snapshot_version": snapshot_version,
-                    "source_rule_policy_version": (
-                        event.payload_json.get("rule_policy_version")
-                    ),
-                }
+                json_safe_value(
+                    {
+                        "action_run_id": action_run_id,
+                        "n5_snapshot_version": snapshot_version,
+                        "source_rule_policy_version": (
+                            event.payload_json.get("rule_policy_version")
+                        ),
+                    }
+                )
             ),
         ),
     )
