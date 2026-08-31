@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
@@ -269,7 +270,26 @@ class _FakeN4Runtime:
 
     def consume_cycle(self, cycle):
         self.calls.append(cycle)
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class _BlockingSecondN4Runtime(_FakeN4Runtime):
+    def __init__(self, results):
+        super().__init__(results)
+        self.second_cycle_started = Event()
+        self.release_second_cycle = Event()
+
+    def consume_cycle(self, cycle):
+        self.calls.append(cycle)
+        result = self.results.pop(0)
+        if len(self.calls) == 2:
+            self.second_cycle_started.set()
+            if not self.release_second_cycle.wait(timeout=5):
+                raise TimeoutError("second cycle was not released")
+        return result
 
 
 class _FailOnTransactionConnection(_N5FakeConnection):
@@ -489,6 +509,95 @@ def test_three_channels_deliver_trigger_and_closed_minute_once() -> None:
             "ActionEligible": 1,
             "ActionExecuted": 1,
         }
+
+
+def test_bridge_reads_last_completed_snapshot_while_next_cycle_is_running() -> None:
+    first_at = _time("09:31:05")
+    second_at = _time("09:32:05")
+    n4_runtime = _BlockingSecondN4Runtime(
+        [
+            _memory_result(version=1, observed_at=first_at, active=True),
+            _memory_result(version=2, observed_at=second_at, active=True),
+        ]
+    )
+    runtime = _orchestrator(
+        n4_runtime,
+        {kind: _MetricProvider(kind) for kind in IDENTITIES},
+    )
+    runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
+
+    cycle_errors = []
+    read_errors = []
+    snapshots = []
+    read_completed = Event()
+
+    def consume_second_cycle() -> None:
+        try:
+            runtime.consume_cycle(SimpleNamespace(generated_at=second_at))
+        except BaseException as error:  # pragma: no cover - asserted below
+            cycle_errors.append(error)
+
+    def read_snapshot() -> None:
+        try:
+            snapshots.append(runtime.read_state_bridge_snapshot())
+        except BaseException as error:  # pragma: no cover - asserted below
+            read_errors.append(error)
+        finally:
+            read_completed.set()
+
+    cycle_thread = Thread(target=consume_second_cycle)
+    read_thread = Thread(target=read_snapshot)
+    cycle_thread.start()
+    assert n4_runtime.second_cycle_started.wait(timeout=1)
+    read_thread.start()
+    try:
+        assert read_completed.wait(timeout=0.8)
+        assert read_errors == []
+        assert {
+            kind: snapshots[0].n4_states[kind].source_n4_version
+            for kind in IDENTITIES
+        } == {kind: 1 for kind in IDENTITIES}
+    finally:
+        n4_runtime.release_second_cycle.set()
+        cycle_thread.join(timeout=5)
+        read_thread.join(timeout=5)
+
+    assert cycle_errors == []
+    assert not cycle_thread.is_alive()
+    assert not read_thread.is_alive()
+    assert {
+        kind: runtime.read_state_bridge_snapshot().n4_states[
+            kind
+        ].source_n4_version
+        for kind in IDENTITIES
+    } == {kind: 2 for kind in IDENTITIES}
+
+
+def test_failed_cycle_keeps_last_completed_bridge_snapshot() -> None:
+    first_at = _time("09:31:05")
+    second_at = _time("09:32:05")
+    n4_runtime = _FakeN4Runtime(
+        [
+            _memory_result(version=1, observed_at=first_at, active=True),
+            RuntimeError("fixture cycle failed"),
+        ]
+    )
+    runtime = _orchestrator(
+        n4_runtime,
+        {kind: _MetricProvider(kind) for kind in IDENTITIES},
+    )
+    first = runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
+    published = runtime.read_state_bridge_snapshot()
+
+    with pytest.raises(RuntimeError, match="fixture cycle failed"):
+        runtime.consume_cycle(SimpleNamespace(generated_at=second_at))
+
+    assert runtime.read_state_bridge_snapshot() is published
+    assert {
+        kind: published.n4_states[kind].source_n4_version
+        for kind in IDENTITIES
+    } == {kind: 1 for kind in IDENTITIES}
+    assert first.generated_at == first_at
 
 
 def test_deactivation_expires_pending_episode_without_market_request() -> None:

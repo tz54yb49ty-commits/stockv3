@@ -206,6 +206,11 @@ def test_health_three_channels_filters_pagination_and_read_only() -> None:
             "board",
         }
         assert all(row["action_state"] == "eligible" for row in episodes["items"])
+        for limit in (10, 100):
+            _, n4_page = _get(port, f"/internal/v1/n4/states?limit={limit}")
+            _, n5_page = _get(port, f"/internal/v1/n5/episodes?limit={limit}")
+            assert n4_page["count"] == 6
+            assert n5_page["count"] == 3
         assert holder["snapshot"] is before
 
 

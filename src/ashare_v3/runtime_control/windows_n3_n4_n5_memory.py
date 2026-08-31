@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
-from threading import RLock
+from threading import Lock, RLock
 from types import MappingProxyType
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -587,6 +587,8 @@ class WindowsN3N4N5MemoryOrchestrator:
             )
         self.n4_runtime = n4_runtime
         self._lock = RLock()
+        self._state_bridge_lock = Lock()
+        self._state_bridge_snapshot: WindowsStateBridgeSnapshot | None = None
         self._generated_at: datetime | None = None
         self._completed_minute_index = 0
         self._n4_memory: N4MemoryCycleResult | None = None
@@ -646,9 +648,26 @@ class WindowsN3N4N5MemoryOrchestrator:
                     kind: future.result()
                     for kind, future in futures.items()
                 }
+            state_bridge_snapshot = WindowsStateBridgeSnapshot(
+                generated_at=generated_at,
+                n4_memory={
+                    kind: getattr(n4_memory, kind)
+                    for kind in ASSET_KINDS
+                },
+                n4_states={
+                    kind: channel_results[kind].trigger_batch.snapshot
+                    for kind in ASSET_KINDS
+                },
+                n5_episodes={
+                    kind: channel_results[kind].n5_snapshot
+                    for kind in ASSET_KINDS
+                },
+            )
             self._generated_at = generated_at
             self._completed_minute_index = completed_minute_index
             self._n4_memory = n4_memory
+            with self._state_bridge_lock:
+                self._state_bridge_snapshot = state_bridge_snapshot
             return WindowsN3N4N5CycleResult(
                 generated_at=generated_at,
                 completed_minute_index=completed_minute_index,
@@ -659,28 +678,13 @@ class WindowsN3N4N5MemoryOrchestrator:
             )
 
     def read_state_bridge_snapshot(self) -> WindowsStateBridgeSnapshot:
-        """Capture immutable N4/N5 views without advancing either planner."""
+        """Return the last fully completed immutable N4/N5 view."""
 
-        with self._lock:
-            if self._n4_memory is None:
-                raise RuntimeError("no N3/N4/N5 cycle has completed")
-            n4_states = {
-                kind: channel.n4.read()
-                for kind, channel in self._channels.items()
-            }
-            n5_episodes = {
-                kind: channel.n5.read()
-                for kind, channel in self._channels.items()
-            }
-            return WindowsStateBridgeSnapshot(
-                generated_at=self._generated_at,
-                n4_memory={
-                    kind: getattr(self._n4_memory, kind)
-                    for kind in ASSET_KINDS
-                },
-                n4_states=n4_states,
-                n5_episodes=n5_episodes,
-            )
+        with self._state_bridge_lock:
+            snapshot = self._state_bridge_snapshot
+        if snapshot is None:
+            raise RuntimeError("no N3/N4/N5 cycle has completed")
+        return snapshot
 
     def read_summary(self) -> WindowsN3N4N5RuntimeSummary:
         with self._lock:
