@@ -11,6 +11,7 @@ from ashare_v3.runtime_control.windows_n4_outbox_restore import (
 )
 from ashare_v3.trigger.event_factory import build_n4_trigger_event
 from ashare_v3.trigger.windows_n4_state_transition import (
+    BUY_CONDITION_KEY,
     RULE_POLICY_VERSION,
 )
 
@@ -83,7 +84,7 @@ def _matched_event(
         "source_event_id": f"n4-memory:{identity_key}:{version}",
         "direction": "buy",
         "signal_type": "B_BUY",
-        "condition_key": "BUY:STATE_V1",
+        "condition_key": BUY_CONDITION_KEY,
         "trigger_mark_candidate": "normal",
         "trigger_period": "D",
         "trigger_bucket": "episode:1",

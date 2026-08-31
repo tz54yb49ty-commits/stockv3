@@ -28,9 +28,16 @@ from ashare_v3.trigger.windows_n4_memory import (
 )
 
 
-RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
-BUY_CONDITION_KEY = "BUY:STATE_V1"
-SELL_CONDITION_KEY = "SELL:STATE_V1"
+RULE_POLICY_VERSION = "windows_n4_daily_transition_v2"
+BUY_CONDITION_KEY = "BUY:D_STATE_V2"
+SELL_CONDITION_KEY = "SELL:D_STATE_V2"
+LEGACY_RULE_POLICY_VERSION = "windows_n4_state_transition_v1"
+LEGACY_BUY_CONDITION_KEY = "BUY:STATE_V1"
+LEGACY_SELL_CONDITION_KEY = "SELL:STATE_V1"
+SUPPORTED_RULE_POLICY_VERSIONS = {
+    LEGACY_RULE_POLICY_VERSION,
+    RULE_POLICY_VERSION,
+}
 FORMAL_PERIOD_PRIORITY = ("Y", "Q", "M", "W", "D")
 VALID_30M_GRADES = {"volume_up", "shrink_down", "none", "unknown"}
 RuntimeState = StockRuntimeState | IndexRuntimeState | BoardRuntimeState
@@ -259,9 +266,9 @@ class WindowsN4StateTransitionPlanner:
                 (),
             )
 
-        flags = _evaluate_abcd(runtime_state)
-        buy_evaluation = _evaluate_direction(runtime_state, "buy", flags)
-        sell_evaluation = _evaluate_direction(runtime_state, "sell", flags)
+        flags = _evaluate_daily_rules(runtime_state)
+        buy_evaluation = _evaluate_direction("buy", flags)
+        sell_evaluation = _evaluate_direction("sell", flags)
         buy_state, buy_event = self._advance_direction(
             runtime_state,
             previous.buy,
@@ -347,16 +354,7 @@ class WindowsN4StateTransitionPlanner:
             return desired, event
 
         if evaluation.trigger_live and previous.trigger_live:
-            if _material_signature(previous) == _material_signature(desired):
-                return desired, None
-            event = self._build_event(
-                event_type="TriggerStateChanged",
-                runtime_state=runtime_state,
-                previous=previous,
-                current=desired,
-                runtime_snapshot=runtime_snapshot,
-            )
-            return replace(desired, last_event_id=event.event_id), event
+            return desired, None
 
         if not evaluation.trigger_live and previous.trigger_live:
             event = self._build_event(
@@ -460,11 +458,7 @@ class WindowsN4StateTransitionPlanner:
                     "previous_trigger_mark_candidate": (
                         previous.trigger_mark_candidate
                     ),
-                    "state_change_reason": (
-                        "matched_changed"
-                        if current.trigger_live
-                        else "matched_to_inactive"
-                    ),
+                    "state_change_reason": "matched_to_inactive",
                     "source_outcome_event_type": "N4RuntimeStateVersion",
                     "source_outcome_event_id": source_event_id,
                 }
@@ -528,6 +522,7 @@ def _restore_trigger_state_snapshot(
             "for_trade_date",
         )
     )
+    policy_version = _restore_str(first, "rule_policy_version")
     states: dict[str, ObjectTriggerState] = {}
     seen_versions: set[tuple[str, str, int]] = set()
 
@@ -543,6 +538,8 @@ def _restore_trigger_state_snapshot(
         )
         if current_lineage != lineage:
             raise ValueError("restore events contain mixed N2 lineage or dates")
+        if _restore_str(payload, "rule_policy_version") != policy_version:
+            raise ValueError("restore events contain mixed rule policies")
         version = _restore_int(payload, "n4_state_version")
         direction = _restore_str(payload, "direction")
         version_key = (event.identity_key, direction, version)
@@ -608,7 +605,10 @@ def _validate_restore_event(
         raise ValueError("event is not restorable by this N4 channel")
     if _restore_str(payload, "run_id") != event.source_run_id:
         raise ValueError("restore payload run_id does not match event")
-    if _restore_str(payload, "rule_policy_version") != RULE_POLICY_VERSION:
+    if (
+        _restore_str(payload, "rule_policy_version")
+        not in SUPPORTED_RULE_POLICY_VERSIONS
+    ):
         raise ValueError("restore event rule policy is not supported")
     if _restore_str(payload, "for_trade_date") != event.trade_date:
         raise ValueError("restore event trade_date does not match payload")
@@ -641,9 +641,11 @@ def _restore_direction_state(
 ) -> DirectionTriggerState:
     payload = event.payload_json
     direction = _restore_str(payload, "direction")
+    policy_version = _restore_str(payload, "rule_policy_version")
     expected_signal = "B_BUY" if direction == "buy" else "S_SELL"
-    expected_condition = (
-        BUY_CONDITION_KEY if direction == "buy" else SELL_CONDITION_KEY
+    expected_condition = _condition_key_for_policy(
+        policy_version,
+        direction,
     )
     if (
         direction != previous.direction
@@ -679,6 +681,12 @@ def _restore_direction_state(
             "TriggerStateChanged must retain the current live episode"
         )
 
+    if (
+        policy_version == RULE_POLICY_VERSION
+        and event.event_type == "TriggerStateChanged"
+        and trigger_live
+    ):
+        raise ValueError("V2 TriggerStateChanged must be inactive")
     flags = payload.get("rule_flags")
     if not isinstance(flags, Mapping) or set(flags) != {"A", "B", "C", "D30"}:
         raise ValueError("restore event has invalid rule_flags")
@@ -693,6 +701,17 @@ def _restore_direction_state(
     projection = _restore_str(payload, "projection_30m_type")
     if projection not in VALID_30M_GRADES:
         raise ValueError("restore projection_30m_type is invalid")
+    if policy_version == RULE_POLICY_VERSION:
+        if flags["B"] is not False or flags["D30"] is not False:
+            raise ValueError("V2 30m rule flags must be false")
+        expected_periods = ("D",) if trigger_live else ()
+        if (
+            activation_sources != expected_periods
+            or formal_periods != expected_periods
+            or primary != ("D" if trigger_live else None)
+            or projection != "none"
+        ):
+            raise ValueError("V2 trigger period contract is invalid")
 
     return DirectionTriggerState(
         direction=direction,
@@ -748,6 +767,25 @@ def _restore_sequence(
     return tuple(value)
 
 
+def _condition_key_for_policy(
+    policy_version: str,
+    direction: str,
+) -> str:
+    if policy_version == RULE_POLICY_VERSION:
+        return (
+            BUY_CONDITION_KEY
+            if direction == "buy"
+            else SELL_CONDITION_KEY
+        )
+    if policy_version == LEGACY_RULE_POLICY_VERSION:
+        return (
+            LEGACY_BUY_CONDITION_KEY
+            if direction == "buy"
+            else LEGACY_SELL_CONDITION_KEY
+        )
+    raise ValueError("restore event rule policy is not supported")
+
+
 def _initial_object_state(runtime_state: RuntimeState) -> ObjectTriggerState:
     return ObjectTriggerState(
         asset_kind=runtime_state.asset_kind,
@@ -792,10 +830,9 @@ def _has_usable_evidence(state: RuntimeState) -> bool:
     )
 
 
-def _evaluate_abcd(state: RuntimeState) -> Mapping[str, RuleValue]:
+def _evaluate_daily_rules(state: RuntimeState) -> Mapping[str, RuleValue]:
     source_d = state.source_transitions.get("D")
     live_d = state.realtime_transitions.get("D")
-    live_30m = state.realtime_transitions.get("30m")
     source_w = state.comparison_amounts.get("W")
     live_w = state.realtime_virtual_amounts.get("W")
     return MappingProxyType(
@@ -805,85 +842,34 @@ def _evaluate_abcd(state: RuntimeState) -> Mapping[str, RuleValue]:
                 _known_equal(live_d, "volume_up"),
                 _decimal_compare(live_w, source_w, greater=True),
             ),
-            "B": _tri_and(
-                _known_equal(source_d, "low_volume_down"),
-                _known_equal(live_30m, "volume_up"),
-            ),
+            "B": False,
             "C": _tri_and(
                 _known_not_equal(source_d, "low_volume_down"),
                 _known_equal(live_d, "low_volume_down"),
                 _decimal_compare(live_w, source_w, greater=False),
             ),
-            "D30": _tri_and(
-                _known_equal(source_d, "volume_up"),
-                _known_equal(live_30m, "shrink_down"),
-            ),
+            "D30": False,
         }
     )
 
 
 def _evaluate_direction(
-    state: RuntimeState,
     direction: str,
     flags: Mapping[str, RuleValue],
 ) -> _DirectionEvaluation:
-    target = "volume_up" if direction == "buy" else "low_volume_down"
-    period_results: dict[str, RuleValue] = {}
-    for period in ("Y", "Q", "M", "W"):
-        period_results[period] = _tri_and(
-            _known_not_equal(state.source_transitions.get(period), target),
-            _known_equal(state.realtime_transitions.get(period), target),
-        )
-    period_results["D"] = flags["A" if direction == "buy" else "C"]
-    thirty_minute_key = "B" if direction == "buy" else "D30"
-    thirty_minute_result = flags[thirty_minute_key]
-
-    formal = tuple(
-        period
-        for period in FORMAL_PERIOD_PRIORITY
-        if period_results[period] is True
-    )
-    activation_sources = formal + (
-        (thirty_minute_key,) if thirty_minute_result is True else ()
-    )
-    trigger_live = bool(activation_sources)
-    determinate = trigger_live or (
-        all(value is False for value in period_results.values())
-        and thirty_minute_result is False
-    )
-    primary = formal[0] if formal else None
-    trigger_period = primary or ("30m" if thirty_minute_result is True else None)
-    projection = str(state.realtime_transitions.get("30m") or "unknown")
-    if projection not in VALID_30M_GRADES:
-        projection = "unknown"
-    mark = (
-        "30m_volume"
-        if projection == "volume_up"
-        else "30m_shrink"
-        if projection == "shrink_down"
-        else "normal"
-    )
+    result = flags["A" if direction == "buy" else "C"]
+    trigger_live = result is True
+    periods = ("D",) if trigger_live else ()
     return _DirectionEvaluation(
-        determinate=determinate,
+        determinate=result is not None,
         trigger_live=trigger_live,
         rule_flags=flags,
-        activation_sources=activation_sources,
-        formal_triggered_periods=formal,
-        primary_trigger_period=primary,
-        trigger_period=trigger_period,
-        projection_30m_type=projection,
-        trigger_mark_candidate=mark,
-    )
-
-
-def _material_signature(state: DirectionTriggerState) -> tuple[object, ...]:
-    return (
-        state.activation_sources,
-        state.formal_triggered_periods,
-        state.primary_trigger_period,
-        state.trigger_period,
-        state.projection_30m_type,
-        state.trigger_mark_candidate,
+        activation_sources=periods,
+        formal_triggered_periods=periods,
+        primary_trigger_period="D" if trigger_live else None,
+        trigger_period="D" if trigger_live else None,
+        projection_30m_type="none",
+        trigger_mark_candidate="normal",
     )
 
 
@@ -923,8 +909,6 @@ def _decimal_compare(
 
 
 def _tri_and(*values: RuleValue) -> RuleValue:
-    if any(value is False for value in values):
-        return False
     if any(value is None for value in values):
         return None
-    return True
+    return all(values)

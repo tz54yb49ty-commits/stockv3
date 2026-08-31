@@ -201,15 +201,14 @@ def test_candidate_persists_idempotently_before_postcommit_adoption(
             live_30m="volume_up",
         ),
     )
-    assert [event.event_type for event in changed_plan.output_events] == [
-        "TriggerStateChanged"
-    ]
+    assert changed_plan.output_events == ()
     changed = persist_windows_n4_delivery(
         cursor,
         plan=changed_plan,
         json_adapter=lambda value: value,
     )
-    assert changed.outbox_insert_count == 1
+    assert changed.outbox_insert_count == 0
+    assert changed.database_write_count == 0
     planner = changed_plan.candidate_planner
     assert planner.read().source_n4_version == 2
 

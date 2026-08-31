@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 import pytest
 
+from ashare_v3.trigger.event_factory import build_n4_trigger_event
 from ashare_v3.trigger.windows_n4_memory import (
     BoardRuntimeState,
     IndexRuntimeState,
@@ -15,6 +16,8 @@ from ashare_v3.trigger.windows_n4_memory import (
 )
 from ashare_v3.trigger.windows_n4_state_transition import (
     BUY_CONDITION_KEY,
+    LEGACY_BUY_CONDITION_KEY,
+    LEGACY_RULE_POLICY_VERSION,
     RULE_POLICY_VERSION,
     SELL_CONDITION_KEY,
     OutOfOrderN4Snapshot,
@@ -138,14 +141,13 @@ def _planner() -> WindowsN4StateTransitionPlanner:
     )
 
 
-def test_buy_ab_lifecycle_and_new_episode() -> None:
+def test_buy_daily_lifecycle_and_new_episode() -> None:
     planner = _planner()
     sequence = [
         ("09:35", "volume_up", "10.80", "none"),
-        ("09:40", "volume_up", "10.90", "none"),
-        ("10:00", "volume_up", "10.90", "volume_up"),
-        ("10:05", "flat", "9.80", "volume_up"),
-        ("10:10", "flat", "9.80", "none"),
+        ("09:40", "volume_up", "10.90", "volume_up"),
+        ("10:00", "flat", "9.80", "volume_up"),
+        ("10:05", "flat", "9.80", "none"),
         ("10:20", "volume_up", "10.70", "none"),
     ]
     batches = []
@@ -167,6 +169,12 @@ def test_buy_ab_lifecycle_and_new_episode() -> None:
     assert first.payload_json["rule_policy_version"] == RULE_POLICY_VERSION
     assert first.payload_json["match_basis"].startswith(RULE_POLICY_VERSION)
     assert first.payload_json["trigger_period"] == "D"
+    assert first.payload_json["primary_trigger_period"] == "D"
+    assert first.payload_json["activation_sources"] == ["D"]
+    assert first.payload_json["formal_triggered_periods"] == ["D"]
+    assert first.payload_json["projection_30m_flag"] is False
+    assert first.payload_json["projection_30m_type"] == "none"
+    assert first.payload_json["trigger_mark_candidate"] == "normal"
     assert first.payload_json["episode_entry_event_id"] == first.event_id
     assert first.payload_json["source_w_average_amount"] == "10.00"
     assert first.payload_json["source_transitions"]["D"] == "low_volume_down"
@@ -190,45 +198,25 @@ def test_buy_ab_lifecycle_and_new_episode() -> None:
     assert [event.event_type for event in batches[2].events] == [
         "TriggerStateChanged"
     ]
-    changed_payload = batches[2].events[0].payload_json
-    assert changed_payload["trigger_live"] is True
-    assert changed_payload["activation_sources"] == ["D", "B"]
-    assert changed_payload["source_transitions"]["D"] == "low_volume_down"
-    assert changed_payload["source_amounts"]["W"] == "10.00"
-    assert changed_payload["comparison_amounts"]["W"] == "10.00"
-    assert changed_payload["realtime_transitions"]["30m"] == "volume_up"
-    assert changed_payload["realtime_virtual_amounts"]["W"] == "10.90"
-    assert changed_payload["current_price"] == "10.00"
-    assert changed_payload["cumulative_amount"] == "100000000"
-    assert changed_payload["provider"] == "fixture"
-    assert changed_payload["live_status"] == "available"
-    assert changed_payload["fresh"] is True
+    inactive_payload = batches[2].events[0].payload_json
+    assert inactive_payload["trigger_live"] is False
+    assert inactive_payload["current_status"] == "inactive"
+    assert inactive_payload["state_change_reason"] == "matched_to_inactive"
+    assert batches[3].events == ()
 
-    assert [event.event_type for event in batches[3].events] == [
-        "TriggerStateChanged"
-    ]
-    assert batches[3].events[0].payload_json["activation_sources"] == ["B"]
-    assert batches[3].events[0].payload_json["trigger_period"] == "30m"
-
-    assert [event.event_type for event in batches[4].events] == [
-        "TriggerStateChanged"
-    ]
-    assert batches[4].events[0].payload_json["trigger_live"] is False
-    assert batches[4].events[0].payload_json["current_status"] == "inactive"
-
-    assert [event.event_type for event in batches[5].events] == ["TriggerMatched"]
-    second = batches[5].events[0]
+    assert [event.event_type for event in batches[4].events] == ["TriggerMatched"]
+    second = batches[4].events[0]
     assert first.event_id != second.event_id
-    final_buy = batches[5].snapshot.states["stock:SZ:000001"].buy
+    final_buy = batches[4].snapshot.states["stock:SZ:000001"].buy
     assert final_buy.episode_number == 2
     assert final_buy.episode_entry_event_id == second.event_id
 
 
-def test_sell_cd30_lifecycle_is_symmetric() -> None:
+def test_sell_daily_lifecycle_is_symmetric() -> None:
     planner = _planner()
     inputs = [
         ("13:05", "low_volume_down", "18.50", "none"),
-        ("13:30", "flat", "21.00", "shrink_down"),
+        ("13:30", "low_volume_down", "18.00", "shrink_down"),
         ("14:00", "flat", "21.00", "none"),
     ]
     batches = []
@@ -247,50 +235,113 @@ def test_sell_cd30_lifecycle_is_symmetric() -> None:
         )
         batches.append(planner.consume(_snapshot(version, state)))
 
-    matched, changed, inactive = (batch.events[0] for batch in batches)
+    matched = batches[0].events[0]
     assert matched.event_type == "TriggerMatched"
     assert matched.payload_json["condition_key"] == SELL_CONDITION_KEY
     assert matched.payload_json["rule_flags"]["C"] is True
-    assert changed.event_type == "TriggerStateChanged"
-    assert changed.payload_json["trigger_live"] is True
-    assert changed.payload_json["activation_sources"] == ["D30"]
+    assert matched.payload_json["activation_sources"] == ["D"]
+    assert matched.payload_json["trigger_period"] == "D"
+    assert batches[1].events == ()
+    inactive = batches[2].events[0]
     assert inactive.event_type == "TriggerStateChanged"
     assert inactive.payload_json["trigger_live"] is False
 
 
-def test_formal_period_priority_and_30m_fallback() -> None:
+def test_30m_and_higher_periods_never_activate_or_refresh() -> None:
     planner = _planner()
-    formal = _state(
+    ignored = _state(
         version=1,
         observed_at=_time("09:35"),
         source_d="flat",
         live_d="flat",
         source_w="10",
         live_w="10",
-        live_30m="none",
+        live_30m="volume_up",
         higher_live={"Y": "volume_up", "M": "volume_up"},
     )
-    first = planner.consume(_snapshot(1, formal))
-    buy = first.snapshot.states[formal.identity_key].buy
-    assert buy.formal_triggered_periods == ("Y", "M")
-    assert buy.primary_trigger_period == "Y"
-    assert buy.trigger_period == "Y"
+    first = planner.consume(_snapshot(1, ignored))
+    assert first.events == ()
+    assert first.snapshot.states[ignored.identity_key].buy.trigger_live is False
 
-    fallback_planner = _planner()
-    fallback = _state(
-        version=1,
-        observed_at=_time("10:05"),
-        source_d="low_volume_down",
-        live_d="flat",
+    active = _state(
+        version=2,
+        observed_at=_time("09:40"),
+        source_d="flat",
+        live_d="volume_up",
         source_w="10",
-        live_w="9",
+        live_w="11",
+        live_30m="none",
+    )
+    matched = planner.consume(_snapshot(2, active))
+    assert [event.event_type for event in matched.events] == ["TriggerMatched"]
+
+    changed_context = _state(
+        version=3,
+        observed_at=_time("09:45"),
+        source_d="flat",
+        live_d="volume_up",
+        source_w="10",
+        live_w="12",
+        live_30m="shrink_down",
+        higher_source={"Y": "volume_up", "Q": "low_volume_down"},
+        higher_live={"Y": "low_volume_down", "Q": "volume_up"},
+    )
+    unchanged = planner.consume(_snapshot(3, changed_context))
+    assert unchanged.events == ()
+    buy = unchanged.snapshot.states[active.identity_key].buy
+    assert buy.activation_sources == ("D",)
+    assert buy.formal_triggered_periods == ("D",)
+    assert buy.primary_trigger_period == "D"
+    assert buy.trigger_period == "D"
+    assert buy.projection_30m_type == "none"
+    assert buy.trigger_mark_candidate == "normal"
+
+
+def test_one_hundred_live_snapshots_emit_one_match_and_no_true_change() -> None:
+    planner = _planner()
+    event_types = []
+    for version in range(1, 101):
+        state = _state(
+            version=version,
+            observed_at=_time("10:00"),
+            source_d="flat",
+            live_d="volume_up",
+            source_w="10",
+            live_w=str(11 + version),
+            live_30m="volume_up" if version % 2 else "shrink_down",
+            higher_live={"Y": "volume_up" if version % 2 else "flat"},
+        )
+        batch = planner.consume(_snapshot(version, state))
+        event_types.extend(event.event_type for event in batch.events)
+    assert event_types == ["TriggerMatched"]
+
+
+@pytest.mark.parametrize(
+    ("source_d", "live_d"),
+    [
+        ("flat", "volume_up"),
+        ("flat", "low_volume_down"),
+    ],
+)
+def test_equal_week_average_does_not_trigger(
+    source_d: str,
+    live_d: str,
+) -> None:
+    planner = _planner()
+    state = _state(
+        version=1,
+        observed_at=_time("10:00"),
+        source_d=source_d,
+        live_d=live_d,
+        source_w="10",
+        live_w="10",
         live_30m="volume_up",
     )
-    fallback_batch = fallback_planner.consume(_snapshot(1, fallback))
-    fallback_buy = fallback_batch.snapshot.states[fallback.identity_key].buy
-    assert fallback_buy.formal_triggered_periods == ()
-    assert fallback_buy.primary_trigger_period is None
-    assert fallback_buy.trigger_period == "30m"
+    batch = planner.consume(_snapshot(1, state))
+    assert batch.events == ()
+    object_state = batch.snapshot.states[state.identity_key]
+    assert object_state.buy.trigger_live is False
+    assert object_state.sell.trigger_live is False
 
 
 def test_ac_use_previous_complete_week_average_not_current_week_seed() -> None:
@@ -460,6 +511,19 @@ def test_stale_or_unknown_evidence_does_not_deactivate() -> None:
     assert third.events == ()
     assert third.snapshot.states[active.identity_key].buy.trigger_live is True
     assert third.snapshot.states[active.identity_key].buy.source_n4_version == 3
+
+    unknown_source = _state(
+        version=4,
+        observed_at=_time("09:50"),
+        source_d="unknown",
+        live_d="flat",
+        source_w="10",
+        live_w="9",
+        live_30m="none",
+    )
+    fourth = planner.consume(_snapshot(4, unknown_source))
+    assert fourth.events == ()
+    assert fourth.snapshot.states[active.identity_key].buy.trigger_live is True
 
 
 def test_repeated_and_out_of_order_versions_are_safe_and_bounded() -> None:
@@ -678,30 +742,55 @@ def test_restore_outbox_lifecycle_is_symmetric_and_idempotent(
         live_30m="volume_up",
     )
     changed = restored_live.consume(make_snapshot(9, changed_state))
-    assert [event.event_type for event in changed.events] == [
-        "TriggerStateChanged"
-    ]
-    assert changed.events[0].payload_json["trigger_live"] is True
-    assert changed.events[0].payload_json["activation_sources"] == ["D", "B"]
-    assert (
-        changed.events[0].payload_json["episode_entry_event_id"]
-        == matched.event_id
-    )
-
-    restored_after_change = WindowsN4StateTransitionPlanner(
-        asset_kind=asset_kind,
-        trigger_run_id=f"{TRIGGER_RUN_ID}_restart_after_change",
-    )
-    changed_snapshot = restored_after_change.restore_from_outbox(
-        [changed.events[0], matched, changed.events[0]]
-    )
-    assert changed_snapshot.source_n4_version == 9
-    restored_buy = changed_snapshot.states[identity_key].buy
+    assert changed.events == ()
+    restored_buy = changed.snapshot.states[identity_key].buy
     assert restored_buy.trigger_live is True
-    assert restored_buy.activation_sources == ("D", "B")
-    assert restored_after_change.consume(
-        make_snapshot(10, changed_state)
-    ).events == ()
+    assert restored_buy.activation_sources == ("D",)
+
+
+def test_legacy_v1_matched_event_remains_readable() -> None:
+    original = _planner()
+    state = _state(
+        version=1,
+        observed_at=_time("09:35"),
+        source_d="flat",
+        live_d="volume_up",
+        source_w="10",
+        live_w="11",
+        live_30m="none",
+    )
+    matched = original.consume(_snapshot(1, state)).events[0]
+    legacy_payload = dict(matched.payload_json)
+    legacy_payload["rule_policy_version"] = LEGACY_RULE_POLICY_VERSION
+    legacy_payload["episode_entry_event_id"] = "pending"
+    arguments = {
+        "event_type": "TriggerMatched",
+        "asset_kind": matched.asset_kind,
+        "identity_key": matched.identity_key,
+        "trade_date": matched.trade_date,
+        "event_time": matched.event_time,
+        "trigger_run_id": "windows_n4_state_transition_v1_restore_fixture",
+        "source_event_id": str(matched.payload_json["source_event_id"]),
+        "direction": "buy",
+        "signal_type": "B_BUY",
+        "condition_key": LEGACY_BUY_CONDITION_KEY,
+        "trigger_mark_candidate": "normal",
+        "trigger_period": "D",
+        "trigger_bucket": "episode:1",
+        "match_basis": f"{LEGACY_RULE_POLICY_VERSION}:D",
+        "data_quality_status": "ready",
+        "created_at": matched.created_at,
+    }
+    first = build_n4_trigger_event(payload=legacy_payload, **arguments)
+    legacy_payload["episode_entry_event_id"] = first.event_id
+    legacy_event = build_n4_trigger_event(
+        payload=legacy_payload,
+        **arguments,
+    )
+    restored = _planner().restore_from_outbox([legacy_event, legacy_event])
+    restored_buy = restored.states[state.identity_key].buy
+    assert restored_buy.trigger_live is True
+    assert restored_buy.condition_key == LEGACY_BUY_CONDITION_KEY
 
 
 def test_restore_rejects_conflicting_duplicate_without_mutating_planner() -> None:
