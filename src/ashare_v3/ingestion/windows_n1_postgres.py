@@ -117,7 +117,7 @@ class WindowsN1PostgresRepository:
                         continue
                     cur.execute(
                         "SELECT has_table_privilege("
-                        "current_user,format('%I.%I',%s,%s),'SELECT')",
+                        "current_user,format('%%I.%%I',%s::text,%s::text),'SELECT')",
                         (schema, table),
                     )
                     readable = bool(cur.fetchone()[0])

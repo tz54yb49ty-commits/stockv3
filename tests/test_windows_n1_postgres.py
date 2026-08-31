@@ -96,10 +96,13 @@ class WindowsN1PostgresTest(unittest.TestCase):
                 self.statement = ""
                 self.params = ()
                 self.counted_tables = []
+                self.privilege_checks = []
 
             def execute(self, statement, params=()):
                 self.statement = statement
                 self.params = params
+                if "has_table_privilege" in statement:
+                    self.privilege_checks.append((statement, params))
                 if statement.startswith('SELECT count(*)'):
                     self.counted_tables.append(statement)
 
@@ -128,8 +131,21 @@ class WindowsN1PostgresTest(unittest.TestCase):
             "public.readable_table": {"readable": True, "row_count": 7},
             "public.unreadable_table": {"readable": False, "row_count": None},
         })
+        self.assertEqual(connection.cursor_value.privilege_checks, [
+            (
+                "SELECT has_table_privilege("
+                "current_user,format('%%I.%%I',%s::text,%s::text),'SELECT')",
+                ("public", "readable_table"),
+            ),
+            (
+                "SELECT has_table_privilege("
+                "current_user,format('%%I.%%I',%s::text,%s::text),'SELECT')",
+                ("public", "unreadable_table"),
+            ),
+        ])
         self.assertEqual(len(connection.cursor_value.counted_tables), 1)
         self.assertIn('"readable_table"', connection.cursor_value.counted_tables[0])
+        self.assertNotIn('"unreadable_table"', connection.cursor_value.counted_tables[0])
 
     def test_fastlane_failed_marker_is_singleton_and_idempotent(self):
         class Context:
