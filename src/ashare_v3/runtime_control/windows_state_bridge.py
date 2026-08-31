@@ -132,23 +132,61 @@ def _n4_rows(snapshot: WindowsStateBridgeSnapshot):
     versions = {}
     for kind in ASSET_KINDS:
         lifecycle = snapshot.n4_states[kind]
-        runtime = snapshot.n4_memory[kind]
+        runtime_snapshot = snapshot.n4_memory[kind]
         versions[kind] = lifecycle.source_n4_version
         for identity_key, state in lifecycle.states.items():
-            live_status = runtime.states[identity_key].live_status
+            runtime_state = runtime_snapshot.states.get(identity_key)
             for direction in ("buy", "sell"):
                 value = getattr(state, direction)
-                row = _json_value(value)
+                row = _n4_runtime_projection(
+                    runtime_state,
+                    runtime_snapshot=runtime_snapshot,
+                    identity_key=identity_key,
+                )
+                row.update(_json_value(value))
                 row.update(
                     asset_kind=kind,
+                    identity=identity_key,
                     identity_key=identity_key,
                     exchange=state.exchange,
                     code=state.code,
                     name=state.name,
-                    live_status=live_status,
+                    direction=str(value.direction).upper(),
+                    n4_state_version=value.source_n4_version,
                 )
                 rows.append(row)
     return rows, _version("n4", versions)
+
+
+def _n4_runtime_projection(
+    runtime_state: Any,
+    *,
+    runtime_snapshot: Any,
+    identity_key: str,
+) -> dict[str, Any]:
+    field_names = (
+        "source_transitions",
+        "source_amounts",
+        "comparison_amounts",
+        "realtime_transitions",
+        "realtime_virtual_amounts",
+        "current_price",
+        "cumulative_amount",
+        "provider",
+        "live_status",
+        "fresh",
+    )
+    row = {
+        name: _json_value(getattr(runtime_state, name, None))
+        for name in field_names
+    }
+    row.update(
+        identity=identity_key,
+        identity_key=identity_key,
+        n4_state_version=runtime_snapshot.version,
+        updated_at=_json_value(getattr(runtime_state, "observed_at", None)),
+    )
+    return row
 
 
 def _n5_rows(snapshot: WindowsStateBridgeSnapshot):
