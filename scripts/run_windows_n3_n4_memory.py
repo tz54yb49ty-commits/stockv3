@@ -144,13 +144,25 @@ def main() -> int:
     with ExitStack() as stack:
         bridge = None
         stock_client = stack.enter_context(
-            TdxClient(timeout=8, server_count=4, connections_per_server=4)
+            TdxClient(
+                timeout=8,
+                pool_size=16,
+                probe_hosts=True,
+            )
         )
         index_client = stack.enter_context(
-            TdxClient(timeout=8, server_count=4, connections_per_server=4)
+            TdxClient(
+                timeout=8,
+                pool_size=16,
+                probe_hosts=True,
+            )
         )
         board_client = stack.enter_context(
-            TdxClient(timeout=8, server_count=4, connections_per_server=4)
+            TdxClient(
+                timeout=8,
+                pool_size=16,
+                probe_hosts=True,
+            )
         )
 
         def runtime_factory(model):

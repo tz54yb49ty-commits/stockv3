@@ -673,6 +673,11 @@ def test_0915_entry_uses_same_process_orchestrator() -> None:
     assert "_open_transaction_boundaries" in source
     assert "n5_transaction_boundaries=transaction_boundaries" in source
     assert "event_persistence_count" in source
+    assert source.count("TdxClient(") == 3
+    assert source.count("pool_size=16") == 3
+    assert source.count("probe_hosts=True") == 3
+    assert "server_count" not in source
+    assert "connections_per_server" not in source
     assert 'payload["database_write_count"] = sum(' in source
 
 
