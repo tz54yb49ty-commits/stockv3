@@ -225,9 +225,11 @@ def test_actual_n3_buy_metric_executes_actual_n4_match() -> None:
     assert proof["previous_5m_full_amount"] == str(
         metric.previous_5m_full_amount
     )
-    episode_proof = tuple(n5.read().active.values())[0].latest_metric_proof
-    assert episode_proof is not None
-    assert episode_proof["previous_1m_amount"] == metric.previous_1m_amount
+    assert proof["previous_1m_amount"] == str(metric.previous_1m_amount)
+    snapshot = n5.read()
+    assert snapshot.active == {}
+    assert snapshot.closed_episode_count == 1
+    assert snapshot.closed_episode_watermark_count == 1
 
 
 def test_actual_n3_sell_metric_executes_actual_n4_match() -> None:
