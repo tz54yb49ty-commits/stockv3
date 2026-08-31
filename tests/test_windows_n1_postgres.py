@@ -85,5 +85,88 @@ class WindowsN1PostgresTest(unittest.TestCase):
         )
         self.assertEqual(connection.cursor_value.execute_count, 1)
 
+    def test_downstream_counts_skip_tables_without_select_privilege(self):
+        class Context:
+            def __init__(self, value): self.value = value
+            def __enter__(self): return self.value
+            def __exit__(self, exc_type, exc, traceback): return False
+
+        class Cursor:
+            def __init__(self):
+                self.statement = ""
+                self.params = ()
+                self.counted_tables = []
+
+            def execute(self, statement, params=()):
+                self.statement = statement
+                self.params = params
+                if statement.startswith('SELECT count(*)'):
+                    self.counted_tables.append(statement)
+
+            def fetchall(self):
+                return [
+                    ("public", "readable_table"),
+                    ("public", "unreadable_table"),
+                    ("public", "common_ingest_batch"),
+                ]
+
+            def fetchone(self):
+                if "has_table_privilege" in self.statement:
+                    return (self.params[1] == "readable_table",)
+                if self.statement.startswith('SELECT count(*)'):
+                    return (7,)
+                raise AssertionError(self.statement)
+
+        class Connection:
+            def __init__(self): self.cursor_value = Cursor()
+            def transaction(self): return Context(None)
+            def cursor(self): return Context(self.cursor_value)
+
+        connection = Connection()
+        counts = WindowsN1PostgresRepository(connection).downstream_row_counts()
+        self.assertEqual(counts, {
+            "public.readable_table": {"readable": True, "row_count": 7},
+            "public.unreadable_table": {"readable": False, "row_count": None},
+        })
+        self.assertEqual(len(connection.cursor_value.counted_tables), 1)
+        self.assertIn('"readable_table"', connection.cursor_value.counted_tables[0])
+
+    def test_fastlane_failed_marker_is_singleton_and_idempotent(self):
+        class Context:
+            def __init__(self, value): self.value = value
+            def __enter__(self): return self.value
+            def __exit__(self, exc_type, exc, traceback): return False
+
+        class Cursor:
+            def __init__(self, existing):
+                self.existing = existing
+                self.calls = []
+            def execute(self, statement, params):
+                self.calls.append((statement, params))
+            def fetchone(self): return self.existing
+
+        class Connection:
+            def __init__(self, existing): self.cursor_value = Cursor(existing)
+            def transaction(self): return Context(None)
+            def cursor(self): return Context(self.cursor_value)
+
+        existing_connection = Connection(
+            ("failed", "20260831", "common", "fastlane_complete")
+        )
+        WindowsN1PostgresRepository(existing_connection).mark_fastlane_failed(
+            trade_date="20260831", run_id="run2", error_summary="boom",
+        )
+        self.assertEqual(len(existing_connection.cursor_value.calls), 1)
+
+        new_connection = Connection(None)
+        WindowsN1PostgresRepository(new_connection).mark_fastlane_failed(
+            trade_date="20260831", run_id="run1", error_summary="permission denied",
+        )
+        self.assertEqual(len(new_connection.cursor_value.calls), 2)
+        insert_sql, insert_params = new_connection.cursor_value.calls[1]
+        self.assertIn("'failed'", insert_sql)
+        self.assertEqual(insert_params[0], "windows_n1_fastlane_failed_20260831_v1")
+        self.assertEqual(insert_params[-1], "permission denied")
+
 
 if __name__ == "__main__": unittest.main()

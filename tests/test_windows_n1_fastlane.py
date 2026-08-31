@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import unittest
 
 from ashare_v3.ingestion.windows_n1_fastlane import (
     at_or_after_daily_cutoff,
     calendar_date_is_open,
+    daily_cutoff_is_required,
+    resolve_daily_source_trade_date,
     run_recent_daily_gap_fill,
 )
 
@@ -125,6 +127,27 @@ class WindowsN1FastlaneTest(unittest.TestCase):
     def test_cutoff_is_inclusive(self):
         self.assertFalse(at_or_after_daily_cutoff(datetime(2026, 8, 27, 16, 29, 59)))
         self.assertTrue(at_or_after_daily_cutoff(datetime(2026, 8, 27, 16, 30, 0)))
+
+    def test_fixed_historical_date_bypasses_today_cutoff(self):
+        today = date(2026, 9, 1)
+        self.assertEqual(
+            resolve_daily_source_trade_date("20260831", today=today),
+            "20260831",
+        )
+        self.assertFalse(daily_cutoff_is_required("20260831", today=today))
+        self.assertTrue(daily_cutoff_is_required("20260901", today=today))
+
+    def test_default_daily_date_is_today(self):
+        self.assertEqual(
+            resolve_daily_source_trade_date(None, today=date(2026, 9, 1)),
+            "20260901",
+        )
+
+    def test_invalid_or_future_source_date_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "YYYYMMDD"):
+            resolve_daily_source_trade_date("2026-08-31", today=date(2026, 9, 1))
+        with self.assertRaisesRegex(ValueError, "future"):
+            resolve_daily_source_trade_date("20260902", today=date(2026, 9, 1))
 
     def test_closed_day_is_read_only_skip_signal(self):
         calendar = FakeCalendar([

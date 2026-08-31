@@ -105,7 +105,7 @@ class WindowsN1PostgresRepository:
                     counts[table] = int(cur.fetchone()[0])
         return counts
 
-    def downstream_row_counts(self) -> dict[str, int]:
+    def downstream_row_counts(self) -> dict[str, dict[str, Any]]:
         counts = {}
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -115,9 +115,43 @@ class WindowsN1PostgresRepository:
                 for schema, table in cur.fetchall():
                     if schema == "public" and table in N1_WRITABLE_TABLES | FORBIDDEN_WRITE_TABLES:
                         continue
+                    cur.execute(
+                        "SELECT has_table_privilege("
+                        "current_user,format('%I.%I',%s,%s),'SELECT')",
+                        (schema, table),
+                    )
+                    readable = bool(cur.fetchone()[0])
+                    if not readable:
+                        counts[f"{schema}.{table}"] = {
+                            "readable": False,
+                            "row_count": None,
+                        }
+                        continue
                     cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
-                    counts[f"{schema}.{table}"] = int(cur.fetchone()[0])
+                    counts[f"{schema}.{table}"] = {
+                        "readable": True,
+                        "row_count": int(cur.fetchone()[0]),
+                    }
         return counts
+
+    def fastlane_completion_status(self, trade_date: str) -> str | None:
+        """Return the latest exact-date Fastlane terminal status, if present."""
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM common_ingest_batch
+                    WHERE trade_date=%s
+                      AND data_domain='common'
+                      AND data_type=%s
+                    ORDER BY finished_at DESC NULLS LAST, started_at DESC
+                    LIMIT 1
+                    """,
+                    (trade_date, FASTLANE_COMPLETE_DATA_TYPE),
+                )
+                row = cur.fetchone()
+                return None if row is None else str(row[0])
 
     def latest_fastlane_complete_date(self, before_date: str) -> str | None:
         """Return the latest explicitly completed Fastlane date before a new run."""
@@ -246,6 +280,57 @@ class WindowsN1PostgresRepository:
                         batch_id, trade_date, FASTLANE_COMPLETE_DATA_TYPE,
                         source_version, raw_hash, int(row_count),
                         Jsonb(marker, dumps=jsonb_dumps),
+                    ),
+                )
+
+    def mark_fastlane_failed(
+        self, *, trade_date: str, run_id: str, error_summary: str,
+    ) -> None:
+        """Write one idempotent failed marker so N2 can stop polling."""
+        batch_id = f"windows_n1_fastlane_failed_{trade_date}_v1"
+        source_version = f"windows_n1_fastlane_{trade_date}_v1"
+        marker = {
+            "trade_date": trade_date,
+            "run_id": run_id,
+            "error_summary": str(error_summary),
+        }
+        raw_hash = stable_rows_hash([marker])
+        from psycopg.types.json import Jsonb
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status,trade_date,data_domain,data_type
+                    FROM common_ingest_batch
+                    WHERE batch_id=%s
+                    """,
+                    (batch_id,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    if (
+                        str(existing[0]) == "failed"
+                        and str(existing[1]) == trade_date
+                        and str(existing[2]) == "common"
+                        and str(existing[3]) == FASTLANE_COMPLETE_DATA_TYPE
+                    ):
+                        return
+                    raise RuntimeError(f"Fastlane failure marker collision: {batch_id}")
+                cur.execute(
+                    """
+                    INSERT INTO common_ingest_batch (
+                      batch_id,trade_date,data_domain,data_type,source,source_version,
+                      raw_hash,row_count,error_count,status,started_at,finished_at,
+                      quality_gate_summary,error_summary
+                    ) VALUES (
+                      %s,%s,'common',%s,'TQ_ELTDX_WINDOWS',%s,
+                      %s,0,1,'failed',now(),now(),%s,%s
+                    )
+                    """,
+                    (
+                        batch_id, trade_date, FASTLANE_COMPLETE_DATA_TYPE,
+                        source_version, raw_hash,
+                        Jsonb(marker, dumps=jsonb_dumps), str(error_summary),
                     ),
                 )
 

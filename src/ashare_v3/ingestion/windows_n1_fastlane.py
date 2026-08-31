@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any
 
 from .windows_n1_bootstrap import BootstrapResult
@@ -39,6 +39,26 @@ class RecentGapFillResult:
 
 def at_or_after_daily_cutoff(now: datetime) -> bool:
     return now.time() >= DAILY_CUTOFF
+
+
+def resolve_daily_source_trade_date(
+    requested: str | None, *, today: date,
+) -> str:
+    """Resolve one daily source date without permitting future execution."""
+    if requested is None:
+        return today.strftime("%Y%m%d")
+    try:
+        parsed = datetime.strptime(requested, "%Y%m%d").date()
+    except ValueError as exc:
+        raise ValueError("source_trade_date must use YYYYMMDD") from exc
+    if parsed > today:
+        raise ValueError("source_trade_date cannot be in the future")
+    return parsed.strftime("%Y%m%d")
+
+
+def daily_cutoff_is_required(source_trade_date: str, *, today: date) -> bool:
+    """Only today's daily run is subject to the 16:30 wall-clock gate."""
+    return source_trade_date == today.strftime("%Y%m%d")
 
 
 def calendar_date_is_open(
