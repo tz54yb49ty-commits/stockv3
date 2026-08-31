@@ -94,9 +94,9 @@ def test_bundle_restores_three_channel_episode_states_without_reemission() -> No
     assert next(iter(stock.active.values())).eligible_event_id is not None
 
     index = planners["index"].read()
-    assert len(index.active) == 1
-    assert next(iter(index.active.values())).action_state == "executed"
-    assert next(iter(index.runtime_states.values())).closed_1m_price is not None
+    assert index.active == {}
+    assert index.runtime_states == {}
+    assert index.closed_episode_watermark_count == 1
 
     board = planners["board"].read()
     assert board.active == {}

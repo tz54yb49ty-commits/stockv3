@@ -471,10 +471,8 @@ def test_three_channels_deliver_trigger_and_closed_minute_once() -> None:
         assert channel.requested_identity_keys == (
             IDENTITIES[kind][0],
         )
-        assert len(channel.n5_snapshot.runtime_states) == 1
-        runtime_state = next(iter(channel.n5_snapshot.runtime_states.values()))
-        assert runtime_state.action_state == "executed"
-        assert runtime_state.metric_minute_label == "09:31"
+        assert channel.n5_snapshot.runtime_states == {}
+        assert channel.n5_snapshot.closed_episode_count == 1
         assert getattr(second, kind).requested_identity_keys == ()
         assert providers[kind].calls == [((IDENTITIES[kind][0],), 1)]
 
@@ -492,9 +490,9 @@ def test_three_channels_deliver_trigger_and_closed_minute_once() -> None:
         bridge_snapshot.n5_episodes["stock"] = None
     assert summary["completed_minute_index"] == 1
     assert summary["n5_state_counts"] == {
-        "stock": 1,
-        "index": 1,
-        "board": 1,
+        "stock": 0,
+        "index": 0,
+        "board": 0,
     }
     assert summary["action_metric_identity_request_counts"] == {
         "stock": 1,
@@ -1241,8 +1239,8 @@ def test_closed_minute_failure_keeps_eligible_planner_then_retries() -> None:
     assert [event.event_type for event in retry.stock.n5_events] == [
         "ActionExecuted"
     ]
-    executed = next(iter(retry.stock.n5_snapshot.active.values()))
-    assert executed.action_state == "executed"
+    assert retry.stock.n5_snapshot.active == {}
+    assert retry.stock.n5_snapshot.closed_episode_count == 1
     assert providers["stock"].calls == [
         ((IDENTITIES["stock"][0],), 1),
         ((IDENTITIES["stock"][0],), 1),

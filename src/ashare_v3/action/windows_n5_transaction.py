@@ -16,6 +16,7 @@ from typing import Any
 from ashare_v3.action.windows_n5_delivery import (
     JsonAdapter,
     N4OutboxDelivery,
+    WindowsN5CommittedOutboxRow,
     WindowsN5DeliveryPlan,
     WindowsN5PersistenceResult,
     persist_windows_n5_delivery,
@@ -40,12 +41,24 @@ class WindowsN5CommittedDelivery:
     planner: WindowsN5EpisodePlanner
     snapshot: N5EpisodeSnapshot
     output_events: tuple[EventEnvelope, ...]
+    outbox_rows: tuple[WindowsN5CommittedOutboxRow, ...]
     persistence: WindowsN5PersistenceResult
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output_events", tuple(self.output_events))
+        object.__setattr__(self, "outbox_rows", tuple(self.outbox_rows))
         if self.planner.read() != self.snapshot:
             raise ValueError("committed planner does not match snapshot")
+        if self.persistence.outbox_rows != self.outbox_rows:
+            raise ValueError(
+                "committed N5 rows do not match persistence result"
+            )
+        if tuple(
+            row.event for row in self.outbox_rows if row.inserted
+        ) != self.output_events:
+            raise ValueError(
+                "new committed N5 rows do not match output events"
+            )
 
 
 class WindowsN5TransactionCoordinator:
@@ -120,6 +133,11 @@ class WindowsN5TransactionCoordinator:
         return WindowsN5CommittedDelivery(
             planner=plan.candidate_planner,
             snapshot=plan.snapshot,
-            output_events=plan.output_events,
+            output_events=tuple(
+                row.event
+                for row in persistence.outbox_rows
+                if row.inserted
+            ),
+            outbox_rows=persistence.outbox_rows,
             persistence=persistence,
         )

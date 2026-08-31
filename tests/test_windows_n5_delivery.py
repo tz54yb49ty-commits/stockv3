@@ -25,38 +25,86 @@ class _FakeCursor:
     def __init__(self) -> None:
         self.inbox: set[tuple[str, str]] = set()
         self.outbox: set[str] = set()
+        self.outbox_rows: dict[str, tuple[int, tuple[object, ...]]] = {}
+        self.dedup_event_ids: dict[tuple[str, ...], str] = {}
+        self.next_outbox_id = 1
         self.checkpoints: dict[tuple[str, str, str], int] = {}
         self.calls: list[tuple[str, tuple[object, ...]]] = []
-        self._returned = None
+        self._returned: list[tuple[object, ...]] = []
 
     def execute(self, query, params) -> None:
         sql = " ".join(str(query).split())
         values = tuple(params)
         self.calls.append((sql, values))
-        self._returned = None
+        self._returned = []
         if "INSERT INTO common_event_inbox" in sql:
             key = (str(values[0]), str(values[1]))
             if key not in self.inbox:
                 self.inbox.add(key)
-                self._returned = (values[1],)
+                self._returned = [(values[1],)]
             return
         if "INSERT INTO common_event_outbox" in sql:
             event_id = str(values[0])
-            if event_id not in self.outbox:
-                self.outbox.add(event_id)
-                self._returned = (event_id,)
+            dedup_identity = tuple(
+                str(value)
+                for value in (
+                    values[7],
+                    values[1],
+                    values[8],
+                    values[9],
+                    values[2],
+                )
+            )
+            if (
+                event_id in self.outbox
+                or dedup_identity in self.dedup_event_ids
+            ):
+                return
+            outbox_id = self.next_outbox_id
+            self.next_outbox_id += 1
+            self.outbox.add(event_id)
+            self.outbox_rows[event_id] = (outbox_id, values)
+            self.dedup_event_ids[dedup_identity] = event_id
+            self._returned = [(outbox_id, *values)]
+            return
+        if "FROM common_event_outbox" in sql:
+            event_id, layer, event_type, run_id, dedup_key, schema = values
+            dedup_identity = tuple(
+                str(value)
+                for value in (
+                    layer,
+                    event_type,
+                    run_id,
+                    dedup_key,
+                    schema,
+                )
+            )
+            matching_event_ids = {str(event_id)} & set(self.outbox_rows)
+            dedup_event_id = self.dedup_event_ids.get(dedup_identity)
+            if dedup_event_id is not None:
+                matching_event_ids.add(dedup_event_id)
+            self._returned = [
+                (self.outbox_rows[key][0], *self.outbox_rows[key][1])
+                for key in sorted(
+                    matching_event_ids,
+                    key=lambda item: self.outbox_rows[item][0],
+                )[:2]
+            ]
             return
         if "INSERT INTO common_event_consumer_checkpoint" in sql:
             key = (str(values[0]), str(values[1]), str(values[2]))
             outbox_id = int(values[5])
             if outbox_id > self.checkpoints.get(key, 0):
                 self.checkpoints[key] = outbox_id
-                self._returned = (values[1],)
+                self._returned = [(values[1],)]
             return
         raise AssertionError(f"unexpected SQL: {sql}")
 
     def fetchone(self):
-        return self._returned
+        return self._returned[0] if self._returned else None
+
+    def fetchall(self):
+        return list(self._returned)
 
 
 def _row(event, outbox_id: int) -> dict[str, object]:
@@ -123,9 +171,13 @@ def test_delivery_persistence_is_atomic_intent_and_idempotent() -> None:
 
     assert first.inbox_insert_count == 2
     assert first.outbox_insert_count == 1
+    assert first.outbox_rows[0].outbox_id == 1
+    assert first.outbox_rows[0].inserted is True
     assert first.checkpoint_upsert_count == 1
     assert first.database_write_count == 4
     assert replay.database_write_count == 0
+    assert replay.outbox_rows[0].outbox_id == 1
+    assert replay.outbox_rows[0].inserted is False
     checkpoint_key = (
         "windows_n5_state_v1",
         matched.partition_key,
@@ -203,9 +255,7 @@ def test_metric_output_persists_without_new_n4_acknowledgement() -> None:
 
     assert next(iter(planner.read().active.values())).action_state == "eligible"
     assert plan.candidate_planner is not None
-    assert next(
-        iter(plan.candidate_planner.read().active.values())
-    ).action_state == "executed"
+    assert plan.candidate_planner.read().active == {}
     result = persist_windows_n5_delivery(
         cursor,
         plan=plan,
@@ -217,6 +267,7 @@ def test_metric_output_persists_without_new_n4_acknowledgement() -> None:
     assert result.checkpoint_upsert_count == 0
     assert result.outbox_insert_count == 1
     assert next(iter(cursor.outbox)) == plan.output_events[0].event_id
+    assert result.outbox_rows[0].event == plan.output_events[0]
 
 
 def test_failed_persistence_discards_candidate_and_retry_still_emits() -> None:
@@ -281,6 +332,66 @@ def test_duplicate_source_outbox_id_is_rejected_before_planning() -> None:
         )
 
     assert planner.read().active == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("event_type", "ActionSkipped"),
+        ("dedup_key", "windows-n5-conflicting-dedup"),
+        ("source_run_id", "windows-n5-conflicting-run"),
+        ("payload_json", "fixture_conflict"),
+    ),
+)
+def test_idempotent_conflict_must_match_authoritative_event_identity(
+    field: str,
+    value: str,
+) -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind="stock",
+        action_run_id="windows_n5_delivery_fixture",
+    )
+    plan = plan_n4_deliveries(
+        planner,
+        [N4OutboxDelivery(10, _matched())],
+    )
+    cursor = _FakeCursor()
+    persist_windows_n5_delivery(
+        cursor,
+        plan=plan,
+        consumer_name="windows_n5_state_v1",
+        json_adapter=lambda payload: payload,
+    )
+    if field == "event_type":
+        payload = {
+            **plan.output_events[0].payload_json,
+            "action_state": "expired",
+            "confirmation_status": "expired",
+            "eligibility_reason": None,
+            "skipped_reason": "fixture_conflict",
+        }
+        conflicting_event = replace(
+            plan.output_events[0], event_type=value, payload_json=payload
+        )
+    elif field == "payload_json":
+        conflicting_event = replace(
+            plan.output_events[0],
+            payload_json={**plan.output_events[0].payload_json, value: True},
+        )
+    else:
+        conflicting_event = replace(plan.output_events[0], **{field: value})
+    conflicting_plan = replace(plan, output_events=(conflicting_event,))
+
+    with pytest.raises(
+        RuntimeError,
+        match="authoritative N5 outbox row does not match planned event",
+    ):
+        persist_windows_n5_delivery(
+            cursor,
+            plan=conflicting_plan,
+            consumer_name="windows_n5_state_v1",
+            json_adapter=lambda payload: payload,
+        )
 
 
 def test_delivery_module_never_connects_or_commits() -> None:

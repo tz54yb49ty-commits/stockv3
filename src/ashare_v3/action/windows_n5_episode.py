@@ -81,9 +81,9 @@ class N5ActionEpisode:
     source_n4_version: int
 
     def __post_init__(self) -> None:
-        if self.action_state not in {"eligible", "executed"}:
+        if self.action_state != "eligible":
             raise ValueError(f"unsupported active action_state: {self.action_state}")
-        if self.confirmation_status not in {"pending", "passed"}:
+        if self.confirmation_status != "pending":
             raise ValueError(
                 f"unsupported active confirmation_status: {self.confirmation_status}"
             )
@@ -298,15 +298,8 @@ class WindowsN5EpisodePlanner:
                         metric,
                         decision,
                     )
-                    self._active[key] = replace(
-                        episode,
-                        action_state="executed",
-                        confirmation_status="passed",
-                        executed_event_id=action_event.event_id,
-                        last_checked_minute_index=metric.expected_minute_index,
-                        last_checked_minute_label=metric.metric_minute_label,
-                        latest_metric_proof=_metric_proof(metric),
-                    )
+                    del self._active[key]
+                    self._mark_episode_closed(key)
                     output.append(action_event)
                     changed = True
                     continue
@@ -498,23 +491,9 @@ class WindowsN5EpisodePlanner:
                 raise ValueError(
                     "ActionExecuted restore requires TriggerMatched entry"
                 )
-            market_proof = payload.get("final_market_proof")
-            key, episode = found
-            self._active[key] = replace(
-                episode,
-                action_state="executed",
-                confirmation_status="passed",
-                executed_event_id=event.event_id,
-                last_checked_minute_index=_optional_integer(
-                    payload.get("metric_minute_index")
-                ),
-                last_checked_minute_label=payload.get("metric_minute_label"),
-                latest_metric_proof=(
-                    dict(market_proof)
-                    if isinstance(market_proof, Mapping)
-                    else None
-                ),
-            )
+            key, _episode = found
+            del self._active[key]
+            self._mark_episode_closed(key)
         elif event.event_type == "ActionBlocked":
             if found is None:
                 raise ValueError(

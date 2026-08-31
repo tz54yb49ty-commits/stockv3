@@ -447,11 +447,9 @@ def test_runtime_state_projects_n4_context_and_latest_closed_minute_metric() -> 
     assert pending.previous_1m_amount == Decimal("10")
 
     executed_snapshot = planner.consume_metric(_metric(minute_index=8)).snapshot
-    executed = next(iter(executed_snapshot.runtime_states.values()))
-    assert executed.action_state == "executed"
-    assert executed.confirmation_status == "passed"
-    assert executed.metric_minute_label == "09:38"
-    assert executed.closed_1m_price == Decimal("11")
+    assert executed_snapshot.active == {}
+    assert executed_snapshot.runtime_states == {}
+    assert executed_snapshot.closed_episode_count == 1
 
 
 def test_runtime_state_keeps_missing_upstream_context_explicitly_empty() -> None:
@@ -487,6 +485,16 @@ def test_state_change_true_refreshes_source_and_executed_keeps_entry_ref() -> No
     assert executed.payload_json["action_entry_trigger_matched_ref"]["event_id"] == matched.event_id
     assert executed.payload_json["current_active_source_ref"]["event_id"] == changed.event_id
     assert eligible.event_id != executed.event_id
+
+    inactive = _state_changed(
+        matched,
+        trigger_live=False,
+        version=3,
+        event_time=_time(10, 5),
+    )
+    assert planner.consume_trigger_event(inactive).events == ()
+    assert planner.read().active == {}
+    assert planner.read().closed_episode_count == 1
 
 
 def test_state_change_false_expires_pending_and_new_match_opens_new_episode() -> None:
@@ -577,10 +585,8 @@ def test_strict_equality_fails_then_later_strict_buy_passes() -> None:
     assert executed.event_type == "ActionExecuted"
     assert executed.payload_json["action_mark"] == "30m_volume"
     assert executed.payload_json["confirmation_checks"]["120m_price"] is True
-    episode_proof = _one_active(planner).latest_metric_proof
-    assert episode_proof is not None
-    assert episode_proof["previous_5m_full_amount"] == Decimal("100")
-    assert episode_proof["previous_1m_amount"] == Decimal("10")
+    assert planner.read().active == {}
+    assert planner.read().closed_episode_count == 1
 
 
 def test_sell_confirmation_is_strict_and_uses_shrink_mark() -> None:
@@ -619,7 +625,7 @@ def test_missing_metric_stays_pending_and_close_expires() -> None:
     assert planner.read().active == {}
 
 
-def test_restore_from_outbox_rebuilds_executed_episode_without_reemission() -> None:
+def test_restore_from_outbox_keeps_executed_episode_closed_without_reemission() -> None:
     planner = WindowsN5EpisodePlanner(asset_kind="stock", action_run_id="n5_fixture")
     matched = _matched()
     eligible = planner.consume_trigger_event(matched).events[0]
@@ -628,17 +634,10 @@ def test_restore_from_outbox_rebuilds_executed_episode_without_reemission() -> N
     restored = WindowsN5EpisodePlanner(asset_kind="stock", action_run_id="n5_fixture")
     snapshot = restored.restore_from_outbox([matched, eligible, executed])
 
-    restored_episode = tuple(snapshot.active.values())[0]
-    assert restored_episode.action_state == "executed"
-    assert restored_episode.eligible_event_id == eligible.event_id
-    assert restored_episode.latest_metric_proof is not None
-    assert (
-        restored_episode.latest_metric_proof["previous_120m_body_high"] == "10"
-    )
-    restored_runtime = tuple(snapshot.runtime_states.values())[0]
-    assert restored_runtime.closed_1m_price == Decimal("11")
-    assert restored_runtime.previous_120m_body_high == Decimal("10")
-    assert restored_runtime.action_state == "executed"
+    assert snapshot.active == {}
+    assert snapshot.runtime_states == {}
+    assert snapshot.closed_episode_count == 1
+    assert snapshot.closed_episode_watermark_count == 1
     assert restored.consume_trigger_event(matched).events == ()
     assert restored.consume_metric(_metric(minute_index=8)).events == ()
 

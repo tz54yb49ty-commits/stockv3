@@ -40,6 +40,9 @@ class _TransactionContext:
         self._before = (
             set(cursor.inbox),
             set(cursor.outbox),
+            dict(cursor.outbox_rows),
+            dict(cursor.dedup_event_ids),
+            cursor.next_outbox_id,
             dict(cursor.checkpoints),
         )
         return self
@@ -48,7 +51,14 @@ class _TransactionContext:
         if exc_type is not None or self.connection.fail_commit:
             assert self._before is not None
             cursor = self.connection.fake_cursor
-            cursor.inbox, cursor.outbox, cursor.checkpoints = self._before
+            (
+                cursor.inbox,
+                cursor.outbox,
+                cursor.outbox_rows,
+                cursor.dedup_event_ids,
+                cursor.next_outbox_id,
+                cursor.checkpoints,
+            ) = self._before
             self.connection.rollback_count += 1
             if exc_type is None:
                 raise RuntimeError("fixture commit failure")
@@ -128,6 +138,8 @@ def test_n4_delivery_commits_then_exposes_candidate_for_all_channels(
     assert committed.persistence.inbox_insert_count == 2
     assert committed.persistence.outbox_insert_count == 1
     assert committed.persistence.checkpoint_upsert_count == 1
+    assert committed.outbox_rows[0].outbox_id == 1
+    assert committed.outbox_rows[0].inserted is True
     assert connection.begin_count == 1
     assert connection.commit_count == 1
     assert connection.rollback_count == 0
@@ -164,6 +176,7 @@ def test_commit_failure_discards_candidate_and_retry_is_identical() -> None:
     assert failed_values[0] == retry_values[0]
     assert failed_values[9] == retry_values[9]
     assert committed.output_events[0].event_id == retry_values[0]
+    assert committed.outbox_rows[0].outbox_id == 1
     assert len(committed.planner.read().active) == 1
 
 
@@ -182,9 +195,9 @@ def test_closed_minute_action_executed_commits_without_n4_ack(
     )
 
     original = next(iter(planner.read().active.values()))
-    adopted = next(iter(committed.planner.read().active.values()))
     assert original.action_state == "eligible"
-    assert adopted.action_state == "executed"
+    assert committed.planner.read().active == {}
+    assert committed.planner.read().closed_episode_count == 1
     assert [event.event_type for event in committed.output_events] == [
         "ActionExecuted"
     ]
@@ -192,6 +205,69 @@ def test_closed_minute_action_executed_commits_without_n4_ack(
     assert committed.persistence.checkpoint_upsert_count == 0
     assert committed.persistence.outbox_insert_count == 1
     assert connection.commit_count == 1
+
+
+def test_matching_outbox_conflict_adopts_candidate_without_duplicate_output() -> None:
+    planner = _planner()
+    delivery = N4OutboxDelivery(10, _matched())
+    connection = _FakeConnection()
+
+    first = _coordinator().deliver_n4(
+        connection,
+        planner=planner,
+        deliveries=(delivery,),
+    )
+    replay = _coordinator().deliver_n4(
+        connection,
+        planner=planner,
+        deliveries=(delivery,),
+    )
+
+    assert [event.event_type for event in first.output_events] == [
+        "ActionEligible"
+    ]
+    assert replay.output_events == ()
+    assert replay.outbox_rows[0].outbox_id == first.outbox_rows[0].outbox_id
+    assert replay.outbox_rows[0].inserted is False
+    assert replay.planner.read().active == first.planner.read().active
+    assert connection.commit_count == 2
+
+
+def test_authoritative_outbox_mismatch_rolls_back_and_keeps_original_planner() -> None:
+    planner = _planner()
+    delivery = N4OutboxDelivery(10, _matched())
+    connection = _FakeConnection()
+
+    first = _coordinator().deliver_n4(
+        connection,
+        planner=planner,
+        deliveries=(delivery,),
+    )
+    event_id = first.outbox_rows[0].event.event_id
+    outbox_id, stored_values = connection.fake_cursor.outbox_rows[event_id]
+    conflicting_values = list(stored_values)
+    conflicting_values[11] = {
+        **conflicting_values[11],
+        "fixture_conflict": True,
+    }
+    connection.fake_cursor.outbox_rows[event_id] = (
+        outbox_id,
+        tuple(conflicting_values),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="authoritative N5 outbox row does not match planned event",
+    ):
+        _coordinator().deliver_n4(
+            connection,
+            planner=planner,
+            deliveries=(delivery,),
+        )
+
+    assert planner.read().active == {}
+    assert connection.commit_count == 1
+    assert connection.rollback_count == 1
 
 
 def test_trigger_deactivation_and_close_expiry_write_action_skipped() -> None:
