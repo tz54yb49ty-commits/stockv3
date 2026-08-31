@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 import unittest
 
+from fastapi import Request
+from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +20,6 @@ from ashare_v3.web.windows_n6_runtime import (  # noqa: E402
     windows_archive_status,
     windows_postclose_status,
 )
-
-
 class WindowsN6RuntimeBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = InMemoryWindowsRuntimeFixture()
@@ -71,6 +71,67 @@ class WindowsN6RuntimeBoundaryTests(unittest.TestCase):
 
         self.assertIn("runtime_offline", rendered)
         self.assertIn("暂无当前内存状态", rendered)
+
+    def test_missing_n4_mapping_fields_return_http_200(self) -> None:
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/n6/n4-runtime-states",
+            "raw_path": b"/n6/n4-runtime-states",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+            "root_path": "",
+        })
+        page = {
+            "simulation": False,
+            "runtime_status": "online",
+            "version": 1,
+            "source_condition_run_id": None,
+            "source_trade_date": None,
+            "for_trade_date": None,
+            "item_count": 1,
+            "total_count": 1,
+            "items": [{
+                "asset_kind": "stock",
+                "identity": "stock:SZ:000001",
+                "code": "000001",
+                "name": "fixture",
+                "direction": "BUY",
+                "trigger_live": False,
+                "live_status": "unavailable",
+                "fresh": False,
+                "current_price": None,
+                "cumulative_amount": None,
+                "n4_state_version": 1,
+                "updated_at": None,
+            }],
+        }
+        response = Jinja2Templates(
+            directory=str(SRC / "ashare_v3/web/templates")
+        ).TemplateResponse(
+            request,
+            "n6_windows_runtime_states.html",
+            {
+                "request": request,
+                "title": "N4 runtime states",
+                "layer": "n4",
+                "page": page,
+                "filters": {},
+                "nav": {
+                    "links": (),
+                    "active": "n4_runtime_states",
+                    "is_admin": True,
+                },
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        rendered = response.body.decode("utf-8")
+        self.assertNotIn("Internal Server Error", rendered)
+        self.assertGreaterEqual(rendered.count("<pre>null</pre>"), 5)
 
     def test_status_models_are_windows_specific(self) -> None:
         postclose = windows_postclose_status(self.fixture)
