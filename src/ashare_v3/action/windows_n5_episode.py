@@ -140,7 +140,13 @@ class N5ActionRuntimeState:
     fresh: bool | None
     updated_at: datetime
     metric_minute_label: str | None
+    metric_ready: bool | None
     metric_quality_status: str | None
+    metric_error_summary: str | None
+    metric_expected_minute_index: int | None
+    metric_observed_minute_index: int | None
+    confirmation_checks: Mapping[str, bool | None]
+    confirmation_pending_reason: str | None
     closed_1m_price: Decimal | None
     previous_120m_body_high: Decimal | None
     previous_120m_body_low: Decimal | None
@@ -165,6 +171,7 @@ class N5ActionRuntimeState:
             "comparison_amounts",
             "realtime_transitions",
             "realtime_virtual_amounts",
+            "confirmation_checks",
         ):
             object.__setattr__(
                 self,
@@ -289,9 +296,19 @@ class WindowsN5EpisodePlanner:
                     <= episode.last_checked_minute_index
                 ):
                     continue
-                if not metric.metric_ready:
-                    continue
                 decision = evaluate_confirmation(episode.key.direction, metric)
+                if not metric.metric_ready:
+                    self._active[key] = replace(
+                        episode,
+                        last_checked_minute_index=metric.expected_minute_index,
+                        last_checked_minute_label=metric.metric_minute_label,
+                        latest_metric_proof=_metric_diagnostic(
+                            metric,
+                            decision,
+                        ),
+                    )
+                    changed = True
+                    continue
                 if decision.all_passed:
                     action_event = self._build_action_executed(
                         episode,
@@ -318,7 +335,10 @@ class WindowsN5EpisodePlanner:
                     episode,
                     last_checked_minute_index=metric.expected_minute_index,
                     last_checked_minute_label=metric.metric_minute_label,
-                    latest_metric_proof=_metric_proof(metric),
+                    latest_metric_proof=_metric_diagnostic(
+                        metric,
+                        decision,
+                    ),
                 )
                 changed = True
             if changed:
@@ -1065,8 +1085,24 @@ def _runtime_state_from_episode(
         fresh=_optional_bool(payload.get("fresh")),
         updated_at=_event_time(episode.current_source_event),
         metric_minute_label=_optional_text(metric.get("metric_minute_label")),
+        metric_ready=_optional_bool(metric.get("metric_ready")),
         metric_quality_status=_optional_text(
             metric.get("metric_quality_status")
+        ),
+        metric_error_summary=_optional_text(
+            metric.get("metric_error_summary")
+        ),
+        metric_expected_minute_index=_optional_integer(
+            metric.get("metric_minute_index")
+        ),
+        metric_observed_minute_index=_optional_integer(
+            metric.get("observed_minute_index")
+        ),
+        confirmation_checks=_mapping_or_empty(
+            metric.get("confirmation_checks")
+        ),
+        confirmation_pending_reason=_optional_text(
+            metric.get("confirmation_pending_reason")
         ),
         closed_1m_price=_optional_decimal(metric.get("current_1m_close")),
         previous_120m_body_high=_optional_decimal(
@@ -1155,6 +1191,22 @@ def _metric_proof(metric: ActionConfirmationMetric) -> dict[str, Any]:
         "previous_120m_period_source": metric.previous_120m_period_source,
         "amount_unit": metric.amount_unit,
     }
+
+
+def _metric_diagnostic(
+    metric: ActionConfirmationMetric,
+    decision: ConfirmationDecision,
+) -> dict[str, Any]:
+    proof = _metric_proof(metric)
+    proof.update(
+        {
+            "metric_ready": metric.metric_ready,
+            "metric_error_summary": metric.error_summary,
+            "confirmation_checks": dict(decision.checks),
+            "confirmation_pending_reason": decision.pending_reason,
+        }
+    )
+    return proof
 
 
 def _strict_compare(

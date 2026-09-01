@@ -439,6 +439,13 @@ def test_runtime_state_projects_n4_context_and_latest_closed_minute_metric() -> 
     assert pending.action_state == "eligible"
     assert pending.confirmation_status == "pending"
     assert pending.metric_minute_label == "09:37"
+    assert pending.metric_ready is True
+    assert pending.metric_quality_status == "ready"
+    assert pending.metric_error_summary is None
+    assert pending.metric_expected_minute_index == 7
+    assert pending.metric_observed_minute_index == 7
+    assert pending.confirmation_checks["120m_price"] is False
+    assert pending.confirmation_pending_reason == "confirmation_not_passed"
     assert pending.closed_1m_price == Decimal("10")
     assert pending.previous_120m_body_high == Decimal("10")
     assert pending.current_5m_virtual_amount == Decimal("200")
@@ -623,6 +630,62 @@ def test_missing_metric_stays_pending_and_close_expires() -> None:
     assert [event.event_type for event in expired.events] == ["ActionSkipped"]
     assert expired.events[0].payload_json["skipped_reason"] == "window_expired"
     assert planner.read().active == {}
+
+
+@pytest.mark.parametrize("asset_kind", ("stock", "index", "board"))
+def test_missing_metric_diagnostic_is_retained_once_per_closed_minute(
+    asset_kind: str,
+) -> None:
+    planner = WindowsN5EpisodePlanner(
+        asset_kind=asset_kind,
+        action_run_id=f"n5_{asset_kind}_diagnostic_fixture",
+    )
+    planner.consume_trigger_event(_matched(asset_kind=asset_kind))
+    missing = _metric(asset_kind=asset_kind, ready=False, minute_index=7)
+
+    first = planner.consume_metric(missing)
+    episode = _one_active(planner)
+    runtime = next(iter(first.snapshot.runtime_states.values()))
+
+    assert first.events == ()
+    assert episode.last_checked_minute_index == 7
+    assert episode.last_checked_minute_label == "09:37"
+    assert episode.latest_metric_proof is not None
+    assert episode.latest_metric_proof["metric_ready"] is False
+    assert (
+        episode.latest_metric_proof["metric_error_summary"]
+        == "expected_closed_minute_missing"
+    )
+    assert set(episode.latest_metric_proof["confirmation_checks"].values()) == {
+        None
+    }
+    assert (
+        episode.latest_metric_proof["confirmation_pending_reason"]
+        == "expected_closed_minute_missing"
+    )
+    assert runtime.metric_ready is False
+    assert runtime.metric_quality_status == "pending"
+    assert runtime.metric_error_summary == "expected_closed_minute_missing"
+    assert runtime.metric_expected_minute_index == 7
+    assert runtime.metric_observed_minute_index == 6
+    assert set(runtime.confirmation_checks.values()) == {None}
+    assert (
+        runtime.confirmation_pending_reason
+        == "expected_closed_minute_missing"
+    )
+    with pytest.raises(TypeError):
+        runtime.confirmation_checks["120m_price"] = True
+
+    replay = planner.consume_metric(missing)
+    assert replay.events == ()
+    assert replay.snapshot.version == first.snapshot.version
+
+    next_minute = planner.consume_metric(
+        _metric(asset_kind=asset_kind, ready=False, minute_index=8)
+    )
+    next_runtime = next(iter(next_minute.snapshot.runtime_states.values()))
+    assert next_runtime.metric_expected_minute_index == 8
+    assert next_runtime.metric_observed_minute_index == 7
 
 
 def test_restore_from_outbox_keeps_executed_episode_closed_without_reemission() -> None:
