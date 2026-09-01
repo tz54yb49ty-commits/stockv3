@@ -309,6 +309,7 @@ class _MetricProvider:
     asset_kind: str
     fail: bool = False
     increasing_amounts: bool = False
+    pending_reason_counts: dict[str, int] | None = None
 
     def __post_init__(self):
         self.calls = []
@@ -361,6 +362,7 @@ class _MetricProvider:
             metrics=metrics,
             missing_identity_keys=(),
             provider=f"fixture.{self.asset_kind}.closed_1m",
+            pending_reason_counts=self.pending_reason_counts or {},
         )
 
 
@@ -773,6 +775,151 @@ def test_market_close_expires_pending_when_all_providers_fail() -> None:
         }
 
 
+def test_145956_to_150001_finalizes_without_market_request() -> None:
+    before_close = _time("14:59:56")
+    after_close = _time("15:00:01")
+    providers = {
+        kind: _MetricProvider(kind, fail=True)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=before_close,
+                    active=True,
+                )
+            ]
+        ),
+        providers,
+    )
+    runtime.consume_cycle(SimpleNamespace(generated_at=before_close))
+    calls_before = {
+        kind: tuple(providers[kind].calls)
+        for kind in IDENTITIES
+    }
+
+    finalized = runtime.finalize_session(after_close)
+
+    for kind in IDENTITIES:
+        assert [
+            event.event_type for event in finalized.action_events[kind]
+        ] == ["ActionSkipped"]
+        assert finalized.action_events[kind][0].payload_json[
+            "skipped_reason"
+        ] == "window_expired"
+        assert len(finalized.pre_finalize_snapshots[kind].active) == 1
+        assert finalized.post_finalize_snapshots[kind].active == {}
+        assert tuple(providers[kind].calls) == calls_before[kind]
+    summary = runtime.read_summary().as_dict()
+    assert summary["completed_minute_index"] == 240
+    assert summary["session_finalized"] is True
+    with pytest.raises(RuntimeError, match="already finalized"):
+        runtime.finalize_session(after_close)
+
+
+def test_603444_style_reentry_gets_one_close_skip() -> None:
+    first_match_at = _time("13:32:26")
+    inactive_at = _time("14:19:25")
+    second_match_at = _time("14:35:56")
+    close_at = _time("15:00:01")
+    providers = {
+        kind: _MetricProvider(kind, fail=True)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=first_match_at,
+                    active=True,
+                ),
+                _memory_result(
+                    version=2,
+                    observed_at=inactive_at,
+                    active=False,
+                ),
+                _memory_result(
+                    version=3,
+                    observed_at=second_match_at,
+                    active=True,
+                ),
+            ]
+        ),
+        providers,
+    )
+
+    first = runtime.consume_cycle(
+        SimpleNamespace(generated_at=first_match_at)
+    )
+    inactive = runtime.consume_cycle(
+        SimpleNamespace(generated_at=inactive_at)
+    )
+    second = runtime.consume_cycle(
+        SimpleNamespace(generated_at=second_match_at)
+    )
+    finalized = runtime.finalize_session(close_at)
+
+    for kind in IDENTITIES:
+        assert [
+            event.event_type for event in getattr(first, kind).n5_events
+        ] == ["ActionEligible"]
+        assert [
+            event.event_type for event in getattr(inactive, kind).n5_events
+        ] == ["ActionSkipped"]
+        assert getattr(inactive, kind).n5_events[0].payload_json[
+            "skipped_reason"
+        ] == "trigger_live_false"
+        assert [
+            event.event_type for event in getattr(second, kind).n5_events
+        ] == ["ActionEligible"]
+        assert [
+            event.event_type for event in finalized.action_events[kind]
+        ] == ["ActionSkipped"]
+        assert finalized.action_events[kind][0].payload_json[
+            "skipped_reason"
+        ] == "window_expired"
+
+
+def test_finalize_transaction_failure_is_fail_closed() -> None:
+    before_close = _time("14:59:56")
+    after_close = _time("15:00:01")
+    n5_connections = {
+        "stock": _FailOnTransactionConnection(2),
+        "index": _N5FakeConnection(),
+        "board": _N5FakeConnection(),
+    }
+    boundaries, _n4_connections, _n5_connections = (
+        _transaction_boundaries(n5_connections=n5_connections)
+    )
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=before_close,
+                    active=True,
+                )
+            ]
+        ),
+        {
+            kind: _MetricProvider(kind, fail=True)
+            for kind in IDENTITIES
+        },
+        n5_transaction_boundaries=boundaries,
+    )
+    runtime.consume_cycle(SimpleNamespace(generated_at=before_close))
+
+    with pytest.raises(RuntimeError, match="fixture commit failure"):
+        runtime.finalize_session(after_close)
+
+    summary = runtime.read_summary()
+    assert summary.session_finalized is False
+    assert summary.n5_state_counts["stock"] == 1
+
+
 def test_stale_n4_evidence_keeps_episode_pending_without_metric_request() -> None:
     first_at = _time("09:30:05")
     second_at = _time("09:31:05")
@@ -838,6 +985,83 @@ def test_0915_entry_uses_same_process_orchestrator() -> None:
     assert "server_count" not in source
     assert "connections_per_server" not in source
     assert 'payload["database_write_count"] = sum(' in source
+    assert "write_confirmation_latest" in source
+    assert "finalize_session" in source
+    assert "write_session_final" in source
+
+
+def test_pending_reason_counts_reach_cycle_bridge_and_summary() -> None:
+    observed_at = _time("09:31:05")
+    providers = {
+        kind: _MetricProvider(
+            kind,
+            pending_reason_counts={
+                "expected_closed_minute_missing": 1,
+            },
+        )
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=observed_at,
+                    active=True,
+                )
+            ]
+        ),
+        providers,
+    )
+
+    result = runtime.consume_cycle(
+        SimpleNamespace(generated_at=observed_at)
+    )
+
+    for kind in IDENTITIES:
+        channel = getattr(result, kind)
+        assert channel.pending_reason_counts == {
+            "expected_closed_minute_missing": 1,
+        }
+        assert runtime.read_state_bridge_snapshot().action_confirmation[
+            kind
+        ]["pending_reason_counts"] == {
+            "expected_closed_minute_missing": 1,
+        }
+    assert runtime.read_summary().as_dict()[
+        "action_metric_pending_reason_counts"
+    ] == {
+        kind: {"expected_closed_minute_missing": 1}
+        for kind in IDENTITIES
+    }
+
+
+def test_diagnostic_failure_degrades_health_without_stopping_runtime() -> None:
+    observed_at = _time("09:31:05")
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=observed_at,
+                    active=True,
+                )
+            ]
+        ),
+        {kind: _MetricProvider(kind) for kind in IDENTITIES},
+    )
+    runtime.consume_cycle(SimpleNamespace(generated_at=observed_at))
+
+    runtime.record_diagnostic_error(RuntimeError("fixture write failed"))
+
+    assert runtime.read_summary().diagnostic_status == "degraded"
+    assert runtime.read_summary().diagnostic_write_error_count == 1
+    assert runtime.read_state_bridge_snapshot().diagnostic["status"] == (
+        "degraded"
+    )
+    assert runtime.read_state_bridge_snapshot().diagnostic[
+        "write_error_count"
+    ] == 1
 
 
 

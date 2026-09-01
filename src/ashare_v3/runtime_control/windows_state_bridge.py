@@ -90,6 +90,9 @@ def _handler_factory(snapshot_reader):
                         payload["action_confirmation"] = _json_value(
                             snapshot.action_confirmation
                         )
+                        payload["diagnostic"] = _json_value(
+                            snapshot.diagnostic
+                        )
                     self._send(HTTPStatus.OK, payload)
                     return
                 if path.path not in {

@@ -12,8 +12,9 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+import re
 from threading import Lock, RLock
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -83,8 +84,16 @@ class ChannelCycleResult:
     requested_identity_keys: tuple[str, ...]
     metric_ready_count: int
     metric_pending_count: int
+    pending_reason_counts: Mapping[str, int]
     provider_errors: tuple[str, ...]
     confirmation_errors: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "pending_reason_counts",
+            MappingProxyType(dict(self.pending_reason_counts)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +107,35 @@ class WindowsN3N4N5CycleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowsN3N4N5FinalizeResult:
+    observed_at: datetime
+    pre_finalize_snapshots: Mapping[str, N5EpisodeSnapshot]
+    post_finalize_snapshots: Mapping[str, N5EpisodeSnapshot]
+    action_events: Mapping[str, tuple[EventEnvelope, ...]]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "pre_finalize_snapshots",
+            "post_finalize_snapshots",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(getattr(self, field_name))),
+            )
+        object.__setattr__(
+            self,
+            "action_events",
+            MappingProxyType(
+                {
+                    kind: tuple(events)
+                    for kind, events in self.action_events.items()
+                }
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WindowsStateBridgeSnapshot:
     generated_at: datetime | None
     n4_memory: Mapping[str, RuntimeStateSnapshot[Any]]
@@ -106,6 +144,7 @@ class WindowsStateBridgeSnapshot:
     action_confirmation: Mapping[str, Mapping[str, Any]] = field(
         default_factory=dict
     )
+    diagnostic: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for field_name in ("n4_memory", "n4_states", "n5_episodes"):
@@ -124,6 +163,11 @@ class WindowsStateBridgeSnapshot:
                 }
             ),
         )
+        object.__setattr__(
+            self,
+            "diagnostic",
+            MappingProxyType(dict(self.diagnostic)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +184,9 @@ class WindowsN3N4N5RuntimeSummary:
     action_metric_identity_request_counts: Mapping[str, int]
     action_metric_ready_counts: Mapping[str, int]
     action_metric_pending_counts: Mapping[str, int]
+    action_metric_pending_reason_counts: Mapping[
+        str, Mapping[str, int]
+    ]
     provider_error_counts: Mapping[str, int]
     action_metric_delivery_error_counts: Mapping[str, int]
     action_metric_degraded_cycle_counts: Mapping[str, int]
@@ -148,11 +195,16 @@ class WindowsN3N4N5RuntimeSummary:
     n5_versions: Mapping[str, int]
     database_write_counts: Mapping[str, int]
     event_persistence_counts: Mapping[str, int]
+    session_finalized: bool
+    diagnostic_status: str
+    diagnostic_write_error_count: int
+    last_diagnostic_errors: Sequence[str]
 
     def __post_init__(self) -> None:
         for field_name in (
             "n4_trigger_event_counts",
             "n5_action_event_counts",
+            "action_metric_pending_reason_counts",
         ):
             value = getattr(self, field_name)
             object.__setattr__(
@@ -196,6 +248,11 @@ class WindowsN3N4N5RuntimeSummary:
                     for kind, errors in self.last_action_metric_errors.items()
                 }
             ),
+        )
+        object.__setattr__(
+            self,
+            "last_diagnostic_errors",
+            tuple(self.last_diagnostic_errors),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -241,6 +298,12 @@ class WindowsN3N4N5RuntimeSummary:
             "action_metric_pending_counts": dict(
                 self.action_metric_pending_counts
             ),
+            "action_metric_pending_reason_counts": {
+                kind: dict(counts)
+                for kind, counts in (
+                    self.action_metric_pending_reason_counts.items()
+                )
+            },
             "provider_error_counts": dict(self.provider_error_counts),
             "action_metric_delivery_error_counts": dict(
                 self.action_metric_delivery_error_counts
@@ -258,6 +321,12 @@ class WindowsN3N4N5RuntimeSummary:
             "event_persistence_counts": dict(
                 self.event_persistence_counts
             ),
+            "session_finalized": self.session_finalized,
+            "diagnostic_status": self.diagnostic_status,
+            "diagnostic_write_error_count": (
+                self.diagnostic_write_error_count
+            ),
+            "last_diagnostic_errors": list(self.last_diagnostic_errors),
         }
 
 
@@ -319,6 +388,9 @@ class _ChannelRuntime:
         self.confirmation_delivery_error_count = 0
         self.confirmation_degraded_cycle_count = 0
         self.last_metric_pending_count = 0
+        self.last_pending_reason_counts: Mapping[str, int] = (
+            MappingProxyType({})
+        )
         self.last_confirmation_errors: tuple[str, ...] = ()
         self.last_confirmation_error_minute_index = 0
         self.database_write_count = 0
@@ -409,6 +481,7 @@ class _ChannelRuntime:
             for identity_key in unknown
         ]
         confirmation_errors: list[str] = []
+        pending_reason_counts: dict[str, int] = {}
         ready_count = 0
         pending_count = len(requests)
         if requests:
@@ -433,6 +506,7 @@ class _ChannelRuntime:
                 )
             else:
                 provider_errors.extend(batch.errors)
+                pending_reason_counts.update(batch.pending_reason_counts)
                 missing_identity_keys = set(batch.missing_identity_keys)
                 for key in needed_keys:
                     if key.identity_key in missing_identity_keys:
@@ -503,6 +577,9 @@ class _ChannelRuntime:
         if provider_errors or confirmation_errors:
             self.confirmation_degraded_cycle_count += 1
         self.last_metric_pending_count = pending_count
+        self.last_pending_reason_counts = MappingProxyType(
+            dict(sorted(pending_reason_counts.items()))
+        )
         cycle_errors = tuple(provider_errors + confirmation_errors)
         if cycle_errors:
             self.last_confirmation_errors = cycle_errors
@@ -532,6 +609,7 @@ class _ChannelRuntime:
             ),
             metric_ready_count=ready_count,
             metric_pending_count=pending_count,
+            pending_reason_counts=self.last_pending_reason_counts,
             provider_errors=tuple(provider_errors),
             confirmation_errors=tuple(confirmation_errors),
         )
@@ -727,6 +805,9 @@ class WindowsN3N4N5MemoryOrchestrator:
         self._generated_at: datetime | None = None
         self._completed_minute_index = 0
         self._n4_memory: N4MemoryCycleResult | None = None
+        self._session_finalized = False
+        self._diagnostic_write_error_count = 0
+        self._last_diagnostic_errors: tuple[str, ...] = ()
         self._channels = {
             "stock": _ChannelRuntime(
                 asset_kind="stock",
@@ -806,6 +887,7 @@ class WindowsN3N4N5MemoryOrchestrator:
                     )
                     for kind in ASSET_KINDS
                 },
+                diagnostic=self._diagnostic_status(),
             )
             self._generated_at = generated_at
             self._completed_minute_index = completed_minute_index
@@ -820,6 +902,99 @@ class WindowsN3N4N5MemoryOrchestrator:
                 index=channel_results["index"],
                 board=channel_results["board"],
             )
+
+    def finalize_session(
+        self,
+        observed_at: datetime,
+    ) -> WindowsN3N4N5FinalizeResult:
+        """Expire remaining N5 episodes without requesting market data."""
+
+        with self._lock:
+            if self._session_finalized:
+                raise RuntimeError("N3/N4/N5 session is already finalized")
+            with self._state_bridge_lock:
+                bridge_snapshot = self._state_bridge_snapshot
+            if self._n4_memory is None or bridge_snapshot is None:
+                raise RuntimeError(
+                    "cannot finalize before one complete N3/N4/N5 cycle"
+                )
+            pre_finalize = {
+                kind: channel.n5.read()
+                for kind, channel in self._channels.items()
+            }
+            action_events: dict[str, tuple[EventEnvelope, ...]] = {}
+            for kind in ASSET_KINDS:
+                action_events[kind] = self._channels[kind]._deliver_expiry(
+                    observed_at
+                )
+            post_finalize = {
+                kind: channel.n5.read()
+                for kind, channel in self._channels.items()
+            }
+            action_confirmation = {}
+            for kind in ASSET_KINDS:
+                current = dict(
+                    bridge_snapshot.action_confirmation.get(kind, {})
+                )
+                current["active_pending_count"] = len(
+                    post_finalize[kind].active
+                )
+                current["status"] = (
+                    "degraded"
+                    if current.get("status") == "degraded"
+                    or current.get("errors")
+                    else (
+                        "pending"
+                        if post_finalize[kind].active
+                        else "ready"
+                    )
+                )
+                action_confirmation[kind] = current
+            final_bridge_snapshot = replace(
+                bridge_snapshot,
+                generated_at=observed_at,
+                n5_episodes=post_finalize,
+                action_confirmation=action_confirmation,
+                diagnostic=self._diagnostic_status(),
+            )
+            self._generated_at = observed_at
+            self._completed_minute_index = MINUTES_PER_DAY
+            self._session_finalized = True
+            with self._state_bridge_lock:
+                self._state_bridge_snapshot = final_bridge_snapshot
+            return WindowsN3N4N5FinalizeResult(
+                observed_at=observed_at,
+                pre_finalize_snapshots=pre_finalize,
+                post_finalize_snapshots=post_finalize,
+                action_events=action_events,
+            )
+
+    def record_diagnostic_error(self, error: Exception) -> None:
+        """Expose a bounded diagnostic failure without stopping main flow."""
+
+        summary = _structured_diagnostic_error(error)
+        with self._lock:
+            self._diagnostic_write_error_count += 1
+            self._last_diagnostic_errors = (
+                self._last_diagnostic_errors + (summary,)
+            )[-10:]
+            with self._state_bridge_lock:
+                if self._state_bridge_snapshot is not None:
+                    self._state_bridge_snapshot = replace(
+                        self._state_bridge_snapshot,
+                        diagnostic=self._diagnostic_status(),
+                    )
+
+    def _diagnostic_status(self) -> Mapping[str, Any]:
+        return {
+            "status": (
+                "degraded"
+                if self._diagnostic_write_error_count
+                else "ready"
+            ),
+            "write_error_count": self._diagnostic_write_error_count,
+            "errors": self._last_diagnostic_errors,
+        }
 
     def read_state_bridge_snapshot(self) -> WindowsStateBridgeSnapshot:
         """Return the last fully completed immutable N4/N5 view."""
@@ -879,6 +1054,10 @@ class WindowsN3N4N5MemoryOrchestrator:
                     kind: channel.last_metric_pending_count
                     for kind, channel in self._channels.items()
                 },
+                action_metric_pending_reason_counts={
+                    kind: channel.last_pending_reason_counts
+                    for kind, channel in self._channels.items()
+                },
                 provider_error_counts={
                     kind: channel.provider_error_count
                     for kind, channel in self._channels.items()
@@ -911,6 +1090,16 @@ class WindowsN3N4N5MemoryOrchestrator:
                     kind: channel.event_persistence_count
                     for kind, channel in self._channels.items()
                 },
+                session_finalized=self._session_finalized,
+                diagnostic_status=(
+                    "degraded"
+                    if self._diagnostic_write_error_count
+                    else "ready"
+                ),
+                diagnostic_write_error_count=(
+                    self._diagnostic_write_error_count
+                ),
+                last_diagnostic_errors=self._last_diagnostic_errors,
             )
 
 
@@ -940,6 +1129,21 @@ def _structured_action_metric_error(
     return "|".join(values)
 
 
+def _structured_diagnostic_error(error: Exception) -> str:
+    summary = str(error).replace("\r", " ").replace("\n", " ")
+    summary = re.sub(
+        r"(?i)(postgres(?:ql)?://)[^\s@]+@",
+        r"\1<redacted>@",
+        summary,
+    )
+    summary = re.sub(
+        r"(?i)(password\s*[=:]\s*)[^\s|;]+",
+        r"\1<redacted>",
+        summary,
+    )[:512]
+    return f"error_type={type(error).__name__}|error={summary}"
+
+
 def _action_confirmation_status(
     result: ChannelCycleResult,
     *,
@@ -966,6 +1170,7 @@ def _action_confirmation_status(
         "requested_count": len(result.requested_identity_keys),
         "ready_count": result.metric_ready_count,
         "pending_count": result.metric_pending_count,
+        "pending_reason_counts": dict(result.pending_reason_counts),
         "provider_error_count": len(result.provider_errors),
         "delivery_error_count": len(result.confirmation_errors),
         "errors": visible_errors,

@@ -154,6 +154,9 @@ def _snapshot(
                 "requested_count": 1,
                 "ready_count": 0,
                 "pending_count": 1,
+                "pending_reason_counts": {
+                    "expected_closed_minute_missing": 1,
+                },
                 "provider_error_count": 0,
                 "delivery_error_count": 1,
                 "errors": (
@@ -163,6 +166,11 @@ def _snapshot(
             },
             "index": {"status": "pending"},
             "board": {"status": "ready"},
+        },
+        diagnostic={
+            "status": "degraded",
+            "write_error_count": 1,
+            "errors": ("error_type=OSError|error=fixture",),
         },
     )
 
@@ -189,10 +197,18 @@ def test_health_three_channels_filters_pagination_and_read_only() -> None:
             ],
             "hidden_error_count": 0,
             "pending_count": 1,
+            "pending_reason_counts": {
+                "expected_closed_minute_missing": 1,
+            },
             "provider_error_count": 0,
             "ready_count": 0,
             "requested_count": 1,
             "status": "degraded",
+        }
+        assert health["diagnostic"] == {
+            "errors": ["error_type=OSError|error=fixture"],
+            "status": "degraded",
+            "write_error_count": 1,
         }
         assert health["action_confirmation"]["index"]["status"] == (
             "pending"

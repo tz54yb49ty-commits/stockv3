@@ -53,6 +53,10 @@ from ashare_v3.runtime_control.windows_n3_n4_n5_memory import (
     N5ChannelTransactionBoundary,
     WindowsN3N4N5MemoryOrchestrator,
 )
+from ashare_v3.runtime_control.windows_n3_n4_n5_diagnostics import (
+    DEFAULT_DIAGNOSTIC_ROOT,
+    WindowsN3N4N5DiagnosticWriter,
+)
 from ashare_v3.runtime_control.windows_n4_outbox_restore import (
     WindowsN4OutboxReadOnlyRepository,
 )
@@ -88,6 +92,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tq-module-path")
     parser.add_argument("--state-bridge-host", default="127.0.0.1")
     parser.add_argument("--state-bridge-port", type=int, default=8796)
+    parser.add_argument(
+        "--diagnostic-root",
+        default=os.environ.get(
+            "ASHARE_V3_WINDOWS_N3_N4_N5_DIAGNOSTIC_ROOT",
+            str(DEFAULT_DIAGNOSTIC_ROOT),
+        ),
+    )
     return parser.parse_args()
 
 
@@ -141,6 +152,7 @@ def main() -> int:
         )
     )
     integration_holder = {}
+    process_started_at = datetime.now(SHANGHAI_TIMEZONE)
     with ExitStack() as stack:
         bridge = None
         stock_client = stack.enter_context(
@@ -231,6 +243,17 @@ def main() -> int:
                 n5_restore_events=n5_restore.events,
                 n5_transaction_boundaries=transaction_boundaries,
             )
+            try:
+                integration_holder["diagnostic_writer"] = (
+                    WindowsN3N4N5DiagnosticWriter(
+                        for_trade_date=model.for_trade_date,
+                        started_at=process_started_at,
+                        root=args.diagnostic_root,
+                    )
+                )
+            except Exception as error:
+                integration_holder["diagnostic_writer"] = None
+                integration_holder["runtime"].record_diagnostic_error(error)
             if bridge is None:
                 bridge = WindowsStateBridge(
                     integration_holder["runtime"].read_state_bridge_snapshot,
@@ -261,6 +284,16 @@ def main() -> int:
             if runtime is None:
                 raise RuntimeError("N3/N4/N5 runtime was not initialized from N2")
             integration_holder["latest"] = runtime.consume_cycle(cycle)
+            writer = integration_holder.get("diagnostic_writer")
+            if writer is None:
+                return
+            try:
+                writer.write_confirmation_latest(
+                    runtime.read_state_bridge_snapshot(),
+                    runtime.read_summary(),
+                )
+            except Exception as error:
+                runtime.record_diagnostic_error(error)
 
         current_provider_args = {}
         now = datetime.now(SHANGHAI_TIMEZONE)
@@ -299,6 +332,33 @@ def main() -> int:
             **current_provider_args,
         )
         summary = runner.execute(args.for_trade_date)
+        if summary.result == "N3_MEMORY_SESSION_COMPLETE":
+            integration = integration_holder.get("runtime")
+            writer = integration_holder.get("diagnostic_writer")
+            if integration is None:
+                raise RuntimeError(
+                    "completed N3 session requires initialized integration"
+                )
+            finalization = integration.finalize_session(
+                summary.finished_at
+            )
+            integration_holder["finalization"] = finalization
+            if writer is None:
+                raise RuntimeError(
+                    "N3/N4/N5 final diagnostic writer is unavailable"
+                )
+            try:
+                integration_holder["session_final_artifact"] = (
+                    writer.write_session_final(
+                        finalization,
+                        integration.read_summary(),
+                    )
+                )
+            except Exception as error:
+                integration.record_diagnostic_error(error)
+                raise RuntimeError(
+                    "N3/N4/N5 final diagnostic artifact write failed"
+                ) from error
 
     payload = asdict(summary)
     latest = integration_holder.get("latest")
@@ -369,6 +429,16 @@ def main() -> int:
         )
         payload["event_persistence_count"] = sum(
             runtime_summary["event_persistence_counts"].values()
+        )
+        writer = integration_holder.get("diagnostic_writer")
+        payload["diagnostic_directory"] = (
+            str(writer.run_directory) if writer is not None else None
+        )
+        final_artifact = integration_holder.get(
+            "session_final_artifact"
+        )
+        payload["session_final_artifact"] = (
+            str(final_artifact) if final_artifact is not None else None
         )
     else:
         payload["trigger_event_count"] = 0
