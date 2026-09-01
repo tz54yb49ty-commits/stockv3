@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
@@ -18,6 +20,7 @@ from ashare_v3.market.windows_n3_action_metric import (
 from ashare_v3.market.windows_n3_minute_context import (
     NormalizedMinuteBar,
     PreviousDayMinuteContext,
+    ThirtyMinuteWindow,
     build_minute_context,
 )
 from ashare_v3.market.windows_n3_snapshot import (
@@ -103,6 +106,29 @@ def _compressed_previous(identity: str) -> PreviousDayMinuteContext:
     )
 
 
+def _persisted_previous_template() -> PreviousDayMinuteContext:
+    identity = "fixture:SH:000000"
+    context = build_minute_context(
+        identity,
+        "20260831",
+        _bars(identity, "20260831", 240),
+    )
+    windows = tuple(
+        ThirtyMinuteWindow(
+            bucket_index=window.bucket_index,
+            bars=(),
+            cumulative_amounts=window.cumulative_amounts,
+            full_amount=window.full_amount,
+            open=window.open,
+            high=window.high,
+            low=window.low,
+            close=window.close,
+        )
+        for window in context.windows
+    )
+    return replace(context, bars=(), windows=windows)
+
+
 def test_first_closed_minute_uses_previous_day_price_periods() -> None:
     identity = "stock:SZ:000001"
     metric = build_action_confirmation_metric(
@@ -135,6 +161,9 @@ def test_first_closed_minute_uses_previous_day_price_periods() -> None:
     assert metric.current_5m_virtual_amount == Decimal(150)
     assert metric.current_30m_virtual_amount == Decimal(4650)
     assert metric.previous_day_same_window_amount == Decimal(465)
+    assert metric.metric_time is not None
+    assert metric.metric_time.isoformat() == "2026-08-27T09:31:00+08:00"
+    assert metric.metric_time == metric.metric_time.astimezone(timezone.utc)
 
 def test_seventh_minute_uses_closed_current_day_periods_and_calibration() -> None:
     identity = "stock:SZ:000001"
@@ -184,6 +213,134 @@ class _FakeBars:
 class _FakeClient:
     def __init__(self, responses):
         self.bars = _FakeBars(responses)
+
+
+class _SharedRowsBars:
+    def __init__(self, rows):
+        self.rows = tuple(rows)
+        self.calls: list[dict[str, object]] = []
+        self._lock = Lock()
+
+    def get(self, code, **kwargs):
+        with self._lock:
+            self.calls.append({"code": code, **kwargs})
+        return _Series(self.rows)
+
+
+class _SharedRowsClient:
+    def __init__(self, rows):
+        self.bars = _SharedRowsBars(rows)
+
+
+NATURAL_ACTION_ELIGIBLE_COUNTS_20260901 = {
+    "stock": 664,
+    "index": 6,
+    "board": 32,
+}
+
+
+def _natural_requests(asset_kind: str, count: int):
+    if asset_kind == "stock":
+        return tuple(
+            StockSnapshotRequest(
+                f"stock:SZ:{index:06d}",
+                "SZ",
+                f"{index:06d}",
+                f"stock-{index}",
+            )
+            for index in range(1, count + 1)
+        )
+    if asset_kind == "index":
+        return tuple(
+            IndexSnapshotRequest(
+                f"index:SH:{index:06d}",
+                "SH",
+                f"{index:06d}",
+                f"index-{index}",
+            )
+            for index in range(1, count + 1)
+        )
+    return tuple(
+        BoardSnapshotRequest(
+            f"board:SH:{881000 + index:06d}",
+            "SH",
+            f"{881000 + index:06d}",
+            f"board-{index}",
+        )
+        for index in range(1, count + 1)
+    )
+
+
+def test_natural_702_action_eligible_first_minute_provider_load_isolated_by_channel() -> None:
+    rows = (
+        _raw_rows("20260831", 1, 240)
+        + _raw_rows("20260901", 1, 1)
+    )
+    template = _persisted_previous_template()
+    provider_classes = {
+        "stock": EltdxStockActionMetricProvider,
+        "index": EltdxIndexActionMetricProvider,
+        "board": EltdxBoardActionMetricProvider,
+    }
+    clients = {
+        asset_kind: _SharedRowsClient(rows)
+        for asset_kind in NATURAL_ACTION_ELIGIBLE_COUNTS_20260901
+    }
+    requests = {
+        asset_kind: _natural_requests(asset_kind, count)
+        for asset_kind, count in NATURAL_ACTION_ELIGIBLE_COUNTS_20260901.items()
+    }
+    contexts = {
+        asset_kind: {
+            request.identity_key: replace(
+                template,
+                identity_key=request.identity_key,
+            )
+            for request in channel_requests
+        }
+        for asset_kind, channel_requests in requests.items()
+    }
+    providers = {
+        asset_kind: provider_classes[asset_kind](
+            clients[asset_kind],
+            max_workers=16,
+        )
+        for asset_kind in requests
+    }
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {
+            asset_kind: pool.submit(
+                providers[asset_kind].fetch_many,
+                requests[asset_kind],
+                "20260901",
+                contexts[asset_kind],
+                1,
+            )
+            for asset_kind in requests
+        }
+        batches = {
+            asset_kind: future.result()
+            for asset_kind, future in futures.items()
+        }
+
+    for asset_kind, expected_count in NATURAL_ACTION_ELIGIBLE_COUNTS_20260901.items():
+        batch = batches[asset_kind]
+        assert len(batch.metrics) == expected_count
+        assert batch.missing_identity_keys == ()
+        assert batch.errors == ()
+        assert batch.pending_reason_counts == {}
+        assert all(metric.metric_ready for metric in batch.metrics.values())
+        assert {
+            metric.metric_minute_label for metric in batch.metrics.values()
+        } == {"09:31"}
+        assert {
+            metric.metric_time.utcoffset() for metric in batch.metrics.values()
+        } == {timedelta(hours=8)}
+        assert len(clients[asset_kind].bars.calls) == expected_count
+        assert {
+            call["count"] for call in clients[asset_kind].bars.calls
+        } == {ACTION_INITIAL_BAR_COUNT}
 
 
 def test_provider_requests_600_then_3_and_only_active_identity() -> None:
@@ -399,6 +556,67 @@ def test_three_channels_report_previous_price_context_pending_reason(
     assert batch.pending_reason_counts == {
         "previous_day_price_context_incomplete": 1,
     }
+
+
+@pytest.mark.parametrize(
+    ("asset_kind", "provider_class", "security_request"),
+    (
+        (
+            "stock",
+            EltdxStockActionMetricProvider,
+            StockSnapshotRequest("stock:SZ:000001", "SZ", "000001", "平安银行"),
+        ),
+        (
+            "index",
+            EltdxIndexActionMetricProvider,
+            IndexSnapshotRequest("index:SH:000001", "SH", "000001", "上证指数"),
+        ),
+        (
+            "board",
+            EltdxBoardActionMetricProvider,
+            BoardSnapshotRequest("board:SH:881333", "SH", "881333", "元器件"),
+        ),
+    ),
+)
+def test_three_channels_convert_metric_build_exception_to_structured_pending(
+    asset_kind,
+    provider_class,
+    security_request,
+) -> None:
+    template = _persisted_previous_template()
+    broken_context = replace(
+        template,
+        identity_key=security_request.identity_key,
+        cumulative_day_amounts=(Decimal("NaN"),)
+        + template.cumulative_day_amounts[1:],
+    )
+    client = _SharedRowsClient(
+        _raw_rows("20260831", 1, 240)
+        + _raw_rows("20260901", 1, 1)
+    )
+    provider = provider_class(client, max_workers=1)
+
+    batch = provider.fetch_many(
+        [security_request],
+        "20260901",
+        {security_request.identity_key: broken_context},
+        1,
+    )
+
+    metric = batch.metrics[security_request.identity_key]
+    assert metric.metric_ready is False
+    assert metric.metric_quality_status == "pending"
+    assert metric.error_summary == "provider_metric_build_failed"
+    assert metric.observed_minute_index == 1
+    assert batch.missing_identity_keys == (security_request.identity_key,)
+    assert batch.pending_reason_counts == {
+        "provider_metric_build_failed": 1,
+    }
+    assert len(batch.errors) == 1
+    assert f"asset_kind={asset_kind}" in batch.errors[0]
+    assert f"identity_key={security_request.identity_key}" in batch.errors[0]
+    assert "phase=build_action_metric" in batch.errors[0]
+    assert "error_type=InvalidOperation" in batch.errors[0]
 
 
 def test_module_has_no_database_outbox_or_n5_dependency() -> None:

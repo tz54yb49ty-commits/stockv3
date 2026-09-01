@@ -15,6 +15,7 @@ from decimal import Decimal
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Generic, Protocol, TypeVar
+from zoneinfo import ZoneInfo
 
 from ashare_v3.market.windows_n3_minute_context import (
     MINUTES_PER_DAY,
@@ -35,6 +36,7 @@ ACTION_MAX_WORKERS = 16
 ACTION_METRIC_POLICY_VERSION = "windows_n3_action_metric_v1"
 BOUNDARY_POLICY_VERSION = "n3.action_confirmation_boundary.v1"
 VIRTUAL_AMOUNT_POLICY_VERSION = "previous_day_same_window_elapsed_ratio_v1"
+SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 PREVIOUS_DAY_SOURCE = "previous_trade_date_last_period"
 SAME_DAY_SOURCE = "same_trade_date_previous_period"
@@ -259,7 +261,12 @@ class _EltdxActionMetricFetcher:
                     except Exception as error:
                         fetch_failures.add(request.identity_key)
                         errors.append(
-                            f"{request.identity_key}:{type(error).__name__}:{error}"
+                            _structured_provider_error(
+                                asset_kind=self.asset_kind,
+                                identity_key=request.identity_key,
+                                phase="fetch_closed_1m",
+                                error=error,
+                            )
                         )
             metrics: dict[str, ActionConfirmationMetric] = {}
             missing: list[str] = []
@@ -268,10 +275,6 @@ class _EltdxActionMetricFetcher:
                 fetched_bars = fetched.get(
                     request.identity_key,
                     _FetchedMinuteBars(current=(), previous=()),
-                )
-                previous_context = _with_fetched_previous_prices(
-                    previous_contexts.get(request.identity_key),
-                    fetched_bars.previous,
                 )
                 if request.identity_key in fetch_failures:
                     metric = _pending_metric(
@@ -284,15 +287,42 @@ class _EltdxActionMetricFetcher:
                         "provider_fetch_failed",
                     )
                 else:
-                    metric = build_action_confirmation_metric(
-                        asset_kind=self.asset_kind,
-                        identity_key=request.identity_key,
-                        trade_date=trade_date,
-                        provider=provider,
-                        current_bars=fetched_bars.current,
-                        previous_context=previous_context,
-                        expected_minute_index=expected_minute_index,
-                    )
+                    try:
+                        previous_context = _with_fetched_previous_prices(
+                            previous_contexts.get(request.identity_key),
+                            fetched_bars.previous,
+                        )
+                        metric = build_action_confirmation_metric(
+                            asset_kind=self.asset_kind,
+                            identity_key=request.identity_key,
+                            trade_date=trade_date,
+                            provider=provider,
+                            current_bars=fetched_bars.current,
+                            previous_context=previous_context,
+                            expected_minute_index=expected_minute_index,
+                        )
+                    except Exception as error:
+                        errors.append(
+                            _structured_provider_error(
+                                asset_kind=self.asset_kind,
+                                identity_key=request.identity_key,
+                                phase="build_action_metric",
+                                error=error,
+                            )
+                        )
+                        metric = _pending_metric(
+                            self.asset_kind,
+                            request.identity_key,
+                            trade_date,
+                            provider,
+                            expected_minute_index,
+                            (
+                                fetched_bars.current[-1].minute_index
+                                if fetched_bars.current
+                                else None
+                            ),
+                            "provider_metric_build_failed",
+                        )
                 metrics[request.identity_key] = metric
                 if not metric.metric_ready:
                     missing.append(request.identity_key)
@@ -551,6 +581,25 @@ def _pending_metric(
     )
 
 
+def _structured_provider_error(
+    *,
+    asset_kind: str,
+    identity_key: str,
+    phase: str,
+    error: Exception,
+) -> str:
+    summary = str(error).replace("\r", "\\r").replace("\n", "\\n")
+    return "|".join(
+        (
+            f"asset_kind={asset_kind}",
+            f"identity_key={identity_key}",
+            f"phase={phase}",
+            f"error_type={type(error).__name__}",
+            f"error={summary}",
+        )
+    )
+
+
 def _previous_period_rows(
     current: Sequence[NormalizedMinuteBar],
     previous: Sequence[NormalizedMinuteBar],
@@ -785,4 +834,6 @@ def _coerce_datetime(value: Any) -> datetime | None:
 
 
 def _metric_time(trade_date: str, time_label: str) -> datetime:
-    return datetime.strptime(f"{trade_date} {time_label}", "%Y%m%d %H:%M")
+    return datetime.strptime(
+        f"{trade_date} {time_label}", "%Y%m%d %H:%M"
+    ).replace(tzinfo=SHANGHAI_TIMEZONE)
