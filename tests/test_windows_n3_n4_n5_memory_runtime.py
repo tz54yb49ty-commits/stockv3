@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -308,6 +308,7 @@ class _FailOnTransactionConnection(_N5FakeConnection):
 class _MetricProvider:
     asset_kind: str
     fail: bool = False
+    increasing_amounts: bool = False
 
     def __post_init__(self):
         self.calls = []
@@ -327,23 +328,35 @@ class _MetricProvider:
         )
         if self.fail:
             raise RuntimeError(f"{self.asset_kind} provider failed")
-        metrics = {
-            request.identity_key: build_action_confirmation_metric(
-                asset_kind=self.asset_kind,
-                identity_key=request.identity_key,
-                trade_date=trade_date,
-                provider=f"fixture.{self.asset_kind}.closed_1m",
-                current_bars=_bars(
-                    request.identity_key,
-                    trade_date,
-                    expected_minute_index,
-                    current=True,
-                ),
-                previous_context=previous_contexts[request.identity_key],
-                expected_minute_index=expected_minute_index,
+        metrics = {}
+        for request in requests:
+            current_bars = _bars(
+                request.identity_key,
+                trade_date,
+                expected_minute_index,
+                current=True,
             )
-            for request in requests
-        }
+            if self.increasing_amounts:
+                current_bars = tuple(
+                    replace(
+                        bar,
+                        amount=Decimal(bar.minute_index * 10),
+                    )
+                    for bar in current_bars
+                )
+            metrics[request.identity_key] = (
+                build_action_confirmation_metric(
+                    asset_kind=self.asset_kind,
+                    identity_key=request.identity_key,
+                    trade_date=trade_date,
+                    provider=f"fixture.{self.asset_kind}.closed_1m",
+                    current_bars=current_bars,
+                    previous_context=(
+                        previous_contexts[request.identity_key]
+                    ),
+                    expected_minute_index=expected_minute_index,
+                )
+            )
         return ActionMetricBatch(
             metrics=metrics,
             missing_identity_keys=(),
@@ -636,28 +649,47 @@ def test_deactivation_expires_pending_episode_without_market_request() -> None:
 
 
 def test_one_provider_failure_does_not_stop_other_channels() -> None:
-    observed_at = _time("09:31:05")
+    first_at = _time("09:31:05")
+    same_minute_at = _time("09:31:30")
+    next_minute_at = _time("09:32:05")
     n4_runtime = _FakeN4Runtime(
         [
             _memory_result(
                 version=1,
-                observed_at=observed_at,
+                observed_at=first_at,
                 active=True,
-            )
+            ),
+            _memory_result(
+                version=2,
+                observed_at=same_minute_at,
+                active=True,
+            ),
+            _memory_result(
+                version=3,
+                observed_at=next_minute_at,
+                active=True,
+            ),
         ]
     )
     providers = {
-        "stock": _MetricProvider("stock", fail=True),
+        "stock": _MetricProvider(
+            "stock",
+            fail=True,
+            increasing_amounts=True,
+        ),
         "index": _MetricProvider("index"),
         "board": _MetricProvider("board"),
     }
     runtime = _orchestrator(n4_runtime, providers)
 
-    result = runtime.consume_cycle(SimpleNamespace(generated_at=observed_at))
+    result = runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
 
-    assert result.stock.provider_errors == (
-        "RuntimeError:stock provider failed",
-    )
+    assert len(result.stock.provider_errors) == 1
+    assert "asset_kind=stock" in result.stock.provider_errors[0]
+    assert "phase=fetch_action_metric" in result.stock.provider_errors[0]
+    assert "error_type=RuntimeError" in result.stock.provider_errors[0]
+    assert "error=stock provider failed" in result.stock.provider_errors[0]
+    assert result.stock.confirmation_errors == ()
     assert [event.event_type for event in result.stock.n5_events] == [
         "ActionEligible",
     ]
@@ -667,6 +699,26 @@ def test_one_provider_failure_does_not_stop_other_channels() -> None:
     assert [
         event.event_type for event in result.board.n5_events
     ] == ["ActionEligible", "ActionExecuted"]
+    same_minute = runtime.consume_cycle(
+        SimpleNamespace(generated_at=same_minute_at)
+    )
+    assert same_minute.stock.requested_identity_keys == ()
+    assert same_minute.stock.n5_events == ()
+    assert providers["stock"].calls == [
+        ((IDENTITIES["stock"][0],), 1)
+    ]
+
+    providers["stock"].fail = False
+    retry = runtime.consume_cycle(
+        SimpleNamespace(generated_at=next_minute_at)
+    )
+    assert [event.event_type for event in retry.stock.n5_events] == [
+        "ActionExecuted"
+    ]
+    assert providers["stock"].calls == [
+        ((IDENTITIES["stock"][0],), 1),
+        ((IDENTITIES["stock"][0],), 2),
+    ]
     assert runtime.read_summary().provider_error_counts == {
         "stock": 1,
         "index": 0,
@@ -1187,12 +1239,127 @@ def test_n5_failure_replays_already_committed_authoritative_n4_row() -> None:
 def test_closed_minute_failure_keeps_eligible_planner_then_retries() -> None:
     first_at = _time("09:31:05")
     second_at = _time("09:31:30")
+    third_at = _time("09:32:05")
     n5_connections = {
         "stock": _FailOnTransactionConnection(2),
         "index": _N5FakeConnection(),
         "board": _N5FakeConnection(),
     }
     boundaries, n4_connections, n5_connections = (
+        _transaction_boundaries(n5_connections=n5_connections)
+    )
+    providers = {
+        kind: _MetricProvider(kind, increasing_amounts=True)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=first_at,
+                    active=True,
+                ),
+                _memory_result(
+                    version=2,
+                    observed_at=second_at,
+                    active=True,
+                ),
+                _memory_result(
+                    version=3,
+                    observed_at=third_at,
+                    active=True,
+                ),
+            ]
+        ),
+        providers,
+        n5_transaction_boundaries=boundaries,
+    )
+
+    first = runtime.consume_cycle(
+        SimpleNamespace(generated_at=first_at)
+    )
+
+    stock_channel = runtime._channels["stock"]
+    active = next(iter(stock_channel.n5.read().active.values()))
+    assert active.action_state == "eligible"
+    assert set(stock_channel.metric_watermarks.values()) == {1}
+    assert n4_connections["stock"].commit_count == 1
+    assert n5_connections["stock"].commit_count == 1
+    assert n5_connections["stock"].rollback_count == 1
+    assert [event.event_type for event in first.stock.n5_events] == [
+        "ActionEligible"
+    ]
+    assert len(first.stock.confirmation_errors) == 1
+    assert "asset_kind=stock" in first.stock.confirmation_errors[0]
+    assert "phase=deliver_action_executed" in (
+        first.stock.confirmation_errors[0]
+    )
+    assert "minute_index=1" in first.stock.confirmation_errors[0]
+    assert runtime.read_summary().n5_action_event_counts["stock"] == {
+        "ActionEligible": 1,
+    }
+    first_bridge = runtime.read_state_bridge_snapshot()
+    assert first_bridge.action_confirmation["stock"]["status"] == (
+        "degraded"
+    )
+    assert first_bridge.action_confirmation["stock"][
+        "active_pending_count"
+    ] == 1
+
+    same_minute = runtime.consume_cycle(
+        SimpleNamespace(generated_at=second_at)
+    )
+    assert same_minute.stock.requested_identity_keys == ()
+    assert same_minute.stock.n5_events == ()
+    assert runtime.read_state_bridge_snapshot().action_confirmation[
+        "stock"
+    ]["status"] == "degraded"
+
+    retry = runtime.consume_cycle(
+        SimpleNamespace(generated_at=third_at)
+    )
+
+    assert [event.event_type for event in retry.stock.n5_events] == [
+        "ActionExecuted"
+    ]
+    assert retry.stock.n5_snapshot.active == {}
+    assert retry.stock.n5_snapshot.closed_episode_count == 1
+    assert providers["stock"].calls == [
+        ((IDENTITIES["stock"][0],), 1),
+        ((IDENTITIES["stock"][0],), 2),
+    ]
+    executed_writes = [
+        values
+        for sql, values in n5_connections["stock"].fake_cursor.calls
+        if "INSERT INTO common_event_outbox" in sql
+        and values[1] == "ActionExecuted"
+    ]
+    assert len(executed_writes) == 2
+    assert executed_writes[0][0] != executed_writes[1][0]
+    assert executed_writes[0][0] not in (
+        n5_connections["stock"].fake_cursor.outbox
+    )
+    assert executed_writes[1][0] in (
+        n5_connections["stock"].fake_cursor.outbox
+    )
+
+    summary = runtime.read_summary().as_dict()
+    assert summary["action_confirmation_status"] == "degraded"
+    assert summary["action_metric_delivery_error_counts"]["stock"] == 1
+    assert summary["action_metric_degraded_cycle_counts"]["stock"] == 1
+    assert summary["last_action_metric_errors"]["stock"] == []
+
+
+def test_confirmation_failure_does_not_block_trigger_false_skip() -> None:
+    first_at = _time("09:31:05")
+    second_at = _time("09:31:30")
+    n5_connections = {
+        "stock": _FailOnTransactionConnection(2),
+        "index": _N5FakeConnection(),
+        "board": _N5FakeConnection(),
+    }
+    boundaries, _n4_connections, _n5_connections = (
         _transaction_boundaries(n5_connections=n5_connections)
     )
     providers = {
@@ -1210,7 +1377,7 @@ def test_closed_minute_failure_keeps_eligible_planner_then_retries() -> None:
                 _memory_result(
                     version=2,
                     observed_at=second_at,
-                    active=True,
+                    active=False,
                 ),
             ]
         ),
@@ -1218,42 +1385,79 @@ def test_closed_minute_failure_keeps_eligible_planner_then_retries() -> None:
         n5_transaction_boundaries=boundaries,
     )
 
-    with pytest.raises(RuntimeError, match="fixture commit failure"):
-        runtime.consume_cycle(SimpleNamespace(generated_at=first_at))
-
-    stock_channel = runtime._channels["stock"]
-    active = next(iter(stock_channel.n5.read().active.values()))
-    assert active.action_state == "eligible"
-    assert stock_channel.metric_watermarks == {}
-    assert n4_connections["stock"].commit_count == 1
-    assert n5_connections["stock"].commit_count == 1
-    assert n5_connections["stock"].rollback_count == 1
-    assert runtime.read_summary().n5_action_event_counts["stock"] == {
-        "ActionEligible": 1,
-    }
-
-    retry = runtime.consume_cycle(
+    first = runtime.consume_cycle(
+        SimpleNamespace(generated_at=first_at)
+    )
+    second = runtime.consume_cycle(
         SimpleNamespace(generated_at=second_at)
     )
 
-    assert [event.event_type for event in retry.stock.n5_events] == [
-        "ActionExecuted"
+    assert [event.event_type for event in first.stock.n5_events] == [
+        "ActionEligible"
     ]
-    assert retry.stock.n5_snapshot.active == {}
-    assert retry.stock.n5_snapshot.closed_episode_count == 1
+    assert len(first.stock.confirmation_errors) == 1
+    assert [event.event_type for event in second.stock.n5_events] == [
+        "ActionSkipped"
+    ]
+    assert second.stock.n5_events[0].payload_json["skipped_reason"] == (
+        "trigger_live_false"
+    )
+    assert second.stock.n5_snapshot.active == {}
     assert providers["stock"].calls == [
-        ((IDENTITIES["stock"][0],), 1),
-        ((IDENTITIES["stock"][0],), 1),
+        ((IDENTITIES["stock"][0],), 1)
     ]
-    executed_writes = [
-        values
-        for sql, values in n5_connections["stock"].fake_cursor.calls
-        if "INSERT INTO common_event_outbox" in sql
-        and values[1] == "ActionExecuted"
+
+
+def test_confirmation_failure_does_not_block_window_expiry() -> None:
+    observed_at = _time("15:00:05")
+    n5_connections = {
+        "stock": _FailOnTransactionConnection(2),
+        "index": _N5FakeConnection(),
+        "board": _N5FakeConnection(),
+    }
+    boundaries, _n4_connections, _n5_connections = (
+        _transaction_boundaries(n5_connections=n5_connections)
+    )
+    providers = {
+        kind: _MetricProvider(kind)
+        for kind in IDENTITIES
+    }
+    runtime = _orchestrator(
+        _FakeN4Runtime(
+            [
+                _memory_result(
+                    version=1,
+                    observed_at=observed_at,
+                    active=True,
+                )
+            ]
+        ),
+        providers,
+        n5_transaction_boundaries=boundaries,
+    )
+
+    result = runtime.consume_cycle(
+        SimpleNamespace(generated_at=observed_at)
+    )
+
+    assert [event.event_type for event in result.stock.n5_events] == [
+        "ActionEligible",
+        "ActionSkipped",
     ]
-    assert len(executed_writes) == 2
-    assert executed_writes[0][0] == executed_writes[1][0]
-    assert executed_writes[0][9] == executed_writes[1][9]
+    assert result.stock.n5_events[-1].payload_json["skipped_reason"] == (
+        "window_expired"
+    )
+    assert len(result.stock.confirmation_errors) == 1
+    assert result.stock.n5_snapshot.active == {}
+    assert providers["stock"].calls == [
+        ((IDENTITIES["stock"][0],), 240)
+    ]
+    assert runtime.read_state_bridge_snapshot().action_confirmation[
+        "stock"
+    ]["status"] == "degraded"
+    assert runtime.read_state_bridge_snapshot().action_confirmation[
+        "stock"
+    ]["active_pending_count"] == 0
 
 
 def test_market_close_action_skipped_uses_transaction_boundary() -> None:

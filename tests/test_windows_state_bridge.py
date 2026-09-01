@@ -147,6 +147,23 @@ def _snapshot(
         n4_memory=n4_memory,
         n4_states=n4_states,
         n5_episodes=n5_episodes,
+        action_confirmation={
+            "stock": {
+                "status": "degraded",
+                "active_pending_count": 1,
+                "requested_count": 1,
+                "ready_count": 0,
+                "pending_count": 1,
+                "provider_error_count": 0,
+                "delivery_error_count": 1,
+                "errors": (
+                    "asset_kind=stock|phase=deliver_action_executed",
+                ),
+                "hidden_error_count": 0,
+            },
+            "index": {"status": "pending"},
+            "board": {"status": "ready"},
+        },
     )
 
 
@@ -162,7 +179,27 @@ def test_health_three_channels_filters_pagination_and_read_only() -> None:
     with WindowsStateBridge(lambda: holder["snapshot"], port=port):
         response, health = _get(port, "/internal/v1/health")
         assert response.headers["Cache-Control"] == "no-store"
-        assert health == {"read_only": True, "status": "ok"}
+        assert health["read_only"] is True
+        assert health["status"] == "ok"
+        assert health["action_confirmation"]["stock"] == {
+            "active_pending_count": 1,
+            "delivery_error_count": 1,
+            "errors": [
+                "asset_kind=stock|phase=deliver_action_executed"
+            ],
+            "hidden_error_count": 0,
+            "pending_count": 1,
+            "provider_error_count": 0,
+            "ready_count": 0,
+            "requested_count": 1,
+            "status": "degraded",
+        }
+        assert health["action_confirmation"]["index"]["status"] == (
+            "pending"
+        )
+        assert health["action_confirmation"]["board"]["status"] == (
+            "ready"
+        )
 
         _, first = _get(port, "/internal/v1/n4/states?limit=2")
         assert first["count"] == 2
@@ -345,3 +382,18 @@ def test_loopback_only_startup_failure_and_shutdown() -> None:
             WindowsStateBridge(_snapshot, port=port)
     finally:
         blocker.close()
+
+
+def test_health_stays_ok_while_first_snapshot_is_warming() -> None:
+    def warming_snapshot():
+        raise RuntimeError("no N3/N4/N5 cycle has completed")
+
+    port = _free_port()
+    with WindowsStateBridge(warming_snapshot, port=port):
+        _, health = _get(port, "/internal/v1/health")
+
+    assert health == {
+        "action_confirmation": {},
+        "read_only": True,
+        "status": "ok",
+    }

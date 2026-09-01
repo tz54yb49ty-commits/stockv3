@@ -81,7 +81,16 @@ def _handler_factory(snapshot_reader):
             try:
                 path = urlsplit(self.path)
                 if path.path == "/internal/v1/health":
-                    self._send(HTTPStatus.OK, {"status": "ok", "read_only": True})
+                    payload = {"status": "ok", "read_only": True}
+                    try:
+                        snapshot = snapshot_reader()
+                    except RuntimeError:
+                        payload["action_confirmation"] = {}
+                    else:
+                        payload["action_confirmation"] = _json_value(
+                            snapshot.action_confirmation
+                        )
+                    self._send(HTTPStatus.OK, payload)
                     return
                 if path.path not in {
                     "/internal/v1/n4/states",

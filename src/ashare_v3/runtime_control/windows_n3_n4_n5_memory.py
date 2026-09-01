@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock, RLock
 from types import MappingProxyType
@@ -84,6 +84,7 @@ class ChannelCycleResult:
     metric_ready_count: int
     metric_pending_count: int
     provider_errors: tuple[str, ...]
+    confirmation_errors: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,9 @@ class WindowsStateBridgeSnapshot:
     n4_memory: Mapping[str, RuntimeStateSnapshot[Any]]
     n4_states: Mapping[str, Any]
     n5_episodes: Mapping[str, N5EpisodeSnapshot]
+    action_confirmation: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         for field_name in ("n4_memory", "n4_states", "n5_episodes"):
@@ -110,6 +114,16 @@ class WindowsStateBridgeSnapshot:
                 field_name,
                 MappingProxyType(dict(getattr(self, field_name))),
             )
+        object.__setattr__(
+            self,
+            "action_confirmation",
+            MappingProxyType(
+                {
+                    kind: MappingProxyType(dict(value))
+                    for kind, value in self.action_confirmation.items()
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +139,11 @@ class WindowsN3N4N5RuntimeSummary:
     n5_action_event_counts: Mapping[str, Mapping[str, int]]
     action_metric_identity_request_counts: Mapping[str, int]
     action_metric_ready_counts: Mapping[str, int]
+    action_metric_pending_counts: Mapping[str, int]
     provider_error_counts: Mapping[str, int]
+    action_metric_delivery_error_counts: Mapping[str, int]
+    action_metric_degraded_cycle_counts: Mapping[str, int]
+    last_action_metric_errors: Mapping[str, Sequence[str]]
     n5_state_counts: Mapping[str, int]
     n5_versions: Mapping[str, int]
     database_write_counts: Mapping[str, int]
@@ -155,7 +173,10 @@ class WindowsN3N4N5RuntimeSummary:
             "n5_restored_versions",
             "action_metric_identity_request_counts",
             "action_metric_ready_counts",
+            "action_metric_pending_counts",
             "provider_error_counts",
+            "action_metric_delivery_error_counts",
+            "action_metric_degraded_cycle_counts",
             "n5_state_counts",
             "n5_versions",
             "database_write_counts",
@@ -166,11 +187,32 @@ class WindowsN3N4N5RuntimeSummary:
                 field_name,
                 MappingProxyType(dict(getattr(self, field_name))),
             )
+        object.__setattr__(
+            self,
+            "last_action_metric_errors",
+            MappingProxyType(
+                {
+                    kind: tuple(errors)
+                    for kind, errors in self.last_action_metric_errors.items()
+                }
+            ),
+        )
 
     def as_dict(self) -> dict[str, Any]:
+        action_confirmation_status = (
+            "degraded"
+            if any(self.provider_error_counts.values())
+            or any(self.action_metric_delivery_error_counts.values())
+            else (
+                "pending"
+                if any(self.action_metric_pending_counts.values())
+                else "ready"
+            )
+        )
         return {
             "generated_at": self.generated_at,
             "completed_minute_index": self.completed_minute_index,
+            "action_confirmation_status": action_confirmation_status,
             "n4_trigger_event_counts": {
                 kind: dict(values)
                 for kind, values in self.n4_trigger_event_counts.items()
@@ -196,7 +238,20 @@ class WindowsN3N4N5RuntimeSummary:
             "action_metric_ready_counts": dict(
                 self.action_metric_ready_counts
             ),
+            "action_metric_pending_counts": dict(
+                self.action_metric_pending_counts
+            ),
             "provider_error_counts": dict(self.provider_error_counts),
+            "action_metric_delivery_error_counts": dict(
+                self.action_metric_delivery_error_counts
+            ),
+            "action_metric_degraded_cycle_counts": dict(
+                self.action_metric_degraded_cycle_counts
+            ),
+            "last_action_metric_errors": {
+                kind: list(errors)
+                for kind, errors in self.last_action_metric_errors.items()
+            },
             "n5_state_counts": dict(self.n5_state_counts),
             "n5_versions": dict(self.n5_versions),
             "database_write_counts": dict(self.database_write_counts),
@@ -261,6 +316,11 @@ class _ChannelRuntime:
         self.metric_identity_request_count = 0
         self.metric_ready_count = 0
         self.provider_error_count = 0
+        self.confirmation_delivery_error_count = 0
+        self.confirmation_degraded_cycle_count = 0
+        self.last_metric_pending_count = 0
+        self.last_confirmation_errors: tuple[str, ...] = ()
+        self.last_confirmation_error_minute_index = 0
         self.database_write_count = 0
         self.event_persistence_count = 0
 
@@ -340,10 +400,15 @@ class _ChannelRuntime:
             for identity_key in needed_identities
             if identity_key not in self.requests
         )
+        unknown_identity_keys = set(unknown)
+        for key in needed_keys:
+            if key.identity_key in unknown_identity_keys:
+                self.metric_watermarks[key] = completed_minute_index
         provider_errors: list[str] = [
             f"active_identity_missing_from_n2:{identity_key}"
             for identity_key in unknown
         ]
+        confirmation_errors: list[str] = []
         ready_count = 0
         pending_count = len(requests)
         if requests:
@@ -356,9 +421,24 @@ class _ChannelRuntime:
                     completed_minute_index,
                 )
             except Exception as error:
-                provider_errors.append(f"{type(error).__name__}:{error}")
+                for key in needed_keys:
+                    self.metric_watermarks[key] = completed_minute_index
+                provider_errors.append(
+                    _structured_action_metric_error(
+                        asset_kind=self.asset_kind,
+                        phase="fetch_action_metric",
+                        error=error,
+                        minute_index=completed_minute_index,
+                    )
+                )
             else:
                 provider_errors.extend(batch.errors)
+                missing_identity_keys = set(batch.missing_identity_keys)
+                for key in needed_keys:
+                    if key.identity_key in missing_identity_keys:
+                        self.metric_watermarks[key] = (
+                            completed_minute_index
+                        )
                 pending_count = 0
                 needed_by_identity: dict[str, tuple[EpisodeKey, ...]] = {
                     identity_key: tuple(
@@ -368,19 +448,47 @@ class _ChannelRuntime:
                     )
                     for identity_key in needed_identities
                 }
-                for request in requests:
+                for request_index, request in enumerate(requests):
                     metric = batch.metrics.get(request.identity_key)
                     if metric is None:
                         pending_count += 1
+                        for key in needed_by_identity[
+                            request.identity_key
+                        ]:
+                            self.metric_watermarks[key] = (
+                                completed_minute_index
+                            )
                         provider_errors.append(
                             f"metric_missing_from_batch:{request.identity_key}"
                         )
                         continue
-                    action_events.extend(self._deliver_metric(metric))
+                    try:
+                        action_events.extend(self._deliver_metric(metric))
+                    except Exception as error:
+                        confirmation_errors.append(
+                            _structured_action_metric_error(
+                                asset_kind=self.asset_kind,
+                                identity_key=request.identity_key,
+                                phase="deliver_action_executed",
+                                error=error,
+                                minute_index=completed_minute_index,
+                            )
+                        )
+                        remaining = requests[request_index:]
+                        remaining_identity_keys = {
+                            item.identity_key for item in remaining
+                        }
+                        for key in needed_keys:
+                            if key.identity_key in remaining_identity_keys:
+                                self.metric_watermarks[key] = (
+                                    completed_minute_index
+                                )
+                        pending_count += len(remaining)
+                        break
+                    for key in needed_by_identity[request.identity_key]:
+                        self.metric_watermarks[key] = completed_minute_index
                     if metric.metric_ready:
                         ready_count += 1
-                        for key in needed_by_identity[request.identity_key]:
-                            self.metric_watermarks[key] = completed_minute_index
                     else:
                         pending_count += 1
 
@@ -389,6 +497,32 @@ class _ChannelRuntime:
 
         self.metric_ready_count += ready_count
         self.provider_error_count += len(provider_errors)
+        self.confirmation_delivery_error_count += len(
+            confirmation_errors
+        )
+        if provider_errors or confirmation_errors:
+            self.confirmation_degraded_cycle_count += 1
+        self.last_metric_pending_count = pending_count
+        cycle_errors = tuple(provider_errors + confirmation_errors)
+        if cycle_errors:
+            self.last_confirmation_errors = cycle_errors
+            self.last_confirmation_error_minute_index = (
+                completed_minute_index
+            )
+        else:
+            current_active = self.n5.read().active
+            active_pending = any(
+                episode.trigger_live
+                and episode.action_state == "eligible"
+                and episode.confirmation_status == "pending"
+                for episode in current_active.values()
+            )
+            if not active_pending or (
+                requests
+                and completed_minute_index
+                > self.last_confirmation_error_minute_index
+            ):
+                self.last_confirmation_errors = ()
         return ChannelCycleResult(
             trigger_batch=trigger_batch,
             n5_snapshot=self.n5.read(),
@@ -399,6 +533,7 @@ class _ChannelRuntime:
             metric_ready_count=ready_count,
             metric_pending_count=pending_count,
             provider_errors=tuple(provider_errors),
+            confirmation_errors=tuple(confirmation_errors),
         )
 
     def _deliver_trigger_events(
@@ -662,6 +797,15 @@ class WindowsN3N4N5MemoryOrchestrator:
                     kind: channel_results[kind].n5_snapshot
                     for kind in ASSET_KINDS
                 },
+                action_confirmation={
+                    kind: _action_confirmation_status(
+                        channel_results[kind],
+                        diagnostic_errors=(
+                            self._channels[kind].last_confirmation_errors
+                        ),
+                    )
+                    for kind in ASSET_KINDS
+                },
             )
             self._generated_at = generated_at
             self._completed_minute_index = completed_minute_index
@@ -731,8 +875,24 @@ class WindowsN3N4N5MemoryOrchestrator:
                     kind: channel.metric_ready_count
                     for kind, channel in self._channels.items()
                 },
+                action_metric_pending_counts={
+                    kind: channel.last_metric_pending_count
+                    for kind, channel in self._channels.items()
+                },
                 provider_error_counts={
                     kind: channel.provider_error_count
+                    for kind, channel in self._channels.items()
+                },
+                action_metric_delivery_error_counts={
+                    kind: channel.confirmation_delivery_error_count
+                    for kind, channel in self._channels.items()
+                },
+                action_metric_degraded_cycle_counts={
+                    kind: channel.confirmation_degraded_cycle_count
+                    for kind, channel in self._channels.items()
+                },
+                last_action_metric_errors={
+                    kind: channel.last_confirmation_errors
                     for kind, channel in self._channels.items()
                 },
                 n5_state_counts={
@@ -758,3 +918,56 @@ def _shanghai_wall_time(value: datetime):
     if value.tzinfo is not None:
         value = value.astimezone(SHANGHAI_TIMEZONE)
     return value.time().replace(tzinfo=None)
+
+
+def _structured_action_metric_error(
+    *,
+    asset_kind: str,
+    phase: str,
+    error: Exception,
+    minute_index: int,
+    identity_key: str | None = None,
+) -> str:
+    summary = str(error).replace("\r", " ").replace("\n", " ")[:512]
+    values = (
+        f"asset_kind={asset_kind}",
+        f"identity_key={identity_key or ''}",
+        f"phase={phase}",
+        f"minute_index={minute_index}",
+        f"error_type={type(error).__name__}",
+        f"error={summary}",
+    )
+    return "|".join(values)
+
+
+def _action_confirmation_status(
+    result: ChannelCycleResult,
+    *,
+    diagnostic_errors: Sequence[str] = (),
+) -> Mapping[str, Any]:
+    active_pending_count = sum(
+        1
+        for episode in result.n5_snapshot.active.values()
+        if episode.trigger_live
+        and episode.action_state == "eligible"
+        and episode.confirmation_status == "pending"
+    )
+    errors = tuple(diagnostic_errors)
+    if errors:
+        status = "degraded"
+    elif active_pending_count:
+        status = "pending"
+    else:
+        status = "ready"
+    visible_errors = errors[:10]
+    return {
+        "status": status,
+        "active_pending_count": active_pending_count,
+        "requested_count": len(result.requested_identity_keys),
+        "ready_count": result.metric_ready_count,
+        "pending_count": result.metric_pending_count,
+        "provider_error_count": len(result.provider_errors),
+        "delivery_error_count": len(result.confirmation_errors),
+        "errors": visible_errors,
+        "hidden_error_count": len(errors) - len(visible_errors),
+    }
